@@ -65,6 +65,17 @@ export default async function setup(): Promise<() => Promise<void>> {
   await git(dir, ['lfs', 'push', '--all', 'origin'])
   await git(dir, ['push', '-q', 'origin', 'main', 'polish'])
   await post('/api/v3/repos/octo/gallery/pulls', token, { title: 'Say goodbye', head: 'polish', base: 'main' })
+  for (const project of ['desktop', 'mobile']) {
+    await post('/api/repos', token, { owner: 'octo', name: `pipeline-${project}`, visibility: 'public' })
+    const pipeline = tempDir()
+    await git(pipeline, ['init', '-q', '-b', 'main'])
+    write(pipeline, '.github/workflows/ci.yml', 'name: Build\non: push\njobs:\n  test:\n    runs-on: self-hosted\n    steps:\n      - run: echo hi\n')
+    await git(pipeline, ['add', '-A'])
+    await git(pipeline, ['commit', '-q', '-m', 'Add a workflow'])
+    await git(pipeline, ['push', '-q', `${dev.url.replace('http://', `http://git:${token}@`)}/octo/pipeline-${project}.git`, 'main'])
+  }
+  await post('/api/repos', token, { owner: 'octo', name: 'copy', visibility: 'private' })
+  await post('/api/repos/octo/copy/mirrors', token, { url: 'https://upstream.example/octo/copy.git', mode: 'manual' })
   process.env.FORGE_URL = dev.url
   process.env.FORGE_ADMIN_TOKEN = token
   return async () => {

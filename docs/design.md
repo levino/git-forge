@@ -1625,8 +1625,12 @@ bundle.
   (or on Node) the plain built-in pages are used. The passkey ceremony script
   is the one exported by `@git-forge/accounts` (`PASSKEY_SCRIPT`).
 - Reserved first path segments: `api`, `explore`, `login`, `logout`,
-  `settings`, `notifications`, `organizations`, `orgs`, `-` (assets) and the
-  other page routes. Account names must not use them.
+  `settings`, `notifications`, `organizations`, `orgs`, `new`, `-` (assets,
+  login and admin pages) and the other page routes. Account names must not
+  use them: `RESERVED_LOGINS` of `@git-forge/accounts` is checked when an
+  organization is created and when an instance admin creates a user (names
+  with characters outside `LOGIN_PATTERN`, such as `-` or `.well-known`, are
+  invalid anyway).
 
 ### Permissions
 
@@ -1714,14 +1718,36 @@ admins (`canAdministerOrganization`) add and remove members, change roles
 (the last owner cannot be demoted or removed), create teams, and set team
 members and team repository roles; members see people and teams, everyone
 else gets 404. `/organizations/new`, `/orgs/{org}` and
-`/orgs/{org}/teams/{slug}` call these operations; a JSON API on the same
-functions can follow. The account page `/settings` also lists linked OIDC
-identities (unlinking the last way to sign in is refused) and active
-sessions (ending any but the current one).
+`/orgs/{org}/teams/{slug}` call these operations, and so does the JSON API
+under `/api/orgs/{org}` (members, teams, team members, team repositories;
+`OrganizationError` carries the status). The account page `/settings` also
+lists linked OIDC identities (unlinking the last way to sign in is refused)
+and active sessions (ending any but the current one); both operations take
+the session's user and only touch that user's rows.
+
+### Instance administration
+
+`/-/admin` (instance admins only, 404 for everyone else; linked from the
+account menu) lists and changes instance admins (the last admin cannot be
+removed), trusted instances (issuer normalized by `normalizeIssuer`, optional
+pinned key thumbprint) and shows every mirror of the instance with its
+health (alarms, failed sync, failed deep check, last success), linking to the
+repository's mirror settings. The page and the admin API (`GET|POST
+/api/admin/instances`, `DELETE /api/admin/instances/{issuer}`, `GET
+/api/admin/admins`, `PUT|DELETE /api/admin/admins/{login}`, `GET
+/api/admin/mirrors`) call the same operations: `createInstanceAdministration`
+of `@git-forge/accounts` (`view`, `setAdmin`, `trust`, `distrust`, each
+starting with `canAdministerInstance`: a user principal without a token
+ceiling below `admin` who is an instance admin) and `services.instance.mirrors`
+in `createForge`, which runs the same check before reading the mirror configs
+and statuses from storage. The mirror overview reads one config and one status
+object per mirror; it is meant for the admin page, not for public listings.
 
 ### Actions pages
 
-`/{owner}/{repo}/actions` lists workflow runs, a run page lists its jobs
+`/{owner}/{repo}/actions` lists workflow runs, filtered by workflow
+(`?workflow=<path>`; the side list holds every workflow that has runs, named
+after its latest run). A run page lists the jobs of the current attempt
 (refreshing every five seconds while the run is active), and a job page shows
 the job log. Pages read through `services.actions`, which only returns runs
 and jobs of the repository the page already checked with
@@ -1732,6 +1758,18 @@ strips ANSI escapes, shows at most the last 2 MiB and, while the job is not
 done, polls `…/jobs/{job}/log.txt` every three seconds with a small inline
 script; the response header `X-Job-Done` makes the page reload into its final
 state.
+
+Writers see *Cancel run* while a run is active and *Re-run all jobs*,
+*Re-run failed jobs* and per-job *Re-run* once it completed. The forms post
+to the run page with the session's CSRF token and call
+`services.actions.cancel` and `services.actions.rerun`, which check read
+access, that the run belongs to the repository, and write access through
+`canWriteActions` (`repositoryAccess(…, 'write')`), then call `cancelRun`
+and `rerunRun` of `@git-forge/actions`, the functions behind the GHES
+`…/cancel`, `…/rerun`, `…/rerun-failed-jobs` and `…/jobs/{id}/rerun`
+endpoints. The GHES write check uses the same `canWriteActions`, so instance
+admins may cancel and re-run there too. A re-run while the run is still in
+progress answers 409.
 
 ### Rendering
 
@@ -1766,7 +1804,9 @@ state.
   against `wrangler dev` running the built bundle, with a repository pushed by
   the real `git` and `git-lfs` clients, and a passkey sign-up from an invite
   with Chromium's virtual WebAuthn authenticator (settings, token create and
-  revoke, sign-out, passkey sign-in).
+  revoke, sign-out, passkey sign-in), organizations and teams, repository
+  settings, cancelling and re-running a workflow run (the runner launch fails
+  under `wrangler dev`, so jobs stay queued), and the instance admin page.
 - `apps/forge-worker/test/e2e/headless.e2e.test.ts`: the same bundle with
   `UI=false` serves only the forge.
 - The release test requests a page from the template instance.

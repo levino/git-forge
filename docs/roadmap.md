@@ -37,7 +37,8 @@ discussions.
 - [x] Short-lived instance JWTs, trust table "issuer X may read repo Y", optional pinned thumbprint
 - [x] Device flow (`git forge auth login`, RFC 8628) and git credential helper (`git forge auth git-credential`)
 - [x] Break-glass key (offline Ed25519, one-hour admin session)
-- [ ] Login follow-ups: OIDC groups → teams, session list and revocation in the UI, rate limits on login and device endpoints, purging expired challenges and device codes, branch protection API with sessions, device-flow scope choice
+- [x] Session list and revocation, list and unlink linked OIDC identities (account page)
+- [ ] Login follow-ups: OIDC groups → teams, rate limits on login and device endpoints, purging expired challenges and device codes, branch protection API with sessions, device-flow scope choice
 - [ ] SAML, SCIM
 - [x] Branch protection rules (patterns, force push, deletion, push restrictions, admin bypass) enforced in `receive-pack`, API under `/api/repos/{owner}/{repo}/branches/{branch}/protection`
 - [ ] Branch protection API and push policy wired into the Worker app (needs accounts on D1 there)
@@ -52,7 +53,7 @@ discussions.
 - [x] Copy-only sync: copy upstream packs and indexes as stored (byte-identical), verify index consistency and pack trailer while streaming; deep check (re-hash everything, recompute indexes, walk refs) on demand or every 30 days
 - [x] Native streaming hashes (`crypto.DigestStream` behind a `DigestFactory` seam) and one job per pack / LFS object with a byte budget (`MIRROR_UNIT_BYTES`), oversized units stay pending (design §12)
 - [x] Plain clones of a mirror check out the upstream default branch: read-side `refs/heads/*` view of one remote, own refs win, detach materializes it
-- [ ] Mirror overview (UI: M6)
+- [x] Mirror overview (instance admin page `/-/admin`, `GET /api/admin/mirrors`)
 
 ## M5 — Deployment and adapters
 
@@ -95,7 +96,7 @@ Design: [design.md §15](design.md#ci).
 - [ ] Broker and run service (v2 flow), results service, message encryption; then cache, artifacts, OIDC id tokens
 - [ ] External providers: signed `workflow_job` webhook delivery, GitHub App auth (JWT → installation token, manifest flow) and PATs on `/api/v3`, org-level runners; try WarpBuild Enterprise, AWS CodeBuild, RunsOn
 - [ ] `container:` and `services:` (Docker-in-Docker in the runner container)
-- [x] Web UI for runs and live logs (runs, jobs, log polling)
+- [x] Web UI for runs and live logs (runs per workflow, jobs, log polling, cancel, re-run all, failed or one job)
 - [x] "Deploy to Cloudflare" button in the README pointing at the instance template; template wired to accounts (`BOOTSTRAP_TOKEN`)
 - [x] Release artifact (bundled worker + migrations + checksums) and instance template with pinned version
 - [ ] Create `levino/git-forge-instance`, add the deploy key secret `INSTANCE_TEMPLATE_DEPLOY_KEY`, cut the first release
@@ -115,7 +116,8 @@ Design: [design.md §18](design.md#18-web-ui).
 - [x] Notifications inbox (unread/all, mark read, done, all read) and repository releases (list, tag page, notes, asset downloads)
 - [x] List and unlink linked OIDC identities, list and end sessions
 - [x] Organizations and teams (create, members and owners, teams, team members, team repository roles)
-- [ ] JSON API for organizations and teams on the same operations
+- [x] JSON API for organizations and teams on the same operations (`/api/orgs/…`)
+- [x] Instance admin page and API (admins, trusted instances, mirror overview)
 - [x] Repository settings (visibility, collaborators, branch protection, federation trust)
 - [x] Mirror settings, status and alarms (add, sync, deep check, detach)
 - [ ] Blame, syntax highlighting in diffs and Markdown code blocks

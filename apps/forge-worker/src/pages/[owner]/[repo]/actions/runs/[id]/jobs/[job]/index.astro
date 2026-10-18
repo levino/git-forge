@@ -2,15 +2,17 @@
 import NotFound from '../../../../../../../../components/NotFound.astro'
 import RepoHeader from '../../../../../../../../components/RepoHeader.astro'
 import Layout from '../../../../../../../../layouts/Layout.astro'
-import { durationText, jobState, logText } from '../../../../../../../../ui/actions.ts'
+import { durationText, jobState, logText, runState } from '../../../../../../../../ui/actions.ts'
 import { parseNumber } from '../../../../../../../../ui/collaboration.ts'
 import { openRepository, repoUrl } from '../../../../../../../../ui/repository.ts'
 
-const { forge, principal } = Astro.locals
+const { forge, principal, session } = Astro.locals
 const repo = await openRepository(forge, principal, Astro.params.owner!, Astro.params.repo!)
 const runId = parseNumber(Astro.params.id)
 const found = repo.kind === 'ok' && runId !== null && Astro.params.job ? await forge.actions.log(repo.name, runId, Astro.params.job) : null
 const state = found ? jobState(found.job) : null
+const run = repo.kind === 'ok' && runId !== null && found ? await forge.actions.run(repo.name, runId) : null
+const canRerun = repo.kind === 'ok' && session !== null && run !== null && runState(run.run).done && (await forge.actions.canWrite(session.principal, repo.name))
 const log = found ? logText(found.log) : null
 const runHref = repo.kind === 'ok' && runId !== null ? repoUrl(repo.name, 'actions', 'runs', String(runId)) : '/'
 const logHref = found ? `${runHref}/jobs/${encodeURIComponent(found.job.id)}/log.txt` : ''
@@ -29,7 +31,16 @@ const logHref = found ? `${runHref}/jobs/${encodeURIComponent(found.job.id)}/log
         <h2 class="text-2xl break-words">{found.job.display_name}</h2>
         <span class:list={['badge', state.badge]} data-job-state>{state.label}</span>
         <span class="text-sm text-base-content/70">{durationText(found.job.started_at, found.job.completed_at)}</span>
-        <a class="btn btn-xs ml-auto" href={logHref}>Raw log</a>
+        <span class="ml-auto flex gap-2">
+          {canRerun && session && (
+            <form method="post" action={runHref}>
+              <input type="hidden" name="csrf" value={session.csrf} />
+              <input type="hidden" name="job" value={found.job.id} />
+              <button class="btn btn-xs" name="action" value="rerun-job">Re-run job</button>
+            </form>
+          )}
+          <a class="btn btn-xs" href={logHref}>Raw log</a>
+        </span>
       </header>
       {log.truncated && <p class="text-sm mb-2">Showing the last 2 MiB of the log.</p>}
       <pre

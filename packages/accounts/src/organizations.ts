@@ -1,6 +1,6 @@
 import type { OrganizationRole, Principal, UserPrincipal } from './permissions.ts'
 import { isRole, type Role } from './roles.ts'
-import type { AccountsStore } from './store.ts'
+import { type AccountsStore, isReservedLogin } from './store.ts'
 
 export class OrganizationError extends Error {
   constructor(
@@ -98,6 +98,7 @@ export const createOrganizationOperations = (store: OrganizationStore) => {
   return {
     create: async (principal: Principal, login: string): Promise<{ readonly id: string; readonly login: string }> => {
       const creator = userOf(principal)
+      if (isReservedLogin(login)) throw new OrganizationError(422, `${login} is reserved`)
       if (await store.findAccount(login)) throw new OrganizationError(409, `${login} already exists`)
       let created: { readonly id: string }
       try {

@@ -9,6 +9,7 @@ const session = Astro.locals.session
 const login = principal.kind === 'user' ? principal.login : null
 const host = Astro.url.host
 const returnTo = Astro.url.pathname.startsWith('/-/') ? '/' : Astro.url.pathname
+const instanceAdmin = session !== null && session !== undefined && (await Astro.locals.forge.instance.isAdministrator(session.principal))
 ---
 
 <!doctype html>
@@ -62,6 +63,11 @@ const returnTo = Astro.url.pathname.startsWith('/-/') ? '/' : Astro.url.pathname
                   {session && (
                     <li>
                       <a href="/organizations/new">New organization</a>
+                    </li>
+                  )}
+                  {instanceAdmin && (
+                    <li>
+                      <a href="/-/admin">Instance administration</a>
                     </li>
                   )}
                   {session && (

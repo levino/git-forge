@@ -47,6 +47,7 @@ describe('organization operations', () => {
     await operations.create(ada, 'acme')
     expect(await failure(operations.create(ada, 'acme'))).toBe(409)
     expect(await failure(operations.create(ada, 'bad name'))).toBe(422)
+    expect(await failure(operations.create(ada, 'Settings'))).toBe(422)
     await operations.setMember(ada, 'acme', 'bob', 'member')
     const view = await operations.view(bob, 'acme')
     expect(view).toMatchObject({ membership: 'member', canAdminister: false })

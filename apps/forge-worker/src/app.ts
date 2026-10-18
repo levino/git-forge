@@ -2,6 +2,7 @@ import {
   type ActionsTick,
   actionsTick,
   advanceRun,
+  cancelRun,
   type CheckRunReport,
   type CheckRunSink,
   queueRunsForPullRequest,
@@ -15,10 +16,15 @@ import {
   GITHUB_TOKEN_PREFIX,
   getRun,
   type JobRow,
+  listCurrentJobs,
   listRunJobs,
   listRuns,
+  listRunWorkflows,
   readJobLog,
+  RerunError,
+  rerunRun,
   type RunRow,
+  type RunWorkflow,
   verifyToken,
   workflowJobPayload,
 } from '@git-forge/actions'
@@ -61,6 +67,11 @@ import {
   type CredentialSummary,
   createOrganizationOperations,
   type OrganizationOperations,
+  OrganizationError,
+  createInstanceAdministration,
+  type InstanceAdministration,
+  InstanceAdministrationError,
+  isReservedLogin,
   type LoginStore,
   type BranchProtectionRule,
   type NamedAllowances,
@@ -203,9 +214,16 @@ export type ForgeServices = {
   readonly inbox: InboxOperations
   readonly releases: ReleaseReads
   readonly collaboration: (request: Request, principal: Principal, owner: string, name: string) => Promise<CollaborationScope | null>
-  readonly actions: ActionsReads
+  readonly actions: ActionsOperations
   readonly settings: RepositorySettingsOperations
   readonly organizations: OrganizationOperations
+  readonly instance: InstanceOperations
+}
+
+export type MirrorOverviewEntry = { readonly repository: RepositoryName; readonly config: MirrorConfig; readonly status: MirrorStatus | null }
+
+export type InstanceOperations = InstanceAdministration & {
+  readonly mirrors: (principal: Principal) => Promise<MirrorOverviewEntry[]>
 }
 
 export type InboxOperations = {
@@ -248,10 +266,16 @@ export class ForgeError extends Error {
   }
 }
 
-export type ActionsReads = {
-  readonly runs: (repository: RepositoryName, limit: number) => Promise<RunRow[]>
+export type RerunChoice = { readonly kind: 'all' } | { readonly kind: 'failed' } | { readonly kind: 'job'; readonly jobId: string }
+
+export type ActionsOperations = {
+  readonly runs: (repository: RepositoryName, limit: number, workflowPath?: string | null) => Promise<RunRow[]>
+  readonly workflows: (repository: RepositoryName) => Promise<RunWorkflow[]>
   readonly run: (repository: RepositoryName, id: number) => Promise<{ readonly run: RunRow; readonly jobs: readonly JobRow[] } | null>
   readonly log: (repository: RepositoryName, runId: number, jobId: string) => Promise<{ readonly job: JobRow; readonly log: Uint8Array[] } | null>
+  readonly canWrite: (principal: Principal, repository: RepositoryName) => Promise<boolean>
+  readonly cancel: (principal: Principal, repository: RepositoryName, runId: number, issuer: string) => Promise<void>
+  readonly rerun: (principal: Principal, repository: RepositoryName, runId: number, choice: RerunChoice, issuer: string) => Promise<number>
 }
 
 export type ReleaseReads = {
@@ -548,6 +572,7 @@ export const createForge = (options: ForgeOptions): Forge => {
     const body = await readBody(request)
     const login = requiredString(body, 'login')
     const email = optionalString(body, 'email')
+    if (isReservedLogin(login)) throw new HttpError(422, `${login} is reserved`)
     if (await store.findAccount(login)) throw new HttpError(409, `${login} already exists`)
     const user = await store.createUser({ login, ...(email ? { email } : {}) }, { kind: 'user', id: actor.id })
     if (body.admin === true) await store.setInstanceAdmin(user.id, true, { kind: 'user', id: actor.id })
@@ -594,13 +619,97 @@ export const createForge = (options: ForgeOptions): Forge => {
     return json(201, { code: invite.code, url: new URL(`/login/invite/${invite.code}`, issuerFor(request)).toString(), expiresAt: invite.expiresAt })
   }
 
+  const instanceAdministration = createInstanceAdministration(store)
+
+  const instance: InstanceOperations = {
+    ...instanceAdministration,
+    mirrors: async (principal) => {
+      await instanceAdministration.view(principal)
+      const overview: MirrorOverviewEntry[] = []
+      for (const subject of await store.listRepositories()) {
+        const repository = { owner: subject.owner, name: subject.name }
+        for (const config of await listMirrors(storage, repository)) overview.push({ repository, config, status: await readMirrorStatus(storage, repository, config.remote) })
+      }
+      return overview
+    },
+  }
+
   const trustInstance = async (request: Request): Promise<Response> => {
-    const actor = await requireInstanceAdmin(request)
+    const principal = await principalOf(request)
     const body = await readBody(request)
-    const issuer = normalizeIssuer(requiredString(body, 'issuer'))
-    const pinnedThumbprint = optionalString(body, 'pinnedThumbprint') ?? null
-    await store.trustInstance({ issuer, pinnedThumbprint }, { kind: 'user', id: actor.id })
-    return json(200, { issuer, pinnedThumbprint })
+    return json(200, await instance.trust(principal, requiredString(body, 'issuer'), optionalString(body, 'pinnedThumbprint') ?? null))
+  }
+
+  const listTrustedInstances = async (request: Request): Promise<Response> => json(200, (await instance.view(await principalOf(request))).trustedInstances)
+
+  const distrustInstance = async (request: Request, params: string[]): Promise<Response> => {
+    await instance.distrust(await principalOf(request), params[0]!)
+    return new Response(null, { status: 204 })
+  }
+
+  const listInstanceAdmins = async (request: Request): Promise<Response> => json(200, (await instance.view(await principalOf(request))).admins)
+
+  const setInstanceAdmin = (admin: boolean) => async (request: Request, params: string[]): Promise<Response> => {
+    await instance.setAdmin(await principalOf(request), params[0]!, admin)
+    return new Response(null, { status: 204 })
+  }
+
+  const mirrorOverview = async (request: Request): Promise<Response> => json(200, await instance.mirrors(await principalOf(request)))
+
+  const organizations = createOrganizationOperations(store)
+
+  const createOrganizationRoute = async (request: Request): Promise<Response> =>
+    json(201, await organizations.create(await principalOf(request), requiredString(await readBody(request), 'login')))
+
+  const organizationRoute = async (request: Request, params: string[]): Promise<Response> => {
+    const view = await organizations.view(await principalOf(request), params[0]!)
+    if (!view.membership && !view.canAdminister) throw new HttpError(404, 'organization not found')
+    return json(200, view)
+  }
+
+  const roleOf = async (request: Request): Promise<string> => {
+    const role = (await readBody(request)).role
+    return typeof role === 'string' ? role : ''
+  }
+
+  const setOrganizationMemberRoute = async (request: Request, params: string[]): Promise<Response> => {
+    await organizations.setMember(await principalOf(request), params[0]!, params[1]!, await roleOf(request))
+    return new Response(null, { status: 204 })
+  }
+
+  const removeOrganizationMemberRoute = async (request: Request, params: string[]): Promise<Response> => {
+    await organizations.removeMember(await principalOf(request), params[0]!, params[1]!)
+    return new Response(null, { status: 204 })
+  }
+
+  const createTeamRoute = async (request: Request, params: string[]): Promise<Response> => {
+    const principal = await principalOf(request)
+    const body = await readBody(request)
+    const slug = requiredString(body, 'slug')
+    await organizations.createTeam(principal, params[0]!, slug, optionalString(body, 'name') ?? '')
+    return json(201, (await organizations.team(principal, params[0]!, slug)).team)
+  }
+
+  const teamRoute = async (request: Request, params: string[]): Promise<Response> => json(200, await organizations.team(await principalOf(request), params[0]!, params[1]!))
+
+  const setTeamMemberRoute = async (request: Request, params: string[]): Promise<Response> => {
+    await organizations.setTeamMember(await principalOf(request), params[0]!, params[1]!, params[2]!, await roleOf(request))
+    return new Response(null, { status: 204 })
+  }
+
+  const removeTeamMemberRoute = async (request: Request, params: string[]): Promise<Response> => {
+    await organizations.removeTeamMember(await principalOf(request), params[0]!, params[1]!, params[2]!)
+    return new Response(null, { status: 204 })
+  }
+
+  const setTeamRepositoryRoute = async (request: Request, params: string[]): Promise<Response> => {
+    await organizations.setTeamRepository(await principalOf(request), params[0]!, params[1]!, params[2]!, await roleOf(request))
+    return new Response(null, { status: 204 })
+  }
+
+  const removeTeamRepositoryRoute = async (request: Request, params: string[]): Promise<Response> => {
+    await organizations.removeTeamRepository(await principalOf(request), params[0]!, params[1]!, params[2]!)
+    return new Response(null, { status: 204 })
   }
 
   const createRepositoryRoute = async (request: Request): Promise<Response> => {
@@ -875,8 +984,9 @@ export const createForge = (options: ForgeOptions): Forge => {
     },
   }
 
-  const dispatchOptions = (request: Request): DispatchOptions => {
-    const serverUrl = issuerFor(request)
+  const dispatchOptions = (request: Request): DispatchOptions => dispatchOptionsFor(issuerFor(request))
+
+  const dispatchOptionsFor = (serverUrl: string): DispatchOptions => {
     return {
       db,
       storage,
@@ -903,8 +1013,57 @@ export const createForge = (options: ForgeOptions): Forge => {
     if (!isValidName(owner) || !isValidName(name)) return false
     if (required === 'read') return (await withJobTokens(createGitAccess(authenticateOptions(request)).authorize)(request, { owner, name }, 'read', 'git')) === null
     const principal = await authenticateRequest(request, authenticateOptions(request))
-    if (!principal) return false
-    return (await checkRepositoryAccess(store, principal, { owner, name }, 'write')).decision === 'allow'
+    return principal !== null && (await canWriteActions(principal, { owner, name }))
+  }
+
+  const canWriteActions = async (principal: Principal, repo: RepositoryName): Promise<boolean> => (await repositoryAccess(principal, repo, 'write')).decision === 'allow'
+
+  const runOf = async (repository: RepositoryName, id: number): Promise<RunRow | null> => {
+    const run = await getRun(db, id)
+    return run && run.owner.toLowerCase() === repository.owner.toLowerCase() && run.repo.toLowerCase() === repository.name.toLowerCase() ? run : null
+  }
+
+  const writableRunOf = async (principal: Principal, repository: RepositoryName, id: number): Promise<RunRow> => {
+    if ((await repositoryAccess(principal, repository, 'read')).decision !== 'allow') throw new HttpError(404, 'repository not found')
+    const run = await runOf(repository, id)
+    if (!run) throw new HttpError(404, 'run not found')
+    if (!(await canWriteActions(principal, repository))) throw new HttpError(403, 'write access is required')
+    return run
+  }
+
+  const actions: ActionsOperations = {
+    runs: (repository, limit, workflowPath = null) => listRuns(db, repository.owner, repository.name, limit, workflowPath),
+    workflows: (repository) => listRunWorkflows(db, repository.owner, repository.name),
+    run: async (repository, id) => {
+      const run = await runOf(repository, id)
+      return run ? { run, jobs: await listCurrentJobs(db, run.id) } : null
+    },
+    log: async (repository, runId, jobId) => {
+      const run = await runOf(repository, runId)
+      if (!run) return null
+      const job = (await listRunJobs(db, run.id)).find((candidate) => candidate.id === jobId)
+      return job ? { job, log: await readJobLog(db, storage, run, job) } : null
+    },
+    canWrite: canWriteActions,
+    cancel: async (principal, repository, runId, issuer) => {
+      const run = await writableRunOf(principal, repository, runId)
+      if (!(await cancelRun(dispatchOptionsFor(issuer), run.id))) throw new HttpError(409, 'the run has already completed')
+    },
+    rerun: async (principal, repository, runId, choice, issuer) => {
+      const run = await writableRunOf(principal, repository, runId)
+      let mode: Parameters<typeof rerunRun>[2] = choice.kind === 'all' ? { kind: 'all' } : { kind: 'failed' }
+      if (choice.kind === 'job') {
+        const job = (await listRunJobs(db, run.id)).find((candidate) => candidate.id === choice.jobId)
+        if (!job) throw new HttpError(404, 'job not found')
+        mode = { kind: 'job', requestId: job.request_id }
+      }
+      try {
+        return await rerunRun(dispatchOptionsFor(issuer), run.id, mode)
+      } catch (error) {
+        if (error instanceof RerunError) throw new HttpError(409, error.message)
+        throw error
+      }
+    },
   }
 
   const userLogin = async (request: Request): Promise<string | null> => {
@@ -1087,11 +1246,25 @@ export const createForge = (options: ForgeOptions): Forge => {
     { method: 'POST', pattern: /^\/api\/bootstrap$/, handler: bootstrap },
     { method: 'POST', pattern: /^\/api\/admin\/users$/, handler: createUser },
     { method: 'POST', pattern: new RegExp(`^/api/admin/users/${SEGMENT}/tokens$`), handler: createToken },
+    { method: 'GET', pattern: /^\/api\/admin\/instances$/, handler: listTrustedInstances },
     { method: 'POST', pattern: /^\/api\/admin\/instances$/, handler: trustInstance },
+    { method: 'DELETE', pattern: new RegExp(`^/api/admin/instances/${SEGMENT}$`), handler: distrustInstance },
+    { method: 'GET', pattern: /^\/api\/admin\/admins$/, handler: listInstanceAdmins },
+    { method: 'PUT', pattern: new RegExp(`^/api/admin/admins/${SEGMENT}$`), handler: setInstanceAdmin(true) },
+    { method: 'DELETE', pattern: new RegExp(`^/api/admin/admins/${SEGMENT}$`), handler: setInstanceAdmin(false) },
+    { method: 'GET', pattern: /^\/api\/admin\/mirrors$/, handler: mirrorOverview },
     { method: 'POST', pattern: /^\/api\/admin\/invites$/, handler: createInvite },
     { method: 'GET', pattern: /^\/api\/user$/, handler: currentUser },
-    { method: 'POST', pattern: /^\/api\/admin\/invites$/, handler: createInvite },
-    { method: 'GET', pattern: /^\/api\/user$/, handler: currentUser },
+    { method: 'POST', pattern: /^\/api\/orgs$/, handler: createOrganizationRoute },
+    { method: 'GET', pattern: new RegExp(`^/api/orgs/${SEGMENT}$`), handler: organizationRoute },
+    { method: 'PUT', pattern: new RegExp(`^/api/orgs/${SEGMENT}/members/${SEGMENT}$`), handler: setOrganizationMemberRoute },
+    { method: 'DELETE', pattern: new RegExp(`^/api/orgs/${SEGMENT}/members/${SEGMENT}$`), handler: removeOrganizationMemberRoute },
+    { method: 'POST', pattern: new RegExp(`^/api/orgs/${SEGMENT}/teams$`), handler: createTeamRoute },
+    { method: 'GET', pattern: new RegExp(`^/api/orgs/${SEGMENT}/teams/${SEGMENT}$`), handler: teamRoute },
+    { method: 'PUT', pattern: new RegExp(`^/api/orgs/${SEGMENT}/teams/${SEGMENT}/members/${SEGMENT}$`), handler: setTeamMemberRoute },
+    { method: 'DELETE', pattern: new RegExp(`^/api/orgs/${SEGMENT}/teams/${SEGMENT}/members/${SEGMENT}$`), handler: removeTeamMemberRoute },
+    { method: 'PUT', pattern: new RegExp(`^/api/orgs/${SEGMENT}/teams/${SEGMENT}/repos/${SEGMENT}$`), handler: setTeamRepositoryRoute },
+    { method: 'DELETE', pattern: new RegExp(`^/api/orgs/${SEGMENT}/teams/${SEGMENT}/repos/${SEGMENT}$`), handler: removeTeamRepositoryRoute },
     { method: 'POST', pattern: /^\/api\/repos$/, handler: createRepositoryRoute },
     { method: 'PATCH', pattern: new RegExp(`^${REPO}$`), handler: updateRepository },
     { method: 'PUT', pattern: new RegExp(`^${REPO}/collaborators/${SEGMENT}$`), handler: setCollaborator },
@@ -1176,6 +1349,7 @@ export const createForge = (options: ForgeOptions): Forge => {
       if (api) return api
     } catch (error) {
       if (error instanceof HttpError) return json(error.status, { error: error.message }, error.headers)
+      if (error instanceof OrganizationError || error instanceof InstanceAdministrationError) return json(error.status, { error: error.message })
       if (error instanceof AccountsError) return json(400, { error: error.message })
       throw error
     }
@@ -1244,7 +1418,8 @@ export const createForge = (options: ForgeOptions): Forge => {
         listSessions: (user) => logins.listSessions(user.id),
         revokeSession: (user, id) => logins.revokeUserSession(user.id, id),
       },
-      organizations: createOrganizationOperations(store),
+      organizations,
+      instance,
       inbox: {
         threads: (user, filter) => notifications.store.threads(user.id, { ...filter, participating: false }),
         markRead: (user, id) => notifications.store.markThreadRead(user.id, id),
@@ -1260,20 +1435,7 @@ export const createForge = (options: ForgeOptions): Forge => {
         }
       },
       settings,
-      actions: {
-        runs: (repository, limit) => listRuns(db, repository.owner, repository.name, limit),
-        run: async (repository, id) => {
-          const run = await getRun(db, id)
-          if (!run || run.owner.toLowerCase() !== repository.owner.toLowerCase() || run.repo.toLowerCase() !== repository.name.toLowerCase()) return null
-          return { run, jobs: await listRunJobs(db, run.id) }
-        },
-        log: async (repository, runId, jobId) => {
-          const run = await getRun(db, runId)
-          if (!run || run.owner.toLowerCase() !== repository.owner.toLowerCase() || run.repo.toLowerCase() !== repository.name.toLowerCase()) return null
-          const job = (await listRunJobs(db, run.id)).find((candidate) => candidate.id === jobId)
-          return job ? { job, log: await readJobLog(db, storage, run, job) } : null
-        },
-      },
+      actions,
       releases: {
         list: (repository, includeDrafts, limit, offset) => releaseStore.list(repository.id, includeDrafts, limit, offset),
         byTag: async (repository, tag, includeDrafts) => {

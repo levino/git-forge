@@ -63,6 +63,10 @@ export const LOGIN_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/
 
 export const TEAM_SLUG_PATTERN = LOGIN_PATTERN
 
+export const RESERVED_LOGINS: ReadonlySet<string> = new Set(['api', 'explore', 'login', 'logout', 'settings', 'notifications', 'organizations', 'orgs', 'new'])
+
+export const isReservedLogin = (login: string): boolean => RESERVED_LOGINS.has(login.toLowerCase())
+
 const requireLogin = (login: string) => {
   if (!LOGIN_PATTERN.test(login)) throw new AccountsError(`invalid login ${login}`)
 }
@@ -558,6 +562,16 @@ export const createAccountsStore = (db: Database, options: AccountsStoreOptions 
 
     isInstanceAdmin: async (userId: string): Promise<boolean> =>
       (await first(db, sql('SELECT 1 AS ok FROM instance_admins i JOIN accounts a ON a.id = i.user_id WHERE i.user_id = ? AND a.disabled_at IS NULL', userId))) !== null,
+
+    listInstanceAdmins: async (): Promise<{ readonly id: string; readonly login: string }[]> =>
+      db.all<{ id: string; login: string }>(sql('SELECT a.id, a.login FROM instance_admins i JOIN accounts a ON a.id = i.user_id WHERE a.disabled_at IS NULL ORDER BY a.login')),
+
+    listTrustedInstances: async (): Promise<{ readonly issuer: string; readonly pinnedThumbprint: string | null; readonly createdAt: number }[]> =>
+      (
+        await db.all<{ issuer: string; pinned_thumbprint: string | null; created_at: number }>(
+          sql('SELECT issuer, pinned_thumbprint, created_at FROM trusted_instances WHERE disabled_at IS NULL ORDER BY issuer'),
+        )
+      ).map((row) => ({ issuer: row.issuer, pinnedThumbprint: row.pinned_thumbprint, createdAt: row.created_at })),
 
     setCollaborator: async (repositoryId: string, userId: string, role: Role, actor: AuditActor = SYSTEM): Promise<void> => {
       requireRole(role)

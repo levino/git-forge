@@ -66,6 +66,8 @@ jobs:
           bun-version: 1.4.2
       - name: Build the git-forge CLI executables
         run: sh packages/cli/build-executables.sh "$RUNNER_TEMP/cli"
+      - name: Build the git-forge-node executables
+        run: sh apps/forge-node/build-executables.sh "$RUNNER_TEMP/node"
       - name: Publish release assets
         env:
           GH_TOKEN: ${{ github.token }}
@@ -82,6 +84,8 @@ jobs:
             echo '`sha256` is the SHA-256 of the `SHA256SUMS` asset, which lists the checksums of the Worker bundle and the migrations.'
             echo
             echo 'The `git-forge-<os>-<arch>` assets are single executables of the `git-forge` CLI (`git forge push`); `CLI-SHA256SUMS` lists their checksums.'
+            echo
+            echo 'The `git-forge-node-linux-<arch>` assets run an instance without Cloudflare (Raspberry Pi, any Linux server; see `apps/forge-node/README.md`); `NODE-SHA256SUMS` lists their checksums.'
           } > "$RUNNER_TEMP/notes.md"
           prerelease=""
           case "$version" in *-*) prerelease="--prerelease" ;; esac
@@ -92,6 +96,7 @@ jobs:
             "$RUNNER_TEMP/release/migrations.tar.gz" \
             "$RUNNER_TEMP/release/SHA256SUMS" \
             "$RUNNER_TEMP"/cli/* \
+            "$RUNNER_TEMP"/node/* \
             $verify --title "$TAG" --notes-file "$RUNNER_TEMP/notes.md" $prerelease
 
   sync-template:

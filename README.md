@@ -30,7 +30,11 @@ features are next. Pushes too large for one request go through
 `git forge push` ([packages/cli](packages/cli)) or a server-side import. See [docs/design.md](docs/design.md) and
 [docs/roadmap.md](docs/roadmap.md).
 
-To run an instance, start from the instance template in
+Without Cloudflare, for example as a backup mirror on a Raspberry Pi, an
+instance runs as a single executable with an SQLite file and a local
+directory or S3 bucket: [apps/forge-node](apps/forge-node).
+
+To run an instance on Cloudflare, start from the instance template in
 [templates/instance](templates/instance) (later `levino/git-forge-instance`):
 it pins a checksummed release bundle; nothing is installed from npm.
 

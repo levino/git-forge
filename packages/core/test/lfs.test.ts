@@ -6,13 +6,14 @@ import {
   type LfsLinks,
   lfsObjectKey,
   lfsPushCheck,
+  pointersIn,
   parseBatchRequest,
   parseLfsPointer,
   storeLfsObject,
   verifyLfsObject,
 } from '../src/lfs.ts'
 import { MemoryStorage } from '../src/memory-storage.ts'
-import type { ResolvedObject } from '../src/pack.ts'
+import type { GitObject } from '../src/objects.ts'
 import type { PresignedPut } from '../src/storage.ts'
 
 const repo = { owner: 'acme', name: 'assets' }
@@ -29,7 +30,7 @@ const links: LfsLinks = {
   verify: async () => ({ href: 'https://forge.test/verify' }),
 }
 
-const blob = (data: Uint8Array): ResolvedObject => ({ type: 'blob', data, id: '0'.repeat(40), offset: 0, crc32: 0 })
+const blob = (data: Uint8Array): GitObject => ({ type: 'blob', data })
 
 class PresigningStorage extends MemoryStorage {
   async presignGet(key: string): Promise<string> {
@@ -147,7 +148,8 @@ describe('verify', () => {
 describe('push check', () => {
   it('rejects pushes whose pointers reference missing objects', async () => {
     const storage = new MemoryStorage()
-    const check = lfsPushCheck(storage, repo)
+    const push = lfsPushCheck(storage, repo)
+    const check = (objects: readonly GitObject[]) => push({ lfsPointers: pointersIn(objects) })
     expect(await check([blob(pointer(oid, content.length)), blob(utf8('plain\n'))])).toBe(`missing LFS object ${oid}`)
     await storeLfsObject(storage, repo, spec, streamOf(content))
     expect(await check([blob(pointer(oid, content.length))])).toBeNull()

@@ -1,3 +1,4 @@
+import { importSecretsKey, type SecretsKey } from '@git-forge/actions'
 import { importSigningKey, normalizeIssuer, type PrivateJwk, type SigningKey } from '@git-forge/accounts'
 
 export type ForgeVars = {
@@ -5,6 +6,8 @@ export type ForgeVars = {
   readonly INSTANCE_KEY?: string
   readonly BOOTSTRAP_TOKEN?: string
   readonly MAX_PUSH_BYTES?: string
+  readonly PACKFILE_URI_BASE?: string
+  readonly COMPACT_MAX_BYTES?: string
   readonly MAX_LFS_OBJECT_BYTES?: string
   readonly MIRROR_INTERVAL_MINUTES?: string
   readonly ALLOW_INSECURE_FEDERATION?: string
@@ -22,7 +25,9 @@ export type ForgeSettings = {
   readonly publicUrl: string | undefined
   readonly instanceKey: SigningKey | undefined
   readonly bootstrapToken: string | undefined
-  readonly maxPushBytes: number
+  readonly maxPushBytes: number | undefined
+  readonly packfileUriBase: string | undefined
+  readonly compactMaxBytes: number
   readonly maxLfsObjectBytes: number
   readonly mirrorIntervalMinutes: number
   readonly allowInsecureFederation: boolean
@@ -92,7 +97,7 @@ export const parseActionsSecrets = (value: string | undefined): Record<string, s
   return parsed as Record<string, string>
 }
 
-export const DEFAULT_MAX_PUSH_BYTES = 16 * 1024 * 1024
+export const DEFAULT_COMPACT_MAX_BYTES = 128 * 1024 * 1024
 
 export const DEFAULT_MAX_LFS_OBJECT_BYTES = 100 * 1024 * 1024
 
@@ -132,7 +137,9 @@ export const parseSettings = async (vars: ForgeVars): Promise<ForgeSettings> => 
     publicUrl: publicUrl ? normalizeIssuer(publicUrl) : undefined,
     instanceKey: await parseInstanceKey(vars.INSTANCE_KEY),
     bootstrapToken: present(vars.BOOTSTRAP_TOKEN),
-    maxPushBytes: positiveInteger(vars.MAX_PUSH_BYTES, DEFAULT_MAX_PUSH_BYTES),
+    maxPushBytes: positiveInteger(vars.MAX_PUSH_BYTES, 0) || undefined,
+    packfileUriBase: present(vars.PACKFILE_URI_BASE),
+    compactMaxBytes: positiveInteger(vars.COMPACT_MAX_BYTES, DEFAULT_COMPACT_MAX_BYTES, true),
     maxLfsObjectBytes: positiveInteger(vars.MAX_LFS_OBJECT_BYTES, DEFAULT_MAX_LFS_OBJECT_BYTES),
     mirrorIntervalMinutes: positiveInteger(vars.MIRROR_INTERVAL_MINUTES, DEFAULT_MIRROR_INTERVAL_MINUTES, true),
     allowInsecureFederation: vars.ALLOW_INSECURE_FEDERATION === 'true',
@@ -151,5 +158,14 @@ export const parseActionsSettings = (vars: ForgeVars): ActionsSettings | undefin
     secretsKey: present(vars.ACTIONS_SECRETS_KEY),
     repositories: parseActionRepositories(vars.ACTIONS_REPOSITORIES),
     githubFallback: parseGithubFallback(vars.ACTIONS_GITHUB_FALLBACK),
+  }
+}
+
+export const loadSecretsKey = async (settings: ActionsSettings | undefined): Promise<SecretsKey | undefined> => {
+  if (!settings?.secretsKey) return undefined
+  try {
+    return await importSecretsKey(settings.secretsKey)
+  } catch (error) {
+    throw new ConfigurationError(`ACTIONS_SECRETS_KEY: ${(error as Error).message}`)
   }
 }

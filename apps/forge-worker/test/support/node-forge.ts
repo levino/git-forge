@@ -19,6 +19,8 @@ export const nodeForge = async (overrides: Partial<ForgeOptions> = {}): Promise<
     instanceKey: undefined,
     bootstrapToken: BOOTSTRAP_TOKEN,
     maxPushBytes: 1024 * 1024,
+    packfileUriBase: undefined,
+    compactMaxBytes: 0,
     maxLfsObjectBytes: DEFAULT_MAX_LFS_OBJECT_BYTES,
     mirrorIntervalMinutes: 30,
     allowInsecureFederation: false,

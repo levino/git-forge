@@ -149,8 +149,8 @@ hold the same refs; it can be recomputed from `git ls-remote`.
 
 ## Limits and open points
 
-- As in the rest of the core, packs are held in memory while they are parsed
-  and indexed; `maxPackBytes` bounds a single fetch.
+- Fetched packs are streamed into the same indexer as a push (bounded memory,
+  `docs/design.md` §7); `maxPackBytes` optionally bounds a single fetch.
 - Each run walks the commit graph of all local refs to know what is
   connected. Fine for the archive's size; a commit-graph cache can come
   later.

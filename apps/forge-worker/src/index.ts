@@ -1,9 +1,8 @@
 import { d1Database } from '@git-forge/accounts'
 import { consumeJobs, digestStreams, QueueJobs, R2Storage } from '@git-forge/cloudflare'
 import { continueImport, type ImportJob, type ImportScheduler } from '@git-forge/core'
-import { importSecretsKey } from '@git-forge/actions'
 import { createForge, type Forge } from './app.ts'
-import { ACTIONS_CRON, type ForgeVars, parseActionsSettings, parseSettings } from './config.ts'
+import { ACTIONS_CRON, type ForgeVars, loadSecretsKey, parseActionsSettings, parseSettings } from './config.ts'
 import type { ForgeJob } from './mirror-federation.ts'
 import { containerLauncher } from './runner-launcher.ts'
 
@@ -29,7 +28,7 @@ const forgeFor = (env: Env): Promise<Forge> => {
   forge ??= parseSettings(env)
     .then(async (settings) => {
       const actions = parseActionsSettings(env)
-      const secretsKey = actions?.secretsKey ? await importSecretsKey(actions.secretsKey) : undefined
+      const secretsKey = await loadSecretsKey(actions)
       return createForge({
         ...settings,
         storage: new R2Storage(env.BUCKET),
@@ -61,8 +60,8 @@ const forgeFor = (env: Env): Promise<Forge> => {
 const isJobQueue = (name: string): boolean => name === 'git-forge-jobs' || /^git-forge-[a-z0-9-]+-jobs$/.test(name)
 
 export default {
-  async fetch(request, env): Promise<Response> {
-    return (await forgeFor(env)).fetch(request)
+  async fetch(request, env, ctx): Promise<Response> {
+    return (await forgeFor(env)).fetch(request, (promise) => ctx.waitUntil(promise))
   },
   async scheduled(controller, env): Promise<void> {
     if (controller.cron === ACTIONS_CRON) {

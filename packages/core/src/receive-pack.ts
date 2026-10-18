@@ -1,9 +1,12 @@
-import { concat, fromUtf8 } from './bytes.ts'
+import { concat, fromUtf8, SizeLimitError } from './bytes.ts'
+import { ByteCursor } from './cursor.ts'
 import { isObjectId, type ObjectId, ZERO_ID } from './hash.ts'
-import type { GitObject } from './objects.ts'
-import { PackError, parsePack, type ResolvedObject, writePack } from './pack.ts'
-import { FLUSH, parsePackets, pkt, sideband, SIDEBAND_DATA } from './pktline.ts'
+import type { LfsObjectSpec } from './lfs.ts'
+import { PackError } from './pack.ts'
+import type { IndexedPack } from './pack-indexer.ts'
+import { FLUSH, pkt, sideband, SIDEBAND_DATA } from './pktline.ts'
 import {
+  type IngestOptions,
   ObjectDatabase,
   readRefs,
   type RefsState,
@@ -13,7 +16,7 @@ import {
   writeServerInfo,
 } from './repository.ts'
 import type { Storage } from './storage.ts'
-import { checkConnectivity, isAncestor, type ObjectSource } from './walk.ts'
+import { isAncestor, type ObjectSource } from './walk.ts'
 
 export const AGENT = 'git-forge/0.1'
 
@@ -44,10 +47,16 @@ export type CommandResult = RefCommand & {
   readonly forced?: boolean
 }
 
+export type PushedPack = {
+  readonly objectCount: number
+  readonly lfsPointers: readonly LfsObjectSpec[]
+}
+
 export type PushOutcome = {
   readonly unpack: string
   readonly results: readonly CommandResult[]
-  readonly objects: readonly ResolvedObject[]
+  readonly pack: string | null
+  readonly objectCount: number
   readonly archived: readonly { readonly name: string; readonly id: ObjectId }[]
 }
 
@@ -58,16 +67,23 @@ export type ReceiveOptions = {
   readonly repo: RepositoryName
   readonly now?: () => Date
   readonly policy?: RefPolicy
-  readonly beforeUpdate?: (objects: readonly ResolvedObject[], commands: readonly RefCommand[]) => Promise<string | null>
+  readonly beforeUpdate?: (pushed: PushedPack, commands: readonly RefCommand[]) => Promise<string | null>
+  readonly pack?: IngestOptions
 }
 
-const parseRequest = (body: Uint8Array): { commands: RefCommand[]; capabilities: Set<string>; pack: Uint8Array } => {
-  const { packets, rest } = parsePackets(body, true)
+const readCommands = async (cursor: ByteCursor): Promise<{ commands: RefCommand[]; capabilities: Set<string> }> => {
   const commands: RefCommand[] = []
   let capabilities = new Set<string>()
-  for (const packet of packets) {
-    if (packet.kind !== 'data') continue
-    let line = fromUtf8(packet.data).replace(/\n$/, '')
+  for (;;) {
+    if ((await cursor.fill(4)) < 4) throw new PackError('truncated command list')
+    const length = Number.parseInt(fromUtf8(cursor.peek().subarray(0, 4)), 16)
+    if (Number.isNaN(length) || (length > 0 && length < 4)) throw new PackError('invalid pkt-line length')
+    if (length === 0) {
+      cursor.skip(4)
+      break
+    }
+    const packet = await cursor.read(length)
+    let line = fromUtf8(packet.subarray(4)).replace(/\n$/, '')
     const nul = line.indexOf('\0')
     if (nul !== -1) {
       capabilities = new Set(line.slice(nul + 1).split(' ').filter(Boolean))
@@ -78,7 +94,7 @@ const parseRequest = (body: Uint8Array): { commands: RefCommand[]; capabilities:
     if (!oldId || !newId || !name || !isObjectId(oldId) || !isObjectId(newId)) throw new PackError(`invalid command: ${line}`)
     commands.push({ oldId, newId, name })
   }
-  return { commands, capabilities, pack: rest }
+  return { commands, capabilities }
 }
 
 export const validRefName = (name: string): boolean =>
@@ -107,14 +123,20 @@ const report = (outcome: Pick<PushOutcome, 'unpack' | 'results'>, useSideband: b
   return useSideband ? concat([...sideband(SIDEBAND_DATA, inner), FLUSH]) : inner
 }
 
-export const receivePack = async (options: ReceiveOptions, body: Uint8Array): Promise<{ response: Uint8Array; outcome: PushOutcome }> => {
+export const receivePack = async (
+  options: ReceiveOptions,
+  body: ReadableStream<Uint8Array>,
+): Promise<{ response: Uint8Array; outcome: PushOutcome }> => {
   const { storage, repo } = options
   const now = options.now ?? (() => new Date())
-  let parsed: ReturnType<typeof parseRequest>
+  const cursor = new ByteCursor(body)
+  let parsed: Awaited<ReturnType<typeof readCommands>>
   try {
-    parsed = parseRequest(body)
+    parsed = await readCommands(cursor)
   } catch (error) {
-    const outcome = { unpack: `error ${(error as Error).message}`, results: [], objects: [], archived: [] }
+    await cursor.cancel()
+    if (error instanceof SizeLimitError) throw error
+    const outcome: PushOutcome = { unpack: `error ${(error as Error).message}`, results: [], pack: null, objectCount: 0, archived: [] }
     return { response: report(outcome, false), outcome }
   }
   const { commands, capabilities } = parsed
@@ -125,34 +147,23 @@ export const receivePack = async (options: ReceiveOptions, body: Uint8Array): Pr
     const outcome: PushOutcome = {
       unpack,
       results: commands.map((command) => ({ ...command, ok: false, reason: 'unpacker error' })),
-      objects: [],
+      pack: null,
+      objectCount: 0,
       archived: [],
     }
     return { response: report(outcome, useSideband), outcome }
   }
-  let objects: readonly ResolvedObject[] = []
-  let packBytes: Uint8Array | null = null
-  let checksum: Uint8Array | null = null
-  if (parsed.pack.length > 0) {
-    try {
-      const pack = await parsePack(parsed.pack, (id) => odb.read(id))
-      if (pack.externalBases.length > 0) {
-        const rewritten = writePack(pack.objects)
-        objects = rewritten.objects
-        packBytes = rewritten.bytes
-        checksum = rewritten.checksum
-      } else {
-        objects = pack.objects
-        packBytes = parsed.pack
-        checksum = pack.checksum
-      }
-    } catch (error) {
-      return fail(`error ${(error as Error).message}`)
-    }
+  let pack: IndexedPack | null = null
+  try {
+    if (!(await cursor.atEnd())) pack = await odb.index(cursor, options.pack)
+  } catch (error) {
+    await cursor.cancel()
+    if (error instanceof SizeLimitError) throw error
+    return fail(`error ${(error as Error).message}`)
   }
-  const fresh = new Map<ObjectId, GitObject>(objects.map((object) => [object.id, object]))
-  const source: ObjectSource = { read: async (id) => fresh.get(id) ?? (await odb.read(id)) }
-  const exists = async (id: ObjectId) => fresh.has(id) || (await odb.has(id))
+  const objectCount = pack?.objectCount ?? 0
+  const source: ObjectSource = { read: async (id) => (await pack?.read(id)) ?? (await odb.read(id)) }
+  const typeOf = async (id: ObjectId) => pack?.typeOf(id) ?? (await odb.read(id))?.type ?? null
   const checks = new Map<string, string | null>()
   for (const command of commands) {
     if (!validRefName(command.name)) {
@@ -163,31 +174,25 @@ export const receivePack = async (options: ReceiveOptions, body: Uint8Array): Pr
       checks.set(command.name, null)
       continue
     }
-    const target = await source.read(command.newId)
-    if (!target) {
-      checks.set(command.name, 'missing object')
-      continue
-    }
-    if (command.name.startsWith('refs/heads/') && target.type !== 'commit') {
-      checks.set(command.name, 'not a commit')
-      continue
-    }
-    const missing = await checkConnectivity(source, command.newId, (id) => fresh.has(id), (id) => odb.has(id))
-    checks.set(command.name, missing ? `missing object ${missing}` : null)
+    const type = await typeOf(command.newId)
+    if (!type) checks.set(command.name, 'missing object')
+    else if (command.name.startsWith('refs/heads/') && type !== 'commit') checks.set(command.name, 'not a commit')
+    else checks.set(command.name, null)
   }
   if (options.beforeUpdate) {
-    const rejection = await options.beforeUpdate(objects, commands)
+    const rejection = await options.beforeUpdate({ objectCount, lfsPointers: pack?.lfsPointers ?? [] }, commands)
     if (rejection) {
       const outcome: PushOutcome = {
         unpack: 'ok',
         results: commands.map((command) => ({ ...command, ok: false, reason: rejection })),
-        objects,
+        pack: null,
+        objectCount,
         archived: [],
       }
       return { response: report(outcome, useSideband), outcome }
     }
   }
-  if (packBytes && checksum && objects.length > 0) await odb.addPack(packBytes, objects, checksum)
+  const packName = pack ? await odb.storePack(pack) : null
   for (let attempt = 0; attempt < 10; attempt++) {
     const current = await readRefs(storage, repo)
     if (!current) return fail('error repository not found')
@@ -227,7 +232,13 @@ export const receivePack = async (options: ReceiveOptions, body: Uint8Array): Pr
       atomic && anyFailed
         ? results.map((result) => (result.ok ? { ...result, ok: false, reason: 'atomic push failed' } : result))
         : results
-    const outcome: PushOutcome = { unpack: 'ok', results: finalResults, objects, archived: atomic && anyFailed ? [] : archived }
+    const outcome: PushOutcome = {
+      unpack: 'ok',
+      results: finalResults,
+      pack: packName,
+      objectCount,
+      archived: atomic && anyFailed ? [] : archived,
+    }
     if (finalResults.every((result) => !result.ok)) return { response: report(outcome, useSideband), outcome }
     const state: RefsState = { ...current.state, refs }
     if (await writeRefs(storage, repo, state, current.etag)) {
@@ -237,4 +248,3 @@ export const receivePack = async (options: ReceiveOptions, body: Uint8Array): Pr
   }
   return fail('error could not update refs')
 }
-

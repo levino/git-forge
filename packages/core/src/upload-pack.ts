@@ -4,7 +4,7 @@ import { parseTag } from './objects.ts'
 import { writePack } from './pack.ts'
 import { DELIM, FLUSH, packetText, parsePackets, pkt, sideband, SIDEBAND_DATA, SIDEBAND_ERROR, SIDEBAND_PROGRESS } from './pktline.ts'
 import { AGENT } from './receive-pack.ts'
-import { ObjectDatabase, type RefsState, type RepositoryName, readRefs, sortedRefs } from './repository.ts'
+import { type AdvertisedRefs, advertisedRefs, ObjectDatabase, type RepositoryName, readRefs, sortedRefs } from './repository.ts'
 import type { Storage } from './storage.ts'
 import { MissingObjectError, reachable } from './walk.ts'
 
@@ -48,7 +48,7 @@ const parseRequest = (body: Uint8Array): Request => {
   return { command, args }
 }
 
-const lsRefs = async (state: RefsState, odb: ObjectDatabase, args: readonly string[]): Promise<Uint8Array> => {
+const lsRefs = async (state: AdvertisedRefs, odb: ObjectDatabase, args: readonly string[]): Promise<Uint8Array> => {
   const symrefs = args.includes('symrefs')
   const peel = args.includes('peel')
   const unborn = args.includes('unborn')
@@ -75,7 +75,7 @@ const lsRefs = async (state: RefsState, odb: ObjectDatabase, args: readonly stri
 
 const errorResponse = (message: string): Uint8Array => concat([pkt(`ERR ${message}\n`), FLUSH])
 
-const fetch = async (state: RefsState, odb: ObjectDatabase, args: readonly string[]): Promise<Uint8Array> => {
+const fetch = async (state: AdvertisedRefs, odb: ObjectDatabase, args: readonly string[]): Promise<Uint8Array> => {
   const wants = new Set<ObjectId>()
   const haves: ObjectId[] = []
   let done = false
@@ -139,9 +139,9 @@ export const uploadPackV2 = async (storage: Storage, repo: RepositoryName, body:
   const request = parseRequest(body)
   switch (request.command) {
     case 'ls-refs':
-      return lsRefs(refs.state, odb, request.args)
+      return lsRefs(advertisedRefs(refs.state), odb, request.args)
     case 'fetch':
-      return fetch(refs.state, odb, request.args)
+      return fetch(advertisedRefs(refs.state), odb, request.args)
     default:
       return errorResponse(`unknown command ${request.command}`)
   }

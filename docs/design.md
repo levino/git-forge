@@ -116,6 +116,27 @@ example on a Raspberry Pi.
   descend from the previously mirrored value, the downstream instance archives
   the old value (§5), applies the new one and raises an alarm. Divergence is
   never merged automatically.
+- **Plain clones of a mirror check out the upstream default branch.** Git
+  clients only check out `refs/heads/*`, so a mirror shows one remote's
+  `refs/upstream/{remote}/heads/*` and `…/tags/*` additionally as
+  `refs/heads/*` and `refs/tags/*` (a read-side view, nothing is stored
+  twice) and points `HEAD` at the upstream default branch. The view is named
+  in `refs.json` as the optional field `mirrorView: { remote, head }`, set by
+  the first sync of a remote (only one remote provides it) and its `head`
+  follows the upstream `HEAD`. `advertisedRefs(state)` computes the view and
+  is used for every read: protocol v2 `ls-refs` and `fetch`, the static
+  `info/refs` and `HEAD` files (so a plain clone from the bucket behaves the
+  same), raw URLs and the ref state in push notifications.
+  `refs/upstream/*` stays visible, so mirrors of mirrors are unchanged.
+  - **Own refs win:** a real `refs/heads/X` of the repository shadows the
+    view's `X`; nothing local is ever hidden.
+  - **Writes see real refs only:** `receive-pack` advertises `refs.json` as
+    stored, so pushing `X` to a mirror creates a real branch (which then
+    shadows the view) and branch protection never sees virtual refs.
+  - **Detach materializes the view:** `detachMirror` writes the view into
+    real `refs/heads/*` and `refs/tags/*`, points `HEAD` at the default
+    branch and drops `mirrorView`; `refs/upstream/*` stay. The repository
+    then continues as a primary.
 - **Users of a mirror are independent of the upstream.** Who may read a mirror
   is decided by its operator. If the upstream and its identity provider
   disappear, the mirror stays usable with its own users and can simply be
@@ -346,7 +367,8 @@ pass through the function on upload.
 `refs/upstream/{remote}/*` (archive and alarm on rewrites), fetch missing LFS
 objects via the Batch API and verify their hashes. Two strategies:
 
-- **Copy-only** (default between instances, `strategy: 'copy'`): upstream
+- **Copy-only** (between instances; the Worker uses `strategy: 'auto'`,
+  which copies whenever the upstream serves `objects/info/packs`): upstream
   packs are already indexed and immutable, so the mirror reads the dumb-HTTP
   files (`info/refs`, `HEAD`, `objects/info/packs`) and copies every pack it
   lacks, with its `.idx`, as is under the same name. Checks per pack, all
@@ -595,13 +617,14 @@ development container:
 
 | per invocation (CPU ms) | small repo (0.9 MiB pack) | medium repo (14.1 MiB pack) |
 |---|---|---|
-| notification request, in-process replay | 1.4–2.1 | 1.3–1.5 |
-| copy-only sync of a 1-commit push, replay | 4.6–5.4 | 4.1–5.6 |
-| delivering a notification, replay | 0.6–0.7 | 0.6–3.1 |
-| same three through Node's HTTP stack | 4.5, 8.7–14.0, 1.7–2.0 | 6.4–10.0, 8.9–13.3, — |
-| copy-only sync of the initial push, replay | 21.8 | 157 |
-| re-indexing sync (fetch strategy) for comparison | 195 | 858 |
-| deep check | 606 | 2 624 |
+| notification request, in-process replay | 1.3–1.5 | 1.1–2.5 |
+| copy-only sync of a 1-commit push, replay | 4.7–10.2 | 4.1–5.0 |
+| delivering a notification, replay | 0.7 | 0.6–0.8 |
+| same three through Node's HTTP stack | 4.3–4.8, 8.9–14.1, 1.6–2.1 | 7.0–10.0, 10.6–14.9, — |
+| copy-only sync of the initial push, replay, JavaScript hashes | 19.7 | 140 |
+| the same with a native streaming hash | 10.2 | 65 |
+| re-indexing sync (fetch strategy) for comparison | 215 | 851 |
+| deep check | 574 | 2 651 |
 
 The replay rows run the same code in process against a storage snapshot and
 recorded upstream responses; they exclude Node's JavaScript HTTP client and
@@ -631,33 +654,46 @@ Result:
   downstream subscriber, each in its own invocation, i.e. at roughly half the
   10 ms budget, with ~30 subrequests (≈ 25 storage operations + 5 fetches)
   per sync. Queues, Cron and D1 stay far below their free allowances.
-- **Bulk data does not fit.** Verifying bytes in JavaScript costs 6.3 ms per
-  MiB of pack (SHA-1) and 7.7 ms per MiB of LFS object (SHA-256), so the
-  initial copy of a repository, any push with more than about 0.8 MiB of new
-  pack data and any LFS object above about 1 MiB exceed 10 ms. The deep
-  check and the re-indexing sync never fit.
+- **Bulk data needs units.** Verifying bytes in JavaScript costs about 6 ms
+  per MiB of pack (SHA-1) and 7 ms per MiB of LFS object (SHA-256). With
+  `crypto.DigestStream` (native) hashing costs 1.2–1.8 ms per MiB; the rest
+  of a bulk copy in the Node measurement (about 4 ms per MiB) is mostly
+  Node's JavaScript implementation of web streams, which is native in
+  workerd. A Free-plan mirror therefore copies one pack or LFS object per
+  invocation and sets a byte budget per unit (`MIRROR_UNIT_BYTES`, e.g.
+  1 MiB to stay safely inside 10 ms; check the real CPU time in Workers Logs
+  and raise it). The deep check and the re-indexing sync never fit.
 
-Changes that would make a pure mirror fit more often (proposed, not built):
+What was done about it:
 
-1. **Native streaming hashes.** Pass a hash factory to `verifyingPackStream`
-   and the LFS verification; on Workers back it with `crypto.DigestStream`
-   (non-standard, native, [docs](https://developers.cloudflare.com/workers/runtime-apis/web-crypto/)),
-   elsewhere with the JavaScript implementation. Native SHA-1/SHA-256 cost
-   1.8/1.3 ms per MiB in the same measurement, so packs of ~3 MiB and LFS
-   objects of ~5 MiB would fit.
-2. **One unit of bytes per invocation.** Enqueue one job per pack and per
-   LFS object and update the refs in a final job once all packs are
-   present, so the budget applies per pack instead of per push. Anything
-   larger than the budget stays pending (like `lfsPending`) for a paid
-   instance or a Node/Pi mirror to fetch; the mirror on Free then only
-   follows.
-3. **Ranged object reads.** `ObjectDatabase` loads a whole pack to read one
-   object (fast-forward check, peeling refs). Reading single entries by range
-   keeps a sync cheap when a ref moves onto an object inside a large old
-   pack (e.g. a tag on an old commit).
-4. **Seed on a larger runtime.** The initial copy (and the deep check) runs
-   once on Workers Paid, a Node instance or a Pi; afterwards the same bucket
-   is served by a Free-plan worker. The bucket layout is the same everywhere.
+1. **Native streaming hashes (built).** `verifyingPackStream` and the LFS
+   `verifyingStream` take a `DigestFactory` (`@git-forge/core`,
+   `javascriptDigests` by default). The Worker passes `digestStreams` from
+   `@git-forge/cloudflare`, backed by `crypto.DigestStream` (non-standard,
+   native, [docs](https://developers.cloudflare.com/workers/runtime-apis/web-crypto/));
+   it is tested against the JavaScript hashes in workerd.
+2. **One unit of bytes per invocation (built).** With `MIRROR_UNIT_BYTES` set,
+   a sync job first plans (`planPackCopy`: missing packs and their sizes from
+   `HEAD` requests, stored as `pendingPacks` in the mirror status), then
+   enqueues one `mirror-pack` job per pack (`copyPendingPack`: copy, verify,
+   register, record the LFS pointers it contains). The job that copies the
+   last pack enqueues the final sync, which only updates the refs and defers
+   LFS (`deferLfs`); each LFS object then gets its own `mirror-lfs` job
+   (`mirrorPendingLfsObject`). Packs above the budget stay in `pendingPacks`
+   with `oversized: true` and the refs are not moved past them; LFS objects
+   above the budget stay in `lfsPending`. A later sync with a larger budget
+   (Workers Paid, a Node instance, a Pi) picks them up; the bucket layout is
+   the same everywhere. Without `MIRROR_UNIT_BYTES` everything runs in one
+   job as before.
+3. **Ranged object reads (by the streaming work).** `ObjectDatabase` reading
+   single entries by range instead of whole packs is part of the bounded-memory
+   rework of `ObjectDatabase` (block cache with ranged storage reads) and is
+   not duplicated here.
+4. **Seed on a larger runtime (documentation).** The initial copy of a large
+   repository and the deep check run once on Workers Paid, a Node instance
+   or a Pi with the same bucket (or with the Free-plan instance's bucket via
+   its S3 API); afterwards the Free-plan worker only follows small pushes.
+   Oversized units left by a Free-plan mirror are picked up the same way.
 5. Deploy a Free-plan instance without `limits.cpu_ms` in `wrangler.jsonc`
    (the key is rejected there).
 

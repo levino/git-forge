@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process'
 import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { createInterface } from 'node:readline'
+import { createHash } from 'node:crypto'
 import { createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { generateSigningKey, importSigningKey, mintMirrorNotification, type PrivateJwk } from '@git-forge/accounts'
@@ -12,13 +13,13 @@ import {
   createSha1,
   createSha256,
   deepCheckRepository,
+  type DigestFactory,
   type FetchFunction,
   parseInfoRefs,
   type ObjectInfo,
   type PutBody,
   type PutOptions,
   type PutResult,
-  readAll,
   readRefs,
   type Storage,
   type StoredObject,
@@ -31,29 +32,32 @@ import { mirrorAuthorization } from '../src/mirrors.ts'
 import { type Instance, type Invocation, quiesce, startInstance } from '../test/support/federated-instance.ts'
 
 class BucketLikeStorage implements Storage {
-  readonly #objects = new Map<string, { data: Uint8Array; etag: string }>()
+  readonly #objects = new Map<string, { parts: readonly Uint8Array[]; size: number; etag: string }>()
   #counter = 0
 
   async get(key: string, range?: ByteRange): Promise<StoredObject | null> {
     const entry = this.#objects.get(key)
     if (!entry) return null
-    const data = range ? entry.data.subarray(range.offset, range.offset + range.length) : entry.data
-    return { key, size: entry.data.length, etag: entry.etag, body: new Blob([data as Uint8Array<ArrayBuffer>]).stream() }
+    const blob = new Blob(entry.parts as Uint8Array<ArrayBuffer>[])
+    const body = (range ? blob.slice(range.offset, range.offset + range.length) : blob).stream()
+    return { key, size: entry.size, etag: entry.etag, body }
   }
 
   async head(key: string): Promise<ObjectInfo | null> {
     const entry = this.#objects.get(key)
-    return entry ? { key, size: entry.data.length, etag: entry.etag } : null
+    return entry ? { key, size: entry.size, etag: entry.etag } : null
   }
 
   async put(key: string, body: PutBody, size: number, options: PutOptions = {}): Promise<PutResult> {
-    const data = body instanceof Uint8Array ? body : await readAll(body)
-    if (data.length !== size) throw new Error(`size mismatch for ${key}`)
+    const parts: Uint8Array[] = []
+    if (body instanceof Uint8Array) parts.push(body)
+    else for await (const chunk of body as unknown as AsyncIterable<Uint8Array>) parts.push(chunk)
+    if (parts.reduce((sum, part) => sum + part.length, 0) !== size) throw new Error(`size mismatch for ${key}`)
     const current = this.#objects.get(key)
     if (options.ifNoneMatch === '*' && current) return { ok: false, reason: 'precondition-failed' }
     if (options.ifMatch !== undefined && current?.etag !== options.ifMatch) return { ok: false, reason: 'precondition-failed' }
     const etag = `e${++this.#counter}`
-    this.#objects.set(key, { data, etag })
+    this.#objects.set(key, { parts, size, etag })
     return { ok: true, info: { key, size, etag } }
   }
 
@@ -67,7 +71,7 @@ class BucketLikeStorage implements Storage {
   async *list(prefix: string): AsyncIterable<ObjectInfo> {
     for (const key of [...this.#objects.keys()].filter((candidate) => candidate.startsWith(prefix)).sort()) {
       const entry = this.#objects.get(key)!
-      yield { key, size: entry.data.length, etag: entry.etag }
+      yield { key, size: entry.size, etag: entry.etag }
     }
   }
 }
@@ -125,24 +129,29 @@ if (process.argv.includes('--upstream')) {
     const measured = await cpuOf(action)
     rows.push({ scenario, invocation: 'inline call', cpuMs: measured.cpuMs, wallMs: measured.wallMs, storageOps: 0, fetches: 0 })
   }
-  type Recorded = { status: number; headers: [string, string][]; body: Uint8Array }
+  type Recorded = { status: number; headers: [string, string][]; body: Blob }
   const recording =
     (log: Map<string, Recorded>): FetchFunction =>
     async (request) => {
       const response = await fetch(request)
-      const body = new Uint8Array(await response.arrayBuffer())
+      const body = await response.blob()
       log.set(`${request.method} ${request.url}`, { status: response.status, headers: [...response.headers], body })
-      return new Response(response.status === 204 ? null : (body as Uint8Array<ArrayBuffer>), { status: response.status, headers: response.headers })
+      return new Response(response.status === 204 ? null : body, { status: response.status, headers: response.headers })
     }
   const replaying =
     (log: Map<string, Recorded>): FetchFunction =>
     async (request) => {
       const entry = log.get(`${request.method} ${request.url}`)
       if (!entry) throw new Error(`not recorded: ${request.method} ${request.url}`)
-      return new Response(entry.body.slice() as Uint8Array<ArrayBuffer>, { status: entry.status, headers: entry.headers })
+      return new Response(entry.body, { status: entry.status, headers: entry.headers })
     }
   const noJobs = { enqueue: async () => undefined }
-  const replayForge = (storage: Storage, fetcher: FetchFunction) => createForge({ ...beta.options, storage, jobs: noJobs, fetch: fetcher })
+  const nativeDigests: DigestFactory = (algorithm) => {
+    const hash = createHash(algorithm === 'SHA-1' ? 'sha1' : 'sha256')
+    return { update: (chunk) => void hash.update(chunk), digest: async () => new Uint8Array(hash.digest()) }
+  }
+  const replayForge = (storage: Storage, fetcher: FetchFunction, digests?: DigestFactory) =>
+    createForge({ ...beta.options, storage, jobs: noJobs, fetch: fetcher, ...(digests ? { digests } : {}) })
   const replay = async (scenario: string, name: string, before: BucketLikeStorage) => {
     const repository = `village/${name}`
     const upstreamRefs = parseInfoRefs(await (await alphaApi('GET', `/${repository}.git/info/refs`)).text())
@@ -164,6 +173,8 @@ if (process.argv.includes('--upstream')) {
     const synced = before.snapshot()
     const sync = await cpuOf(() => replayForge(synced, replaying(log)).runJob(job))
     rows.push({ scenario, invocation: 'replay: copy-only sync job', cpuMs: sync.cpuMs, wallMs: sync.wallMs, storageOps: 0, fetches: log.size })
+    const nativeSync = await cpuOf(() => replayForge(before.snapshot(), replaying(log), nativeDigests).runJob(job))
+    rows.push({ scenario, invocation: 'replay: copy-only sync job, native streaming hash', cpuMs: nativeSync.cpuMs, wallMs: nativeSync.wallMs, storageOps: 0, fetches: log.size })
     const delivering = replayForge(synced, async () => new Response('{}'))
     const delivery = await cpuOf(() => delivering.runJob({ kind: 'mirror-notify', repository: 'village/small', issuer: alphaUrl, callback: alpha.sink }))
     rows.push({ scenario, invocation: 'replay: notification delivery job', cpuMs: delivery.cpuMs, wallMs: delivery.wallMs, storageOps: 0, fetches: 1 })

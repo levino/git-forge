@@ -24,6 +24,7 @@ import {
   createRepository,
   deepCheckMirror,
   detachMirror,
+  type DigestFactory,
   type FetchFunction,
   handleContentRequest,
   handleGitRequest,
@@ -64,6 +65,7 @@ export type ForgeOptions = ForgeSettings & {
   readonly fetch?: FetchFunction
   readonly now?: () => Date
   readonly jobs?: JobQueue<ForgeJob>
+  readonly digests?: DigestFactory
   readonly scheduleImport?: ImportScheduler
 }
 
@@ -203,6 +205,7 @@ export const createForge = (options: ForgeOptions): Forge => {
     issuer,
     instanceKey: options.instanceKey,
     ...(options.fetch ? { fetch: options.fetch } : {}),
+    ...(options.digests ? { digests: options.digests } : {}),
   })
 
   const federation: MirrorFederation | null =
@@ -215,6 +218,7 @@ export const createForge = (options: ForgeOptions): Forge => {
           jobs: options.jobs,
           canRead: async (principal, repo) => (await checkRepositoryAccess(store, principal, repo, 'read')).decision === 'allow',
           deepCheckDays: options.deepCheckDays,
+          unitBytes: options.mirrorUnitBytes,
           now,
         }
       : null

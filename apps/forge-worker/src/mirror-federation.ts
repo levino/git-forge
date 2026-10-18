@@ -14,13 +14,17 @@ import {
   verifyMirrorNotification,
 } from '@git-forge/accounts'
 import {
+  advertisedRefs,
+  copyPendingPack,
   deepCheckMirror,
   isMirrorDue,
   isValidName,
   type JobQueue,
   listMirrors,
   type MirrorConfig,
+  mirrorPendingLfsObject,
   PermanentJobError,
+  planPackCopy,
   type PushOutcome,
   readAll,
   readMirrorConfig,
@@ -32,10 +36,12 @@ import {
   SizeLimitError,
   type SyncResult,
 } from '@git-forge/core'
-import { type MirrorContext, runMirrorSync, type ScheduledMirrorRun } from './mirrors.ts'
+import { type MirrorContext, mirrorUnitOptions, runMirrorSync, type ScheduledMirrorRun } from './mirrors.ts'
 
 export type ForgeJob =
-  | { readonly kind: 'mirror-sync'; readonly repository: string; readonly remote: string; readonly reason: 'notification' | 'schedule' | 'configure' }
+  | { readonly kind: 'mirror-sync'; readonly repository: string; readonly remote: string; readonly reason: 'notification' | 'schedule' | 'configure' | 'units' }
+  | { readonly kind: 'mirror-pack'; readonly repository: string; readonly remote: string; readonly pack: string }
+  | { readonly kind: 'mirror-lfs'; readonly repository: string; readonly remote: string; readonly oid: string; readonly size: number }
   | { readonly kind: 'mirror-notify'; readonly repository: string; readonly issuer: string; readonly callback: string }
   | { readonly kind: 'mirror-subscribe'; readonly repository: string; readonly remote: string }
   | { readonly kind: 'mirror-deep-check'; readonly repository: string; readonly remote: string }
@@ -47,6 +53,7 @@ export type MirrorFederation = MirrorContext & {
   readonly jobs: JobQueue<ForgeJob>
   readonly canRead: (principal: InstancePrincipal, repo: RepositoryName) => Promise<boolean>
   readonly deepCheckDays: number
+  readonly unitBytes: number
   readonly now?: () => Date
 }
 
@@ -99,7 +106,7 @@ const deliverNotification = async (federation: MirrorFederation, job: Extract<Fo
     issuer: federation.issuer,
     audience: job.issuer,
     repository: job.repository,
-    refs: refs.state.refs,
+    refs: advertisedRefs(refs.state).refs,
   })
   const response = await send(federation, new Request(job.callback, { method: 'POST', headers: { 'Content-Type': NOTIFICATION_MEDIA_TYPE }, body: token }))
   await response.body?.cancel()
@@ -113,6 +120,33 @@ export const syncAndNotify = async (federation: MirrorFederation, repo: Reposito
   const result = await runMirrorSync(federation, repo, config)
   if (result.status === 'ok' && result.updates.length > 0) await enqueueNotifications(federation, repo)
   return result
+}
+
+const syncInUnits = async (federation: MirrorFederation, repo: RepositoryName, config: MirrorConfig): Promise<SyncResult | null> => {
+  const unit = mirrorUnitOptions(federation, repo, config, federation.unitBytes)
+  const plan = await planPackCopy(unit)
+  if (plan === null) return syncAndNotify(federation, repo, config)
+  const copyable = plan.filter((pack) => !pack.oversized)
+  for (const pack of copyable) await federation.jobs.enqueue({ kind: 'mirror-pack', repository: nameOf(repo), remote: config.remote, pack: pack.name })
+  if (plan.length > 0) {
+    if (copyable.length === 0) console.log(JSON.stringify({ event: 'mirror-oversized', repository: nameOf(repo), remote: config.remote, packs: plan }))
+    return null
+  }
+  const result = await runMirrorSync(federation, repo, config, { deferLfs: true })
+  if (result.status !== 'ok') return result
+  if (result.updates.length > 0) await enqueueNotifications(federation, repo)
+  for (const pointer of (await readMirrorStatus(federation.storage, repo, config.remote))?.lfsPending ?? []) {
+    if (pointer.size > federation.unitBytes) continue
+    await federation.jobs.enqueue({ kind: 'mirror-lfs', repository: nameOf(repo), remote: config.remote, oid: pointer.oid, size: pointer.size })
+  }
+  return result
+}
+
+const mirrorConfigOf = async (federation: MirrorFederation, repository: string, remote: string) => {
+  const repo = repositoryOf(repository)
+  const config = await readMirrorConfig(federation.storage, repo, remote)
+  if (!config) throw new PermanentJobError(`mirror ${remote} of ${repository} not configured`)
+  return { repo, config }
 }
 
 const subscribeUpstream = async (federation: MirrorFederation, repo: RepositoryName, remote: string): Promise<void> => {
@@ -143,12 +177,22 @@ export const runJob = async (federation: MirrorFederation, job: ForgeJob): Promi
       if (!check.ok) console.log(JSON.stringify({ event: 'mirror-deep-check', repository: job.repository, remote: job.remote, problems: check.problems }))
       return
     }
+    case 'mirror-pack': {
+      const { repo, config } = await mirrorConfigOf(federation, job.repository, job.remote)
+      const { remaining } = await copyPendingPack(mirrorUnitOptions(federation, repo, config, federation.unitBytes), job.pack)
+      if (remaining === 0) await federation.jobs.enqueue({ kind: 'mirror-sync', repository: job.repository, remote: job.remote, reason: 'units' })
+      return
+    }
+    case 'mirror-lfs': {
+      const { repo, config } = await mirrorConfigOf(federation, job.repository, job.remote)
+      const result = await mirrorPendingLfsObject(mirrorUnitOptions(federation, repo, config), { oid: job.oid, size: job.size })
+      if (result.missing.length > 0) throw new Error(`LFS object ${job.oid}: ${result.missing[0]!.reason}`)
+      return
+    }
     case 'mirror-sync': {
-      const repo = repositoryOf(job.repository)
-      const config = await readMirrorConfig(federation.storage, repo, job.remote)
-      if (!config) throw new PermanentJobError(`mirror ${job.remote} of ${job.repository} not configured`)
-      const result = await syncAndNotify(federation, repo, config)
-      if (result.status === 'failed') throw new Error(result.error ?? 'mirror sync failed')
+      const { repo, config } = await mirrorConfigOf(federation, job.repository, job.remote)
+      const result = federation.unitBytes > 0 ? await syncInUnits(federation, repo, config) : await syncAndNotify(federation, repo, config)
+      if (result?.status === 'failed') throw new Error(result.error ?? 'mirror sync failed')
     }
   }
 }

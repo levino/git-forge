@@ -17,7 +17,7 @@ import {
 } from './content.ts'
 import type { Authorize } from './http.ts'
 import { lfsObjectKey } from './lfs.ts'
-import { ObjectDatabase, readRefs, type RepositoryName } from './repository.ts'
+import { advertisedRefs, ObjectDatabase, readRefs, type RepositoryName } from './repository.ts'
 import type { ByteRange, Storage } from './storage.ts'
 
 export type ContentHttpOptions = {
@@ -115,7 +115,7 @@ export const handleContentRequest = async (request: Request, options: ContentHtt
   const refs = await readRefs(storage, route.repo)
   if (!refs) return text(404, 'repository not found\n')
   if (route.kind === 'media') return serveLfs(request, storage, route.repo, route.oid, route.filename, IMMUTABLE_CACHE)
-  const target = await resolveRaw(new ObjectDatabase(storage, route.repo), refs.state, route.segments)
+  const target = await resolveRaw(new ObjectDatabase(storage, route.repo), advertisedRefs(refs.state), route.segments)
   if (target.kind === 'not-found') return text(404, `${target.message}\n`)
   const cacheControl = refCacheControl(target.immutable, options.refMaxAgeSeconds ?? 60)
   if (target.kind === 'lfs') {

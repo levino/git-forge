@@ -43,7 +43,7 @@ export type AuditEntry = {
   readonly data: Record<string, unknown>
 }
 
-type AuditInput = {
+export type AuditInput = {
   readonly action: string
   readonly subjectKind?: string
   readonly subjectId?: string
@@ -204,24 +204,24 @@ const toSubject = (row: RepositoryRow): RepositorySubject => ({
 const REPOSITORY_SELECT = `SELECT r.id, r.name, r.visibility, r.owner_id, a.login AS owner_login, a.kind AS owner_kind, a.default_repository_role
 FROM repositories r JOIN accounts a ON a.id = r.owner_id`
 
+export const auditStatement = (actor: AuditActor, entry: AuditInput, at: number): Statement =>
+  sql(
+    'INSERT INTO audit_log (at, actor_kind, actor_id, action, subject_kind, subject_id, repository_id, data) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+    at,
+    actor.kind,
+    actor.kind === 'system' ? null : actor.id,
+    entry.action,
+    entry.subjectKind ?? null,
+    entry.subjectId ?? null,
+    entry.repositoryId ?? null,
+    JSON.stringify(entry.data ?? {}),
+  )
+
 export const createAccountsStore = (db: Database, options: AccountsStoreOptions = {}) => {
   const now = options.now ?? Date.now
 
-  const audit = (actor: AuditActor, entry: AuditInput, at: number): Statement =>
-    sql(
-      'INSERT INTO audit_log (at, actor_kind, actor_id, action, subject_kind, subject_id, repository_id, data) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-      at,
-      actor.kind,
-      actor.kind === 'system' ? null : actor.id,
-      entry.action,
-      entry.subjectKind ?? null,
-      entry.subjectId ?? null,
-      entry.repositoryId ?? null,
-      JSON.stringify(entry.data ?? {}),
-    )
-
   const write = async (actor: AuditActor, entry: AuditInput, statements: readonly Statement[]): Promise<void> => {
-    await db.batch([...statements, audit(actor, entry, now())])
+    await db.batch([...statements, auditStatement(actor, entry, now())])
   }
 
   const requireAccount = async (id: string, kind: OwnerKind): Promise<void> => {
@@ -231,12 +231,18 @@ export const createAccountsStore = (db: Database, options: AccountsStoreOptions 
 
   const createAccount = async (
     kind: OwnerKind,
-    input: { readonly login: string; readonly displayName?: string; readonly email?: string; readonly defaultRepositoryRole?: Role | null },
+    input: {
+      readonly id?: string
+      readonly login: string
+      readonly displayName?: string
+      readonly email?: string
+      readonly defaultRepositoryRole?: Role | null
+    },
     actor: AuditActor,
   ): Promise<{ readonly id: string }> => {
     requireLogin(input.login)
     if (input.defaultRepositoryRole) requireRole(input.defaultRepositoryRole)
-    const id = randomId()
+    const id = input.id ?? randomId()
     await write(actor, { action: `${kind}.create`, subjectKind: kind, subjectId: id, data: { login: input.login } }, [
       sql(
         'INSERT INTO accounts (id, kind, login, display_name, email, default_repository_role, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
@@ -292,7 +298,10 @@ export const createAccountsStore = (db: Database, options: AccountsStoreOptions 
   }
 
   const store = {
-    createUser: (input: { readonly login: string; readonly displayName?: string; readonly email?: string }, actor: AuditActor = SYSTEM) =>
+    createUser: (
+      input: { readonly id?: string; readonly login: string; readonly displayName?: string; readonly email?: string },
+      actor: AuditActor = SYSTEM,
+    ) =>
       createAccount('user', input, actor),
 
     createOrganization: (
@@ -334,6 +343,14 @@ export const createAccountsStore = (db: Database, options: AccountsStoreOptions 
           subject,
         ),
       ),
+
+    findUserById: async (id: string): Promise<{ readonly id: string; readonly login: string; readonly displayName: string | null; readonly email: string | null } | null> => {
+      const row = await first<{ id: string; login: string; display_name: string | null; email: string | null }>(
+        db,
+        sql("SELECT id, login, display_name, email FROM accounts WHERE id = ? AND kind = 'user' AND disabled_at IS NULL", id),
+      )
+      return row ? { id: row.id, login: row.login, displayName: row.display_name, email: row.email } : null
+    },
 
     findAccount: async (login: string): Promise<{ readonly id: string; readonly kind: OwnerKind; readonly login: string } | null> =>
       first<{ id: string; kind: OwnerKind; login: string }>(db, sql('SELECT id, kind, login FROM accounts WHERE login = ?', login)),
@@ -420,7 +437,7 @@ export const createAccountsStore = (db: Database, options: AccountsStoreOptions 
       requireLogin(input.login)
       const id = randomId()
       const at = now()
-      const entry = audit(SYSTEM, { action: 'instance.bootstrap', subjectKind: 'user', subjectId: id, data: { login: input.login } }, at)
+      const entry = auditStatement(SYSTEM, { action: 'instance.bootstrap', subjectKind: 'user', subjectId: id, data: { login: input.login } }, at)
       const results = await db.batch([
         sql(
           `INSERT INTO accounts (id, kind, login, email, created_at) SELECT ?, 'user', ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM instance_admins)`,
@@ -884,7 +901,7 @@ export const createAccountsStore = (db: Database, options: AccountsStoreOptions 
     },
 
     recordAudit: async (actor: AuditActor, entry: AuditInput): Promise<void> => {
-      await db.run(audit(actor, entry, now()))
+      await db.run(auditStatement(actor, entry, now()))
     },
 
     auditLog: async (filter: { readonly repositoryId?: string; readonly afterSeq?: number; readonly limit?: number } = {}): Promise<AuditEntry[]> => {

@@ -1,0 +1,128 @@
+import { readAll, SizeLimitError } from './bytes.ts'
+import { advertiseReceivePack, type PushOutcome, receivePack, type ReceiveOptions } from './receive-pack.ts'
+import { gitPrefix, isValidName, readRefs, type RepositoryName } from './repository.ts'
+import type { Storage } from './storage.ts'
+import { advertiseUploadPackV2, uploadPackV2 } from './upload-pack.ts'
+
+export type Access = 'read' | 'write'
+
+export type Authorize = (request: Request, repo: RepositoryName, access: Access) => Promise<Response | null>
+
+export type GitHttpOptions = {
+  readonly storage: Storage
+  readonly authorize?: Authorize
+  readonly maxRequestBytes?: number
+  readonly receive?: Omit<ReceiveOptions, 'storage' | 'repo'>
+  readonly onPush?: (repo: RepositoryName, outcome: PushOutcome) => Promise<void>
+}
+
+export type GitRoute = {
+  readonly repo: RepositoryName
+  readonly path: string
+}
+
+const ROUTE = /^\/([^/]+)\/([^/]+?)(?:\.git)?(\/.*)$/
+
+export const matchGitRoute = (pathname: string): GitRoute | null => {
+  const match = ROUTE.exec(pathname)
+  if (!match) return null
+  const [, owner, name, path] = match as unknown as [string, string, string, string]
+  if (!isValidName(owner) || !isValidName(name)) return null
+  return { repo: { owner, name }, path }
+}
+
+const DUMB_PATHS = [/^\/HEAD$/, /^\/info\/refs$/, /^\/objects\/info\/packs$/, /^\/objects\/pack\/pack-[0-9a-f]{40}\.(pack|idx)$/]
+
+const binary = (bytes: Uint8Array): BodyInit => bytes as Uint8Array<ArrayBuffer>
+
+const noCache = { 'Cache-Control': 'no-cache, max-age=0, must-revalidate' }
+const immutable = { 'Cache-Control': 'public, max-age=31536000, immutable' }
+
+const text = (status: number, body: string, headers: Record<string, string> = {}) =>
+  new Response(body, { status, headers: { 'Content-Type': 'text/plain; charset=utf-8', ...noCache, ...headers } })
+
+const isProtocolV2 = (request: Request): boolean =>
+  (request.headers.get('Git-Protocol') ?? '').split(':').includes('version=2')
+
+const readBody = async (request: Request, limit: number): Promise<Uint8Array> => {
+  if (!request.body) return new Uint8Array(0)
+  const encoding = request.headers.get('Content-Encoding')
+  const stream =
+    encoding === 'gzip' || encoding === 'x-gzip'
+      ? request.body.pipeThrough(new DecompressionStream('gzip') as unknown as ReadableWritablePair<Uint8Array, Uint8Array>)
+      : request.body
+  return readAll(stream, limit)
+}
+
+const serveStored = async (storage: Storage, key: string, contentType: string, cache: Record<string, string>): Promise<Response> => {
+  const object = await storage.get(key)
+  if (!object) return text(404, 'not found\n')
+  return new Response(object.body, {
+    status: 200,
+    headers: { 'Content-Type': contentType, 'Content-Length': String(object.size), ETag: `"${object.etag}"`, ...cache },
+  })
+}
+
+const dumbContentType = (path: string): string => {
+  if (path.endsWith('.pack')) return 'application/x-git-packed-objects'
+  if (path.endsWith('.idx')) return 'application/x-git-packed-objects-toc'
+  return 'text/plain; charset=utf-8'
+}
+
+export const handleGitRequest = async (request: Request, options: GitHttpOptions): Promise<Response | null> => {
+  const url = new URL(request.url)
+  const route = matchGitRoute(url.pathname)
+  if (!route) return null
+  const { repo, path } = route
+  const { storage } = options
+  const limit = options.maxRequestBytes ?? 64 * 1024 * 1024
+  const service = url.searchParams.get('service')
+  const isReceive = service === 'git-receive-pack' || path === '/git-receive-pack'
+  const isGitPath = path === '/git-upload-pack' || path === '/git-receive-pack' || DUMB_PATHS.some((pattern) => pattern.test(path))
+  if (!isGitPath) return null
+  const denied = await options.authorize?.(request, repo, isReceive ? 'write' : 'read')
+  if (denied) return denied
+  const refs = await readRefs(storage, repo)
+  if (!refs) return text(404, 'repository not found\n')
+
+  if (request.method === 'GET' && path === '/info/refs' && service === 'git-receive-pack') {
+    return new Response(binary(advertiseReceivePack(refs.state)), {
+      headers: { 'Content-Type': 'application/x-git-receive-pack-advertisement', ...noCache },
+    })
+  }
+  if (request.method === 'GET' && path === '/info/refs' && service === 'git-upload-pack' && isProtocolV2(request)) {
+    return new Response(binary(advertiseUploadPackV2()), {
+      headers: { 'Content-Type': 'application/x-git-upload-pack-advertisement', ...noCache },
+    })
+  }
+  if ((request.method === 'GET' || request.method === 'HEAD') && DUMB_PATHS.some((pattern) => pattern.test(path))) {
+    const cache = path.startsWith('/objects/pack/') ? immutable : noCache
+    return serveStored(storage, `${gitPrefix(repo)}${path.slice(1)}`, dumbContentType(path), cache)
+  }
+  if (request.method === 'POST' && path === '/git-upload-pack') {
+    if (!isProtocolV2(request)) return text(400, 'only git protocol v2 is supported for smart fetch\n')
+    let body: Uint8Array
+    try {
+      body = await readBody(request, limit)
+    } catch (error) {
+      if (error instanceof SizeLimitError) return text(413, 'request too large\n')
+      throw error
+    }
+    return new Response(binary(await uploadPackV2(storage, repo, body)), {
+      headers: { 'Content-Type': 'application/x-git-upload-pack-result', ...noCache },
+    })
+  }
+  if (request.method === 'POST' && path === '/git-receive-pack') {
+    let body: Uint8Array
+    try {
+      body = await readBody(request, limit)
+    } catch (error) {
+      if (error instanceof SizeLimitError) return text(413, `push exceeds ${limit} bytes; use Git LFS for large files\n`)
+      throw error
+    }
+    const { response, outcome } = await receivePack({ ...options.receive, storage, repo }, body)
+    if (options.onPush) await options.onPush(repo, outcome)
+    return new Response(binary(response), { headers: { 'Content-Type': 'application/x-git-receive-pack-result', ...noCache } })
+  }
+  return text(405, 'method not allowed\n')
+}

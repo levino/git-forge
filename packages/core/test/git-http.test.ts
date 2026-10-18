@@ -1,0 +1,177 @@
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { handleGitRequest } from '../src/http.ts'
+import { MemoryStorage } from '../src/memory-storage.ts'
+import { createRepository, readRefs } from '../src/repository.ts'
+import { commitAll, gitEnv, initRepo, sampleHistory, tempDir, writeFile } from './git-helpers.ts'
+import { type RunningServer, startServer } from './http-server.ts'
+
+const run = promisify(execFile)
+
+const gitAsync = async (cwd: string, args: readonly string[]): Promise<string> => {
+  const { stdout } = await run('git', args, { cwd, env: { ...process.env, ...gitEnv }, maxBuffer: 256 * 1024 * 1024 })
+  return stdout
+}
+
+const gitFails = async (cwd: string, args: readonly string[]): Promise<string> => {
+  try {
+    await gitAsync(cwd, args)
+  } catch (error) {
+    return String((error as { stderr?: string }).stderr ?? error)
+  }
+  throw new Error(`git ${args.join(' ')} unexpectedly succeeded`)
+}
+
+let storage: MemoryStorage
+let server: RunningServer
+let repoCounter = 0
+
+beforeAll(async () => {
+  server = await startServer(async (request) => (await handleGitRequest(request, { storage })) ?? new Response('not found', { status: 404 }))
+})
+
+afterAll(async () => {
+  await server.close()
+})
+
+beforeEach(() => {
+  storage = new MemoryStorage()
+})
+
+const newRemote = async (): Promise<string> => {
+  const name = `repo${++repoCounter}`
+  await createRepository(storage, { owner: 'test', name })
+  return `${server.url}/test/${name}.git`
+}
+
+const log = (dir: string, ref = 'HEAD') => gitAsync(dir, ['log', '--format=%H %s', ref])
+
+describe('git over HTTP', () => {
+  it('pushes and clones with protocol v2', async () => {
+    const remote = await newRemote()
+    const source = initRepo()
+    sampleHistory(source, 5)
+    await gitAsync(source, ['push', remote, 'main'])
+    const clone = tempDir()
+    await gitAsync(clone, ['clone', '-q', remote, 'out'])
+    expect(await log(`${clone}/out`)).toBe(await log(source))
+    expect(await gitAsync(`${clone}/out`, ['fsck', '--full', '--strict'])).toBe('')
+    expect(server.requests.some((request) => request.path.endsWith('/git-upload-pack'))).toBe(true)
+  })
+
+  it('clones over dumb HTTP when protocol v0 is requested', async () => {
+    const remote = await newRemote()
+    const source = initRepo()
+    sampleHistory(source, 4)
+    await gitAsync(source, ['push', remote, 'main'])
+    const clone = tempDir()
+    const before = server.requests.length
+    await gitAsync(clone, ['-c', 'protocol.version=0', 'clone', '-q', remote, 'out'])
+    expect(await log(`${clone}/out`)).toBe(await log(source))
+    const newRequests = server.requests.slice(before)
+    expect(newRequests.some((request) => request.path.includes('/objects/pack/'))).toBe(true)
+    expect(newRequests.some((request) => request.path.endsWith('/git-upload-pack'))).toBe(false)
+  })
+
+  it('accepts incremental pushes with thin packs and fetches only new objects', async () => {
+    const remote = await newRemote()
+    const source = initRepo()
+    sampleHistory(source, 3)
+    await gitAsync(source, ['push', remote, 'main'])
+    const clone = tempDir()
+    await gitAsync(clone, ['clone', '-q', remote, 'out'])
+    sampleHistory(source, 6)
+    await gitAsync(source, ['push', remote, 'main'])
+    await gitAsync(`${clone}/out`, ['pull', '-q', '--ff-only'])
+    expect(await log(`${clone}/out`)).toBe(await log(source))
+    expect(await gitAsync(`${clone}/out`, ['fsck', '--full', '--strict'])).toBe('')
+    const dumb = tempDir()
+    await gitAsync(dumb, ['-c', 'protocol.version=0', 'clone', '-q', remote, 'out'])
+    expect(await gitAsync(`${dumb}/out`, ['fsck', '--full', '--strict'])).toBe('')
+  })
+
+  it('handles branches, annotated tags and deletes', async () => {
+    const remote = await newRemote()
+    const source = initRepo()
+    sampleHistory(source, 2)
+    await gitAsync(source, ['tag', '-a', 'v1', '-m', 'release 1'])
+    await gitAsync(source, ['checkout', '-q', '-b', 'feature'])
+    writeFile(source, 'feature.txt', 'feature\n')
+    commitAll(source, 'feature commit')
+    await gitAsync(source, ['push', remote, 'main', 'feature', '--tags'])
+    const remoteRefs = await gitAsync(source, ['ls-remote', remote])
+    expect(remoteRefs).toContain('refs/heads/feature')
+    expect(remoteRefs).toContain('refs/tags/v1^{}')
+    const clone = tempDir()
+    await gitAsync(clone, ['clone', '-q', remote, 'out'])
+    expect(await gitAsync(`${clone}/out`, ['describe', '--tags', 'origin/main'])).toBe('v1\n')
+    await gitAsync(source, ['push', remote, '--delete', 'feature'])
+    expect(await gitAsync(source, ['ls-remote', '--heads', remote])).not.toContain('refs/heads/feature')
+  })
+
+  it('archives the previous state on force push and branch deletion', async () => {
+    const remote = await newRemote()
+    const source = initRepo()
+    const [, second] = sampleHistory(source, 2) as [string, string]
+    await gitAsync(source, ['push', remote, 'main'])
+    await gitAsync(source, ['reset', '-q', '--hard', 'HEAD~1'])
+    writeFile(source, 'rewrite.txt', 'rewritten\n')
+    commitAll(source, 'rewritten history')
+    expect(await gitFails(source, ['push', remote, 'main'])).toMatch(/rejected|non-fast-forward|fetch first/)
+    await gitAsync(source, ['push', '--force', remote, 'main'])
+    const refs = (await readRefs(storage, { owner: 'test', name: `repo${repoCounter}` }))?.state.refs ?? {}
+    const archived = Object.entries(refs).filter(([name]) => name.startsWith('refs/archive/'))
+    expect(archived.map(([, id]) => id)).toContain(second)
+    expect(await gitFails(source, ['push', remote, 'HEAD:refs/archive/evil'])).toMatch(/invalid ref name|rejected/)
+  })
+
+  it('rejects pushes based on stale refs', async () => {
+    const remote = await newRemote()
+    const a = initRepo()
+    sampleHistory(a, 1)
+    await gitAsync(a, ['push', remote, 'main'])
+    const b = tempDir()
+    await gitAsync(b, ['clone', '-q', remote, 'out'])
+    writeFile(a, 'a.txt', 'a\n')
+    commitAll(a, 'from a')
+    await gitAsync(a, ['push', remote, 'main'])
+    writeFile(`${b}/out`, 'b.txt', 'b\n')
+    commitAll(`${b}/out`, 'from b')
+    expect(await gitFails(`${b}/out`, ['push', 'origin', 'main'])).toMatch(/fetch first|rejected/)
+  })
+
+  it('supports empty repositories and pushing to them', async () => {
+    const remote = await newRemote()
+    const clone = tempDir()
+    await gitAsync(clone, ['clone', '-q', remote, 'empty'])
+    writeFile(`${clone}/empty`, 'first.txt', 'first\n')
+    commitAll(`${clone}/empty`, 'first')
+    await gitAsync(`${clone}/empty`, ['push', '-q', 'origin', 'HEAD:main'])
+    expect(await gitAsync(clone, ['ls-remote', remote])).toContain('refs/heads/main')
+  })
+
+  it('returns 404 for unknown repositories', async () => {
+    const dir = tempDir()
+    expect(await gitFails(dir, ['ls-remote', `${server.url}/test/missing.git`])).toMatch(/not found|404/)
+  })
+
+  it('handles concurrent pushes to different branches', async () => {
+    const remote = await newRemote()
+    const base = initRepo()
+    sampleHistory(base, 1)
+    await gitAsync(base, ['push', remote, 'main'])
+    const clones = await Promise.all(
+      Array.from({ length: 4 }, async (_, i) => {
+        const dir = tempDir()
+        await gitAsync(dir, ['clone', '-q', remote, 'c'])
+        writeFile(`${dir}/c`, `file-${i}.txt`, `${i}\n`)
+        commitAll(`${dir}/c`, `branch ${i}`)
+        return `${dir}/c`
+      }),
+    )
+    await Promise.all(clones.map((dir, i) => gitAsync(dir, ['push', '-q', 'origin', `HEAD:refs/heads/b${i}`])))
+    const heads = await gitAsync(base, ['ls-remote', '--heads', remote])
+    for (let i = 0; i < 4; i++) expect(heads).toContain(`refs/heads/b${i}`)
+  })
+})

@@ -1,13 +1,18 @@
 # git-forge
 
-Serverlose Git-Forge mit eingebautem Git LFS und föderierten Sicherungskopien.
+Serverless Git forge with built-in Git LFS and federated mirrors.
 
-- Läuft ohne eigenen Server: Funktionen (zuerst Cloudflare Workers),
-  S3-kompatibler Objektspeicher und eine SQLite-Datenbank.
-- Bedienung nach dem Vorbild von GitHub: Repos, Issues, Pull Requests,
-  Discussions, Organisationen und Teams, Apps als Maschinen-Konten.
-- Jede Instanz kann von anderen gesichert werden: dieselbe Software in der
-  Betriebsart „Sicherung“, mit eigenem Speicher und eigenen Nutzern. Jede Kopie
-  bleibt auch ohne diese Software mit einem normalen `git clone` lesbar.
+- Runs without a server of its own: functions (Cloudflare Workers first),
+  S3-compatible object storage and an SQLite database.
+- GitHub-like: repositories, issues, pull requests, discussions,
+  organizations and teams, apps as machine accounts.
+- Instances can mirror each other's repositories as backups. A backup instance
+  is the same software whose repositories are mirrors, with its own storage
+  and users. Every copy stays readable with a plain `git clone`, even without
+  this software.
 
-Stand: Konzeptphase. Siehe [KONZEPT.md](KONZEPT.md).
+Status: Git core implemented; LFS, accounts, mirrors and deployment in
+progress. See [docs/design.md](docs/design.md) and
+[docs/roadmap.md](docs/roadmap.md).
+
+License: MIT.

@@ -119,10 +119,10 @@ const importsEnabled = forge.repositories.importsEnabled
     }
   </section>
 
-  <section aria-labelledby="github-title" class="max-w-xl mt-10">
-    <h2 id="github-title" class="text-xl font-semibold mb-2">Mirror a GitHub account</h2>
-    <form method="post" class="card bg-base-200" aria-label="Mirror a GitHub account">
-      <div class="card-body gap-3">
+  <section class="panel max-w-2xl" aria-labelledby="github-title">
+    <h2 id="github-title" class="panel-title">Mirror a GitHub account</h2>
+    <form method="post" class="flex flex-col gap-3" aria-label="Mirror a GitHub account">
+      <div class="contents">
         <p class="text-sm text-base-content/70">Creates one mirror per repository of a GitHub user or organization. Existing repositories are skipped.</p>
         <input type="hidden" name="csrf" value={session.csrf} />
         <input type="hidden" name="action" value="github" />

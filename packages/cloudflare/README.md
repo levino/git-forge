@@ -40,3 +40,16 @@ mismatches, ranges, both conditional writes, racing conditional writers and
 listing. Once the shared suite lands in
 `packages/core/test/storage-conformance.ts`, this file should be replaced by
 it.
+
+### Simulator noise
+
+The conformance test "stores nothing when the body stream errors" aborts an
+upload stream on purpose. Miniflare's local R2 simulator, which runs in its
+own workerd worker, then leaves internal promises unhandled, and workerd logs
+`uncaught exception; … Error: Network connection lost.` and
+`disconnected: fixed-length pipe ended prematurely`. The promise is not in
+`R2Storage` or the test worker (an `unhandledrejection` listener in the test
+worker never fires), the `put` itself rejects as it should, and real R2 is not
+involved. The vitest pool overrides Miniflare's log handler, so
+`vitest.config.ts` drops exactly these lines from the test process output.
+Any other workerd output is passed through.

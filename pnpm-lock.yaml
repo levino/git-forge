@@ -164,10 +164,17 @@ settings:
 
 importers:
 
-  .: {}
+  .:
+    devDependencies:
+      wrangler:
+        specifier: 4.151.1
+        version: 4.151.1(@cloudflare/workers-types@5.20261012.1)(@types/node@22.20.5)
 
   apps/forge-worker:
     dependencies:
+      '@git-forge/accounts':
+        specifier: workspace:*
+        version: link:../../packages/accounts
       '@git-forge/cloudflare':
         specifier: workspace:*
         version: link:../../packages/cloudflare
@@ -178,6 +185,9 @@ importers:
       '@cloudflare/workers-types':
         specifier: 5.20261012.1
         version: 5.20261012.1
+      '@git-forge/accounts-node':
+        specifier: workspace:*
+        version: link:../../packages/accounts-node
       '@types/node':
         specifier: 22.20.5
         version: 22.20.5

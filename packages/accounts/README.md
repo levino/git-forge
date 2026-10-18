@@ -85,6 +85,7 @@ triggers with `RAISE`), all of which D1, Durable Objects and libSQL support.
 | `tokens` | personal and app tokens: SHA-256 hash only, display prefix, scopes, optional repository restriction, expiry, last use, revocation |
 | `trusted_instances`, `instance_repositories` | federation trust: issuer (+ optional pinned key thumbprint) may read specific repositories |
 | `audit_log` | append-only; `UPDATE` and `DELETE` are rejected by triggers |
+| `instance_admins` | users who administer the instance (create users and tokens, trust other instances, act as admin on every repository) |
 
 Timestamps are Unix milliseconds. IDs are random UUIDs. Logins and repository
 names are case-insensitive (`COLLATE NOCASE`).
@@ -143,9 +144,22 @@ Credentials are read from `Authorization: Basic` (password = token, username
 ignored, as with GitHub) or `Authorization: Bearer` (for
 `git -c http.extraHeader=...`). A value shaped like a JWT goes to the
 instance verifier, anything else is looked up as a token. Invalid credentials
-always yield `401`. `checkRepositoryAccess(directory, principal, repo, role,
-surface)` is the same check for other HTTP surfaces such as the LFS batch API
-(`surface: 'lfs'` requires the instance token scope `lfs:read`).
+always yield `401`. The core passes the request surface (`'git'` or `'lfs'`)
+to the hook, and `createGitAuthorizer` hands it to
+`checkRepositoryAccess(directory, principal, repo, role, surface)`: an instance
+token only counts for Git routes with the scope `git:read` and for LFS routes
+with `lfs:read`. Without the scope the instance is treated like a caller
+without grants (public repositories stay readable, private ones answer `404`).
+
+## Instance admins and bootstrap
+
+`store.bootstrapInstanceAdmin({ login, email? })` creates the first user and
+makes it an instance admin in one atomic batch, but only while
+`instance_admins` is empty; it returns `null` afterwards, so concurrent or
+repeated bootstrap calls cannot create a second admin. Further admins are
+managed with `store.setInstanceAdmin(userId, admin)`; `store.isInstanceAdmin`
+ignores disabled accounts. `store.listRepositories()` lists the repositories
+of enabled owners, e.g. for scheduled mirror sync.
 
 ## Instance federation
 
@@ -220,7 +234,9 @@ signature.
 
 `createJwksCache({ fetch?, cacheSeconds = 300, minRefreshSeconds = 30, allowInsecureHttp = false })`
 fetches the discovery document, requires `issuer` to match and `jwks_uri` to
-be on the issuer's origin, refuses plain HTTP and redirects, limits documents
+be on the issuer's origin, refuses plain HTTP and redirects (requests use
+`redirect: 'manual'` and treat any 3xx as an error, because Workers do not
+implement `redirect: 'error'`), limits documents
 to 64 KiB, and refetches at most every 30 s on unknown key ids.
 
 Trust is managed with `store.trustInstance({ issuer, pinnedThumbprint? })`,

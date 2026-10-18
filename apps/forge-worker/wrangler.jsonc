@@ -5,14 +5,44 @@
   "compatibility_date": "2026-10-01",
   "observability": { "enabled": true },
   "limits": { "cpu_ms": 60000 },
-  "r2_buckets": [{ "binding": "BUCKET", "bucket_name": "git-forge" }],
-  "d1_databases": [
-    {
-      "binding": "DB",
-      "database_name": "git-forge",
-      "database_id": "00000000-0000-0000-0000-000000000000"
-    }
-  ],
   "triggers": { "crons": ["*/30 * * * *"] },
-  "vars": { "PUBLIC_READ": "true", "MAX_PUSH_BYTES": "16777216" }
+  "r2_buckets": [{ "binding": "BUCKET", "bucket_name": "git-forge" }],
+  "d1_databases": [{ "binding": "DB", "database_name": "git-forge" }],
+  "vars": {
+    "MAX_PUSH_BYTES": "16777216",
+    "MAX_LFS_OBJECT_BYTES": "104857600",
+    "MIRROR_INTERVAL_MINUTES": "30"
+  },
+  "env": {
+    "alpha": {
+      "name": "git-forge-alpha",
+      "r2_buckets": [{ "binding": "BUCKET", "bucket_name": "git-forge-alpha" }],
+      "d1_databases": [{ "binding": "DB", "database_name": "git-forge-alpha" }],
+      "vars": {
+        "MAX_PUSH_BYTES": "16777216",
+        "MAX_LFS_OBJECT_BYTES": "104857600",
+        "MIRROR_INTERVAL_MINUTES": "30"
+      }
+    },
+    "beta": {
+      "name": "git-forge-beta",
+      "r2_buckets": [{ "binding": "BUCKET", "bucket_name": "git-forge-beta" }],
+      "d1_databases": [{ "binding": "DB", "database_name": "git-forge-beta" }],
+      "vars": {
+        "MAX_PUSH_BYTES": "16777216",
+        "MAX_LFS_OBJECT_BYTES": "104857600",
+        "MIRROR_INTERVAL_MINUTES": "30"
+      }
+    },
+    "gamma": {
+      "name": "git-forge-gamma",
+      "r2_buckets": [{ "binding": "BUCKET", "bucket_name": "git-forge-gamma" }],
+      "d1_databases": [{ "binding": "DB", "database_name": "git-forge-gamma" }],
+      "vars": {
+        "MAX_PUSH_BYTES": "16777216",
+        "MAX_LFS_OBJECT_BYTES": "104857600",
+        "MIRROR_INTERVAL_MINUTES": "30"
+      }
+    }
+  }
 }

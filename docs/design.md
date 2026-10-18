@@ -135,6 +135,16 @@ OIDC-style, modelled on GitHub Actions OIDC:
 - The target fetches the issuer's JWKS over HTTPS; the trust anchor is the
   issuer's domain. Optionally a key thumbprint is pinned per grant.
 - Public repositories need no grant.
+- The token carries the scopes `git:read` and `lfs:read`. The core tells the
+  authorization hook whether a request is a Git or an LFS request, so both are
+  checked separately.
+- A mirror marks in its config (`auth: "instance"`) that it presents an
+  instance token to its upstream; otherwise it fetches anonymously. A mirror
+  of a mirror reads the upstream's `refs/upstream/{remote}/*` by setting the
+  namespace to `upstream/{remote}/`.
+- JWKS documents are fetched without following redirects (`redirect:
+  "manual"`, any 3xx is an error), because Workers do not implement
+  `redirect: "error"`.
 - There are no push certificates. The instance signs; trust is
   server-to-server.
 
@@ -224,6 +234,22 @@ SQLite database. A new instance works without an external identity provider.
 For the village archive: people log in via OIDC with ZITADEL; apps and
 automations use app tokens; mirrors use instance federation (§4).
 
+**Instance admins and bootstrap.** Instance admins (table `instance_admins`)
+create users and tokens, trust other instances and count as admins of every
+repository. A fresh instance has none: one call of `POST /api/bootstrap`,
+authenticated with the deployment secret `BOOTSTRAP_TOKEN`, creates the first
+admin atomically and returns a personal access token; further calls answer
+`409`. Until login methods exist, the JSON API is used with personal access
+tokens that carry the scope `repo:admin`.
+
+**Visibility.** Repositories are private by default; visibility is a
+per-repository setting in the database. There is no instance-wide public read
+switch.
+
+**Size limits.** Git pushes are limited by `MAX_PUSH_BYTES`; single LFS
+objects by `MAX_LFS_OBJECT_BYTES` (default 100 MiB, the request body limit of
+Cloudflare's Free and Pro plans), enforced in the batch API and on `PUT`.
+
 ## 9. Git over SSH
 
 Not supported: serverless functions accept only HTTP. Git uses HTTPS with
@@ -257,6 +283,17 @@ dev environments) need real machines, started on demand via API.
 | CI (later) | Compute adapter, e.g. with `act` |
 
 Every building block is an interface; Cloudflare is the first implementation.
+
+**Cloudflare deployment.** One Worker serves Git, LFS, the JSON API and the
+well-known federation documents, and runs mirror sync from a Cron Trigger. It
+binds one R2 bucket (`BUCKET`) and one D1 database (`DB`); the database schema
+is migrated by the Worker itself on first use, so there is a single migration
+ledger on every platform. The "Deploy to Cloudflare" button deploys from the
+repository root, because a button pointing at a subdirectory requires that
+directory to be self-contained; the root `wrangler.jsonc` mirrors the app's
+default configuration. Several instances on one account are Wrangler
+environments (`alpha`, `beta`, `gamma`), each with its own Worker, bucket and
+database.
 
 | Building block | Cloudflare | Others |
 |---|---|---|

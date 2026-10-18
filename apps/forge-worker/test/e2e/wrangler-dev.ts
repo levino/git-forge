@@ -10,7 +10,7 @@ export type WranglerDev = {
   stop(): Promise<void>
 }
 
-const freePort = (): Promise<number> =>
+export const freePort = (): Promise<number> =>
   new Promise((done, fail) => {
     const server = createServer()
     server.once('error', fail)
@@ -22,11 +22,20 @@ const freePort = (): Promise<number> =>
 
 const appRoot = resolve(import.meta.dirname, '../..')
 
-export const startWranglerDev = async (vars: Record<string, string>): Promise<WranglerDev> => {
-  const port = await freePort()
+export type WranglerDevOptions = {
+  readonly vars: Record<string, string>
+  readonly env?: string
+  readonly port?: number
+}
+
+export const startWranglerDev = async (options: WranglerDevOptions): Promise<WranglerDev> => {
+  const port = options.port ?? (await freePort())
   const persist = mkdtempSync(join(tmpdir(), 'git-forge-wrangler-'))
   const args = [
     'dev',
+    ...(options.env ? ['--env', options.env] : []),
+    '--inspector-port',
+    String(await freePort()),
     '--ip',
     '127.0.0.1',
     '--port',
@@ -35,7 +44,7 @@ export const startWranglerDev = async (vars: Record<string, string>): Promise<Wr
     persist,
     '--test-scheduled',
     '--show-interactive-dev-session=false',
-    ...Object.entries(vars).flatMap(([key, value]) => ['--var', `${key}:${value}`]),
+    ...Object.entries(options.vars).flatMap(([key, value]) => ['--var', `${key}:${value}`]),
   ]
   const child: ChildProcess = spawn(join(appRoot, 'node_modules/.bin/wrangler'), args, {
     cwd: appRoot,

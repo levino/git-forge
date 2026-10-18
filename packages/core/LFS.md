@@ -11,7 +11,10 @@ with the `basic` transfer adapter and `sha256` as the only hash algorithm.
 - `src/lfs-http.ts` — `handleLfsRequest`, the HTTP layer. `handleGitRequest`
   calls it first for every repository route, so no separate wiring is needed.
   Pass `lfs: false` in `GitHttpOptions` to switch LFS (routes and push check)
-  off, or `lfs: { expiresInSeconds, maxJsonBytes }` to tune it.
+  off, or `lfs: { expiresInSeconds, maxJsonBytes, maxObjectBytes }` to tune it.
+  `maxObjectBytes` caps the size of a single object: the batch API answers
+  oversized upload objects with a per-object `422` and no upload action, and
+  `PUT` answers `413` before reading the body.
 
 ## Routes
 
@@ -34,7 +37,9 @@ when a download target is missing, `422` for an invalid oid or size or a size
 that differs from the stored object.
 
 Access is decided by the `authorize` hook of `GitHttpOptions`, i.e. from the
-verified token or session. For the batch endpoint the hook runs after the body
+verified token or session. The hook receives the surface `'lfs'` for every
+route above and `'git'` for Git routes, so an authorizer can grant them
+separately (instance tokens carry `git:read` and `lfs:read` scopes). For the batch endpoint the hook runs after the body
 has been parsed because the required access depends on `operation`. Actions
 pointing back at the forge carry the `Authorization` header of the batch request
 so `git-lfs` presents the same credentials to the transfer endpoints, which

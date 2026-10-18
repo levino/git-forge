@@ -271,7 +271,6 @@ export const parseR2Signing = (vars: ForgeVars): R2SigningSettings | undefined =
   if (!endpoint || !bucket || !accessKeyId || !secretAccessKey) {
     throw new ConfigurationError('presigned R2 uploads need R2_S3_ENDPOINT, R2_BUCKET_NAME, R2_ACCESS_KEY_ID and R2_SECRET_ACCESS_KEY')
   }
-  if (!endpoint.startsWith('https://')) throw new ConfigurationError('R2_S3_ENDPOINT must be an https URL')
   return { endpoint, bucket, accessKeyId, secretAccessKey }
 }
 

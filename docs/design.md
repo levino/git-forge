@@ -434,6 +434,14 @@ as a sequence of stateless steps, each persisting its progress in
    normalized (http(s), no credentials, trailing `/objects/batch` removed);
    other keys are ignored. The token goes to a `.lfsconfig` endpoint only if
    it has the import URL's origin.
+   With a job queue (`scheduleLfs`), each pointer becomes an `import-lfs` job
+   as soon as a fetch step finds it (`lfsPending`), carrying the token and the
+   endpoint known so far (provisionally the setting or `<url>.git/info/lfs`;
+   jobs are re-queued once `.lfsconfig` names another); *lfs* then only checks
+   presence, re-queues after 10 minutes without progress (doubling,
+   `lfsRound`), and after three rounds hands the rest to the sequential path
+   above, which records them as missing. States without `lfsPending` and
+   runtimes without a queue use the sequential path.
 5. *refs* — update refs via compare-and-swap and rewrite `info/refs`; an
    empty repository adopts the upstream `HEAD`.
 
@@ -749,7 +757,8 @@ switch.
 **Size limits.** Git pushes are only limited by the platform's request body
 limit unless `MAX_PUSH_BYTES` is set; single LFS
 objects by `MAX_LFS_OBJECT_BYTES` (default 100 MiB, the request body limit of
-Cloudflare's Free and Pro plans), enforced in the batch API and on `PUT`.
+Cloudflare's Free and Pro plans), enforced in the batch API and on `PUT`;
+with presigned R2 URLs (§11) it can be raised to about 5 GiB.
 
 ## 9. Git over SSH
 
@@ -937,6 +946,17 @@ plain directory per key, lock files for conditional writes), `R2Storage`
 (`@git-forge/s3`, any S3 API including R2's, with presigning). Presigned LFS
 uploads bind `Content-Length` and `x-amz-checksum-sha256` into the signature,
 so the bucket rejects any other content.
+
+**Presigned R2.** With `R2_S3_ENDPOINT`, `R2_BUCKET_NAME`,
+`R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` the Worker wraps the binding with
+`withPresigner(R2Storage, S3Storage)`: the binding does all I/O, the S3
+adapter only signs (LFS and pack-upload URLs) on the same keys. Verify re-hashes through the
+binding (`crypto.DigestStream`, ~2 s CPU for 600 MB). Without the key LFS is
+proxied, and the size error carries `oversizeHint`. The key is an account API
+token with "Workers R2 Storage Bucket Item Read/Write"
+(`6a018a9f2fc74eb6b293b0c548f38b39`, `2efd5506f9c8494dacb1fa10a3e7d5b6`) on
+`com.cloudflare.edge.r2.bucket.<account_id>_default_<bucket>`; access key id =
+token id, secret = hex SHA-256 of the token value.
 
 **Local S3 test environment:** MinIO is discontinued. versitygw (posix
 backend) is used; it passed the full suite, as did RustFS. SeaweedFS lists in

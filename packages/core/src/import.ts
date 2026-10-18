@@ -2,10 +2,10 @@ import { fromUtf8, readAll, SizeLimitError, toHex, utf8 } from './bytes.ts'
 import { type ObjectId } from './hash.ts'
 import { ByteCursor } from './cursor.ts'
 import { connectRemote, type Protocol, type RemoteConnection } from './fetch-client.ts'
-import type { LfsObjectSpec } from './lfs.ts'
+import { lfsObjectKey, type LfsObjectSpec } from './lfs.ts'
 import type { DigestFactory } from './digest.ts'
 import { findLfsConfig, normalizeLfsUrl } from './lfs-config.ts'
-import { lfsEndpointFor, type LfsMissing, type LfsPointer, mirrorLfsObjects } from './lfs-mirror.ts'
+import { lfsEndpointFor, type LfsMirrorResult, type LfsMissing, type LfsPointer, mirrorLfsObjects } from './lfs-mirror.ts'
 import { commitClosure, type RefUpdate, scanNewObjects, selectUpstreamRefs } from './mirror.ts'
 import { type GitObject, parseCommit, parseTag } from './objects.ts'
 import { forEachTreeEntryId, indexPack, ObjectTooLargeError } from './pack-indexer.ts'
@@ -73,6 +73,9 @@ export type ImportState = {
   readonly fetched: { readonly objects: number; readonly packs: number; readonly bytes: number }
   readonly lfsQueue: readonly LfsPointer[]
   readonly lfsMissing: readonly LfsMissing[]
+  readonly lfsPending?: readonly LfsPointer[]
+  readonly lfsRound?: number
+  readonly lfsProgressAt?: string
   readonly updates: readonly RefUpdate[]
 }
 
@@ -105,6 +108,12 @@ export const STALE_IMPORT_MS = 30 * 60 * 1000
 const LFS_PER_STEP = 100
 
 export const DEFAULT_MAX_LFS_STEP_BYTES = 512 * 1024 * 1024
+
+export const LFS_JOB_TIMEOUT_MS = 10 * 60 * 1000
+
+export const LFS_JOB_ROUNDS = 3
+
+export const LFS_POLL_SECONDS = 5
 
 const importPrefix = (repo: RepositoryName) => `${repositoryPrefix(repo)}import/`
 
@@ -222,6 +231,7 @@ export type ImportStepOptions = {
   readonly maxLfsStepBytes?: number
   readonly digests?: DigestFactory
   readonly maxFailures?: number
+  readonly enqueueLfs?: (pointer: LfsPointer, endpoint: ImportLfsEndpoint) => Promise<void>
 }
 
 type StepContext = {
@@ -231,7 +241,7 @@ type StepContext = {
   readonly now: () => Date
 }
 
-const remoteFor = (options: ImportStepOptions, url: string): Remote => ({
+const remoteFor = (options: Pick<ImportStepOptions, 'fetch' | 'getAuthorization'>, url: string): Remote => ({
   url,
   ...(options.fetch ? { fetch: options.fetch } : {}),
   ...(options.getAuthorization ? { getAuthorization: options.getAuthorization } : {}),
@@ -304,7 +314,7 @@ const mergeLfs = (queue: readonly LfsPointer[], found: readonly LfsPointer[]): L
   return [...byOid.values()]
 }
 
-const afterFetch = (state: ImportState): ImportPhase => (state.lfs && state.lfsQueue.length > 0 ? 'lfs' : 'refs')
+const afterFetch = (state: ImportState): ImportPhase => (state.lfs && state.lfsQueue.length + (state.lfsPending?.length ?? 0) > 0 ? 'lfs' : 'refs')
 
 const discover = async (context: StepContext, state: ImportState): Promise<ImportState> => {
   const { options, odb, remote } = context
@@ -535,11 +545,52 @@ const lfsConfigOrder = (state: ImportState): [string, ObjectId][] => {
   return Object.entries(state.targets).sort(([a], [b]) => (rank(a) < rank(b) ? -1 : 1))
 }
 
-const resolveLfsEndpoint = async (odb: ObjectDatabase, state: ImportState): Promise<ImportLfsEndpoint> => {
-  if (state.lfsUrl) return { url: normalizeLfsUrl(state.lfsUrl) ?? state.lfsUrl, source: 'setting' }
-  const found = await findLfsConfig(odb, lfsConfigOrder(state))
+const provisionalLfsEndpoint = (state: ImportState): ImportLfsEndpoint =>
+  state.lfsUrl ? { url: normalizeLfsUrl(state.lfsUrl) ?? state.lfsUrl, source: 'setting' } : { url: lfsEndpointFor(state.url), source: 'default' }
+
+const knownLfsEndpoint = async (odb: ObjectDatabase, state: ImportState): Promise<ImportLfsEndpoint | undefined> => {
+  if (state.lfsUrl) return provisionalLfsEndpoint(state)
+  const order = lfsConfigOrder(state)
+  const present: [string, ObjectId][] = []
+  for (const entry of order) {
+    if (!(await odb.has(entry[1]))) break
+    present.push(entry)
+  }
+  const found = await findLfsConfig(odb, present)
   if (found) return { url: found.url, source: 'lfsconfig', ref: found.ref }
-  return { url: lfsEndpointFor(state.url), source: 'default' }
+  return present.length === order.length ? provisionalLfsEndpoint(state) : undefined
+}
+
+const resolveLfsEndpoint = async (odb: ObjectDatabase, state: ImportState): Promise<ImportLfsEndpoint> =>
+  (await knownLfsEndpoint(odb, state)) ?? provisionalLfsEndpoint(state)
+
+const mayAuthorize = (state: ImportState, endpoint: ImportLfsEndpoint): boolean =>
+  endpoint.source !== 'lfsconfig' || new URL(endpoint.url).origin === new URL(state.url).origin
+
+const dispatchLfs = async (context: StepContext, before: ImportState, after: ImportState): Promise<ImportState> => {
+  const enqueue = context.options.enqueueLfs
+  const found = after.lfsQueue.slice(before.lfsQueue.length)
+  if (!enqueue || found.length === 0) return after
+  const pending = before.lfsPending ?? []
+  const known = new Set(pending.map((pointer) => pointer.oid))
+  const fresh = found.filter((pointer) => !known.has(pointer.oid))
+  const resolved = before.lfsEndpoint ?? (await knownLfsEndpoint(context.odb, after))
+  const endpoint = resolved ?? provisionalLfsEndpoint(after)
+  const redo = before.lfsEndpoint === undefined && endpoint.url !== provisionalLfsEndpoint(after).url ? pending : []
+  let sent = 0
+  try {
+    for (const pointer of [...redo, ...fresh]) {
+      await enqueue(pointer, endpoint)
+      sent++
+    }
+  } catch {}
+  const queued = Math.max(0, sent - redo.length)
+  return {
+    ...after,
+    ...(resolved ? { lfsEndpoint: resolved } : {}),
+    lfsQueue: [...before.lfsQueue, ...fresh.slice(queued)],
+    lfsPending: [...pending, ...fresh.slice(0, queued)],
+  }
 }
 
 const lfsBatch = (queue: readonly LfsPointer[], maxBytes: number): LfsPointer[] => {
@@ -553,9 +604,9 @@ const lfsBatch = (queue: readonly LfsPointer[], maxBytes: number): LfsPointer[] 
   return batch
 }
 
-const lfs = async (context: StepContext, state: ImportState): Promise<ImportState> => {
+const lfsSequential = async (context: StepContext, state: ImportState): Promise<ImportState> => {
   const endpoint = state.lfsEndpoint ?? (await resolveLfsEndpoint(context.odb, state))
-  const authorize = endpoint.source !== 'lfsconfig' || new URL(endpoint.url).origin === new URL(state.url).origin
+  const authorize = mayAuthorize(state, endpoint)
   const batch = lfsBatch(state.lfsQueue, context.options.maxLfsStepBytes ?? DEFAULT_MAX_LFS_STEP_BYTES)
   const result = await mirrorLfsObjects({
     storage: context.options.storage,
@@ -572,7 +623,35 @@ const lfs = async (context: StepContext, state: ImportState): Promise<ImportStat
     lfsQueue: state.lfsQueue.slice(batch.length),
     lfsMissing: [...state.lfsMissing, ...result.missing],
   }
-  return next.lfsQueue.length > 0 ? next : { ...next, phase: 'refs' }
+  return next.lfsQueue.length > 0 || (next.lfsPending?.length ?? 0) > 0 ? next : { ...next, phase: 'refs' }
+}
+
+const lfsWait = async (context: StepContext, state: ImportState, pending: readonly LfsPointer[]): Promise<ImportState> => {
+  const { storage, repo, enqueueLfs } = context.options
+  const endpoint = state.lfsEndpoint ?? (await resolveLfsEndpoint(context.odb, state))
+  if (!enqueueLfs) return { ...state, lfsEndpoint: endpoint, lfsQueue: pending, lfsPending: [] }
+  const now = context.now()
+  const checked = pending.slice(0, LFS_PER_STEP)
+  const missing: LfsPointer[] = []
+  for (const pointer of checked) {
+    const head = await storage.head(lfsObjectKey(repo, pointer.oid))
+    if (!head || head.size !== pointer.size) missing.push(pointer)
+  }
+  const rest = [...pending.slice(checked.length), ...missing]
+  const progressAt = missing.length < checked.length || !state.lfsProgressAt ? now.toISOString() : state.lfsProgressAt
+  const next: ImportState = { ...state, lfsEndpoint: endpoint, lfsPending: rest, lfsProgressAt: progressAt }
+  if (rest.length === 0) return { ...next, phase: 'refs' }
+  const round = state.lfsRound ?? 0
+  const moved = state.lfsEndpoint === undefined && endpoint.url !== provisionalLfsEndpoint(state).url
+  if (!moved && now.getTime() - Date.parse(progressAt) < LFS_JOB_TIMEOUT_MS * 2 ** round) return next
+  if (!moved && round + 1 >= LFS_JOB_ROUNDS) return { ...next, lfsQueue: rest, lfsPending: [] }
+  for (const pointer of rest) await enqueueLfs(pointer, endpoint)
+  return { ...next, lfsRound: moved ? round : round + 1, lfsProgressAt: now.toISOString() }
+}
+
+const lfs = (context: StepContext, state: ImportState): Promise<ImportState> => {
+  const pending = state.lfsPending ?? []
+  return state.lfsQueue.length > 0 || pending.length === 0 ? lfsSequential(context, state) : lfsWait(context, state, pending)
 }
 
 const updateRefs = async (context: StepContext, state: ImportState): Promise<ImportState> => {
@@ -604,7 +683,7 @@ const runPhase = (context: StepContext, state: ImportState): Promise<ImportState
     case 'graph':
       return graph(context, state)
     case 'fetch':
-      return state.stepped ? fetchStepped(context, state) : fetchWhole(context, state)
+      return (state.stepped ? fetchStepped(context, state) : fetchWhole(context, state)).then((next) => dispatchLfs(context, state, next))
     case 'lfs':
       return lfs(context, state)
     case 'refs':
@@ -651,18 +730,44 @@ export type ImportJob = {
 
 export type ImportScheduler = (job: ImportJob, delaySeconds: number) => Promise<void>
 
+export type ImportLfsJob = ImportJob & { readonly kind: 'import-lfs'; readonly oid: string; readonly size: number; readonly endpoint: ImportLfsEndpoint }
+
 export const retryDelaySeconds = (failures: number): number => (failures === 0 ? 0 : Math.min(15 * 2 ** (failures - 1), 600))
+
+export const importDelaySeconds = (state: ImportState): number =>
+  state.failures > 0 ? retryDelaySeconds(state.failures) : state.phase === 'lfs' && state.lfsQueue.length === 0 && (state.lfsPending?.length ?? 0) > 0 ? LFS_POLL_SECONDS : 0
 
 export const continueImport = async (
   job: ImportJob,
-  options: Omit<ImportStepOptions, 'repo' | 'getAuthorization'> & { readonly schedule: ImportScheduler },
+  options: Omit<ImportStepOptions, 'repo' | 'getAuthorization' | 'enqueueLfs'> & {
+    readonly schedule: ImportScheduler
+    readonly scheduleLfs?: (job: ImportLfsJob) => Promise<void>
+  },
 ): Promise<ImportState> => {
+  const { schedule, scheduleLfs, ...rest } = options
   const authorization = job.authorization
   const state = await importStep({
-    ...options,
+    ...rest,
     repo: { owner: job.owner, name: job.name },
     ...(authorization ? { getAuthorization: async () => authorization } : {}),
+    ...(scheduleLfs ? { enqueueLfs: (pointer: LfsPointer, endpoint: ImportLfsEndpoint) => scheduleLfs({ ...job, kind: 'import-lfs', oid: pointer.oid, size: pointer.size, endpoint }) } : {}),
   })
-  if (!isImportFinished(state)) await options.schedule(job, retryDelaySeconds(state.failures))
+  if (!isImportFinished(state)) await schedule(job, importDelaySeconds(state))
   return state
+}
+
+export const importLfsObject = async (job: ImportLfsJob, options: Pick<ImportStepOptions, 'storage' | 'fetch' | 'digests'>): Promise<LfsMirrorResult | null> => {
+  const repo = { owner: job.owner, name: job.name }
+  const state = await readImportState(options.storage, repo)
+  if (!state || isImportFinished(state) || !state.lfs) return null
+  const authorization = job.authorization
+  return mirrorLfsObjects({
+    storage: options.storage,
+    repo,
+    remote: remoteFor({ ...(options.fetch ? { fetch: options.fetch } : {}), ...(authorization ? { getAuthorization: async () => authorization } : {}) }, state.url),
+    endpoint: job.endpoint.url,
+    authorize: mayAuthorize(state, job.endpoint),
+    objects: [{ oid: job.oid, size: job.size }],
+    ...(options.digests ? { digests: options.digests } : {}),
+  })
 }

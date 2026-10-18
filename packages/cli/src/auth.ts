@@ -273,10 +273,10 @@ export type LoginArguments = {
   readonly setupGit: boolean
 }
 
-export const parseLoginArguments = (args: readonly string[]): LoginArguments => {
+export const parseLoginArguments = (args: readonly string[], interactive: boolean = process.stdin.isTTY === true): LoginArguments => {
   let target: string | undefined
   let scope: Scope = DEFAULT_SCOPE
-  let mode: LoginArguments['mode'] = 'paste'
+  let mode: LoginArguments['mode'] = interactive ? 'paste' : 'device'
   let browser = true
   let git = true
   for (let i = 0; i < args.length; i++) {

@@ -1,9 +1,11 @@
 import { generateSigningKey, type SigningKey } from '@git-forge/accounts'
-import { type ImportJob, readImportState, readRefs, sha256Hex, ZERO_ID } from '@git-forge/core'
+import { type ImportJob, lfsObjectKey, readImportState, readRefs, sha256Hex, startImport, ZERO_ID } from '@git-forge/core'
+import { basicAuth, chain, fakeLfs, lfsPointer, requireAuthorization } from '@git-forge/core/test/mirror-helpers.ts'
+import { S3Storage } from '@git-forge/s3'
 import { commitAll, gitBytes, initRepo, sampleHistory, tempDir, writeFile } from '@git-forge/core/test/git-helpers.ts'
 import { type RunningServer, startServer } from '@git-forge/core/test/http-server.ts'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { basicAuthorization, secretMatches } from '../../src/app.ts'
+import { basicAuthorization, PRESIGN_HINT, RAISE_LIMIT_HINT, secretMatches } from '../../src/app.ts'
 import { git, gitFails } from '../e2e/history.ts'
 import { DEFAULT_COMPACT_MAX_BYTES, DEFAULT_MAX_LFS_OBJECT_BYTES, loadSecretsKey, parseActionsSettings, parseR2Signing, parseSettings } from '../../src/config.ts'
 import { upstreamRepository } from '../../src/mirrors.ts'
@@ -70,7 +72,6 @@ describe('settings', () => {
   it('parses the optional R2 signing settings for direct uploads', () => {
     expect(parseR2Signing({})).toBeUndefined()
     expect(() => parseR2Signing({ R2_BUCKET_NAME: 'forge' })).toThrow(/R2_S3_ENDPOINT/)
-    expect(() => parseR2Signing({ R2_S3_ENDPOINT: 'http://x', R2_BUCKET_NAME: 'b', R2_ACCESS_KEY_ID: 'k', R2_SECRET_ACCESS_KEY: 's' })).toThrow(/https/)
     expect(parseR2Signing({ R2_S3_ENDPOINT: 'https://acct.r2.cloudflarestorage.com', R2_BUCKET_NAME: 'b', R2_ACCESS_KEY_ID: 'k', R2_SECRET_ACCESS_KEY: 's' })).toEqual({
       endpoint: 'https://acct.r2.cloudflarestorage.com',
       bucket: 'b',
@@ -89,6 +90,71 @@ describe('settings', () => {
     expect(upstreamRepository('https://a.example/acme/site.git')).toBe('acme/site')
     expect(upstreamRepository('https://a.example/acme/site')).toBe('acme/site')
     expect(upstreamRepository('https://a.example/acme')).toBeNull()
+  })
+})
+
+describe('presigned LFS URLs on R2', () => {
+  const ACCOUNT = '0123456789abcdef0123456789abcdef'
+  const repo = { owner: 'admin', name: 'assets' }
+  const big = { oid: 'b'.repeat(64), size: 600 * 1024 * 1024 }
+
+  const setup = async (presign: boolean) => {
+    const presigner = new S3Storage({ endpoint: `https://${ACCOUNT}.r2.cloudflarestorage.com`, region: 'auto', bucket: 'levins-git-forge', accessKeyId: 'key-id', secretAccessKey: 'secret', forcePathStyle: true })
+    const forge = await nodeForge({ maxLfsObjectBytes: 1024 * 1024 * 1024, ...(presign ? { presigner } : {}) })
+    const admin = await bootstrap(forge, BASE)
+    expect((await call(forge, BASE, 'POST', '/api/repos', admin, repo)).status).toBe(201)
+    const lfs = (path: string, body: unknown) =>
+      forge.fetch(
+        new Request(`${BASE}/admin/assets.git/info/lfs/objects/${path}`, {
+          method: 'POST',
+          headers: { Authorization: basic(admin), 'Content-Type': 'application/vnd.git-lfs+json' },
+          body: JSON.stringify(body),
+        }),
+      )
+    const batch = async (operation: string, objects: readonly { oid: string; size: number }[]) =>
+      (await json<{ objects: { actions?: Record<string, { href: string; header?: Record<string, string> }> }[] }>(await lfs('batch', { operation, objects }))).objects[0]
+        ?.actions
+    return { forge, lfs, batch }
+  }
+
+  it('hands out R2 URLs signed for the exact length and SHA-256, on the binding key layout, and re-hashes on verify', async () => {
+    const { forge, lfs, batch } = await setup(true)
+    const upload = await batch('upload', [big])
+    const put = new URL(upload?.upload?.href ?? '')
+    expect(`${put.origin}${put.pathname}`).toBe(`https://${ACCOUNT}.r2.cloudflarestorage.com/levins-git-forge/${lfsObjectKey(repo, big.oid)}`)
+    expect(put.searchParams.get('X-Amz-SignedHeaders')).toBe('content-length;host;x-amz-checksum-sha256')
+    expect(put.searchParams.get('X-Amz-Credential')).toMatch(/^key-id\/\d{8}\/auto\/s3\/aws4_request$/)
+    expect(upload?.upload?.header).toEqual({ 'content-length': String(big.size), 'x-amz-checksum-sha256': btoa('»'.repeat(32)) })
+    expect(upload?.verify?.href).toBe(`${BASE}/admin/assets.git/info/lfs/objects/verify`)
+
+    const data = new TextEncoder().encode('stored through the binding')
+    const oid = sha256Hex(data)
+    await forge.storage.put(lfsObjectKey(repo, oid), data, data.length)
+    const download = new URL((await batch('download', [{ oid, size: data.length }]))?.download?.href ?? '')
+    expect(download.host).toBe(`${ACCOUNT}.r2.cloudflarestorage.com`)
+    expect(download.searchParams.get('X-Amz-Signature')).toMatch(/^[0-9a-f]{64}$/)
+
+    expect((await lfs('verify', { oid, size: data.length })).status).toBe(200)
+    const forged = 'c'.repeat(64)
+    await forge.storage.put(lfsObjectKey(repo, forged), data, data.length)
+    expect((await lfs('verify', { oid: forged, size: data.length })).status).toBe(422)
+  })
+
+  it('keeps proxying LFS through the Worker without R2 credentials', async () => {
+    const { batch } = await setup(false)
+    expect((await batch('upload', [big]))?.upload?.href).toBe(`${BASE}/admin/assets.git/info/lfs/objects/${big.oid}`)
+  })
+
+  it('tells the client how the admin can allow an object above the limit', async () => {
+    const tooBig = { oid: 'd'.repeat(64), size: 2 * 1024 * 1024 * 1024 }
+    for (const [presign, hint] of [
+      [false, PRESIGN_HINT],
+      [true, RAISE_LIMIT_HINT],
+    ] as const) {
+      const { lfs } = await setup(presign)
+      const body = await json<{ objects: { error?: { code: number; message: string } }[] }>(await lfs('batch', { operation: 'upload', objects: [tooBig] }))
+      expect(body.objects[0]?.error).toEqual({ code: 422, message: `object exceeds ${1024 * 1024 * 1024} bytes; ${hint}` })
+    }
   })
 })
 
@@ -200,6 +266,7 @@ describe('repositories with accounts', () => {
       }),
     )
     expect(put.status).toBe(413)
+    expect(((await put.json()) as { message: string }).message).toBe(`object exceeds 10 bytes; ${PRESIGN_HINT}`)
   })
 
   it('lets a read-only token read but not push, for example for a CDN pull zone', async () => {
@@ -463,6 +530,24 @@ describe('import endpoint', () => {
     const plain = await nodeForge()
     const token = await bootstrap(plain, BASE)
     expect((await call(plain, BASE, 'POST', '/api/repos/admin/x/import', token, { url: 'https://x/y.git' })).status).toBe(503)
+  })
+
+  it('runs an import LFS job without federation and sends the import token to the LFS endpoint', async () => {
+    const asset = new TextEncoder().encode('large asset\n')
+    const pointer = lfsPointer(asset)
+    const token = basicAuth('git', 'lfs-job-token')
+    const lfs = fakeLfs({ read: async (oid) => (oid === pointer.oid ? asset : null) })
+    const server = await startServer(chain(requireAuthorization(token), lfs.handler))
+    try {
+      const repo = { owner: 'alice', name: 'media' }
+      const url = `${server.url}/acme/media.git`
+      await startImport(forge.storage, repo, { url })
+      await forge.runJob({ kind: 'import-lfs', ...repo, oid: pointer.oid, size: pointer.size, endpoint: { url: `${url}/info/lfs`, source: 'default' }, authorization: token })
+      expect(lfs.batches).toEqual([{ authorization: token, oids: [pointer.oid] }])
+      expect(await forge.storage.head(lfsObjectKey(repo, pointer.oid))).toMatchObject({ size: pointer.size })
+    } finally {
+      await server.close()
+    }
   })
 
   it('encodes non-ASCII credentials as UTF-8', () => {

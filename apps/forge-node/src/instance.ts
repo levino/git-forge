@@ -105,13 +105,13 @@ export const createInstance = async (vars: NodeVars, overrides: InstanceOverride
     queue: 'jobs',
     handler: (job) => forge!.runJob(job),
     concurrency: config.jobConcurrency,
-    onOutcome: outcomeLog<AppJob>(log, 'job', (job) => ({ ...job })),
+    onOutcome: outcomeLog<AppJob>(log, 'job', (job) => ({ ...job, ...('authorization' in job ? { authorization: 'redacted' } : {}) })),
   })
   const imports: SqliteJobQueue<ImportJob> = createSqliteJobQueue<ImportJob>({
     ...queueOptions,
     queue: 'imports',
     handler: async (job) => {
-      const state = await continueImport(job, { storage, digests: nodeDigests, schedule: (next, delaySeconds) => imports.enqueue(next, { delaySeconds }) })
+      const state = await continueImport(job, { storage, digests: nodeDigests, schedule: (next, delaySeconds) => imports.enqueue(next, { delaySeconds }), scheduleLfs: (lfs) => jobs.enqueue(lfs) })
       log({ event: 'import-step', repo: `${job.owner}/${job.name}`, phase: state.phase, steps: state.steps, error: state.error })
     },
     maxAttempts: 3,

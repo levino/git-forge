@@ -146,7 +146,7 @@ describe('browser login', () => {
   })
 
   it('parses login arguments', () => {
-    expect(parseLoginArguments(['https://forge.example', '--scopes', 'repo:admin', '--no-setup-git'])).toEqual({
+    expect(parseLoginArguments(['https://forge.example', '--scopes', 'repo:admin', '--no-setup-git'], true)).toEqual({
       target: 'https://forge.example',
       scope: 'repo:admin',
       mode: 'paste',
@@ -155,6 +155,7 @@ describe('browser login', () => {
     })
     expect(parseLoginArguments(['--scopes=repo:read', '--device', '--no-browser'])).toMatchObject({ target: undefined, scope: 'repo:read', mode: 'device', openBrowser: false })
     expect(parseLoginArguments(['--browser-redirect']).mode).toBe('redirect')
+    expect(parseLoginArguments([], false).mode).toBe('device')
     expect(() => parseLoginArguments(['--scopes', 'repo:root'])).toThrow(/repo:read/)
   })
 

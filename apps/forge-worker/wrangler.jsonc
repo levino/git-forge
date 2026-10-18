@@ -1,0 +1,18 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "git-forge",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-01",
+  "observability": { "enabled": true },
+  "limits": { "cpu_ms": 60000 },
+  "r2_buckets": [{ "binding": "BUCKET", "bucket_name": "git-forge" }],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "git-forge",
+      "database_id": "00000000-0000-0000-0000-000000000000"
+    }
+  ],
+  "triggers": { "crons": ["*/30 * * * *"] },
+  "vars": { "PUBLIC_READ": "true", "MAX_PUSH_BYTES": "16777216" }
+}

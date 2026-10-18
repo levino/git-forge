@@ -125,13 +125,12 @@ pnpm install
 cd apps/forge-worker
 npx wrangler login
 openssl rand -base64 32 | npx wrangler secret put BOOTSTRAP_TOKEN
-npx wrangler queues create git-forge-imports
 npx wrangler deploy
 npx wrangler d1 migrations apply DB --remote
 ```
 
-The first `wrangler deploy` creates the bucket and the database from the
-binding names; no IDs need to be filled in. Later deployments apply new
+The first `wrangler deploy` creates the bucket, the database and the import
+queue from the binding names; no IDs need to be filled in. Later deployments apply new
 migrations first (`wrangler d1 migrations apply DB --remote`, then
 `wrangler deploy`). The Worker never migrates the database itself.
 
@@ -179,13 +178,12 @@ To use your own domain, add a `routes` entry with `custom_domain: true` to
 `wrangler.jsonc` defines three environments, each with its own Worker name,
 R2 bucket and D1 database (`git-forge-alpha`, …). Every Cloudflare resource
 comes from the config, nothing is created in the dashboard: buckets and
-databases have names but no IDs, so the first `wrangler deploy` provisions
-them; migrations come from `migrations_dir`; cron, vars and the required
+databases have names but no IDs and queues are declared by name, so the
+first `wrangler deploy` provisions them; migrations come from `migrations_dir`; cron, vars and the required
 secret (`secrets.required`) are declared as well. An environment goes from
 nothing to running with:
 
 ```sh
-npx wrangler queues create git-forge-alpha-imports
 npx wrangler deploy --env alpha
 npx wrangler d1 migrations apply DB --env alpha --remote
 npx wrangler secret put BOOTSTRAP_TOKEN --env alpha

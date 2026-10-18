@@ -348,12 +348,32 @@ export type NewImport = NewRepository & {
 
 export type StartedImport = RepositoryName & { readonly state: ImportState }
 
+export type GitHubBackup = {
+  readonly account: string
+  readonly owner: string
+  readonly token?: string
+  readonly visibility?: string
+  readonly mode?: string
+  readonly forks?: boolean
+  readonly archived?: boolean
+  readonly webhook?: boolean
+  readonly lfs?: boolean
+}
+
+export type GitHubBackupResult = {
+  readonly owner: string
+  readonly account: string
+  readonly queued: readonly { readonly github: string; readonly repository: string }[]
+  readonly skipped: readonly { readonly github: string; readonly repository: string; readonly reason: string }[]
+}
+
 export type RepositoryOperations = {
   readonly owners: (user: UserPrincipal) => Promise<string[]>
   readonly create: (user: UserPrincipal, input: NewRepository) => Promise<CreatedRepository>
   readonly importsEnabled: boolean
   readonly startImport: (user: UserPrincipal, input: NewImport) => Promise<StartedImport>
   readonly importStatus: (user: UserPrincipal, repo: RepositoryName) => Promise<ImportState | null>
+  readonly mirrorGitHub: (user: UserPrincipal, input: GitHubBackup) => Promise<GitHubBackupResult>
 }
 
 export type UiSession = { readonly principal: UserPrincipal; readonly csrf: string; readonly sessionId: string }
@@ -1220,15 +1240,13 @@ export const createForge = (options: ForgeOptions): Forge => {
 
   const githubJobContext = (job: Pick<GitHubMirrorJob, 'owner' | 'name'>) => ['git-forge-mirror-github-job', job.owner.toLowerCase(), job.name.toLowerCase()]
 
-  const mirrorGitHubRoute = async (request: Request): Promise<Response> => {
-    const actor = await requireManager(request)
-    const body = await readBody(request)
-    const account = requiredString(body, 'account')
-    const owner = (await creatableOwner(actor, requiredString(body, 'owner'))).login
-    const token = optionalString(body, 'token') || undefined
-    const visibility = optionalString(body, 'visibility') ?? 'private'
-    const mode = optionalString(body, 'mode') ?? 'auto'
-    const webhook = optionalBoolean(body, 'webhook', false)
+  const mirrorGitHubFor = async (actor: UserPrincipal, input: GitHubBackup): Promise<GitHubBackupResult> => {
+    const owner = (await creatableOwner(actor, input.owner)).login
+    const { account, token } = input
+    const visibility = input.visibility ?? 'private'
+    const mode = input.mode ?? 'auto'
+    const webhook = input.webhook ?? false
+    if (!account) throw new HttpError(400, 'account is required')
     if (visibility !== 'private' && visibility !== 'public' && visibility !== 'upstream') throw new HttpError(400, 'visibility must be private, public or upstream')
     if (mode !== 'auto' && mode !== 'manual') throw new HttpError(400, 'mode must be auto or manual')
     if (webhook && !token) throw new HttpError(400, 'webhook needs a token with admin:repo_hook')
@@ -1236,19 +1254,13 @@ export const createForge = (options: ForgeOptions): Forge => {
     if (token && !mirrorSecrets.available) throw new HttpError(503, new MirrorSecretsUnavailableError().message)
     let listed
     try {
-      listed = await listGitHubRepositories({
-        account,
-        ...(token ? { token } : {}),
-        ...githubFetch,
-        forks: optionalBoolean(body, 'forks', false),
-        archived: optionalBoolean(body, 'archived', true),
-      })
+      listed = await listGitHubRepositories({ account, ...(token ? { token } : {}), ...githubFetch, forks: input.forks ?? false, archived: input.archived ?? true })
     } catch (error) {
       if (error instanceof GitHubApiError) throw new HttpError(502, error.message)
       throw error
     }
-    const queued: { github: string; repository: string }[] = []
-    const skipped: { github: string; repository: string; reason: string }[] = []
+    const queued: GitHubBackupResult['queued'][number][] = []
+    const skipped: GitHubBackupResult['skipped'][number][] = []
     for (const upstream of listed) {
       const repository = `${owner}/${upstream.name}`
       if (!isValidName(upstream.name)) skipped.push({ github: upstream.fullName, repository, reason: 'invalid name' })
@@ -1264,7 +1276,7 @@ export const createForge = (options: ForgeOptions): Forge => {
           defaultBranch: upstream.defaultBranch,
           actor: { id: actor.id, login: actor.login },
           mode,
-          lfs: optionalBoolean(body, 'lfs', true),
+          lfs: input.lfs ?? true,
           private: upstream.private,
           webhook,
           ...(token && (upstream.private || webhook) ? { sealedToken: await mirrorSecrets.seal(githubJobContext(target), token) } : {}),
@@ -1272,7 +1284,19 @@ export const createForge = (options: ForgeOptions): Forge => {
         queued.push({ github: upstream.fullName, repository })
       }
     }
-    return json(202, { owner, account, queued, skipped })
+    return { owner, account, queued, skipped }
+  }
+
+  const mirrorGitHubRoute = async (request: Request): Promise<Response> => {
+    const actor = await requireManager(request)
+    const body = await readBody(request)
+    const optional = (key: string) => {
+      const value = optionalString(body, key)
+      return value ? { [key]: value } : {}
+    }
+    const flags = Object.fromEntries(['forks', 'archived', 'webhook', 'lfs'].filter((key) => body[key] !== undefined && body[key] !== null).map((key) => [key, optionalBoolean(body, key, false)]))
+    const result = await mirrorGitHubFor(actor, { account: requiredString(body, 'account'), owner: requiredString(body, 'owner'), ...optional('token'), ...optional('visibility'), ...optional('mode'), ...flags })
+    return json(202, result)
   }
 
   const adoptGitHubRepository = async (job: GitHubMirrorJob): Promise<void> => {
@@ -1789,6 +1813,7 @@ export const createForge = (options: ForgeOptions): Forge => {
         importsEnabled: options.scheduleImport !== undefined,
         startImport: importRepositoryFor,
         importStatus: importStatusFor,
+        mirrorGitHub: mirrorGitHubFor,
       },
       inbox: {
         threads: (user, filter) => notifications.store.threads(user.id, { ...filter, participating: false }),

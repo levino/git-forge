@@ -60,6 +60,8 @@ discussions.
 - [x] Native streaming hashes (`crypto.DigestStream` behind a `DigestFactory` seam) and one job per pack / LFS object with a byte budget (`MIRROR_UNIT_BYTES`), oversized units stay pending (design §12)
 - [x] Plain clones of a mirror check out the upstream default branch: read-side `refs/heads/*` view of one remote, own refs win, detach materializes it
 - [x] Mirror overview API: signed attestations from mirrors, ref checksum history, state/lag/alarms, spot checks (design §10); UI in M6
+- [x] Non-forge upstreams: stepped fetch shared with imports (commit ranges, split commits, across queued jobs, refs move when complete), `.lfsconfig` endpoint
+- [x] GitHub backups: push webhooks per mirror (HMAC-SHA256, optional registration via the GitHub API), sealed upstream tokens, bulk "mirror all repositories of a user/org" API and form
 
 ## M5 — Deployment and adapters
 

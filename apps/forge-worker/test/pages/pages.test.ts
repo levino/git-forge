@@ -411,6 +411,23 @@ describe('new repository page', () => {
     expect((await post({ action: 'create', owner: 'alice', name: 'bad name' })).status).toBe(400)
   })
 
+  it('queues mirrors of a GitHub account from the form', async () => {
+    expect((await render(New, '/new', {}, user(), { session: session() })).html).toContain('value="github"')
+    const unavailable = await post({ action: 'github', account: 'levino', owner: 'alice' })
+    expect(unavailable.status).toBe(503)
+    expect(unavailable.html).toContain('bulk mirroring needs a job queue')
+    const inputs: unknown[] = []
+    const repositories = { ...forge.services.repositories, mirrorGitHub: async (_user: unknown, input: unknown) => (inputs.push(input), { owner: 'alice', account: 'levino', queued: [], skipped: [] }) }
+    const queued = await render(New, '/new', {}, user(), {
+      session: session(),
+      request: new Request(`${BASE}/new`, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ action: 'github', account: 'levino', owner: 'alice', token: 'ghp_x', archived: 'on', webhook: 'on' }) }),
+      services: { verifySessionWrite: async () => session(), repositories },
+    })
+    expect(queued).toMatchObject({ status: 303, location: '/alice' })
+    expect(inputs).toEqual([{ account: 'levino', owner: 'alice', token: 'ghp_x', forks: false, archived: true, webhook: true }])
+    expect((await post({ action: 'github', account: '', owner: 'alice' })).status).toBe(400)
+  })
+
   it('starts an import and shows its status to repository admins', async () => {
     const started = await post({ action: 'import', owner: 'alice', name: 'imported', url: 'https://example.org/up.git', token: 'secret', lfs: 'on', visibility: 'public' })
     expect(started).toMatchObject({ status: 303, location: '/alice/imported/import' })

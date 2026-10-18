@@ -1,0 +1,8 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "include": ["src/**/*", "test/**/*", "vitest.config.ts", "../core/src/pako-internals.d.ts"],
+  "compilerOptions": {
+    "lib": ["ES2023"],
+    "types": ["@cloudflare/workers-types", "@cloudflare/vitest-plugin/types"]
+  }
+}

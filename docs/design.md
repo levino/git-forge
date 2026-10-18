@@ -593,8 +593,11 @@ objects via the Batch API and verify their hashes. Two strategies:
   missing objects are fetched object by object as with any dumb remote).
   LFS pointers are found among the small blobs of the copied packs (entry
   headers and delta result sizes, inflating only candidates ≤ 1 KiB) and
-  stored in `lfsPending` before the first download, so a sync that dies
-  half way (CPU limit, deploy) leaves them for the next one. No
+  stored in `lfsPending` before the first download; copied packs are listed
+  in the status as `lfsScan` before they are registered and leave it once
+  their pointers are recorded. A sync that dies half way (CPU limit, deploy)
+  or runs concurrently with another therefore never skips their LFS
+  objects. No
   object is re-hashed and no index is recomputed, so the mirror's packs are
   byte-identical to the upstream's, down the whole chain. Copy-only trusts
   the upstream for connectivity; integrity of the bytes is verified.

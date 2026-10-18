@@ -3,6 +3,8 @@ name: Release
 on:
   push:
     tags: ['v*']
+    branches: [main]
+    paths: [release/VERSION]
   workflow_dispatch:
     inputs:
       tag:
@@ -12,17 +14,42 @@ on:
 permissions:
   contents: write
 
-env:
-  TAG: ${{ inputs.tag || github.ref_name }}
-
 concurrency:
-  group: release-${{ github.ref }}
+  group: release
   cancel-in-progress: false
 
 jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            tag="$GITHUB_REF_NAME"
+          elif [ -n "$INPUT_TAG" ]; then
+            tag="$INPUT_TAG"
+          else
+            tag="v$(tr -d '[:space:]' < release/VERSION)"
+          fi
+          if [ "$GITHUB_REF_TYPE" != tag ] && gh release view "$tag" >/dev/null 2>&1; then
+            echo "Release $tag exists already, nothing to do"
+            tag=""
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
   release:
+    needs: prepare
+    if: needs.prepare.outputs.tag != ''
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      TAG: ${{ needs.prepare.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -52,7 +79,7 @@ jobs:
           prerelease=""
           case "$version" in *-*) prerelease="--prerelease" ;; esac
           verify="--verify-tag"
-          [ "$GITHUB_EVENT_NAME" = workflow_dispatch ] && verify="--target $GITHUB_SHA"
+          [ "$GITHUB_REF_TYPE" = tag ] || verify="--target $GITHUB_SHA"
           gh release create "$TAG" \
             "$RUNNER_TEMP/release/git-forge-worker.mjs" \
             "$RUNNER_TEMP/release/migrations.tar.gz" \
@@ -60,8 +87,8 @@ jobs:
             $verify --title "$TAG" --notes-file "$RUNNER_TEMP/notes.md" $prerelease
 
   sync-template:
-    needs: release
+    needs: [prepare, release]
     uses: ./.github/workflows/sync-instance-template.yml
     with:
-      tag: ${{ inputs.tag || github.ref_name }}
+      tag: ${{ needs.prepare.outputs.tag }}
     secrets: inherit

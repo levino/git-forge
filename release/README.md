@@ -18,7 +18,9 @@ writes into `out-dir` (default `release/dist`):
 and prints the SHA-256 of `SHA256SUMS`, which is the `sha256` an instance pins
 in `git-forge.json`.
 
-`.github/workflows/release.yml` runs the script on every `v*` tag and
+`.github/workflows/release.yml` runs the script on every `v*` tag, on a push to
+`main` that changes `release/VERSION` (it then creates the tag `v<VERSION>` on
+that commit unless the release exists already) and on manual dispatch, and
 publishes the three files as release assets with `GITHUB_TOKEN`; the release
 notes contain the `git-forge.json` to pin. Tags with a `-` (`v0.2.0-rc.1`) are
 marked as pre-releases.

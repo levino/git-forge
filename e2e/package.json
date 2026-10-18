@@ -1,0 +1,11 @@
+{
+  "name": "@git-forge/e2e",
+  "version": "0.0.0",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "s3:up": "docker compose -f docker-compose.yml up -d --wait",
+    "s3:down": "docker compose -f docker-compose.yml down -v"
+  }
+}

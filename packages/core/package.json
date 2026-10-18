@@ -5,7 +5,8 @@
   "license": "MIT",
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./test/storage-conformance": "./test/storage-conformance.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",

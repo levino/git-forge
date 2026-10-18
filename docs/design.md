@@ -1639,8 +1639,8 @@ bundle.
   `/-/login`, which renders the model with the site layout. Without the UI
   (or on Node) the plain built-in pages are used. The passkey ceremony script
   is the one exported by `@git-forge/accounts` (`PASSKEY_SCRIPT`).
-- Reserved first path segments: `api`, `explore`, `login`, `settings`, `-`
-  (assets) and the other page routes. Account names must not use them.
+- Reserved first path segments: `api`, `explore`, `login`, `new`,
+  `settings`, `-` (assets) and the other page routes. Account names must not use them.
 
 ### Permissions
 
@@ -1667,6 +1667,18 @@ the release store after the repository's read check, drafts only with write
 access, as in the releases API. Media and raw URLs also accept a browser
 session for reads (`GET`/`HEAD`, checked with `repositoryAccess`), so LFS
 previews work in private repositories.
+
+Repositories are created and imported through `services.repositories`
+(`owners`, `create`, `startImport`, `importStatus`), the same functions the
+API routes `POST /api/repos` and `POST|GET /api/repos/{owner}/{repo}/import`
+call; the API additionally requires a session or a token with `repo:admin`
+(`requireManager`), the page `/new` a session write. A user may create
+repositories in their own account and in organizations they own; instance
+admins in any account. The import status page `/{owner}/{repo}/import` needs
+repository admin and refreshes itself while the import runs; an empty
+repository links to it for repository admins while an import exists. The
+access token entered for an import goes only into the queued job, never into
+the stored import state or a page.
 
 All UI writes must also come from the same origin:
 `isCrossSiteWrite` rejects UI requests whose `Origin` or `Sec-Fetch-Site`

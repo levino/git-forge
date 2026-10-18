@@ -90,7 +90,7 @@ issues, pull requests and discussions.
 
 - Pages.
 - Partial visibility within a repository (levels, derived views).
-- Encrypted full backups for mirrors without read access to plaintext.
+- Encrypted full backups for mirrors without read access to plaintext (§19).
 - External verification of mirrors (§10).
 - SSH-to-HTTPS gateway (§9).
 
@@ -878,7 +878,8 @@ What was done about it:
 ## 13. Open questions
 
 - Conditional writes on B2, Hetzner, Bunny — supported? (Run the S3 conformance
-  suite against them; see `packages/s3/README.md`.)
+  suite against them; see `packages/s3/README.md`.) Same for `PutObject` into
+  buckets with Object Lock, which may require a checksum header (§19).
 - Signed append-only log of ref/pack/LFS changes (e.g. C2SP tlog-tiles with
   cosigning instances as witnesses): still useful as audit trail, format open.
 - Ref checksum à la GitHub Spokes (XOR over `hash(refname, value)`) for cheap
@@ -1702,3 +1703,69 @@ render.
 - `apps/forge-worker/test/e2e/headless.e2e.test.ts`: the same bundle with
   `UI=false` serves only the forge.
 - The release test requests a page from the template instance.
+
+## 19. Encrypted backups
+
+A mirror (§4) is a copy in someone else's hands that can read everything. A
+backup is the opposite: a copy that nobody but the owner can read, kept where
+it survives the instance, its provider and its admins. Code:
+[`@git-forge/backup`](../packages/backup/README.md); commands in
+`git forge backup` (CLI) and `git-forge-node backup` / `restore`.
+
+- **Target is a plain bucket, not a forge.** Any `Storage` (S3 at Hetzner or
+  Backblaze B2, ideally with Object Lock in compliance mode; a local disk; a
+  partner's bucket). Every write is `If-None-Match: *` and nothing is ever
+  rewritten, so the bucket can refuse overwrites and deletes. The storage
+  interface still has no delete.
+- **Keys.** An X25519 recovery key pair is generated offline; the instance
+  only knows the public key (`BACKUP_RECOVERY_KEY`). Every run creates an
+  ephemeral X25519 key, derives the run key with HKDF from the shared secret
+  and stores only the ephemeral public key (`keys/<run>.json`). Each object
+  has its own key, derived from the run key and a random salt, and is
+  encrypted with AES-256-GCM in 64 KiB segments (nonce = segment index plus a
+  last-segment flag, header as additional data), so objects of any size
+  stream through with constant memory and truncation or reordering fails.
+  A stolen instance (or its config) can add backups but read none.
+- **Incremental by content address.** Packs (`pack-<sha>.pack`, its index),
+  LFS objects (`oid`) and the data export (SHA-256) are already content
+  addressed. Their object name in the bucket is `HMAC(BACKUP_SECRET,
+  address)`, so a run lists `objects/` once and uploads only what is missing,
+  across runs and across repositories, without being able to read what is
+  there. The names reveal nothing without the secret (no confirmation of a
+  known file). Losing the secret only loses deduplication: the next run with
+  a new secret uploads everything again. Restoring never needs it.
+- **Snapshots.** One sealed snapshot per repository and run: `refs.json`
+  state (including `refs/archive/*`, `refs/upstream/*` and the mirror view),
+  the current pack set with sizes and object names, all LFS objects (release
+  assets included, §16) and the data export. A marker `seen/<HMAC(snapshot)>`
+  makes an unchanged repository cost one `HEAD` request and no writes.
+  Restore lists `snapshots/` (keys sort by time) and decrypts newest first.
+- **Data export.** The rows of one repository from the collaboration,
+  release and branch protection tables, plus the referenced accounts (id,
+  login, kind, display name), as JSON (`git-forge-repository-data-v1`).
+  Import keeps ids and so targets a fresh database (the disaster case); it
+  runs in one batch and rolls back on conflicts. Tokens, sessions, secrets
+  and webhooks are deliberately not exported.
+- **Restore.** Verifies every byte: GCM tags, then the pack trailer and index
+  (`verifyingPackStream`, `verifyPackIndex`), LFS SHA-256 and the export's
+  checksum. `git forge backup restore` writes a bare repository (packs,
+  `packed-refs` from the advertised refs, `lfs/objects/…` in git-lfs's own
+  layout), usable with plain `git clone` and `git lfs fsck` and without any
+  git-forge software; `git-forge-node restore` rebuilds it in the instance's
+  storage and database (owner account created if missing, `--as` to rename).
+- **What leaks.** Object count and sizes, run times, and which objects are
+  shared between snapshots. Not: repository names, refs, file names, LFS
+  oids, contents.
+- **Partial trust.** A party that should hold a copy but not read it gets the
+  encrypted form only: `git forge backup copy` (`replicateBackup`) copies a
+  backup bucket append-only to theirs, and `git forge backup check`
+  (`checkBackupStructure`) lets them verify the structure (every object
+  parses, its size matches its header, its run key exists) without the key.
+- **Scheduling.** `apps/forge-node` runs backups on `BACKUP_SCHEDULE`
+  (default `47 3 * * *`, `off` disables) for `BACKUP_REPOSITORIES` (default
+  `*`). The Worker does not run backups yet: a full first run does not fit a
+  Free-plan invocation; it needs the unit-per-job split of §12 (follow-up).
+- **Object Lock caveat.** AWS S3 requires `Content-MD5` or an
+  `x-amz-checksum-*` header on `PutObject` to a bucket with Object Lock;
+  `S3Storage` streams without one. B2 and Hetzner are to be checked with the
+  conformance suite (§13).

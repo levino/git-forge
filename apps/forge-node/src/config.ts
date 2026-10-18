@@ -19,6 +19,19 @@ export type NodeVars = ForgeVars & {
   readonly S3_FORCE_PATH_STYLE?: string
   readonly SCHEDULE?: string
   readonly JOB_CONCURRENCY?: string
+  readonly BACKUP_RECOVERY_KEY?: string
+  readonly BACKUP_SECRET?: string
+  readonly BACKUP_REPOSITORIES?: string
+  readonly BACKUP_SCHEDULE?: string
+  readonly BACKUP_STORAGE?: string
+  readonly BACKUP_DIR?: string
+  readonly BACKUP_S3_ENDPOINT?: string
+  readonly BACKUP_S3_REGION?: string
+  readonly BACKUP_S3_BUCKET?: string
+  readonly BACKUP_S3_ACCESS_KEY_ID?: string
+  readonly BACKUP_S3_SECRET_ACCESS_KEY?: string
+  readonly BACKUP_S3_PREFIX?: string
+  readonly BACKUP_S3_FORCE_PATH_STYLE?: string
 }
 
 export type StorageConfig = { readonly kind: 'fs'; readonly dir: string } | { readonly kind: 's3'; readonly config: S3StorageConfig }
@@ -43,9 +56,9 @@ export const DEFAULT_SCHEDULE = '17 3 * * *'
 
 export const DEFAULT_JOB_CONCURRENCY = 2
 
-const present = (value: string | undefined): string | undefined => (value === undefined || value.trim() === '' ? undefined : value.trim())
+export const present = (value: string | undefined): string | undefined => (value === undefined || value.trim() === '' ? undefined : value.trim())
 
-const joinPath = (dir: string, name: string): string => `${dir.replace(/\/+$/, '')}/${name}`
+export const joinPath = (dir: string, name: string): string => `${dir.replace(/\/+$/, '')}/${name}`
 
 const integer = (name: string, value: string | undefined, fallback: number, min: number, max: number): number => {
   const text = present(value)
@@ -55,42 +68,44 @@ const integer = (name: string, value: string | undefined, fallback: number, min:
   return parsed
 }
 
-const flag = (name: string, value: string | undefined): boolean => {
+export const flag = (name: string, value: string | undefined): boolean => {
   const text = present(value)
   if (text === undefined || text === 'false') return false
   if (text === 'true') return true
   throw new ConfigurationError(`${name} must be true or false`)
 }
 
-const required = (vars: NodeVars, name: keyof NodeVars): string => {
+const required = (vars: NodeVars, name: keyof NodeVars, condition: string): string => {
   const value = present(vars[name])
-  if (value === undefined) throw new ConfigurationError(`${name} is required with STORAGE=s3`)
+  if (value === undefined) throw new ConfigurationError(`${name} is required with ${condition}`)
   return value
+}
+
+export const s3StorageConfig = (vars: NodeVars, prefix: 'S3_' | 'BACKUP_S3_', condition: string): S3StorageConfig => {
+  const name = (suffix: string) => `${prefix}${suffix}` as keyof NodeVars
+  const endpoint = required(vars, name('ENDPOINT'), condition)
+  try {
+    new URL(endpoint)
+  } catch {
+    throw new ConfigurationError(`${name('ENDPOINT')} must be a URL`)
+  }
+  const bucketPrefix = present(vars[name('PREFIX')])
+  return {
+    endpoint,
+    region: present(vars[name('REGION')]) ?? 'us-east-1',
+    bucket: required(vars, name('BUCKET'), condition),
+    accessKeyId: required(vars, name('ACCESS_KEY_ID'), condition),
+    secretAccessKey: required(vars, name('SECRET_ACCESS_KEY'), condition),
+    forcePathStyle: flag(name('FORCE_PATH_STYLE'), vars[name('FORCE_PATH_STYLE')]),
+    ...(bucketPrefix ? { prefix: bucketPrefix } : {}),
+  }
 }
 
 const storageConfig = (vars: NodeVars, dataDir: string): StorageConfig => {
   const kind = present(vars.STORAGE) ?? 'fs'
   if (kind === 'fs') return { kind, dir: present(vars.STORAGE_DIR) ?? joinPath(dataDir, 'objects') }
   if (kind !== 's3') throw new ConfigurationError('STORAGE must be fs or s3')
-  const endpoint = required(vars, 'S3_ENDPOINT')
-  try {
-    new URL(endpoint)
-  } catch {
-    throw new ConfigurationError('S3_ENDPOINT must be a URL')
-  }
-  const prefix = present(vars.S3_PREFIX)
-  return {
-    kind,
-    config: {
-      endpoint,
-      region: present(vars.S3_REGION) ?? 'us-east-1',
-      bucket: required(vars, 'S3_BUCKET'),
-      accessKeyId: required(vars, 'S3_ACCESS_KEY_ID'),
-      secretAccessKey: required(vars, 'S3_SECRET_ACCESS_KEY'),
-      forcePathStyle: flag('S3_FORCE_PATH_STYLE', vars.S3_FORCE_PATH_STYLE),
-      ...(prefix ? { prefix } : {}),
-    },
-  }
+  return { kind, config: s3StorageConfig(vars, 'S3_', 'STORAGE=s3') }
 }
 
 const schedule = (value: string | undefined): CronSchedule => {

@@ -1,4 +1,5 @@
 import { configDirectory, credentialFor, deviceLogin, gitCredential, normalizeHost, readHosts, removeGitSetup, setupGit, writeHosts } from './auth.ts'
+import { BACKUP_USAGE } from './backup-usage.ts'
 import { configValue, runGit } from './git.ts'
 import { CommitTooLargeError } from './plan.ts'
 import { DEFAULT_BUDGET, forgePush } from './push.ts'
@@ -10,6 +11,7 @@ const USAGE = `usage: git forge push [options] <remote> <refspec>...
        git forge auth login [<url>] [--no-setup-git]
        git forge auth status | logout [<url>] | setup-git [<url>] | token [<url>]
        git forge auth git-credential <get|store|erase>
+       git forge backup <keygen|list|restore|check|copy> ...
 
 Pushes history in several smaller pushes so that no single request exceeds
 the budget, then performs the final ref update. Rerun to resume.
@@ -25,7 +27,9 @@ options:
 git forge auth login signs in through the browser (device flow), stores a
 token for Git and Git LFS in ~/.config/git-forge/hosts.json and makes git use
 it for that host through the credential helper git forge auth git-credential.
-Without <url> it uses the host of the remote origin.`
+Without <url> it uses the host of the remote origin.
+
+${BACKUP_USAGE}`
 
 type Parsed = {
   readonly remote: string
@@ -156,6 +160,15 @@ export const main = async (args: readonly string[]): Promise<number> => {
   if (command === 'auth') {
     try {
       return await auth(rest)
+    } catch (error) {
+      process.stderr.write(`git-forge: ${error instanceof Error ? error.message : String(error)}\n`)
+      return 1
+    }
+  }
+  if (command === 'backup') {
+    try {
+      const { backupCommand } = await import('./backup.ts')
+      return await backupCommand(rest, { env: process.env, out: (text) => process.stdout.write(text), err: (text) => process.stderr.write(text) })
     } catch (error) {
       process.stderr.write(`git-forge: ${error instanceof Error ? error.message : String(error)}\n`)
       return 1

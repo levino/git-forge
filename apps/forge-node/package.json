@@ -17,6 +17,7 @@
   "dependencies": {
     "@git-forge/accounts": "workspace:*",
     "@git-forge/accounts-node": "workspace:*",
+    "@git-forge/backup": "workspace:*",
     "@git-forge/core": "workspace:*",
     "@git-forge/node": "workspace:*",
     "@git-forge/s3": "workspace:*",

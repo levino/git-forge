@@ -48,6 +48,28 @@ token stays until you log in again. `--no-setup-git` skips the git
 configuration; `git forge auth setup-git [<url>]` writes it later and
 `git forge auth token [<url>]` prints the token for scripts.
 
+## Encrypted backups
+
+`git forge backup` works on backup buckets written by an instance
+([`@git-forge/backup`](../backup/README.md)). A location is a directory or
+`s3://<bucket>[/<prefix>]` with `S3_ENDPOINT`, `S3_REGION`,
+`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` (and `S3_FORCE_PATH_STYLE=true`
+for path-style servers).
+
+```sh
+git forge backup keygen recovery.jwk                 # offline; prints the public key
+git forge backup list --from s3://vault --key recovery.jwk
+git forge backup restore --from s3://vault --key recovery.jwk acme/site site.git
+git clone site.git site                               # plain git, no forge needed
+git forge backup check --from /mnt/partner-copy       # no key needed
+git forge backup copy --from s3://vault --to /mnt/partner-copy
+```
+
+`restore` writes a bare repository with its LFS objects under `lfs/objects`
+(git-lfs's own layout, so `git lfs fsck` works in it) and the database export
+as `git-forge-data.json`. `--snapshot <key>` picks an older snapshot from
+`list`.
+
 ## Installation
 
 Download the single executable for your platform from a git-forge release

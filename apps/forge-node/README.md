@@ -20,6 +20,9 @@ release, checksums in `NODE-SHA256SUMS`).
 | `git-forge-node serve` (default) | HTTP server, job runner and mirror schedule. Refuses to start while the database has pending migrations. Stops on `SIGTERM`/`SIGINT`: closes the listener, lets running jobs finish (up to 10 s) and closes the database. |
 | `git-forge-node migrate` | Applies pending migrations to the database and exits. These are the SQL files from `packages/accounts/migrations` that `wrangler d1 migrations apply` uses for the Worker, bundled into the executable. Migrations are never applied implicitly. |
 | `git-forge-node instance-key` | Prints a new Ed25519 private JWK for `INSTANCE_KEY` (key id on stderr). |
+| `git-forge-node backup` | Pushes an encrypted backup of `BACKUP_REPOSITORIES` to the backup bucket now (see [Encrypted backups](#encrypted-backups)). |
+| `git-forge-node restore <owner>/<name> --key <file> [--snapshot <key>] [--as <owner>/<name>]` | Rebuilds a repository from the backup bucket: Git, LFS objects, and issues, pull requests, discussions, releases and branch protection into the database. Creates the owner account if missing; refuses to overwrite an existing repository. |
+| `git-forge-node recovery-key` | Prints a new X25519 recovery key (private JWK) on stdout and the public key for `BACKUP_RECOVERY_KEY` on stderr. |
 | `git-forge-node version` | Prints the version. |
 
 Logs are JSON lines on stdout (`listening`, `job`, `import-step`,
@@ -60,6 +63,28 @@ Only for this app:
 
 Invalid values stop the process with exit code 2 and a message instead of
 falling back to a default.
+
+## Encrypted backups
+
+With `BACKUP_RECOVERY_KEY` set, `serve` also pushes encrypted, append-only
+backups to a bucket of your choice on `BACKUP_SCHEDULE`
+([`@git-forge/backup`](../../packages/backup/README.md), design §19). The
+bucket only sees ciphertext; restoring needs the private recovery key, which
+never touches the instance.
+
+| Name | Default | Purpose |
+|---|---|---|
+| `BACKUP_RECOVERY_KEY` | none (backups off) | Public X25519 JWK of the recovery key (`git-forge-node recovery-key` or `git forge backup keygen`). A private key is refused. |
+| `BACKUP_SECRET` | required | At least 32 characters; names objects in the bucket so runs are incremental. Not needed to restore. |
+| `BACKUP_REPOSITORIES` | `*` | Comma-separated `owner/name`, `owner/*` or `*`. |
+| `BACKUP_SCHEDULE` | `47 3 * * *` | Cron expression for backups while serving; `off` for `git-forge-node backup` from a timer only. |
+| `BACKUP_STORAGE` | `fs` | `fs` (`BACKUP_DIR`, default `$DATA_DIR/backup`, e.g. a USB disk) or `s3`. |
+| `BACKUP_S3_ENDPOINT`, `BACKUP_S3_REGION`, `BACKUP_S3_BUCKET`, `BACKUP_S3_ACCESS_KEY_ID`, `BACKUP_S3_SECRET_ACCESS_KEY`, `BACKUP_S3_PREFIX`, `BACKUP_S3_FORCE_PATH_STYLE` | as for `S3_*` | Bucket for `BACKUP_STORAGE=s3`, e.g. B2 or Hetzner with Object Lock. Give the key write and list rights only. |
+
+Each run logs one `backup` line per repository (`uploaded`, `uploadedBytes`,
+`present`, `unchanged`). To recover after losing the instance: install a new
+one, `migrate`, configure the same `BACKUP_*` location and run
+`git-forge-node restore owner/name --key recovery.jwk` per repository.
 
 ## Jobs and restarts
 

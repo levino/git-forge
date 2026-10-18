@@ -1,0 +1,24 @@
+{
+  "name": "@git-forge/backup",
+  "version": "0.0.0",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@git-forge/accounts": "workspace:*",
+    "@git-forge/core": "workspace:*"
+  },
+  "devDependencies": {
+    "@git-forge/accounts-node": "workspace:*",
+    "@types/node": "22.20.5",
+    "typescript": "6.0.3",
+    "vitest": "4.1.11"
+  }
+}

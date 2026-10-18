@@ -152,6 +152,8 @@ Design: [design.md §17](design.md#17-collaboration).
 - [ ] Webhooks: `POST …/hooks/{id}/tests`, GitHub App installations, encrypted secrets
 - [x] Releases: GitHub-compatible REST API, tags created on publish, assets stored as LFS objects behind the media URL, download redirects
 - [ ] Releases: source archives (`tarball_url`, `zipball_url`), generated release notes, web UI
-- [ ] Encrypted full backups, partial visibility
+- [x] Encrypted full backups (design §19): X25519 recovery key, AES-GCM segments, incremental by content address, snapshots with the data export, restore into a bare repository (`git forge backup restore`) or an instance (`git-forge-node restore`), keyless replication and structure check for partial-trust holders, scheduled backups in `apps/forge-node`
+- [ ] Backups from the Worker (one job per unit like mirror sync), `Content-MD5`/checksum header for S3 Object Lock buckets, data import with id remapping into a non-empty database
+- [ ] Partial visibility
 - [ ] External mirror verification
 - [ ] Pages

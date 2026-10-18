@@ -13,7 +13,13 @@ const call = (path: string, init: RequestInit = {}, token = admin) =>
   fetch(`${dev.url}${path}`, { ...init, headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', ...(init.headers as Record<string, string>) } })
 
 beforeAll(async () => {
-  dev = await startWranglerDev({ vars: { BOOTSTRAP_TOKEN, ACTIONS_SECRETS: '{"DEPLOY_TOKEN":"from-the-instance"}' } })
+  dev = await startWranglerDev({
+    vars: {
+      BOOTSTRAP_TOKEN,
+      ACTIONS_SECRETS: '{"DEPLOY_TOKEN":"from-the-instance"}',
+      ACTIONS_SECRETS_KEY: btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32)))),
+    },
+  })
   const bootstrapped = await call('/api/bootstrap', { method: 'POST', body: JSON.stringify({ login: 'e2e' }) }, BOOTSTRAP_TOKEN)
   admin = ((await bootstrapped.json()) as { token: string }).token
 }, 90_000)
@@ -28,7 +34,11 @@ describe('CI on wrangler dev', () => {
     const repo = tempDir()
     await git(repo, ['init', '-q', '-b', 'main'])
     mkdirSync(`${repo}/.github/workflows`, { recursive: true })
-    writeFileSync(`${repo}/.github/workflows/ci.yml`, 'on: push\njobs:\n  hello:\n    runs-on: [self-hosted, e2e]\n    steps:\n      - run: echo hello\n')
+    writeFileSync(
+      `${repo}/.github/workflows/ci.yml`,
+      'on: push\njobs:\n  hello:\n    runs-on: [self-hosted, e2e]\n    strategy:\n      matrix:\n        n: [1, 2]\n    steps:\n      - run: echo hello\n',
+    )
+    expect((await call('/api/v3/repos/e2e/ci/actions/secrets/REPO_TOKEN', { method: 'PUT', body: JSON.stringify({ value: 'from-the-repository' }) })).status).toBe(201)
     await git(repo, ['add', '-A'])
     await git(repo, ['commit', '-q', '-m', 'workflow'])
     await git(repo, ['push', '-q', `${dev.url.replace('http://', `http://git:${admin}@`)}/e2e/ci.git`, 'main'])
@@ -59,13 +69,31 @@ describe('CI on wrangler dev', () => {
     }
     expect(job.jobName).toBe('hello')
     expect(job.variables['DEPLOY_TOKEN']!.value).toBe('from-the-instance')
+    expect(job.variables['REPO_TOKEN']!.value).toBe('from-the-repository')
     const renewed = await call(`/_services/actions/_apis/v1/AgentRequest/1/${job.requestId}`, { method: 'PATCH', body: JSON.stringify({ requestId: job.requestId }) }, token)
     expect(renewed.status).toBe(200)
-    const jobs = (await (await call(`/api/v3/repos/e2e/ci/actions/runs/${runs.workflow_runs[0]!.id}/jobs`)).json()) as { jobs: { status: string }[] }
-    expect(jobs.jobs[0]!.status).toBe('in_progress')
+    const jobs = (await (await call(`/api/v3/repos/e2e/ci/actions/runs/${runs.workflow_runs[0]!.id}/jobs`)).json()) as { jobs: { name: string; status: string }[] }
+    expect(jobs.jobs.map((entry) => [entry.name, entry.status])).toEqual([
+      ['hello (1)', 'in_progress'],
+      ['hello (2)', 'queued'],
+    ])
+    const checks = (await (await call('/api/v3/repos/e2e/ci/commits/main/check-runs')).json()) as { check_runs: { name: string; status: string }[] }
+    expect(checks.check_runs.map((check) => [check.name, check.status]).sort()).toEqual([
+      ['hello (1)', 'in_progress'],
+      ['hello (2)', 'queued'],
+    ])
 
     const githubToken = job.variables['system.github.token']!.value
     await git(tempDir(), ['clone', '-q', `${dev.url.replace('http://', `http://x-access-token:${githubToken}@`)}/e2e/ci.git`, 'out'])
     expect(await gitFails(tempDir(), ['clone', '-q', `${dev.url.replace('http://', `http://x-access-token:${githubToken}x@`)}/e2e/ci.git`, 'out'])).toMatch(/401|Authentication failed/i)
+
+    expect((await call(`/api/v3/repos/e2e/ci/actions/runs/${runs.workflow_runs[0]!.id}/cancel`, { method: 'POST' })).status).toBe(202)
+    const cancellation = await call(`/_services/actions/_apis/v1/Message/1?sessionId=${session.sessionId}`, {}, token)
+    expect(((await cancellation.json()) as { messageType: string }).messageType).toBe('JobCancellation')
+    const cancelled = (await (await call(`/api/v3/repos/e2e/ci/actions/runs/${runs.workflow_runs[0]!.id}/jobs`)).json()) as { jobs: { status: string; conclusion: string | null }[] }
+    expect(cancelled.jobs.map((entry) => [entry.status, entry.conclusion])).toEqual([
+      ['in_progress', null],
+      ['completed', 'cancelled'],
+    ])
   })
 })

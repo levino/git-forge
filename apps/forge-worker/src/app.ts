@@ -1,7 +1,13 @@
 import {
+  type ActionsTick,
+  actionsTick,
   advanceRun,
+  type CheckRunReport,
+  type CheckRunSink,
+  queueRunsForPullRequest,
   type DispatchOptions,
   handleActionsService,
+  type SecretsKey,
   handleGhesApi,
   queueRunsForPush,
   type RunnerLauncher,
@@ -90,7 +96,20 @@ import {
   type SyncResult,
   ZERO_ID,
 } from '@git-forge/core'
-import { type BranchUpdate, type CollaborationOptions, handleCollaborationApi, handlePushedRefs, systemScope, actorRefOf } from '@git-forge/collaboration'
+import {
+  type BranchUpdate,
+  type CheckRunInput,
+  type CollaborationOptions,
+  getPullSummary,
+  handleCollaborationApi,
+  handlePushedRefs,
+  loadUsers,
+  recordCheckRun,
+  SYSTEM_ACTOR as COLLABORATION_SYSTEM_ACTOR,
+  systemScope,
+  actorRefOf,
+  updateCheckRunRecord,
+} from '@git-forge/collaboration'
 import {
   createNotifications,
   type EventActor,
@@ -127,6 +146,9 @@ export type ActionsOptions = {
   readonly instanceId: string
   readonly launcher?: RunnerLauncher
   readonly secrets?: SecretsProvider
+  readonly secretsKey?: SecretsKey
+  readonly repositories?: Readonly<Record<string, string>>
+  readonly githubFallback?: string | null
 }
 
 export type ForgeOptions = ForgeSettings & {
@@ -196,6 +218,7 @@ export type Forge = {
   readonly fetch: (request: Request, waitUntil?: WaitUntil) => Promise<Response>
   readonly services: ForgeServices
   readonly scheduled: (at?: Date) => Promise<ScheduledMirrorRun[]>
+  readonly actionsTick: () => Promise<ActionsTick | null>
   readonly runJob: (job: AppJob) => Promise<void>
   readonly notifications: Notifications
 }
@@ -700,12 +723,33 @@ export const createForge = (options: ForgeOptions): Forge => {
     }
   }
 
+  const checkRunInput = (check: CheckRunReport): CheckRunInput => ({
+    name: check.name,
+    status: check.status,
+    conclusion: check.conclusion,
+    externalId: check.externalId,
+    detailsUrl: check.detailsUrl,
+    ...(check.title ? { output: { title: check.title } } : {}),
+  })
+
+  const checkRuns: CheckRunSink = {
+    create: async (repo, check) => {
+      const repository = await store.findRepository(repo.owner, repo.name)
+      return repository ? recordCheckRun(db, repository.id, check.headSha, checkRunInput(check), COLLABORATION_SYSTEM_ACTOR, now().getTime()) : null
+    },
+    update: async (repo, id, check) => {
+      const repository = await store.findRepository(repo.owner, repo.name)
+      if (repository) await updateCheckRunRecord(db, repository.id, id, checkRunInput(check), now().getTime())
+    },
+  }
+
   const dispatchOptions = (request: Request): DispatchOptions => {
     const serverUrl = issuerFor(request)
     return {
       db,
       storage,
       urls: { serverUrl, serviceUrl: `${serverUrl}${ACTIONS_SERVICE_PATH}` },
+      checks: checkRuns,
       ...(options.actions?.launcher ? { launcher: options.actions.launcher } : {}),
       now: () => now().getTime(),
       log: (event) => console.log(JSON.stringify(event)),
@@ -723,6 +767,24 @@ export const createForge = (options: ForgeOptions): Forge => {
     }
   }
 
+  const hasRepositoryAccess = async (request: Request, owner: string, name: string, required: 'read' | 'write'): Promise<boolean> => {
+    if (!isValidName(owner) || !isValidName(name)) return false
+    if (required === 'read') return (await withJobTokens(createGitAccess(authenticateOptions(request)).authorize)(request, { owner, name }, 'read', 'git')) === null
+    const principal = await authenticateRequest(request, authenticateOptions(request))
+    if (!principal) return false
+    return (await checkRepositoryAccess(store, principal, { owner, name }, 'write')).decision === 'allow'
+  }
+
+  const userLogin = async (request: Request): Promise<string | null> => {
+    const principal = await authenticateRequest(request, authenticateOptions(request))
+    return principal?.kind === 'user' ? principal.login : null
+  }
+
+  const canUseAction = async (job: RepositoryName, action: RepositoryName): Promise<boolean> => {
+    if (job.owner === action.owner) return true
+    return (await store.findRepository(action.owner, action.name))?.visibility === 'public'
+  }
+
   const actionsRoute = async (request: Request): Promise<Response | null> => {
     const { actions } = options
     const { pathname } = new URL(request.url)
@@ -737,11 +799,32 @@ export const createForge = (options: ForgeOptions): Forge => {
         serverUrl: dispatch.urls.serverUrl,
         now: () => now().getTime(),
         ...(actions.secrets ? { secrets: actions.secrets } : {}),
+        ...(actions.secretsKey ? { secretsKey: actions.secretsKey } : {}),
+        checks: checkRuns,
+        actionSources: {
+          ...(actions.repositories ? { repositories: actions.repositories } : {}),
+          githubFallback: actions.githubFallback ?? null,
+          canUse: canUseAction,
+        },
         onJobCompleted: async (job) => {
           await advanceRun(dispatch, job)
           await emitRunEvents(dispatch.urls.serverUrl, job)
         },
-      })) ?? (await handleGhesApi(request, { db, storage, urls: dispatch.urls, authorize: isRepositoryAdmin, now: () => now().getTime() }))
+      })) ??
+      (await handleGhesApi(request, {
+        db,
+        storage,
+        urls: dispatch.urls,
+        authorize: isRepositoryAdmin,
+        authorizeRead: (incoming, owner, name) => hasRepositoryAccess(incoming, owner, name, 'read'),
+        authorizeWrite: (incoming, owner, name) => hasRepositoryAccess(incoming, owner, name, 'write'),
+        actor: userLogin,
+        ...(actions.secretsKey ? { secretsKey: actions.secretsKey } : {}),
+        ...(actions.launcher ? { launcher: actions.launcher } : {}),
+        checks: checkRuns,
+        log: dispatch.log!,
+        now: () => now().getTime(),
+      }))
     )
   }
 
@@ -827,7 +910,27 @@ export const createForge = (options: ForgeOptions): Forge => {
       const outcome: PushOutcome = { unpack: 'ok', results: [{ name: update.ref, oldId: update.oldId, newId: update.newId, ok: true }], pack: null, objectCount: 0, archived: [] }
       await afterPush(request, update.repo, outcome, waitUntil, await apiPrincipal(request))
     },
-    onActivity: async (scope, activity) => emit(await activityEvent(scope, activity, issuerFor(request))),
+    onActivity: async (scope, activity) => {
+      await emit(await activityEvent(scope, activity, issuerFor(request)))
+      if (options.actions && activity.kind === 'pull_request') {
+        try {
+          const pull = await getPullSummary(scope, activity.number)
+          const actor = activity.actor.kind === 'system' ? 'system' : (await loadUsers(scope.db, [activity.actor]))(activity.actor).login
+          await queueRunsForPullRequest(dispatchOptions(request), {
+            repo: scope.repo,
+            number: pull.number,
+            action: activity.action,
+            actor,
+            title: pull.title,
+            base: { ref: pull.baseRef, sha: pull.baseSha },
+            head: { ref: pull.headRef, sha: pull.headSha, repo: scope.repo },
+            trusted: true,
+          })
+        } catch (error) {
+          console.log(JSON.stringify({ event: 'pull-request-runs-failed', repository: `${scope.repo.owner}/${scope.repo.name}`, number: activity.number, error: String(error) }))
+        }
+      }
+    },
   })
 
   const refreshCollaboration = async (request: Request, repo: RepositoryName, outcome: PushOutcome, principal: Principal | null): Promise<void> => {
@@ -1019,6 +1122,19 @@ export const createForge = (options: ForgeOptions): Forge => {
       const sweep = await notifications.sweep().catch((error: unknown) => ({ error: String(error) }))
       console.log(JSON.stringify({ event: 'notification-sweep', ...sweep }))
       return federation ? enqueueDueMirrors(federation, at, options.mirrorIntervalMinutes) : syncDueMirrors(mirrorContext(options.publicUrl), at, options.mirrorIntervalMinutes)
+    },
+    actionsTick: async () => {
+      if (!options.actions) return null
+      const serverUrl = options.publicUrl ?? 'http://localhost'
+      return actionsTick({
+        db,
+        storage,
+        urls: { serverUrl, serviceUrl: `${serverUrl}${ACTIONS_SERVICE_PATH}` },
+        checks: checkRuns,
+        ...(options.actions.launcher && options.publicUrl ? { launcher: options.actions.launcher } : {}),
+        now: () => now().getTime(),
+        log: (event) => console.log(JSON.stringify(event)),
+      })
     },
     runJob: async (job) => {
       if (isNotificationJob(job)) return notifications.runJob(job)

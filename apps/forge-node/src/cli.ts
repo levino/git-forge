@@ -1,6 +1,7 @@
 import { generateSigningKey } from '@git-forge/accounts'
 import { serve } from '@git-forge/node'
-import { ConfigurationError } from 'forge-worker/config'
+import { ACTIONS_CRON, ConfigurationError } from 'forge-worker/config'
+import { parseCron } from './cron.ts'
 import { createInstance, jsonLog, type Log, migrate } from './instance.ts'
 import { startScheduler } from './scheduler.ts'
 
@@ -37,6 +38,16 @@ const runServe = async (env: Env, log: Log): Promise<number> => {
     },
     onError: (error, at) => log({ event: 'scheduled', cron: config.schedule.source, at: at.toISOString(), error: error instanceof Error ? error.message : String(error) }),
   })
+  const actions = startScheduler({
+    schedule: parseCron(ACTIONS_CRON),
+    task: async (at) => {
+      const tick = await forge.actionsTick()
+      if (tick && (tick.scheduled.length > 0 || Object.values(tick.reaped).some((count) => count > 0))) {
+        log({ event: 'scheduled', cron: ACTIONS_CRON, at: at.toISOString(), task: 'actions', scheduled: tick.scheduled.length, reaped: tick.reaped })
+      }
+    },
+    onError: (error, at) => log({ event: 'scheduled', cron: ACTIONS_CRON, at: at.toISOString(), task: 'actions', error: error instanceof Error ? error.message : String(error) }),
+  })
   log({
     event: 'listening',
     version: VERSION,
@@ -56,7 +67,7 @@ const runServe = async (env: Env, log: Log): Promise<number> => {
     process.once('SIGTERM', () => stop('SIGTERM'))
     process.once('SIGINT', () => stop('SIGINT'))
   })
-  await Promise.all([server.close(), scheduler.stop()])
+  await Promise.all([server.close(), scheduler.stop(), actions.stop()])
   await instance.close()
   log({ event: 'stopped' })
   return 0

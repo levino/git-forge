@@ -5,7 +5,7 @@ import { type RunningServer, startServer } from '@git-forge/core/test/http-serve
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { basicAuthorization, secretMatches } from '../../src/app.ts'
 import { git } from '../e2e/history.ts'
-import { DEFAULT_COMPACT_MAX_BYTES, DEFAULT_MAX_LFS_OBJECT_BYTES, parseSettings } from '../../src/config.ts'
+import { DEFAULT_COMPACT_MAX_BYTES, DEFAULT_MAX_LFS_OBJECT_BYTES, loadSecretsKey, parseActionsSettings, parseSettings } from '../../src/config.ts'
 import { upstreamRepository } from '../../src/mirrors.ts'
 import { bootstrap, BOOTSTRAP_TOKEN, call, type NodeForge, nodeForge } from '../support/node-forge.ts'
 
@@ -44,6 +44,27 @@ describe('settings', () => {
     const { privateJwk, key } = await generateSigningKey()
     expect((await parseSettings({ INSTANCE_KEY: JSON.stringify(privateJwk) })).instanceKey?.kid).toBe(key.kid)
     await expect(parseSettings({ INSTANCE_KEY: 'nope' })).rejects.toThrow(/INSTANCE_KEY/)
+  })
+
+  it('parses the CI settings', async () => {
+    expect(parseActionsSettings({})).toBeUndefined()
+    const settings = parseActionsSettings({
+      ACTIONS: 'true',
+      ACTIONS_REPOSITORIES: '{"actions/*": "mirrors/*", "pnpm/action-setup": "mirrors/pnpm-action-setup"}',
+      ACTIONS_GITHUB_FALLBACK: 'true',
+      ACTIONS_SECRETS_KEY: 'a'.repeat(64),
+    })
+    expect(settings).toMatchObject({
+      repositories: { 'actions/*': 'mirrors/*', 'pnpm/action-setup': 'mirrors/pnpm-action-setup' },
+      githubFallback: 'https://api.github.com',
+    })
+    expect((await loadSecretsKey(settings))?.id).toMatch(/^[0-9a-f]{16}$/)
+    expect(await loadSecretsKey(parseActionsSettings({ ACTIONS: 'true' }))).toBeUndefined()
+    await expect(loadSecretsKey(parseActionsSettings({ ACTIONS: 'true', ACTIONS_SECRETS_KEY: 'short' }))).rejects.toThrow(/ACTIONS_SECRETS_KEY/)
+    expect(() => parseActionsSettings({ ACTIONS: 'true', ACTIONS_REPOSITORIES: '{"actions/checkout": "mirrors/*"}' })).toThrow(/invalid mapping/)
+    expect(() => parseActionsSettings({ ACTIONS: 'true', ACTIONS_REPOSITORIES: '[]' })).toThrow(/ACTIONS_REPOSITORIES/)
+    expect(() => parseActionsSettings({ ACTIONS: 'true', ACTIONS_GITHUB_FALLBACK: 'http://insecure' })).toThrow(/ACTIONS_GITHUB_FALLBACK/)
+    expect(parseActionsSettings({ ACTIONS: 'true', ACTIONS_GITHUB_FALLBACK: 'https://ghe.example/api/v3/' })?.githubFallback).toBe('https://ghe.example/api/v3')
   })
 
   it('compares secrets without accepting missing or different values', async () => {

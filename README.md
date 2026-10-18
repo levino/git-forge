@@ -23,7 +23,9 @@ Paid plan is required. After deploying, create the first admin with the
 
 Status: Git core, Git LFS, accounts with personal access tokens, instance
 federation and mirrors work on Cloudflare Workers; GitHub Actions compatible
-CI for the official `actions/runner` is a spike; the web UI and collaboration
+CI for the official `actions/runner` runs real workflows (matrix, `uses:`
+actions from mirrors, secrets, environments, cancellation, re-runs), not yet
+deployed on Cloudflare Containers; the web UI and collaboration
 features are next. Pushes too large for one request go through
 `git forge push` ([packages/cli](packages/cli)) or a server-side import. See [docs/design.md](docs/design.md) and
 [docs/roadmap.md](docs/roadmap.md).

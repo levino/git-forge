@@ -166,6 +166,37 @@ importers:
 
   .: {}
 
+  apps/forge-node:
+    dependencies:
+      '@git-forge/accounts':
+        specifier: workspace:*
+        version: link:../../packages/accounts
+      '@git-forge/accounts-node':
+        specifier: workspace:*
+        version: link:../../packages/accounts-node
+      '@git-forge/core':
+        specifier: workspace:*
+        version: link:../../packages/core
+      '@git-forge/node':
+        specifier: workspace:*
+        version: link:../../packages/node
+      '@git-forge/s3':
+        specifier: workspace:*
+        version: link:../../packages/s3
+      forge-worker:
+        specifier: workspace:*
+        version: link:../forge-worker
+    devDependencies:
+      '@types/node':
+        specifier: 22.20.5
+        version: 22.20.5
+      typescript:
+        specifier: 6.0.3
+        version: 6.0.3
+      vitest:
+        specifier: 4.1.11
+        version: 4.1.11(@types/node@22.20.5)(vite@8.3.4(@types/node@22.20.5))
+
   apps/forge-worker:
     dependencies:
       '@git-forge/accounts':

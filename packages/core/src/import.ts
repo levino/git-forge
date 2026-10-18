@@ -79,6 +79,8 @@ export const DEFAULT_MAX_GRAPH_BYTES = 64 * 1024 * 1024
 
 export const DEFAULT_MAX_FAILURES = 5
 
+export const STALE_IMPORT_MS = 30 * 60 * 1000
+
 const LFS_PER_STEP = 100
 
 const importPrefix = (repo: RepositoryName) => `${repositoryPrefix(repo)}import/`
@@ -152,11 +154,15 @@ export const startImport = async (storage: Storage, repo: RepositoryName, settin
   for (let attempt = 0; attempt < 10; attempt++) {
     const stored = await readState(storage, repo)
     const previous = stored?.value
-    if (previous && !isImportFinished(previous)) throw new ImportRunningError(`an import into ${repo.owner}/${repo.name} is already running`)
+    const stale = previous !== undefined && !isImportFinished(previous) && now.getTime() - Date.parse(previous.updatedAt) > STALE_IMPORT_MS
+    if (previous && !isImportFinished(previous) && !stale) throw new ImportRunningError(`an import into ${repo.owner}/${repo.name} is already running`)
     const resume = previous?.phase === 'failed' && previous.url === settings.url && previous.failedIn !== undefined
+    const takeOver = stale && previous.url === settings.url
     const state: ImportState = resume
       ? (({ error: _error, failedIn: _failedIn, ...rest }) => ({ ...rest, phase: previous.failedIn as ImportPhase, failures: 0, updatedAt: at }))(previous)
-      : freshState(settings, at)
+      : takeOver
+        ? { ...previous, failures: 0, updatedAt: at }
+        : freshState(settings, at)
     if (await writeState(storage, repo, state, stored?.etag ?? null)) return state
   }
   throw new Error('could not start import')

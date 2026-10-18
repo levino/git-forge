@@ -61,7 +61,9 @@ discussions.
 - [x] File system storage adapter (`@git-forge/node`)
 - [x] Shared storage conformance suite for all adapters
 - [x] Local S3 test environment (versitygw; Garage, SeaweedFS, RustFS evaluated)
-- [ ] Headless deployment on a Raspberry Pi (Bun/Node + SQLite file + filesystem or S3)
+- [x] Headless deployment on a Raspberry Pi: `apps/forge-node` serves the Worker's router over `node:http` with an SQLite file, `FsStorage` or `S3Storage`, an in-process job queue and a cron schedule; explicit `migrate` command; single executables for `linux-x64`/`linux-arm64` (Bun) in every release, Dockerfile, systemd units; E2E with a Worker under `wrangler dev` mirroring in both directions
+- [ ] Publish the `apps/forge-node` image to a container registry (multi-arch) from the release workflow
+- [ ] Durable jobs for Node deployments (job table in SQLite), so queued mirror jobs survive a restart instead of waiting for the next notification or scheduled run
 
 ## M5a — Large pushes
 

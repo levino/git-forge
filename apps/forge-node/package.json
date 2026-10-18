@@ -1,0 +1,30 @@
+{
+  "name": "forge-node",
+  "version": "0.0.0",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "git-forge-node": "./src/main.ts"
+  },
+  "scripts": {
+    "start": "node --experimental-transform-types --no-warnings src/main.ts",
+    "build": "sh build-executables.sh",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run && vitest run --config vitest.e2e.config.ts",
+    "test:e2e": "vitest run --config vitest.e2e.config.ts"
+  },
+  "dependencies": {
+    "@git-forge/accounts": "workspace:*",
+    "@git-forge/accounts-node": "workspace:*",
+    "@git-forge/core": "workspace:*",
+    "@git-forge/node": "workspace:*",
+    "@git-forge/s3": "workspace:*",
+    "forge-worker": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.5",
+    "typescript": "6.0.3",
+    "vitest": "4.1.11"
+  }
+}

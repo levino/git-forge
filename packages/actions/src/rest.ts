@@ -54,6 +54,7 @@ import {
   type RunRow,
   verifyToken,
 } from './store.ts'
+import { deleteVariable, getVariable, listVariables, putVariable, type Variable } from './variables.ts'
 
 export type RepositoryAuthorize = (request: Request, owner: string, repo: string) => Promise<boolean>
 
@@ -408,6 +409,36 @@ const secretRoutes = async (context: RepoRequest, scope: SecretScope, rest: read
   }
 }
 
+const variableJson = (variable: Variable) => ({ name: variable.name, value: variable.value, created_at: new Date(variable.created_at).toISOString(), updated_at: new Date(variable.updated_at).toISOString() })
+
+const variableRoutes = async (context: RepoRequest, scope: SecretScope, rest: readonly string[]): Promise<Response> => {
+  const { options, request, now } = context
+  const method = request.method
+  if (rest.length === 0 && method === 'GET') {
+    const variables = await listVariables(options.db, scope)
+    return json(200, { total_count: variables.length, variables: variables.map(variableJson) })
+  }
+  if (rest.length > 1 || (rest.length === 0 && method !== 'POST')) return error(404, 'Not Found')
+  const existing = rest[0] === undefined ? null : await getVariable(options.db, scope, rest[0])
+  if (method === 'GET') return existing ? json(200, variableJson(existing)) : error(404, 'Not Found')
+  if (method === 'DELETE') return existing && (await deleteVariable(options.db, scope, existing.name)) ? noContent() : error(404, 'Not Found')
+  if (method !== 'POST' && method !== 'PATCH') return error(404, 'Not Found')
+  if (method === 'PATCH' && !existing) return error(404, 'Not Found')
+  const body = (await readBody(request)) ?? {}
+  const name = typeof body['name'] === 'string' ? body['name'] : existing?.name
+  const value = typeof body['value'] === 'string' ? body['value'] : existing?.value
+  if (name === undefined || value === undefined) return error(422, 'name and value must be strings')
+  if (method === 'POST' && (await getVariable(options.db, scope, name))) return error(409, 'Variable already exists')
+  try {
+    await putVariable(options.db, scope, name, value, now)
+  } catch (caught) {
+    if (caught instanceof SecretNameError) return error(422, caught.message)
+    throw caught
+  }
+  if (existing && existing.name !== name.toUpperCase()) await deleteVariable(options.db, scope, existing.name)
+  return noContent(method === 'POST' ? 201 : 204)
+}
+
 const parseReviewers = (value: unknown): EnvironmentReviewer[] | null => {
   if (value === undefined || value === null) return []
   if (!Array.isArray(value)) return null
@@ -448,6 +479,11 @@ const environmentRoutes = async (context: RepoRequest, rest: readonly string[]):
     const environment = await getEnvironment(options.db, owner, repo, name)
     if (!environment) return error(404, 'Not Found')
     return secretRoutes(context, { owner, repo, environment: environment.name }, rest.slice(2))
+  }
+  if (rest[1] === 'variables') {
+    const environment = await getEnvironment(options.db, owner, repo, name)
+    if (!environment) return error(404, 'Not Found')
+    return variableRoutes(context, { owner, repo, environment: environment.name }, rest.slice(2).map(decodeURIComponent))
   }
   return error(404, 'Not Found')
 }
@@ -582,6 +618,7 @@ const actionsRoutes = async (context: RepoRequest, collection: string | undefine
   }
   if (!(await options.authorize(request, owner, repo))) return error(404, 'Not Found')
   if (collection === 'secrets') return secretRoutes(context, { owner, repo, environment: '' }, rest.map(decodeURIComponent))
+  if (collection === 'variables') return variableRoutes(context, { owner, repo, environment: '' }, rest.map(decodeURIComponent))
   if (collection === 'runners') {
     if (rest.length === 0 && method === 'GET') {
       const runners = await listRunners(options.db, owner, repo, url.searchParams.get('name') ?? undefined)

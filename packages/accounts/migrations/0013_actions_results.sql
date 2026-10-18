@@ -81,3 +81,14 @@ CREATE TABLE actions_artifacts (
 CREATE UNIQUE INDEX actions_artifacts_name ON actions_artifacts (run_id, name) WHERE deleted_at IS NULL;
 --> statement-breakpoint
 CREATE INDEX actions_artifacts_repo ON actions_artifacts (owner, repo, id);
+--> statement-breakpoint
+CREATE TABLE actions_variables (
+  owner TEXT NOT NULL,
+  repo TEXT NOT NULL,
+  environment TEXT NOT NULL,
+  name TEXT NOT NULL,
+  value TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (owner, repo, environment, name)
+);

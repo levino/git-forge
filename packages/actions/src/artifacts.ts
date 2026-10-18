@@ -1,6 +1,6 @@
 import { type Database, first, sql } from '@git-forge/accounts'
-import { repositoryPrefix } from '@git-forge/core'
-import { type BlobRow, createBlob } from './blobs.ts'
+import { fromUtf8, readAll, repositoryPrefix, type Storage } from '@git-forge/core'
+import { type BlobRow, createBlob, getBlob, openBlob } from './blobs.ts'
 
 export type ArtifactRow = {
   readonly id: number
@@ -112,3 +112,34 @@ export const listArtifacts = async (db: Database, owner: string, repo: string, f
       limit,
     ),
   )
+
+const u16 = (bytes: Uint8Array, at: number): number => bytes[at]! | (bytes[at + 1]! << 8)
+
+const u32 = (bytes: Uint8Array, at: number): number => u16(bytes, at) + u16(bytes, at + 2) * 0x10000
+
+const MAX_DIRECTORY_BYTES = 16 * 1024 * 1024
+
+export const PAGES_ARCHIVE = 'artifact.tar'
+
+export const openArtifactFile = async (db: Database, storage: Storage, owner: string, repo: string, id: number, now: number): Promise<ReadableStream<Uint8Array> | null> => {
+  const artifact = await getArtifact(db, id)
+  if (!artifact || artifact.owner !== owner || artifact.repo !== repo || artifact.finalized_at === null || artifact.deleted_at !== null || artifact.expires_at <= now) return null
+  const blob = await getBlob(db, artifact.blob_id)
+  if (!blob?.size) return null
+  if (artifact.mime_type !== null && artifact.mime_type !== 'application/zip') return openBlob(db, storage, blob)
+  const range = (offset: number, length: number) => readAll(openBlob(db, storage, blob, { offset, length }), MAX_DIRECTORY_BYTES)
+  const tail = await range(Math.max(0, blob.size - 22 - 0xffff), Math.min(blob.size, 22 + 0xffff))
+  let end = tail.length - 22
+  while (end >= 0 && u32(tail, end) !== 0x06054b50) end--
+  if (end < 0 || u32(tail, end + 12) > MAX_DIRECTORY_BYTES) return null
+  const directory = await range(u32(tail, end + 16), u32(tail, end + 12))
+  const entries: { readonly name: string; readonly method: number; readonly size: number; readonly offset: number }[] = []
+  for (let at = 0; at + 46 <= directory.length && u32(directory, at) === 0x02014b50; at += 46 + u16(directory, at + 28) + u16(directory, at + 30) + u16(directory, at + 32)) {
+    entries.push({ name: fromUtf8(directory.subarray(at + 46, at + 46 + u16(directory, at + 28))), method: u16(directory, at + 10), size: u32(directory, at + 20), offset: u32(directory, at + 42) })
+  }
+  const entry = entries.find((candidate) => candidate.name === PAGES_ARCHIVE) ?? (entries.length === 1 ? entries[0] : undefined)
+  if (!entry || (entry.method !== 0 && entry.method !== 8) || entry.size === 0xffffffff || entry.offset === 0xffffffff) return null
+  const local = await range(entry.offset, 30)
+  const data = openBlob(db, storage, blob, { offset: entry.offset + 30 + u16(local, 26) + u16(local, 28), length: entry.size })
+  return entry.method === 8 ? data.pipeThrough(new DecompressionStream('deflate-raw') as unknown as TransformStream<Uint8Array, Uint8Array>) : data
+}

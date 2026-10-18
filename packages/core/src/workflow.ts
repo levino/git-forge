@@ -71,6 +71,7 @@ export type WorkflowJob = {
   readonly continueOnError: boolean | string
   readonly timeoutMinutes: number
   readonly permissions?: Permissions
+  readonly concurrency?: Concurrency
   readonly steps: readonly WorkflowStep[]
 }
 
@@ -79,6 +80,8 @@ export type BranchFilter = {
   readonly branchesIgnore?: readonly string[]
   readonly tags?: readonly string[]
   readonly tagsIgnore?: readonly string[]
+  readonly paths?: readonly string[]
+  readonly pathsIgnore?: readonly string[]
 }
 
 export type DispatchInputType = 'string' | 'boolean' | 'number' | 'choice' | 'environment'
@@ -127,15 +130,15 @@ const DEFAULT_TIMEOUT_MINUTES = 360
 
 const WORKFLOW_KEYS = new Set(['name', 'on', 'env', 'defaults', 'concurrency', 'jobs', 'permissions'])
 
-const JOB_KEYS = new Set(['name', 'if', 'runs-on', 'needs', 'env', 'defaults', 'outputs', 'strategy', 'environment', 'continue-on-error', 'timeout-minutes', 'steps', 'permissions'])
+const JOB_KEYS = new Set(['name', 'if', 'runs-on', 'needs', 'env', 'defaults', 'outputs', 'strategy', 'environment', 'continue-on-error', 'timeout-minutes', 'steps', 'permissions', 'concurrency'])
 
 const STRATEGY_KEYS = new Set(['matrix', 'fail-fast', 'max-parallel'])
 
 const INPUT_TYPES: ReadonlySet<string> = new Set(['string', 'boolean', 'number', 'choice', 'environment'])
 
 const TRIGGER_FILTER_KEYS: Readonly<Record<string, ReadonlySet<string>>> = {
-  push: new Set(['branches', 'branches-ignore', 'tags', 'tags-ignore']),
-  pull_request: new Set(['branches', 'branches-ignore', 'types']),
+  push: new Set(['branches', 'branches-ignore', 'tags', 'tags-ignore', 'paths', 'paths-ignore']),
+  pull_request: new Set(['branches', 'branches-ignore', 'types', 'paths', 'paths-ignore']),
   workflow_dispatch: new Set(['inputs']),
 }
 
@@ -271,6 +274,8 @@ const parseTriggers = (value: YamlValue | undefined, c: Collector): WorkflowTrig
       ...optional('branchesIgnore', c.stringList(filter['branches-ignore'], `${path}.branches-ignore`)),
       ...optional('tags', c.stringList(filter['tags'], `${path}.tags`)),
       ...optional('tagsIgnore', c.stringList(filter['tags-ignore'], `${path}.tags-ignore`)),
+      ...optional('paths', c.stringList(filter['paths'], `${path}.paths`)),
+      ...optional('pathsIgnore', c.stringList(filter['paths-ignore'], `${path}.paths-ignore`)),
       ...optional('types', c.stringList(filter['types'], `${path}.types`)),
       ...optional('inputs', event === 'workflow_dispatch' ? parseInputs(filter['inputs'], `${path}.inputs`, c) : undefined),
     }
@@ -392,6 +397,7 @@ const parseJob = (id: string, value: YamlValue, c: Collector): WorkflowJob | nul
     continueOnError: c.booleanish(value['continue-on-error'], `${path}.continue-on-error`),
     timeoutMinutes: c.positiveNumber(value['timeout-minutes'], `${path}.timeout-minutes`) ?? DEFAULT_TIMEOUT_MINUTES,
     ...optional('permissions', parsePermissions(value['permissions'], `${path}.permissions`, c)),
+    ...optional('concurrency', parseConcurrency(value['concurrency'], `${path}.concurrency`, c)),
     steps: steps.flatMap((step, index) => parseStep(step, `${path}.steps[${index}]`, c) ?? []),
   }
 }
@@ -545,9 +551,18 @@ export const matchesFilters = (name: string, include: readonly string[] | undefi
   return matched
 }
 
-export const triggeredByPush = (workflow: Workflow, ref: string): boolean =>
+export const hasPathFilter = (trigger: WorkflowTrigger): boolean => trigger.paths !== undefined || trigger.pathsIgnore !== undefined
+
+export const matchesPaths = (trigger: WorkflowTrigger, changed: readonly string[] | null): boolean => {
+  if (changed === null || !hasPathFilter(trigger)) return true
+  if (trigger.pathsIgnore && !changed.some((path) => matchesFilters(path, undefined, trigger.pathsIgnore))) return false
+  return !trigger.paths || changed.some((path) => matchesFilters(path, trigger.paths, undefined))
+}
+
+export const triggeredByPush = (workflow: Workflow, ref: string, changed: readonly string[] | null = null): boolean =>
   workflow.triggers.some((trigger) => {
     if (trigger.event !== 'push') return false
+    if (!ref.startsWith('refs/tags/') && !matchesPaths(trigger, changed)) return false
     if (ref.startsWith('refs/heads/')) {
       if (!trigger.branches && !trigger.branchesIgnore && (trigger.tags || trigger.tagsIgnore)) return false
       return matchesFilters(ref.slice('refs/heads/'.length), trigger.branches, trigger.branchesIgnore)
@@ -561,12 +576,13 @@ export const triggeredByPush = (workflow: Workflow, ref: string): boolean =>
 
 export const DEFAULT_PULL_REQUEST_TYPES = ['opened', 'synchronize', 'reopened']
 
-export const triggeredByPullRequest = (workflow: Workflow, baseBranch: string, action: string): boolean =>
+export const triggeredByPullRequest = (workflow: Workflow, baseBranch: string, action: string, changed: readonly string[] | null = null): boolean =>
   workflow.triggers.some(
     (trigger) =>
       trigger.event === 'pull_request' &&
       (trigger.types ?? DEFAULT_PULL_REQUEST_TYPES).includes(action) &&
-      matchesFilters(baseBranch, trigger.branches, trigger.branchesIgnore),
+      matchesFilters(baseBranch, trigger.branches, trigger.branchesIgnore) &&
+      matchesPaths(trigger, changed),
   )
 
 export const dispatchTrigger = (workflow: Workflow): WorkflowTrigger | undefined => workflow.triggers.find((trigger) => trigger.event === 'workflow_dispatch')

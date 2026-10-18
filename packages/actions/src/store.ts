@@ -623,8 +623,27 @@ export const recordLogChunk = async (db: Database, id: number, chunk: number): P
   await db.run(sql('UPDATE actions_logs SET chunks = MAX(chunks, ?) WHERE id = ?', chunk + 1, id))
 }
 
-export const promoteJob = async (db: Database, requestId: number): Promise<boolean> =>
-  (await db.run(sql("UPDATE actions_jobs SET status = 'queued' WHERE request_id = ? AND status = 'pending'", requestId))).changes === 1
+export type JobGroup = { readonly owner: string; readonly repo: string; readonly group: string }
+
+const IN_GROUP = "json_extract(j.definition, '$.concurrency.group') = ? AND j.run_id IN (SELECT id FROM actions_runs WHERE owner = ? AND repo = ?)"
+
+export const promoteJob = async (db: Database, requestId: number, group: JobGroup | null = null): Promise<boolean> =>
+  (
+    await db.run(
+      group
+        ? sql(
+            `UPDATE actions_jobs SET status = 'queued' WHERE request_id = ? AND status = 'pending' AND NOT EXISTS (SELECT 1 FROM actions_jobs j WHERE j.status IN ('queued', 'assigned', 'in_progress') AND ${IN_GROUP})`,
+            requestId,
+            group.group,
+            group.owner,
+            group.repo,
+          )
+        : sql("UPDATE actions_jobs SET status = 'queued' WHERE request_id = ? AND status = 'pending'", requestId),
+    )
+  ).changes === 1
+
+export const jobsInGroup = async (db: Database, group: JobGroup): Promise<JobRow[]> =>
+  db.all<JobRow>(sql(`SELECT j.* FROM actions_jobs j WHERE j.status != 'completed' AND ${IN_GROUP} ORDER BY j.request_id`, group.group, group.owner, group.repo))
 
 export const skipJob = async (db: Database, requestId: number, now: number): Promise<boolean> =>
   (await db.run(sql("UPDATE actions_jobs SET status = 'completed', conclusion = 'skipped', completed_at = ? WHERE request_id = ? AND status = 'pending'", now, requestId)))

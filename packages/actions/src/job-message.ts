@@ -1,5 +1,5 @@
 import type { ExpressionValue, RunDefaults, RunStep, UsesStep, WorkflowEnv, WorkflowJob, WorkflowStep } from '@git-forge/core'
-import { contextDictionary, expressionToken, mappingToken, stepCondition, type TemplateToken, toContextData } from './template.ts'
+import { expressionToken, mappingToken, stepCondition, type TemplateToken, toContextData } from './template.ts'
 
 export type RunContext = {
   readonly id: number
@@ -47,6 +47,7 @@ export type JobMessageInput = {
   readonly runtimeToken: string
   readonly githubToken: string
   readonly secrets: Readonly<Record<string, string>>
+  readonly vars?: Readonly<Record<string, string>>
   readonly endpointData?: Readonly<Record<string, string>>
   readonly variables?: Readonly<Record<string, string>>
   readonly retentionDays?: number
@@ -211,7 +212,7 @@ export const buildJobMessage = (input: JobMessageInput) => {
     contextData: {
       github: toContextData(githubContextValue(input.run, input.serverUrl, input.job.id, input.retentionDays)),
       inputs: toContextData(input.run.inputs ?? {}),
-      vars: contextDictionary({}),
+      vars: toContextData(input.vars ?? {}),
       needs: toContextData(needsContextValue(input.needs ?? {})),
       matrix: input.matrix ? toContextData(input.matrix) : null,
       strategy: input.strategy ? toContextData(strategyContextValue(input.strategy)) : null,

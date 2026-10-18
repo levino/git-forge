@@ -8,6 +8,7 @@ import { verifyClientAssertion } from './keys.ts'
 import { idTokenAllowed, idTokenRequestUrl } from './oidc.ts'
 import { resultsEndpointData } from './results.ts'
 import { readSecrets, type SecretsKey } from './secrets.ts'
+import { readVariables } from './variables.ts'
 import { authorizationUrl, POOL_ID, POOL_NAME } from './service-constants.ts'
 import {
   acknowledgeMessage,
@@ -305,9 +306,14 @@ export const jobSecrets = async (options: Pick<ActionsServiceOptions, 'db' | 'se
   const key = options.secretsKey
   if (!key) return { ...instance }
   const repository = await readSecrets(options.db, key, { ...scope, environment: '' })
-  const environment = job.environment && job.approval !== 'rejected' && job.approval !== 'waiting' ? await readSecrets(options.db, key, { ...scope, environment: job.environment }) : {}
+  const environment = approvedEnvironment(job) ? await readSecrets(options.db, key, { ...scope, environment: job.environment! }) : {}
   return { ...instance, ...repository, ...environment }
 }
+
+const approvedEnvironment = (job: JobRow): string | null => (job.environment && job.approval !== 'rejected' && job.approval !== 'waiting' ? job.environment : null)
+
+export const jobVariables = async (db: Database, run: RunRow, job: JobRow): Promise<Record<string, string>> =>
+  run.trusted === 1 ? readVariables(db, run.owner, run.repo, approvedEnvironment(job)) : {}
 
 const jobTtlMs = (job: JobRow): number => (jobDefinitionOf(job).job.timeoutMinutes + 60) * 60 * 1000
 
@@ -320,10 +326,11 @@ const deliver = async (context: Context, job: JobRow, runner: Runner): Promise<R
   const ttlMs = jobTtlMs(job)
   const results = context.options.results
   const idTokenUrl = results?.idTokens && idTokenAllowed(run, runDefinition, definition) ? idTokenRequestUrl(context.serverUrl) : null
-  const [runtimeToken, githubToken, secrets] = await Promise.all([
+  const [runtimeToken, githubToken, secrets, vars] = await Promise.all([
     issueToken(db, { kind: 'runtime', jobId: job.id, runnerId: runner.id, owner: run.owner, repo: run.repo, scope: resultsScope(run.id, job.id), ttlMs }, context.now),
     issueToken(db, { kind: 'github', jobId: job.id, owner: run.owner, repo: run.repo, ttlMs }, context.now),
     jobSecrets(context.options, run, job),
+    jobVariables(db, run, job),
   ])
   const message = buildJobMessage({
     requestId: job.request_id,
@@ -342,6 +349,7 @@ const deliver = async (context: Context, job: JobRow, runner: Runner): Promise<R
     runtimeToken,
     githubToken,
     secrets,
+    vars,
     ...(results
       ? {
           endpointData: resultsEndpointData(context.serverUrl, idTokenUrl),

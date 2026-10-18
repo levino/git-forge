@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { base64UrlDecode, decodeJwt, utf8 } from '@git-forge/accounts'
-import { createRepository, parseWorkflow, WorkflowError } from '@git-forge/core'
+import { createRepository, parseWorkflow, readAll, WorkflowError } from '@git-forge/core'
 import { commitAll, gitEnv, initRepo, writeFile } from '@git-forge/core/test/git-helpers.ts'
 import { type RunningServer, startServer } from '@git-forge/core/test/http-server.ts'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -15,6 +15,7 @@ import {
   idTokenAllowed,
   importEs256Key,
   matchCacheEntry,
+  openArtifactFile,
   parseBlockList,
   planRangeParts,
   type RunnerLaunch,
@@ -75,6 +76,31 @@ const authorized = (job: DeliveredJob, init: RequestInit = {}): RequestInit => (
 const twirp = async (server: RunningServer, job: DeliveredJob, service: 'CacheService' | 'ArtifactService', method: string, body: unknown) => {
   const response = await fetch(`${server.url}/twirp/github.actions.results.api.v1.${service}/${method}`, authorized(job, { method: 'POST', body: JSON.stringify(body) }))
   return { status: response.status, body: (await response.json()) as Record<string, any> }
+}
+
+const zipOf = async (entries: readonly { name: string; data: Uint8Array; deflate: boolean }[]): Promise<Uint8Array> => {
+  const header = (size: number, write: (view: DataView) => void) => {
+    const bytes = new Uint8Array(size)
+    write(new DataView(bytes.buffer))
+    return bytes
+  }
+  const locals: Uint8Array[] = []
+  const centrals: Uint8Array[] = []
+  let offset = 0
+  for (const entry of entries) {
+    const name = utf8(entry.name)
+    const data = entry.deflate ? await readAll(new Blob([entry.data as Uint8Array<ArrayBuffer>]).stream().pipeThrough(new CompressionStream('deflate-raw'))) : entry.data
+    const method = entry.deflate ? 8 : 0
+    locals.push(header(30, (v) => (v.setUint32(0, 0x04034b50, true), v.setUint16(8, method, true), v.setUint32(18, data.length, true), v.setUint32(22, entry.data.length, true), v.setUint16(26, name.length, true))), name, data)
+    centrals.push(
+      header(46, (v) => (v.setUint32(0, 0x02014b50, true), v.setUint16(10, method, true), v.setUint32(20, data.length, true), v.setUint32(24, entry.data.length, true), v.setUint16(28, name.length, true), v.setUint32(42, offset, true))),
+      name,
+    )
+    offset += 30 + name.length + data.length
+  }
+  const size = centrals.reduce((total, part) => total + part.length, 0)
+  const end = header(22, (v) => (v.setUint32(0, 0x06054b50, true), v.setUint16(10, entries.length, true), v.setUint32(12, size, true), v.setUint32(16, offset, true)))
+  return new Uint8Array(await new Blob([...locals, ...centrals, end] as Uint8Array<ArrayBuffer>[]).arrayBuffer())
 }
 
 const endpointData = (job: DeliveredJob): Record<string, string> => job.message.resources.endpoints[0].data
@@ -218,6 +244,29 @@ describe('results service', () => {
     expect(await (await fetch(zip.headers.get('location')!)).text()).toBe('PK-first;PK-second')
     expect((await api(`/artifacts/${rest.artifacts[0]!.id}`, { method: 'DELETE' })).status).toBe(204)
     expect(((await (await api('/artifacts')).json()) as { total_count: number }).total_count).toBe(0)
+  })
+
+  it('opens artifact.tar inside a stored artifact zip for Pages', async () => {
+    const h = await harness()
+    await h.push({ '.github/workflows/ci.yml': WORKFLOW })
+    const { job } = await h.start(0)
+    const ids = backendIds(job)
+    const tar = utf8('tar bytes '.repeat(100))
+    const zip = await zipOf([
+      { name: 'other.txt', data: utf8('x'), deflate: false },
+      { name: 'artifact.tar', data: tar, deflate: true },
+    ])
+    const created = await twirp(h.server, job, 'ArtifactService', 'CreateArtifact', { ...ids, name: 'github-pages', version: 4 })
+    const url = created.body['signed_upload_url'] as string
+    const half = Math.floor(zip.length / 2)
+    await fetch(`${url}?comp=block&blockid=YQ==`, { method: 'PUT', body: zip.slice(0, half) })
+    await fetch(`${url}?comp=block&blockid=Yg==`, { method: 'PUT', body: zip.slice(half) })
+    await fetch(`${url}?comp=blocklist`, { method: 'PUT', body: '<BlockList><Latest>YQ==</Latest><Latest>Yg==</Latest></BlockList>' })
+    const finalized = await twirp(h.server, job, 'ArtifactService', 'FinalizeArtifact', { ...ids, name: 'github-pages', size: String(zip.length) })
+    const id = Number(finalized.body['artifact_id'])
+    const stream = await openArtifactFile(h.forge.db, h.forge.storage, 'acme', 'site', id, Date.now())
+    expect(await readAll(stream!)).toEqual(tar)
+    expect(await openArtifactFile(h.forge.db, h.forge.storage, 'acme', 'other', id, Date.now())).toBeNull()
   })
 
   it('issues ID tokens with GitHub-shaped claims signed with the published key', async () => {

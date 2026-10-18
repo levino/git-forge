@@ -409,18 +409,26 @@ update themselves.
   `levino/git-forge-instance`): `wrangler.jsonc` (own bindings, vars, domain,
   `main: dist/git-forge-worker.mjs`, `build.command: sh build.sh`,
   `migrations_dir: dist/migrations`), `git-forge.json`, `build.sh` (POSIX sh,
-  `curl`, `sha256sum`, `tar`), `renovate.json`, a checksum workflow and a
-  README. No `package.json`, no lockfile, nothing from npm in the Worker.
+  `curl`, `sha256sum`, `tar`), `deploy.sh`, `renovate.json`, a checksum
+  workflow and a README. No `package.json`, no lockfile, nothing from npm in the Worker.
   `GIT_FORGE_RELEASE_URL` overrides the download base for mirrors and tests.
+- **Resources only from config:** every Cloudflare resource is declared in
+  `wrangler.jsonc` and created by Wrangler, never by hand. D1 and R2 have a
+  name and no id, so the first `wrangler deploy` provisions them (automatic
+  resource provisioning) and later commands find them by name. Cron, vars,
+  routes (custom domains) and the required `ADMIN_TOKEN` secret
+  (`secrets.required`) are declared there as well; only the secret's value is
+  set outside the repository.
 - **Build on Cloudflare (Workers Builds):** build command `sh build.sh`,
-  deploy command `wrangler d1 migrations apply DB --remote && wrangler deploy`.
-  Migrations run before the upload so new code never sees an old schema;
-  migrations are therefore additive and compatible with the previous release,
-  which keeps a rollback (reverting the pin) safe. `build.sh` is idempotent, so
-  the second run through `build.command` is a no-op.
-- **First install:** "Deploy to Cloudflare" button (copies the template,
-  provisions R2 and D1, connects Workers Builds) or "Use this template" plus
-  `wrangler r2 bucket create` / `wrangler d1 create` and importing the
+  deploy command `sh deploy.sh`. `deploy.sh` applies the D1 migrations before
+  the upload so new code never sees an old schema; migrations are therefore
+  additive and compatible with the previous release, which keeps a rollback
+  (reverting the pin) safe. When the database does not exist yet (first
+  deploy), it deploys first, which provisions the database, and migrates right
+  after. `build.sh` is idempotent, so the second run through `build.command` is
+  a no-op.
+- **First install:** "Deploy to Cloudflare" button (copies the template and
+  connects Workers Builds) or "Use this template" plus importing the
   repository in the dashboard. The first admin is the `ADMIN_TOKEN` secret
   until accounts are wired up.
 - **Update:** bump `version` and `sha256` in `git-forge.json` and push.
@@ -438,7 +446,8 @@ update themselves.
   all-zero placeholder pin that fails the build on purpose.
 - **Test:** `release/test/instance.test.ts` builds a release, runs the
   template's `build.sh` against it via `file://`, checks that wrong pins and
-  tampered assets are refused, applies the migrations and does a push/clone
+  tampered assets are refused, checks the order of `deploy.sh` with a stub
+  Wrangler, applies the migrations and does a push/clone
   smoke test against `wrangler dev` running the template.
 - The same bundle may additionally be published to npm later; the template
   never depends on it.

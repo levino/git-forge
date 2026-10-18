@@ -170,6 +170,26 @@ describe('instance template build script', () => {
   })
 })
 
+describe('instance template deploy script', () => {
+  const deployWith = async (databaseExists: boolean): Promise<string[]> => {
+    const target = newInstance('0.0.0-test', pinned)
+    const calls = join(tempDir(), 'calls')
+    const stub = join(tempDir(), 'wrangler')
+    writeFileSync(stub, `#!/bin/sh\necho "$*" >> '${calls}'\nif [ "$1 $2" = "d1 info" ]; then exit ${databaseExists ? 0 : 1}; fi\n`, { mode: 0o755 })
+    await run('sh', [join(target, 'deploy.sh')], { env: { ...process.env, GIT_FORGE_RELEASE_URL: releaseUrl, WRANGLER: stub } })
+    expect(existsSync(join(target, 'dist/git-forge-worker.mjs'))).toBe(true)
+    return readFileSync(calls, 'utf8').trim().split('\n')
+  }
+
+  it('migrates before deploying an existing instance', async () => {
+    expect(await deployWith(true)).toEqual(['d1 info DB', 'd1 migrations apply DB --remote', 'deploy'])
+  })
+
+  it('deploys first to provision the database on the first deploy', async () => {
+    expect(await deployWith(false)).toEqual(['d1 info DB', 'deploy', 'd1 migrations apply DB --remote'])
+  })
+})
+
 describe('instance on wrangler dev', () => {
   it('serves a push and a clone with the real git client', async () => {
     await startDev()

@@ -61,7 +61,7 @@ discussions.
 - [ ] "Deploy to Cloudflare" button and three test instances (alpha, beta, gamma)
 - [x] Release artifact (bundled worker + migrations + checksums) and instance template with pinned version
 - [ ] Create `levino/git-forge-instance`, add the deploy key secret `INSTANCE_TEMPLATE_DEPLOY_KEY`, cut the first release
-- [ ] Verify the Deploy button and Workers Builds settings of the template against a real Cloudflare account
+- [ ] Verify the Deploy button, Workers Builds settings and automatic provisioning of D1/R2 of the template against a real Cloudflare account
 
 ## M6 — Web UI (Astro SSR)
 

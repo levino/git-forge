@@ -6,7 +6,7 @@ import { startServer } from '@git-forge/core/test/http-server.ts'
 import { basicAuth, chain, httpBackendHandler, requireAuthorization } from '@git-forge/core/test/mirror-helpers.ts'
 import build from '../e2e/build.ts'
 import { gitEnv, tempDir } from '../e2e/history.ts'
-import { startWranglerDev } from '../e2e/wrangler-dev.ts'
+import { freePort, startWranglerDev } from '../e2e/wrangler-dev.ts'
 
 const run = promisify(execFile)
 
@@ -41,7 +41,11 @@ const UPSTREAM_TOKEN = `upstream-${crypto.randomUUID()}`
 export default async function setup(): Promise<() => Promise<void>> {
   await build()
   const bootstrapToken = `browser-${crypto.randomUUID()}`
-  const dev = await startWranglerDev({ vars: { BOOTSTRAP_TOKEN: bootstrapToken } })
+  const port = await freePort()
+  const dev = await startWranglerDev({
+    port,
+    vars: { BOOTSTRAP_TOKEN: bootstrapToken, PUBLIC_URL: `http://localhost:${port}`, PAGES_HOST: `http://{owner}.pages.localhost:${port}` },
+  })
   const post = async (path: string, token: string, body: unknown) => {
     const response = await fetch(`${dev.url}${path}`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
     if (!response.ok) throw new Error(`${path}: ${response.status} ${await response.text()}`)
@@ -69,6 +73,10 @@ export default async function setup(): Promise<() => Promise<void>> {
   await git(dir, ['lfs', 'push', '--all', 'origin'])
   await git(dir, ['push', '-q', 'origin', 'main', 'polish'])
   await post('/api/v3/repos/octo/gallery/pulls', token, { title: 'Say goodbye', head: 'polish', base: 'main' })
+  await git(dir, ['remote', 'add', 'hidden', `${dev.url.replace('http://', `http://git:${token}@`)}/octo/hidden.git`])
+  await git(dir, ['lfs', 'push', '--all', 'hidden'])
+  await git(dir, ['push', '-q', 'hidden', 'main'])
+  await post('/api/v3/repos/octo/hidden/pages', token, { source: { branch: 'main', path: '/' } })
   for (const project of ['desktop', 'mobile']) {
     await post('/api/repos', token, { owner: 'octo', name: `pipeline-${project}`, visibility: 'public' })
     const pipeline = tempDir()

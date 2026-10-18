@@ -1,6 +1,6 @@
 import { d1Database, MIGRATIONS, migrateOnStart } from '@git-forge/accounts'
 import { consumeJobs, digestStreams, QueueJobs, R2Storage } from '@git-forge/cloudflare'
-import { continueImport, createConsoleEmailSender, type EmailSender, type ImportJob, type ImportScheduler } from '@git-forge/core'
+import { continueImport, createConsoleEmailSender, type EmailSender, type ImportJob, type ImportScheduler, storagePublisher } from '@git-forge/core'
 import { createSesEmailSender } from '@git-forge/ses'
 import { type AppJob, createForge, type Forge } from './app.ts'
 import { ACTIONS_CRON, type EmailSettings, type ForgeVars, loadSecretsKey, parseActionsSettings, parseEmailSettings, parseSettings, uiEnabled } from './config.ts'
@@ -9,6 +9,7 @@ import { captureLoginPage } from './ui/login-pages.ts'
 
 export type Env = ForgeVars & {
   readonly BUCKET: R2Bucket
+  readonly CDN_BUCKET?: R2Bucket
   readonly DB: D1Database
   readonly RUNNER?: DurableObjectNamespace
   readonly IMPORTS?: Queue<ImportJob>
@@ -45,6 +46,7 @@ export const forgeFor = (env: Env): Promise<Forge> => {
         ...(env.IMPORTS ? { scheduleImport: importScheduler(env.IMPORTS) } : {}),
         ...(env.JOBS ? { jobs: new QueueJobs(env.JOBS) } : {}),
         ...(email ? { email } : {}),
+        ...(env.CDN_BUCKET ? { lfsPublisher: storagePublisher(new R2Storage(env.CDN_BUCKET), env.LFS_PUBLISH_PREFIX?.trim() ?? '') } : {}),
         ...(actions
           ? {
               actions: {

@@ -88,7 +88,7 @@ issues, pull requests and discussions.
 
 **Later / maybe**
 
-- Pages.
+- Pages (first version implemented, §20).
 - Partial visibility within a repository (levels, derived views).
 - SSH-to-HTTPS gateway (§9).
 
@@ -279,7 +279,8 @@ the [accounts README](../packages/accounts/README.md#branch-protection).
     objects/pack/pack-<sha>.pack
     objects/pack/pack-<sha>.idx
   lfs/
-    objects/<oid[0:2]>/<oid[2:4]>/<oid>   # LFS objects and release assets
+    objects/<oid[0:2]>/<oid[2:4]>/<oid>   # LFS objects, release assets and Pages files
+  pages/deployments/<sha256>.json   # immutable Pages manifest, keyed by its own hash (§20)
   import/status.json                # progress of the last import
   import/commits.txt                # commit order of the last import
   import/blobs.txt                  # blobs of the commit an import is splitting
@@ -309,6 +310,9 @@ tmp/<repo>/<timestamp>-<uuid>/asset # a release asset upload without a declared 
   rule (e.g. one day). Pushes up to one chunk never touch `tmp/`. Fetched
   packs are staged the same way; chunks of failed attempts and unlisted packs
   are never reused and stay until expired.
+- **Pages files** are stored the same way, under the SHA-256 of their
+  content, and each deployment is one manifest that maps paths to those
+  hashes (§20). Which deployment is active lives only in the database.
 - **Release assets** are content-addressed like LFS objects
   (`lfs/objects/…`, §16). Which asset belongs to which release lives only in
   the database; a deleted asset or release leaves its bytes in place.
@@ -552,8 +556,34 @@ there is no upload or publish step.
   Push); LFS bytes are always streamed from the bucket, ranges via ranged
   bucket reads.
 
-Optional later: a "publish" setting that copies public LFS objects into a
-public CDN bucket on push.
+**LFS publish (optional)** — copy the LFS objects of public repositories
+into a public bucket on push, keyed by oid alone, for a CDN that should be
+refillable from hashes and never reach the Worker.
+
+- Adapter in the core (`packages/core/src/lfs-publish.ts`): `LfsPublisher`
+  with `has(oid, size)` and `publish(oid, size, body)`; `storagePublisher`
+  implements it on any `Storage` (key `<prefix><oid>`, written with
+  `If-None-Match: *`, never deleted). `publishLfsObjects` copies the given
+  oids that exist in the repository and are not yet published;
+  `listLfsOids` lists a repository's LFS objects for a backfill.
+- `receivePack` reports the LFS pointers of the pushed pack in
+  `PushOutcome.lfsPointers`. After a push with at least one accepted ref to a
+  **public** repository, the app enqueues `lfs-publish` jobs of 100 oids
+  (inline without a job queue). The visibility is checked again when the job
+  runs; private repositories are never published, and objects published
+  while a repository was public stay published.
+  `POST /api/repos/{owner}/{repo}/lfs/publish` (repository admin) backfills
+  all objects of a public repository.
+- Targets: `CDN_BUCKET` (a second R2 binding) on Cloudflare,
+  `LFS_PUBLISH_DIR` (`FsStorage`) on Node; an S3 bucket works through
+  `S3Storage`.
+- Versus a pull-zone CDN: with Bunny (or any pull zone) in front of the media
+  URLs nothing has to be published; the zone pulls
+  `/{owner}/{repo}/media/{oid}` on a miss and keeps it forever because it is
+  immutable. Publishing is the push alternative: the bytes leave the forge
+  once, the CDN or static host never talks to the Worker, and the public
+  bucket keeps working without it. Both can be combined (a Bunny pull zone
+  whose origin is the public bucket).
 
 **Submit via form** — the server creates blob, tree and commit on a proposal
 branch.
@@ -762,7 +792,7 @@ dev environments) need real machines, started on demand via API.
 | Live updates | Durable Objects with WebSockets, polling as fallback |
 | Search in issues | SQLite FTS5 |
 | Web UI | Astro SSR |
-| Releases, Pages | Bucket + CDN (release assets are LFS objects behind the media URL, §16) |
+| Releases, Pages | Bucket + CDN (release assets and Pages files are content-addressed like LFS objects, §16, §20) |
 | CI | Actions service emulating GHES for the official `actions/runner`; compute adapter starts one runner per job (§15) |
 
 Every building block is an interface; Cloudflare is the first implementation.
@@ -789,6 +819,7 @@ database.
 | Database | D1 / SQLite in Durable Objects | libSQL/Turso, SQLite file (Pi) |
 | Per-repository consistency | Durable Object | conditional writes (S3 CAS), single-writer process |
 | Scheduling, jobs | Cron Triggers, Queues (Workflows for long jobs) | `Deno.cron`, systemd timers, job table, in-process queue |
+| Public LFS bucket (`LfsPublisher`) | second R2 bucket (`CDN_BUCKET`) | any `Storage`: S3 bucket, local directory (`LFS_PUBLISH_DIR`) |
 | Email | Amazon SES v2 HTTP API (`@git-forge/ses`, SigV4 via `aws4fetch`, runs on Workers and Node) | SMTP for the Node deployment (later); a console adapter for development |
 | Compute for CI | Containers | external per-minute providers via the GHES API (WarpBuild, AWS CodeBuild, RunsOn), Fly Machines, a local process |
 
@@ -1738,6 +1769,9 @@ bundle.
   `/-/login`, which renders the model with the site layout. Without the UI
   (or on Node) the plain built-in pages are used. The passkey ceremony script
   is the one exported by `@git-forge/accounts` (`PASSKEY_SCRIPT`).
+- Pages hosts (§20) never reach Astro: `worker.ts` hands every request whose
+  host matches `PAGES_HOST` or `PAGES_DOMAINS` to `createForge` directly.
+  `/_pages/` (the Pages session handoff) is a forge path on the forge host.
 - Reserved first path segments: `api`, `explore`, `login`, `logout`,
   `settings`, `notifications`, `organizations`, `orgs`, `new`, `-` (assets,
   login and admin pages) and the other page routes. Account names must not
@@ -1994,3 +2028,130 @@ within the Time Travel window, otherwise `npx wrangler d1 execute <new db>
 `--s3-version-at <time>`). A repository can also be cloned straight from the
 copied bucket over dumb HTTP or after `rclone copy` to a directory, without
 any git-forge software (§2).
+
+## 20. Pages
+
+Static sites per repository, like GitHub Pages, served by the same Worker.
+Package `@git-forge/pages`, tables from migration `0012_pages.sql`
+(`pages_sites`, `pages_deployments`, `pages_grants`, `pages_sessions`).
+
+### Sources
+
+- **Branch** (`build_type: legacy`, `source: {branch, path}` with path `/`
+  or `/docs`): enabling Pages, changing the source and every push that moves
+  the branch create a deployment of that commit. Files are served as they
+  are; there is no Jekyll build (use a workflow for generators). Symlinks and
+  submodules are skipped.
+- **Workflow** (`build_type: workflow`): `POST
+  /api/v3/repos/{owner}/{repo}/pages/deployments`. With `artifact_id` or
+  `artifact_url` (what `actions/deploy-pages` sends) the deployment reads the
+  artifact through the `ArtifactSource` adapter, which returns the tar of
+  the `github-pages` artifact (`actions/upload-pages-artifact`). The forge
+  does not store workflow artifacts yet (§15), so without an adapter these
+  requests answer `422`; until then any CI uploads the same tar (or tar.gz)
+  as the request body (`Content-Type: application/x-tar`), deployed while it
+  streams. The `GITHUB_TOKEN` of a trusted, non-`pull_request` run of the
+  same repository may create deployments, like `pages: write` on GitHub; so
+  may users with write access. `GET …/deployments/{id}` reports GitHub's
+  status strings (`deployment_queued`, `deployment_in_progress`, `succeed`,
+  `deployment_failed`, `deployment_cancelled`), which `deploy-pages` polls.
+
+### Deployments
+
+- Building a deployment is a pure function of its input
+  (`buildFromTree`, `buildFromTar`): every file is stored under
+  `lfs/objects/<sha256>` (the LFS key space, so identical files, LFS objects
+  and release assets share bytes), and a manifest
+  `{"version":1,"files":{"<path>":{"oid","size","lfs"?}}}` with sorted keys
+  is written to `pages/deployments/<sha256 of the manifest>.json` with
+  `If-None-Match: *`. Deployments are therefore immutable and
+  content-addressed; nothing is ever overwritten. Files that are LFS
+  pointers (in the branch, or in an artifact checked out without LFS) are
+  recorded as `lfs: true` with the pointer's oid. Limits: 50 000 files and
+  1 GiB per site. Tar entries up to 4 MiB are hashed in memory, larger ones
+  are staged under `tmp/` while hashing and then copied, like release
+  assets.
+- **Atomic switch:** the deployment row moves to `succeed` and
+  `pages_sites.active_deployment_id` to its id in one database batch, and
+  only forward (`active_deployment_id < id`), so a slow older build never
+  replaces a newer one. Readers see either the old or the new manifest,
+  never a mix. A failed deployment leaves the active one in place.
+- Deployments run as `pages-deploy` jobs on the job queue (one invocation
+  each) or inline without one; uploads run in the request that streams them.
+  Cancelling marks a queued or running deployment `cancelled`; it is then
+  never activated.
+
+### Serving
+
+- `PAGES_HOST` is a pattern `{owner}.<suffix>` (scheme `https` unless given,
+  optional port for development). `https://<owner>.<suffix>/<repo>/` serves
+  the project site of `<owner>/<repo>`; a repository named exactly like the
+  host (`<owner>.<suffix>`) is the owner's site at the root, as with
+  `<owner>.github.io`. Project sites win over paths of the owner site.
+  Owners whose names are not DNS labels (dots, underscores) have no Pages
+  host. `PAGES_DOMAINS` maps custom domains to repositories
+  (`{"docs.example.com": "acme/handbook"}`); on Cloudflare each is also a
+  Workers custom domain and the wildcard a zone route, all declared in the
+  Wrangler configuration. The API reports the domain as `cname` and refuses
+  to change it (`422`): domains are instance configuration, not repository
+  data.
+- Path resolution (pure, `resolvePagesPath`): `/repo` → `301 /repo/`;
+  `dir/` → `dir/index.html`; `dir` → `301 dir/` when `dir/index.html`
+  exists; `page` → `page.html`; anything else → `404.html` with status 404 if
+  the site has one. `..` never resolves.
+- Responses: `Content-Type` by extension (`text/html; charset=utf-8` for
+  HTML, unlike raw URLs, because these hosts are not the forge origin),
+  `X-Content-Type-Options: nosniff`, `ETag` = the file's SHA-256,
+  `If-None-Match`, single `Range` and `HEAD`. Public sites are
+  `Cache-Control: public, max-age=<PAGES_MAX_AGE>` (default 60 s), so a
+  pull-zone CDN can front the Pages hosts; the content behind a path changes
+  only on a switch, and the short max-age plus ETag revalidation bounds the
+  staleness. Private responses are `private, no-cache` with
+  `Vary: Cookie, Authorization`.
+- **LFS files** of public repositories answer `302` to the absolute media
+  URL on `PUBLIC_URL` (`/{owner}/{repo}/media/{oid}/{name}`, immutable), so
+  large files are cached once however many deployments reference them. For
+  private repositories the bytes are streamed on the Pages host, because the
+  media URL needs a forge session or token the browser does not send there.
+- Manifests are cached per isolate (LRU, 32 MiB), which is safe because
+  they are immutable; each request still reads the repository, the site row
+  and the active deployment from the database, so a switch is visible
+  immediately.
+
+### Private sites
+
+Access is the repository's `read` check (`checkRepositoryAccess`), with the
+principal taken from a Pages session cookie or an `Authorization` header,
+never from the request otherwise. Pages hosts are other origins than the
+forge, so the forge session cookie is not sent there; the handoff:
+
+1. A visitor without access and without credentials gets `302` to
+   `<PUBLIC_URL>/_pages/authorize?redirect=<page URL>`.
+2. The forge accepts only redirect URLs on its own Pages hosts (scheme,
+   host pattern or configured domain, no credentials). Without a forge
+   session it sends the visitor to `/login?return_to=…` and comes back after
+   sign-in. With a session it stores a random one-time code (hash only, two
+   minutes, bound to the target host) and redirects to
+   `https://<pages host>/__pages/callback?code=…&path=…`.
+3. The Pages host redeems the code once, creates a Pages session (hash in
+   `pages_sessions`, twelve hours, bound to the host) and sets an
+   `HttpOnly; SameSite=Lax` cookie without `Domain` (host-only; `__Host-`
+   prefixed and `Secure` on https), then redirects to the path (same host
+   only).
+
+Readers without access get `404` like private repositories elsewhere. Pages
+sessions are not revoked by signing out of the forge; they expire. All
+repositories of one owner share an origin (as on GitHub): their scripts
+can read each other's pages with the visitor's cookie, but only what that
+visitor may read anyway. Use a registrable domain of its own for Pages so
+that site scripts cannot set cookies for the forge.
+
+### Not yet
+
+- Reading workflow artifacts (`ArtifactSource` on top of the CI artifact
+  storage, §15), so `actions/deploy-pages` works unchanged.
+- Repository settings page in the UI; custom domains set per repository
+  (today: instance configuration), HTTPS certificates for them beyond
+  Workers custom domains.
+- Preview deployments, the `pages/health` endpoint, `pages_build_version`
+  validation against the repository.

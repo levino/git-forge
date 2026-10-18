@@ -66,7 +66,10 @@
     "SELF_SIGNUP": "false",
     "BREAK_GLASS_PUBLIC_KEY": "",
     "EMAIL_PROVIDER": "console",
-    "EMAIL_FROM": "forge@example.org"
+    "EMAIL_FROM": "forge@example.org",
+    "PAGES_HOST": "",
+    "PAGES_DOMAINS": "",
+    "PAGES_MAX_AGE": "60"
   },
   "secrets": {
     "required": [
@@ -154,7 +157,10 @@
         "SELF_SIGNUP": "false",
         "BREAK_GLASS_PUBLIC_KEY": "",
         "EMAIL_PROVIDER": "console",
-        "EMAIL_FROM": "forge@example.org"
+        "EMAIL_FROM": "forge@example.org",
+        "PAGES_HOST": "",
+        "PAGES_DOMAINS": "",
+        "PAGES_MAX_AGE": "60"
       },
       "secrets": {
         "required": [
@@ -239,7 +245,10 @@
         "SELF_SIGNUP": "false",
         "BREAK_GLASS_PUBLIC_KEY": "",
         "EMAIL_PROVIDER": "console",
-        "EMAIL_FROM": "forge@example.org"
+        "EMAIL_FROM": "forge@example.org",
+        "PAGES_HOST": "",
+        "PAGES_DOMAINS": "",
+        "PAGES_MAX_AGE": "60"
       },
       "secrets": {
         "required": [
@@ -324,7 +333,10 @@
         "SELF_SIGNUP": "false",
         "BREAK_GLASS_PUBLIC_KEY": "",
         "EMAIL_PROVIDER": "console",
-        "EMAIL_FROM": "forge@example.org"
+        "EMAIL_FROM": "forge@example.org",
+        "PAGES_HOST": "",
+        "PAGES_DOMAINS": "",
+        "PAGES_MAX_AGE": "60"
       },
       "secrets": {
         "required": [

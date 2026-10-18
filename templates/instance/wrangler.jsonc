@@ -37,7 +37,11 @@
     "OIDC_SCOPES": "openid profile email",
     "SELF_SIGNUP": "false",
     "BREAK_GLASS_PUBLIC_KEY": "",
-    "EMAIL_PROVIDER": "none"
+    "EMAIL_PROVIDER": "none",
+    "PAGES_HOST": "",
+    "PAGES_DOMAINS": "",
+    "PAGES_MAX_AGE": "60",
+    "LFS_PUBLISH_PREFIX": ""
   },
   "secrets": { "required": ["BOOTSTRAP_TOKEN"] }
 }

@@ -1,6 +1,6 @@
 import { matchContentRoute, matchGitRoute } from '@git-forge/core'
 
-const FORGE_PREFIXES = ['/api/', '/_services/', '/.well-known/', '/login/']
+const FORGE_PREFIXES = ['/api/', '/_services/', '/_pages/', '/.well-known/', '/login/']
 
 const FORGE_PATHS = new Set(['/api', '/login', '/logout'])
 

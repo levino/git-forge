@@ -4,7 +4,7 @@ import { dirname, join } from 'node:path'
 import { promisify } from 'node:util'
 import build from '../e2e/build.ts'
 import { gitEnv, tempDir } from '../e2e/history.ts'
-import { startWranglerDev } from '../e2e/wrangler-dev.ts'
+import { freePort, startWranglerDev } from '../e2e/wrangler-dev.ts'
 
 const run = promisify(execFile)
 
@@ -37,7 +37,11 @@ const PNG = Uint8Array.from(
 export default async function setup(): Promise<() => Promise<void>> {
   await build()
   const bootstrapToken = `browser-${crypto.randomUUID()}`
-  const dev = await startWranglerDev({ vars: { BOOTSTRAP_TOKEN: bootstrapToken } })
+  const port = await freePort()
+  const dev = await startWranglerDev({
+    port,
+    vars: { BOOTSTRAP_TOKEN: bootstrapToken, PUBLIC_URL: `http://localhost:${port}`, PAGES_HOST: `http://{owner}.pages.localhost:${port}` },
+  })
   const post = async (path: string, token: string, body: unknown) => {
     const response = await fetch(`${dev.url}${path}`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
     if (!response.ok) throw new Error(`${path}: ${response.status} ${await response.text()}`)
@@ -61,6 +65,10 @@ export default async function setup(): Promise<() => Promise<void>> {
   await git(dir, ['commit', '-q', '-am', 'Punctuate the greeting'])
   await git(dir, ['lfs', 'push', '--all', 'origin'])
   await git(dir, ['push', '-q', 'origin', 'main'])
+  await git(dir, ['remote', 'add', 'hidden', `${dev.url.replace('http://', `http://git:${token}@`)}/octo/hidden.git`])
+  await git(dir, ['lfs', 'push', '--all', 'hidden'])
+  await git(dir, ['push', '-q', 'hidden', 'main'])
+  await post('/api/v3/repos/octo/hidden/pages', token, { source: { branch: 'main', path: '/' } })
   process.env.FORGE_URL = dev.url
   process.env.FORGE_ADMIN_TOKEN = token
   return async () => {

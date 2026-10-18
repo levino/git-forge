@@ -23,7 +23,7 @@ discussions.
 - [x] Reject pushes referencing missing LFS objects
 - [x] Per-object size limit (`MAX_LFS_OBJECT_BYTES` in the Worker)
 - [x] Media URLs `/{owner}/{repo}/media/{oid}` and raw endpoint `/{owner}/{repo}/raw/{ref}/{path}` resolving LFS pointers (CDN pull-zone friendly: immutable caching, ETag, Range, HEAD)
-- [ ] Optional: publish public LFS objects to a CDN bucket on push
+- [x] Optional: publish public LFS objects to a CDN bucket on push (`LfsPublisher` adapter, keyed by oid, `CDN_BUCKET` / `LFS_PUBLISH_DIR`, backfill endpoint; design §7)
 
 ## M3 — Accounts and federation
 
@@ -154,4 +154,6 @@ Design: [design.md §17](design.md#17-collaboration).
 - [ ] Releases: source archives (`tarball_url`, `zipball_url`), generated release notes, web UI
 - [ ] Encrypted full backups, partial visibility
 - [ ] External mirror verification
-- [ ] Pages
+- [x] Pages (design §19): branch source (`/` or `/docs`, redeploy on push), tar upload deployments, GitHub's Pages REST API, `PAGES_HOST` pattern and `PAGES_DOMAINS` from config, immutable content-addressed deployments with atomic switch, LFS files via media URLs, content types, `404.html`, CDN cache headers, private sites via a session handoff to a host-only cookie
+- [ ] Pages: deployments from workflow artifacts (`ArtifactSource` once CI stores artifacts), so `actions/deploy-pages` works unchanged
+- [ ] Pages: settings in the web UI, preview deployments, `pages/health`

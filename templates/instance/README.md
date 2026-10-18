@@ -76,6 +76,32 @@ certificate on deploy (the zone must be on the same Cloudflare account):
 "routes": [{ "pattern": "git.example.com", "custom_domain": true }]
 ```
 
+### Pages
+
+Repository sites (like GitHub Pages) are off until `PAGES_HOST` is set. Use
+a domain of its own, add the wildcard as a route on its zone and, per
+repository, custom domains:
+
+```jsonc
+"routes": [
+  { "pattern": "git.example.com", "custom_domain": true },
+  { "pattern": "*.pages.example.net/*", "zone_name": "example.net" },
+  { "pattern": "docs.example.com", "custom_domain": true }
+],
+"vars": { "…": "…", "PUBLIC_URL": "https://git.example.com", "PAGES_HOST": "{owner}.pages.example.net", "PAGES_DOMAINS": "{\"docs.example.com\": \"acme/handbook\"}" }
+```
+
+Then enable a site with `POST /api/v3/repos/{owner}/{repo}/pages`
+(`{"source": {"branch": "main", "path": "/"}}`). Details:
+[forge-worker README, Pages](https://github.com/levino/git-forge/blob/main/apps/forge-worker/README.md#pages).
+
+### Public LFS bucket
+
+To copy the LFS objects of public repositories into a public bucket on push
+(keyed by oid), add a second bucket binding `CDN_BUCKET` to `r2_buckets` and
+optionally set `LFS_PUBLISH_PREFIX`. A pull-zone CDN in front of the media
+URLs needs none of this.
+
 ## First admin
 
 A fresh instance has no users. The secret `BOOTSTRAP_TOKEN` allows exactly one

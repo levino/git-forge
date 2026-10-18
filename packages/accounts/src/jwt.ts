@@ -47,7 +47,7 @@ export const importSigningKey = async (jwk: PrivateJwk): Promise<SigningKey> => 
 
 export const generateSigningKey = async (): Promise<{ readonly key: SigningKey; readonly privateJwk: PrivateJwk }> => {
   const pair = (await crypto.subtle.generateKey(ED25519, true, ['sign', 'verify'])) as CryptoKeyPair
-  const exported = await crypto.subtle.exportKey('jwk', pair.privateKey)
+  const exported = (await crypto.subtle.exportKey('jwk', pair.privateKey)) as JsonWebKey
   const privateJwk: PrivateJwk = { kty: 'OKP', crv: 'Ed25519', x: exported.x!, d: exported.d! }
   return { key: await importSigningKey(privateJwk), privateJwk }
 }

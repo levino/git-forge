@@ -113,8 +113,8 @@ describe('forge worker on wrangler dev', () => {
   })
 
   it('runs the scheduled handler stub', async () => {
-    const response = await fetch(`${dev.url}/__scheduled?cron=${encodeURIComponent('*/30 * * * *')}`)
+    const response = await fetch(`${dev.url}/__scheduled?cron=${encodeURIComponent('17 3 * * *')}`)
     expect(response.status).toBe(200)
-    await expect.poll(() => dev.output()).toContain('"task":"mirror-sync"')
+    await expect.poll(() => dev.output()).toContain('"task":"mirror-safety-net"')
   })
 })

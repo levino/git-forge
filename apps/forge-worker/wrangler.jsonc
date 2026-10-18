@@ -13,6 +13,10 @@
       "database_id": "00000000-0000-0000-0000-000000000000"
     }
   ],
-  "triggers": { "crons": ["*/30 * * * *"] },
-  "vars": { "PUBLIC_READ": "true", "MAX_PUSH_BYTES": "16777216" }
+  "queues": {
+    "producers": [{ "binding": "JOBS", "queue": "git-forge-jobs" }],
+    "consumers": [{ "queue": "git-forge-jobs", "max_batch_size": 1, "max_batch_timeout": 1, "max_retries": 10 }]
+  },
+  "triggers": { "crons": ["17 3 * * *"] },
+  "vars": { "PUBLIC_READ": "true", "MAX_PUSH_BYTES": "16777216", "MIRROR_SAFETY_SYNC_HOURS": "24", "MIRROR_DEEP_CHECK_DAYS": "30" }
 }

@@ -63,8 +63,8 @@ discussions.
 - [x] Shared storage conformance suite for all adapters
 - [x] Local S3 test environment (versitygw; Garage, SeaweedFS, RustFS evaluated)
 - [x] Headless deployment on a Raspberry Pi: `apps/forge-node` serves the Worker's router over `node:http` with an SQLite file, `FsStorage` or `S3Storage`, an in-process job queue and a cron schedule; explicit `migrate` command; single executables for `linux-x64`/`linux-arm64` (Bun) in every release, Dockerfile, systemd units; E2E with a Worker under `wrangler dev` mirroring in both directions
-- [ ] Publish the `apps/forge-node` image to a container registry (multi-arch) from the release workflow
-- [ ] Durable jobs for Node deployments (job table in SQLite), so queued mirror jobs survive a restart instead of waiting for the next notification or scheduled run
+- [x] Publish the `apps/forge-node` image to a container registry (multi-arch) from the release workflow (`ghcr.io/levino/git-forge-node`, `linux/amd64` and `linux/arm64`)
+- [x] Durable jobs for Node deployments (job table in SQLite, migration `0021_jobs`, leases so a crash re-runs), so queued mirror jobs survive a restart instead of waiting for the next notification or scheduled run
 
 ## M5a — Large pushes
 
@@ -147,7 +147,7 @@ Design: [design.md §17](design.md#17-collaboration).
 ## Later
 
 - [x] Email adapter in the core, Amazon SES v2 implementation (`@git-forge/ses`), console adapter for development
-- [ ] SMTP email adapter for the Node deployment
+- [x] SMTP email adapter for the Node deployment (`@git-forge/smtp`: STARTTLS or implicit TLS, `AUTH PLAIN`/`LOGIN`)
 - [x] Notifications: event log, watching and participating subscriptions, mentions, per-user settings, inbox API (`/api/v3/notifications`), email digests (instant, hourly, daily) via the job queue (design §16)
 - [x] Event producers: push, create/delete, mirror alarms, CI job and run completion, releases
 - [ ] Event producers: issues, pull requests, reviews, comments (builders exist; emitted by the collaboration package)

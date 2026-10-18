@@ -8,7 +8,8 @@ import { FsStorage } from '@git-forge/node'
 import { S3Storage } from '@git-forge/s3'
 import { afterAll, describe, expect, it } from 'vitest'
 import { main } from '../../src/cli.ts'
-import { createInstance, migrate, openStorage, PendingMigrationsError } from '../../src/instance.ts'
+import { parseNodeConfig } from '../../src/config.ts'
+import { createInstance, emailSender, migrate, openStorage, PendingMigrationsError } from '../../src/instance.ts'
 
 const root = mkdtempSync(join(tmpdir(), 'git-forge-node-'))
 const fresh = () => mkdtempSync(join(root, 'case-'))
@@ -39,6 +40,28 @@ describe('node instance', () => {
     } finally {
       await instance.close()
     }
+  })
+
+  it('keeps queued jobs in the database across a restart', async () => {
+    const DATA_DIR = fresh()
+    await migrate({ DATA_DIR })
+    const first = await createInstance({ DATA_DIR }, { log: () => undefined })
+    await first.jobs.enqueue({ kind: 'mirror-sync', repository: 'pi/backup', remote: 'origin', reason: 'notification' }, { delaySeconds: 3600 })
+    await first.imports.enqueue({ owner: 'pi', name: 'backup' }, { delaySeconds: 3600 })
+    await first.close()
+    const second = await createInstance({ DATA_DIR }, { log: () => undefined })
+    try {
+      expect(await second.jobs.pending()).toBe(1)
+      expect(await second.imports.pending()).toBe(1)
+    } finally {
+      await second.close()
+    }
+  })
+
+  it('sends email through SMTP when EMAIL_PROVIDER=smtp', () => {
+    expect(emailSender(parseNodeConfig({ EMAIL_PROVIDER: 'smtp', EMAIL_FROM: 'forge@example.org', SMTP_HOST: 'mail.example.org' }).email)).toBeDefined()
+    expect(emailSender(parseNodeConfig({ EMAIL_PROVIDER: 'console', EMAIL_FROM: 'forge@example.org' }).email)).toBeDefined()
+    expect(emailSender(parseNodeConfig({}).email)).toBeUndefined()
   })
 
   it('opens S3 storage from the configuration', async () => {

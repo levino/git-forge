@@ -41,6 +41,30 @@ describe('node configuration', () => {
     expect(() => parseNodeConfig({ ...vars, S3_ENDPOINT: 'nope' })).toThrow('S3_ENDPOINT must be a URL')
   })
 
+  it('configures email delivery over SMTP', () => {
+    const base = { EMAIL_PROVIDER: 'smtp', EMAIL_FROM: 'Forge <forge@example.org>', SMTP_HOST: 'smtp.example.org' }
+    expect(parseNodeConfig(base).email).toEqual({ provider: 'smtp', from: 'Forge <forge@example.org>', host: 'smtp.example.org', security: 'starttls' })
+    expect(parseNodeConfig({ ...base, SMTP_SECURITY: 'tls', SMTP_PORT: '2465', SMTP_USERNAME: 'forge', SMTP_PASSWORD: ' pw ', SMTP_HELO: 'pi.example.org' }).email).toEqual({
+      provider: 'smtp',
+      from: 'Forge <forge@example.org>',
+      host: 'smtp.example.org',
+      security: 'tls',
+      port: 2465,
+      username: 'forge',
+      password: ' pw ',
+      helo: 'pi.example.org',
+    })
+    expect(parseNodeConfig({ EMAIL_PROVIDER: 'console', EMAIL_FROM: 'forge@example.org' }).email).toEqual({ provider: 'console', from: 'forge@example.org' })
+    expect(parseNodeConfig({}).email).toBeUndefined()
+    expect(() => parseNodeConfig({ ...base, SMTP_HOST: '' })).toThrow('SMTP_HOST is required with EMAIL_PROVIDER=smtp')
+    expect(() => parseNodeConfig({ ...base, EMAIL_FROM: '' })).toThrow(/EMAIL_FROM is required/)
+    expect(() => parseNodeConfig({ ...base, SMTP_SECURITY: 'ssl' })).toThrow(/SMTP_SECURITY must be/)
+    expect(() => parseNodeConfig({ ...base, SMTP_PORT: '0' })).toThrow(/SMTP_PORT/)
+    expect(() => parseNodeConfig({ ...base, SMTP_USERNAME: 'forge' })).toThrow(/go together/)
+    expect(() => parseNodeConfig({ ...base, SMTP_SECURITY: 'none', SMTP_USERNAME: 'forge', SMTP_PASSWORD: 'pw' })).toThrow(/needs SMTP_SECURITY/)
+    expect(() => parseNodeConfig({ EMAIL_PROVIDER: 'sendmail', EMAIL_FROM: 'forge@example.org' })).toThrow('EMAIL_PROVIDER must be none, console, ses or smtp')
+  })
+
   it('rejects invalid values instead of guessing', () => {
     expect(() => parseNodeConfig({ PORT: '70000' })).toThrow(/PORT/)
     expect(() => parseNodeConfig({ STORAGE: 'r2' })).toThrow(/STORAGE must be fs or s3/)

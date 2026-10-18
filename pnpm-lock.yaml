@@ -183,6 +183,12 @@ importers:
       '@git-forge/s3':
         specifier: workspace:*
         version: link:../../packages/s3
+      '@git-forge/ses':
+        specifier: workspace:*
+        version: link:../../packages/ses
+      '@git-forge/smtp':
+        specifier: workspace:*
+        version: link:../../packages/smtp
       forge-worker:
         specifier: workspace:*
         version: link:../forge-worker
@@ -513,6 +519,22 @@ importers:
       aws4fetch:
         specifier: 1.0.20
         version: 1.0.20
+    devDependencies:
+      '@types/node':
+        specifier: 22.20.5
+        version: 22.20.5
+      typescript:
+        specifier: 6.0.3
+        version: 6.0.3
+      vitest:
+        specifier: 4.1.11
+        version: 4.1.11(@types/node@22.20.5)(vite@8.3.4(@types/node@22.20.5))
+
+  packages/smtp:
+    dependencies:
+      '@git-forge/core':
+        specifier: workspace:*
+        version: link:../core
     devDependencies:
       '@types/node':
         specifier: 22.20.5

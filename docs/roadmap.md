@@ -101,8 +101,8 @@ Design: [design.md §15](design.md#ci).
 - [ ] Web UI for runs and live logs
 - [x] "Deploy to Cloudflare" button in the README pointing at the instance template; template wired to accounts (`BOOTSTRAP_TOKEN`)
 - [x] Release artifact (bundled worker + migrations + checksums) and instance template with pinned version
-- [ ] Create `levino/git-forge-instance`, add the deploy key secret `INSTANCE_TEMPLATE_DEPLOY_KEY`, cut the first release
-- [ ] Verify the Deploy button, Workers Builds settings and automatic provisioning of D1/R2 of the template against a real Cloudflare account
+- [x] Minimal instance template: one `wrangler.toml` whose `[build]` command downloads and verifies the pinned bundle, resources provisioned from it, self-migrating Worker, first admin via a one-time `instance_admin_claims` row; Deploy button on the monorepo subdirectory; release notes print the `V`/`S` pin and the release workflow pins it in the template
+- [ ] Verify the Deploy button against a real Cloudflare account
 
 ## M6 — Web UI (Astro SSR)
 

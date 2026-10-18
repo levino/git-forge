@@ -67,13 +67,13 @@ triggers with `RAISE`), all of which D1, Durable Objects and libSQL support.
 - Workers cannot read files, so `src/migrations.generated.ts` embeds the SQL.
   Regenerate it with `pnpm --filter @git-forge/accounts migrations:bundle`; a
   test fails if it is out of sync with `migrations/`.
-- Ledgers: on Cloudflare the files are applied by
-  `wrangler d1 migrations apply` (ledger `d1_migrations`): the instance
-  template's `deploy.sh` runs it before the upload, `apps/forge-worker` points
-  `migrations_dir` at this directory, and the Worker never migrates at
-  runtime. Everywhere else (node:sqlite, libSQL, tests) use
-  `applyMigrations(db, MIGRATIONS)` (ledger `schema_migrations`). One database
-  uses one of the two, never both.
+- Ledger: `applyMigrations(db, MIGRATIONS)` records applied files in
+  `schema_migrations` (node:sqlite, libSQL, tests). The Worker calls
+  `migrateOnStart`, which first copies the names that
+  `wrangler d1 migrations apply` recorded in `d1_migrations` (when
+  `apps/forge-worker` was migrated through `migrations_dir`) into
+  `schema_migrations` and then applies the pending ones; a concurrent run that
+  fails but leaves nothing pending counts as done.
 
 ## Data model
 

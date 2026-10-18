@@ -686,9 +686,9 @@ the login is refused with a hint to ask for an invite. Logins are derived from
 `preferred_username`, the email's local part or the name, with `-2`, `-3`, …
 when taken.
 With an identity provider the first admin comes from a one-time claim instead
-of the bootstrap token: `claim-admin.sh` inserts a verified email address or
+of the bootstrap token: the operator inserts a verified email address or
 OIDC subject into `instance_admin_claims` (migration 0010) with
-`wrangler d1 execute`; the first matching OIDC sign-in creates the account
+`wrangler d1 execute` (the command is in the instance template's README); the first matching OIDC sign-in creates the account
 (even without self-signup), makes it an instance admin and deletes the claim.
 
 **Passkeys.** Registration asks for a discoverable credential, user
@@ -768,10 +768,15 @@ Every building block is an interface; Cloudflare is the first implementation.
 **Cloudflare deployment.** One Worker serves the web UI (§18), Git, LFS, media
 and raw URLs, the JSON API and the well-known federation documents, and runs
 mirror sync from a Cron Trigger. It binds one R2 bucket (`BUCKET`) and one D1 database (`DB`).
-The Worker never migrates its database: `wrangler d1 migrations apply` does,
-from `packages/accounts/migrations` (`migrations_dir` in
-`apps/forge-worker/wrangler.jsonc`, the release's `dist/migrations` in the
-instance template; see §15). Several instances on one account are Wrangler
+The Worker migrates its database itself: when it first builds the forge in an
+isolate, `migrateOnStart` adopts migrations that `wrangler d1 migrations
+apply` recorded in `d1_migrations` into `schema_migrations` and then applies
+the pending ones of the bundled `MIGRATIONS` (from
+`packages/accounts/migrations`). A concurrent isolate that loses the race
+finds nothing pending and goes on. `wrangler d1 migrations apply` with
+`migrations_dir` in `apps/forge-worker/wrangler.jsonc` still works for
+development and is adopted on the next start; the instance template has no
+migration step (§15). Several instances on one account are Wrangler
 environments (`alpha`, `beta`, `gamma`), each with its own Worker, bucket and
 database.
 
@@ -1059,7 +1064,7 @@ Pieces and where they live:
 | Dispatch: triggers → runs → jobs → JIT runners; `needs`, `if`, matrix, throttling, approvals, cancellation, re-runs, schedules, reaper | `@git-forge/actions` (`dispatch.ts`) | See "Workflow semantics" below. |
 | Secrets and environments | `@git-forge/actions` (`secrets.ts`) | AES-256-GCM under the instance key `ACTIONS_SECRETS_KEY`. |
 | Action downloads | `@git-forge/actions` (`actions-download.ts`) | `owner/repo@ref` → repository on the forge (usually a mirror) → tarball URL plus a scoped token. |
-| Runner container | `apps/forge-worker` (`runner-container.ts`, `runner-launcher.ts`, `runner/Dockerfile`), declared in `apps/forge-worker/wrangler.jsonc` (opt-in snippet in `templates/instance`) | Cloudflare Containers; the only Cloudflare-specific part. A plain Durable Object class on `ctx.container`, so the release bundle stays one module without imports. |
+| Runner container | `apps/forge-worker` (`runner-container.ts`, `runner-launcher.ts`, `runner/Dockerfile`), declared in `apps/forge-worker/wrangler.jsonc` (opt-in snippet in the README of `templates/instance`) | Cloudflare Containers; the only Cloudflare-specific part. A plain Durable Object class on `ctx.container`, so the release bundle stays one module without imports. |
 
 #### Runner protocol
 
@@ -1304,8 +1309,8 @@ same functions (`reviewDeployment`).
 #### Data
 
 - SQLite, migrations `packages/accounts/migrations/0005_actions.sql` and
-  `0009_actions_workflows.sql`, applied by `wrangler d1 migrations apply`
-  like every other migration and shipped in the release's
+  `0009_actions_workflows.sql`, applied by the Worker on start like every
+  other migration and shipped in the release bundle and its
   `migrations.tar.gz`: `actions_runners`, `actions_tokens`,
   `actions_sessions`, `actions_runs` (plus definition, attempt, trusted,
   concurrency group, cancellation, completion), `actions_jobs` (plus
@@ -1378,59 +1383,69 @@ update themselves.
   - `migrations.tar.gz`: the D1 migrations (`migrations/*.sql`, currently from
     `packages/accounts`), built reproducibly.
   - `SHA256SUMS`: `sha256sum` output for both files.
-  - The release notes contain the `git-forge.json` to pin. Tags with a `-` are
-    pre-releases.
-- **One pin covers everything:** `git-forge.json` holds `version` and the
-  SHA-256 of `SHA256SUMS`. The build script checks `SHA256SUMS` against the
-  pin and then every asset against `SHA256SUMS`; any mismatch fails the build
-  before anything is deployed. Asset names and the archive layout are a durable
-  format: later releases may add assets, never rename or remove these.
-- **Instance template** (`templates/instance`, synced to its own repository
-  `levino/git-forge-instance`): `wrangler.jsonc` (own bindings, vars, domain,
-  `main: dist/git-forge-worker.mjs`, `build.command: sh build.sh`,
-  `migrations_dir: dist/migrations`), `git-forge.json`, `build.sh` (POSIX sh,
-  `curl`, `sha256sum`, `tar`), `deploy.sh`, `renovate.json`, a checksum
-  workflow and a README. No `package.json`, no lockfile, nothing from npm in the Worker.
-  `GIT_FORGE_RELEASE_URL` overrides the download base for mirrors and tests.
+  - The release notes contain the pin `V=<version> S=<sha256 of SHA256SUMS>`
+    and the complete `[build]` command line of the template with it. Tags
+    with a `-` are pre-releases.
+- **One pin covers everything:** `V` and `S` at the start of the instance's
+  `[build]` command. The command downloads `SHA256SUMS` and
+  `git-forge-worker.mjs`, checks `SHA256SUMS` against `S` and the bundle
+  against `SHA256SUMS` (`sha256sum -c --ignore-missing`, so assets the
+  instance does not download are skipped); any mismatch fails the build
+  before anything is deployed. Asset names and the archive layout are a
+  durable format: later releases may add assets, never rename or remove
+  these. `migrations.tar.gz` is no longer needed by Workers instances (the
+  bundle embeds the migrations) but stays published.
+- **Instance template** (`templates/instance`, deployed straight from this
+  monorepo): a single `wrangler.toml` (Worker name, `main =
+  "dist/git-forge-worker.mjs"`, `no_bundle`, the pinned `[build]` command,
+  bindings by name, queues, cron, `limits.cpu_ms`), `.dev.vars.example`
+  (`BOOTSTRAP_TOKEN`), the optional `runner/Dockerfile` for CI and a README.
+  No `package.json`, no lockfile, no scripts, nothing from npm in the Worker;
+  the command needs only `sh`, `curl` and `sha256sum`. All vars (OIDC,
+  `PUBLIC_URL`, email, …) are optional and documented in the README, not
+  declared. `GIT_FORGE_RELEASE_URL` overrides the download base for mirrors
+  and tests. The production instance `levino/levins-git-forge` is a copy of it
+  with its own names, domain and OIDC vars.
 - **Resources only from config:** every Cloudflare resource is declared in
-  `wrangler.jsonc` and created by Wrangler, never by hand. D1 and R2 have a
-  name and no id, so the first `wrangler deploy` provisions them (automatic
-  resource provisioning) and later commands find them by name. Cron, vars,
-  routes (custom domains) are declared there as well. The `BOOTSTRAP_TOKEN`
-  secret is deliberately not `secrets.required`: a secret can only be set on an
-  existing Worker, so requiring it would block the very first deploy. It is set
-  after the first deploy; until then `/api/bootstrap` answers `503`.
-- **Build on Cloudflare (Workers Builds):** build command `sh build.sh`,
-  deploy command `sh deploy.sh`. `deploy.sh` applies the D1 migrations before
-  the upload so new code never sees an old schema; migrations are therefore
-  additive and compatible with the previous release, which keeps a rollback
-  (reverting the pin) safe. When the database does not exist yet (first
-  deploy), it deploys first, which provisions the database, and migrates right
-  after. `build.sh` is idempotent, so the second run through `build.command` is
-  a no-op.
-- **First install:** "Deploy to Cloudflare" button (copies the template and
-  connects Workers Builds) or "Use this template" plus importing the
-  repository in the dashboard. The setup page asks for `BOOTSTRAP_TOKEN`
-  (from `.dev.vars.example`); one call of `POST /api/bootstrap` with it
-  creates the first instance admin (§8).
-- **Update:** bump `version` and `sha256` in `git-forge.json` and push.
-  Renovate proposes the version via a regex manager on the GitHub releases of
-  `levino/git-forge`. It cannot compute the checksum (the `github-releases`
-  datasource's digest is the tag's commit, not a file hash, and
-  `postUpgradeTasks` exist only for self-hosted Renovate), so the template's
-  `Pin checksum` workflow fills in `sha256` on Renovate's pull requests from
-  the new `SHA256SUMS` and runs `build.sh`; a human reviews and merges.
-- **Template sync:** `.github/workflows/sync-instance-template.yml` copies
-  `templates/instance` to `levino/git-forge-instance` with `git-forge.json`
-  pinned to the latest release, after every release and on template changes on
-  `main`. It pushes with the deploy key `INSTANCE_TEMPLATE_DEPLOY_KEY` and is
-  skipped while that secret is missing. The copy in this repository carries an
-  all-zero placeholder pin that fails the build on purpose.
-- **Test:** `release/test/instance.test.ts` builds a release, runs the
-  template's `build.sh` against it via `file://`, checks that wrong pins and
-  tampered assets are refused, checks the order of `deploy.sh` with a stub
-  Wrangler, applies the migrations and does a push/clone
-  smoke test and a page request against `wrangler dev` running the template.
+  `wrangler.toml` and created by Wrangler, never by hand. D1, R2 and the
+  queues have a name and no id, so the first `wrangler deploy` provisions them
+  (automatic resource provisioning) and later deploys find them by name. The
+  jobs queue is recognised by the suffix `-jobs`. Cron and routes (custom
+  domains) are declared there as well. The `BOOTSTRAP_TOKEN` secret is
+  deliberately not `secrets.required`: a secret can only be set on an existing
+  Worker, so requiring it would block a first deploy without the button. Until
+  it is set `/api/bootstrap` answers `503`.
+- **Build on Cloudflare (Workers Builds):** no build command in Workers
+  Builds, the default deploy command `npx wrangler deploy`, which runs the
+  `[build]` command from `wrangler.toml` and uploads the verified bundle. There
+  is no migration step: the Worker migrates itself on start (§11), so
+  migrations are additive and compatible with the previous release, which
+  keeps a rollback (reverting the pin) safe.
+- **First install:** the "Deploy to Cloudflare" button points at the
+  subdirectory `https://github.com/levino/git-forge/tree/main/templates/instance`.
+  Cloudflare copies that directory (it is self-contained) as the root of a new
+  repository in the user's account, offers to rename the resources from
+  `wrangler.toml`, asks for `BOOTSTRAP_TOKEN` (from `.dev.vars.example`),
+  connects Workers Builds and deploys. Without OIDC one call of
+  `POST /api/bootstrap` with the token creates the first instance admin (§8);
+  with OIDC a one-time `instance_admin_claims` row inserted with
+  `wrangler d1 execute` does.
+- **Update:** change `V` and `S` and push. There is no Renovate integration:
+  Renovate could bump `V` but cannot compute `S` (the `github-releases`
+  datasource's digest is the tag's commit, not a file hash), and a
+  half-updated pin only fails the build.
+- **Template pin:** the template must always pin a published release, because
+  the Deploy button deploys it as is. After every release that is not a
+  pre-release the `pin-template` job of `.github/workflows/release.yml` writes
+  the new `V` and `S` into `templates/instance/wrangler.toml` and pushes that
+  commit to `main` with `GITHUB_TOKEN`.
+- **Test:** `release/test/instance.test.ts` builds a release, checks the
+  template's shape (one pin, resources by name only, `BOOTSTRAP_TOKEN` as the
+  only secret), runs the `[build]` command from `wrangler.toml` against the
+  release via `file://`, checks that a wrong pin and a tampered bundle are
+  refused, then starts `wrangler dev` on the template (which runs the build
+  command too), checks that the Worker migrated its database by inserting an
+  admin claim, and does a push/clone smoke test and a page request.
 - The same bundle may additionally be published to npm later; the template
   never depends on it.
 - **Without Cloudflare:** every release also carries

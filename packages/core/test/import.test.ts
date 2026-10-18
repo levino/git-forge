@@ -410,6 +410,48 @@ describe('server-side import', () => {
     expect(stored && (await readAll(stored.body))).toEqual(asset)
   })
 
+  it('takes the LFS endpoint from .lfsconfig, keeps the token away from it and splits LFS steps by size', async () => {
+    const assets = [randomBytes(50_000, 21), randomBytes(150_000, 22), randomBytes(40_000, 23)]
+    const pointers = assets.map((asset) => lfsPointer(asset))
+    const lfs = fakeLfs({ read: async (oid) => assets[pointers.findIndex((pointer) => pointer.oid === oid)] ?? null })
+    const lfsServer = await serve(lfs.handler)
+    const work = initRepo()
+    sampleHistory(work, 2)
+    pointers.forEach((pointer, i) => writeFile(work, `media/${i}.bin`, pointer.text))
+    writeFile(work, '.lfsconfig', `[lfs]\n\turl = ${lfsServer.url}/store/info/lfs/objects/batch\n\tfetchexclude = media/**\n`)
+    commitAll(work, 'media')
+    await git(work, ['checkout', '-q', '-b', 'other'])
+    writeFile(work, '.lfsconfig', '[lfs]\n\turl = https://elsewhere.invalid/lfs\n')
+    commitAll(work, 'other endpoint')
+    await git(work, ['checkout', '-q', 'main'])
+    const root = tempDir('git-forge-import-root-')
+    await git(root, ['clone', '-q', '--bare', work, 'source.git'])
+    await git(`${root}/source.git`, ['config', 'uploadpack.allowFilter', 'true'])
+    const token = basicAuth('git', 'github-token')
+    const remote = await serve(requireAuthorization(token), httpBackendHandler(root))
+    const storage = new MemoryStorage()
+    await startImport(storage, target, { url: `${remote.url}/source.git` })
+    const states: ImportState[] = []
+    for (let i = 0; i < 50; i++) {
+      const state = await importStep({ storage, repo: target, maxLfsStepBytes: 100_000, getAuthorization: async () => token })
+      states.push(state)
+      if (state.phase === 'done' || state.phase === 'failed') break
+    }
+    const state = states.at(-1)
+    expect(state?.phase).toBe('done')
+    expect(state?.lfsMissing).toEqual([])
+    expect(state?.lfsEndpoint).toEqual({ url: `${lfsServer.url}/store/info/lfs`, source: 'lfsconfig', ref: 'refs/heads/main' })
+    expect(states.filter((step) => step.phase === 'lfs' || (step.phase === 'refs' && step.lfsEndpoint)).length).toBeGreaterThanOrEqual(2)
+    const sizeOf = (oid: string) => pointers.find((pointer) => pointer.oid === oid)?.size ?? 0
+    expect(lfs.batches.length).toBeGreaterThanOrEqual(2)
+    expect(lfs.batches.every((batch) => batch.oids.length === 1 || batch.oids.reduce((sum, oid) => sum + sizeOf(oid), 0) <= 100_000)).toBe(true)
+    expect(lfs.batches.every((batch) => batch.authorization === null)).toBe(true)
+    for (const [i, pointer] of pointers.entries()) {
+      const stored = await storage.get(lfsObjectKey(target, pointer.oid))
+      expect(stored && (await readAll(stored.body))).toEqual(assets[i])
+    }
+  })
+
   it('continues through a scheduler and backs off after failures', async () => {
     const source = await sourceRepo(10)
     const token = basicAuth('git', 'queue-token')

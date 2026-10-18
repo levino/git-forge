@@ -3,7 +3,9 @@ import { type ObjectId } from './hash.ts'
 import { ByteCursor } from './cursor.ts'
 import { connectRemote, type Protocol, type RemoteConnection } from './fetch-client.ts'
 import type { LfsObjectSpec } from './lfs.ts'
-import { type LfsMissing, type LfsPointer, mirrorLfsObjects } from './lfs-mirror.ts'
+import type { DigestFactory } from './digest.ts'
+import { findLfsConfig, normalizeLfsUrl } from './lfs-config.ts'
+import { lfsEndpointFor, type LfsMissing, type LfsPointer, mirrorLfsObjects } from './lfs-mirror.ts'
 import { commitClosure, type RefUpdate, scanNewObjects, selectUpstreamRefs } from './mirror.ts'
 import { type GitObject, parseCommit, parseTag } from './objects.ts'
 import { forEachTreeEntryId, indexPack, ObjectTooLargeError } from './pack-indexer.ts'
@@ -38,11 +40,18 @@ export type ImportSplit = {
   readonly blobsPerStep: number
 }
 
+export type ImportLfsEndpoint = {
+  readonly url: string
+  readonly source: 'setting' | 'lfsconfig' | 'default'
+  readonly ref?: string
+}
+
 export type ImportState = {
   readonly version: 1
   readonly url: string
   readonly lfs: boolean
   readonly lfsUrl?: string
+  readonly lfsEndpoint?: ImportLfsEndpoint
   readonly phase: ImportPhase
   readonly createdAt: string
   readonly updatedAt: string
@@ -95,6 +104,8 @@ export const DEFAULT_MAX_FAILURES = 5
 export const STALE_IMPORT_MS = 30 * 60 * 1000
 
 const LFS_PER_STEP = 100
+
+export const DEFAULT_MAX_LFS_STEP_BYTES = 512 * 1024 * 1024
 
 const importPrefix = (repo: RepositoryName) => `${repositoryPrefix(repo)}import/`
 
@@ -209,6 +220,8 @@ export type ImportStepOptions = {
   readonly maxStepBytes?: number
   readonly maxGraphBytes?: number
   readonly maxObjectBytes?: number
+  readonly maxLfsStepBytes?: number
+  readonly digests?: DigestFactory
   readonly maxFailures?: number
 }
 
@@ -522,16 +535,52 @@ const fetchWhole = async (context: StepContext, state: ImportState): Promise<Imp
   return { ...next, phase: afterFetch(next) }
 }
 
+const lfsConfigOrder = (state: ImportState): [string, ObjectId][] => {
+  const byName = (a: [string, ObjectId], b: [string, ObjectId]) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)
+  const entries = Object.entries(state.targets).sort(byName)
+  const head = entries.filter(([name]) => name === state.head)
+  const heads = entries.filter(([name]) => name !== state.head && name.startsWith('refs/heads/'))
+  const tags = entries.filter(([name]) => name !== state.head && !name.startsWith('refs/heads/'))
+  return [...head, ...heads, ...tags]
+}
+
+export const resolveLfsEndpoint = async (odb: ObjectDatabase, state: ImportState): Promise<ImportLfsEndpoint> => {
+  if (state.lfsUrl) return { url: normalizeLfsUrl(state.lfsUrl) ?? state.lfsUrl, source: 'setting' }
+  const found = await findLfsConfig(odb, lfsConfigOrder(state))
+  if (found) return { url: found.url, source: 'lfsconfig', ref: found.ref }
+  return { url: lfsEndpointFor(state.url), source: 'default' }
+}
+
+export const importLfsBatch = (queue: readonly LfsPointer[], maxBytes: number): LfsPointer[] => {
+  const batch: LfsPointer[] = []
+  let bytes = 0
+  for (const pointer of queue) {
+    if (batch.length >= LFS_PER_STEP || (batch.length > 0 && bytes + pointer.size > maxBytes)) break
+    batch.push(pointer)
+    bytes += pointer.size
+  }
+  return batch
+}
+
 const lfs = async (context: StepContext, state: ImportState): Promise<ImportState> => {
-  const batch = state.lfsQueue.slice(0, LFS_PER_STEP)
+  const endpoint = state.lfsEndpoint ?? (await resolveLfsEndpoint(context.odb, state))
+  const authorize = endpoint.source !== 'lfsconfig' || new URL(endpoint.url).origin === new URL(state.url).origin
+  const batch = importLfsBatch(state.lfsQueue, context.options.maxLfsStepBytes ?? DEFAULT_MAX_LFS_STEP_BYTES)
   const result = await mirrorLfsObjects({
     storage: context.options.storage,
     repo: context.options.repo,
     remote: context.remote,
-    ...(state.lfsUrl ? { endpoint: state.lfsUrl } : {}),
+    endpoint: endpoint.url,
+    authorize,
     objects: batch,
+    ...(context.options.digests ? { digests: context.options.digests } : {}),
   })
-  const next: ImportState = { ...state, lfsQueue: state.lfsQueue.slice(batch.length), lfsMissing: [...state.lfsMissing, ...result.missing] }
+  const next: ImportState = {
+    ...state,
+    lfsEndpoint: endpoint,
+    lfsQueue: state.lfsQueue.slice(batch.length),
+    lfsMissing: [...state.lfsMissing, ...result.missing],
+  }
   return next.lfsQueue.length > 0 ? next : { ...next, phase: 'refs' }
 }
 

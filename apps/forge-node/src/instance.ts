@@ -87,7 +87,7 @@ export const createInstance = async (vars: NodeVars, overrides: InstanceOverride
   })
   const imports: MemoryJobQueue<ImportJob> = createMemoryJobQueue<ImportJob>(
     async (job) => {
-      const state = await continueImport(job, { storage, schedule: (next, delaySeconds) => imports.enqueue(next, { delaySeconds }) })
+      const state = await continueImport(job, { storage, digests: nodeDigests, schedule: (next, delaySeconds) => imports.enqueue(next, { delaySeconds }) })
       log({ event: 'import-step', repo: `${job.owner}/${job.name}`, phase: state.phase, steps: state.steps, error: state.error })
     },
     {

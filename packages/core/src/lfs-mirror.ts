@@ -30,6 +30,7 @@ export type LfsMirrorOptions = {
   readonly batchSize?: number
   readonly digests?: DigestFactory
   readonly concurrency?: number
+  readonly authorize?: boolean
 }
 
 type BatchAction = { readonly href: string; readonly header?: Readonly<Record<string, string>> }
@@ -43,7 +44,7 @@ type BatchObject = {
 
 const LFS_MEDIA_TYPE = 'application/vnd.git-lfs+json'
 
-const requestBatch = async (remote: Remote, endpoint: string, objects: readonly LfsPointer[]): Promise<readonly BatchObject[] | null> => {
+const requestBatch = async (remote: Remote, endpoint: string, objects: readonly LfsPointer[], authorize: boolean): Promise<readonly BatchObject[] | null> => {
   const body = utf8(
     JSON.stringify({
       operation: 'download',
@@ -56,6 +57,7 @@ const requestBatch = async (remote: Remote, endpoint: string, objects: readonly 
     method: 'POST',
     headers: { Accept: LFS_MEDIA_TYPE, 'Content-Type': LFS_MEDIA_TYPE },
     body,
+    authorize,
   })
   if (response.status === 404) {
     await response.body?.cancel()
@@ -78,7 +80,7 @@ const download = async (
   const hasAuthorization = Object.keys(headers).some((name) => name.toLowerCase() === 'authorization')
   const response = await remoteRequest(options.remote, new URL(action.href, endpoint).href, {
     headers,
-    authorize: sameOrigin && !hasAuthorization,
+    authorize: options.authorize !== false && sameOrigin && !hasAuthorization,
   })
   if (!response.ok || !response.body) {
     await response.body?.cancel()
@@ -120,7 +122,7 @@ export const mirrorLfsObjects = async (options: LfsMirrorOptions): Promise<LfsMi
   const batchSize = options.batchSize ?? 100
   for (let start = 0; start < wanted.length; start += batchSize) {
     const batch = wanted.slice(start, start + batchSize)
-    const answers = await requestBatch(options.remote, endpoint, batch)
+    const answers = await requestBatch(options.remote, endpoint, batch, options.authorize !== false)
     if (!answers) {
       missing.push(...batch.map((pointer) => ({ ...pointer, reason: 'LFS batch API not available' })))
       continue

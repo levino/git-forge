@@ -88,7 +88,7 @@ export const backgroundHandlers = {
     const queue = env.IMPORTS
     if (!queue) throw new Error('IMPORTS queue binding is missing')
     for (const message of (batch as MessageBatch<ImportJob>).messages) {
-      const state = await continueImport(message.body, { storage: new R2Storage(env.BUCKET), schedule: importScheduler(queue) })
+      const state = await continueImport(message.body, { storage: new R2Storage(env.BUCKET), digests: digestStreams, schedule: importScheduler(queue) })
       console.log(JSON.stringify({ event: 'import-step', repo: `${message.body.owner}/${message.body.name}`, phase: state.phase, steps: state.steps, error: state.error }))
       message.ack()
     }

@@ -430,8 +430,35 @@ as a sequence of stateless steps, each persisting its progress in
    60 s, enough for single blobs of about 1 GiB; Cloudflare allows up to five
    minutes, which the operator can configure for larger ones. GitHub rejects
    pushes of files above 100 MiB outside LFS.
-4. *lfs* — 100 LFS objects per step via the upstream's batch API; missing
-   objects are recorded, not fatal.
+4. *lfs* — LFS objects via the upstream's batch API, at most 100 objects and
+   `maxLfsStepBytes` (512 MiB) per step, always at least one object, so an
+   object of any size gets a step of its own. Each object is streamed from the
+   download into storage while its SHA-256 and size are checked
+   (`verifyingStream`; the Worker uses the native `crypto.DigestStream`, Node
+   `node:crypto`), so neither memory nor `MAX_LFS_OBJECT_BYTES` limits it; the
+   bound is the storage's single-`put` limit (5 GiB on R2). Measured in Node
+   for `dorfpflege-roessing/dorfarchiv` (29 objects, 4.3 GB, largest 538 MB):
+   at most 5.8 s CPU and 10.6 s wall time per step; JavaScript SHA-256 adds
+   about 1.3 s CPU per 100 MiB. Both fit the 60 s `cpu_ms` of the Worker and
+   the instance template and the 15 minutes of wall time of a queue consumer.
+   Missing objects are recorded, not fatal.
+
+   *Endpoint.* Like `git-lfs`, an explicit `lfsUrl` (the equivalent of git
+   config) wins over the repository's `.lfsconfig`, which wins over the
+   default `<url>.git/info/lfs`. Without `lfsUrl`, the first *lfs* step reads
+   `.lfsconfig` from the imported default branch (`HEAD`); only if that branch
+   has no `.lfsconfig` file are the other branch tips and then the tags tried,
+   in name order. Within the file `lfs.url` wins over `remote.origin.lfsurl`
+   (git-lfs's order). The URL is normalized: http(s) only, no credentials,
+   query or fragment, trailing slashes and a trailing `/objects/batch` removed
+   (git-lfs appends `/objects/batch` itself; an endpoint configured with the
+   full batch URL, as in `dorfarchiv`, works with git-lfs only because that
+   server answers both paths, and the stripped form is what was meant). Other keys such as `lfs.fetchexclude` are ignored: an
+   import mirrors every object so that every clone can smudge. The result is
+   kept in the import state (`lfsEndpoint` with `source` `setting`,
+   `lfsconfig` or `default`). The import token is sent to an endpoint taken
+   from `.lfsconfig` only if it has the same origin as the import URL, since
+   the file is repository content; public LFS servers need no token.
 5. *refs* — update refs via compare-and-swap and rewrite `info/refs`; an
    empty repository adopts the upstream `HEAD`.
 
@@ -694,7 +721,9 @@ switch.
 **Size limits.** Git pushes are only limited by the platform's request body
 limit unless `MAX_PUSH_BYTES` is set; single LFS
 objects by `MAX_LFS_OBJECT_BYTES` (default 100 MiB, the request body limit of
-Cloudflare's Free and Pro plans), enforced in the batch API and on `PUT`.
+Cloudflare's Free and Pro plans), enforced in the batch API and on `PUT`. The
+limit only applies to uploads through the forge's LFS API; imports and mirrors
+download LFS objects server-side into storage and accept any size (§7, Import).
 
 ## 9. Git over SSH
 

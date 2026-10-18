@@ -141,6 +141,7 @@ OIDC_NAME = "Example ID"
 | `OIDC_NAME` | | Button label, e.g. `Dorf-ID`. |
 | `OIDC_SCOPES` | `openid profile email` | Requested scopes. |
 | `SELF_SIGNUP` | `false` | `true`: anyone who can sign in at the provider (or register a passkey) gets an account. `false`: only invited people. |
+| `PASSKEYS` | `true` | `false`: passkey sign-in and registration are off (OIDC-only instance; break-glass keeps working). |
 | `BREAK_GLASS_PUBLIC_KEY` | | Public half of the offline break-glass key, see the [forge-worker README](https://github.com/levino/git-forge/tree/main/apps/forge-worker#break-glass-key). |
 | `UI` | `true` | `false` for a headless instance (for example a backup mirror): Git, LFS and the API only. |
 | `MAX_LFS_OBJECT_BYTES`, `MIRROR_INTERVAL_MINUTES`, `MIRROR_DEEP_CHECK_DAYS` | see the forge-worker README | Limits and mirror schedule. |

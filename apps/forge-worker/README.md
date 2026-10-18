@@ -61,6 +61,7 @@ read functions of `@git-forge/core` and check access with the same
 | `OIDC_NAME` | var, optional | Name of the provider on the login page, e.g. `Dorf-ID`. |
 | `OIDC_SCOPES` | var, optional | Default `openid profile email`. |
 | `SELF_SIGNUP` | var | `true` lets unknown OIDC identities and new passkeys create accounts. Default `false`: an invite (`POST /api/admin/invites`) or an existing link is needed. |
+| `PASSKEYS` | var | `false` turns passkeys off for an OIDC-only instance: the passkey login, registration and `/api/user/passkeys` endpoints answer `404`, and the sign-in, invite and settings pages show no passkey buttons. Stored passkeys stay in the database but cannot be used. Break-glass is unaffected. Default `true`. |
 | `BREAK_GLASS_PUBLIC_KEY` | var, optional | Ed25519 public JWK of the offline break-glass key (see [Login](#login)). Empty: break-glass login is off. |
 | `RUNNER` | Durable Object + Container | `RunnerContainer` (`src/runner-container.ts`, image `runner/Dockerfile`): one container per CI job with the official `actions/runner` and a JIT config. Declared in every environment; without the binding, jobs wait for a runner registered by hand. |
 

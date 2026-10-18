@@ -13,6 +13,7 @@ import {
   type LoginContext,
   LoginError,
   lookupDevice,
+  passkeysEnabled,
   pollDeviceToken,
   type RegistrationSubject,
   sessionTtl,
@@ -151,6 +152,7 @@ export const createLoginHandler = (options: LoginHttpOptions) => {
       oidcName: context.oidc?.config.name ?? null,
       selfSignup: context.selfSignup,
       breakGlass: context.breakGlassKey !== null,
+      passkeys: passkeysEnabled(context),
       user: active ? { login: active.session.login, csrf: active.csrf } : null,
       ...(message ? { message } : {}),
     })
@@ -221,7 +223,7 @@ export const createLoginHandler = (options: LoginHttpOptions) => {
     const invite = await context.logins.findInvite(code)
     if (!invite) return page(request, { kind: 'error', status: 404, message: 'This invite is invalid, used or expired.' })
     const existing = invite.userId ? await context.store.findUserById(invite.userId) : null
-    return page(request, { kind: 'invite', code, login: existing?.login ?? invite.login, existingUser: existing !== null, oidcName: context.oidc?.config.name ?? null })
+    return page(request, { kind: 'invite', code, login: existing?.login ?? invite.login, existingUser: existing !== null, oidcName: context.oidc?.config.name ?? null, passkeys: passkeysEnabled(context) })
   }
 
   const devicePage = async (request: Request, url: URL): Promise<Response> => {
@@ -308,12 +310,18 @@ export const createLoginHandler = (options: LoginHttpOptions) => {
     })
   }
 
+  const requirePasskeys = () => {
+    if (!passkeysEnabled(context)) throw new LoginError('not_configured', 'passkeys are disabled on this instance')
+  }
+
   const listPasskeys = async (request: Request): Promise<Response> => {
+    requirePasskeys()
     const active = await requireSession(request)
     return json(200, await context.logins.listCredentials(active.session.userId))
   }
 
   const removePasskey = async (request: Request, id: string): Promise<Response> => {
+    requirePasskeys()
     const active = await requireSession(request)
     if (!(await context.logins.revokeCredential(active.session.userId, id))) return json(404, { error: 'no such passkey' })
     return new Response(null, { status: 204 })

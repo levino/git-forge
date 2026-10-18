@@ -1,8 +1,7 @@
 import type { ObjectId } from './hash.ts'
 import { fetchDumb, lsRefsDumb } from './dumb-client.ts'
-import { parsePack, writePack } from './pack.ts'
 import { expectOk, type Remote, RemoteError, type RemoteRefs, remoteRequest, remoteUrl } from './remote.ts'
-import type { ObjectDatabase } from './repository.ts'
+import type { IngestOptions, ObjectDatabase } from './repository.ts'
 import { fetchPackV2, HaveWalker, lsRefsV2, parseV2Advertisement, type V2Capabilities } from './smart-client.ts'
 
 export type ProtocolPreference = 'auto' | 'v2' | 'dumb'
@@ -14,6 +13,7 @@ export type FetchObjectsOptions = {
   readonly haveTips: readonly ObjectId[]
   readonly isConnected: (id: ObjectId) => boolean
   readonly maxPackBytes?: number
+  readonly pack?: IngestOptions
 }
 
 export type FetchObjectsResult = {
@@ -37,11 +37,8 @@ const v2Connection = (remote: Remote, capabilities: V2Capabilities): RemoteConne
       haves: new HaveWalker(odb, options.haveTips),
       ...(options.maxPackBytes !== undefined ? { maxPackBytes: options.maxPackBytes } : {}),
     })
-    const parsed = await parsePack(fetched.pack, (id) => odb.read(id))
-    if (parsed.objects.length === 0) return { objects: 0, packs: [], rounds: fetched.rounds }
-    const stored = parsed.externalBases.length > 0 ? writePack(parsed.objects) : { bytes: fetched.pack, ...parsed }
-    const name = await odb.addPack(stored.bytes, stored.objects, stored.checksum)
-    return { objects: parsed.objects.length, packs: [name], rounds: fetched.rounds }
+    const { name, pack } = await odb.ingest(fetched.pack, options.pack)
+    return { objects: pack.objectCount, packs: name ? [name] : [], rounds: fetched.rounds }
   },
 })
 
@@ -55,6 +52,7 @@ const dumbConnection = (remote: Remote, infoRefs?: string): RemoteConnection => 
     const result = await fetchDumb(remote, odb, {
       wants: options.wants,
       isConnected: options.isConnected,
+      ...(options.pack ? { pack: options.pack } : {}),
       ...(options.maxPackBytes !== undefined ? { maxPackBytes: options.maxPackBytes } : {}),
     })
     return { objects: result.objects, packs: result.packs, rounds: 0 }

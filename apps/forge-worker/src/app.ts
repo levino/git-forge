@@ -1,8 +1,10 @@
 import {
   type Authorize,
+  compactRepository,
   createRepository,
   handleGitRequest,
   isValidName,
+  publicPackfileUris,
   RepositoryExistsError,
   type Storage,
 } from '@git-forge/core'
@@ -11,8 +13,13 @@ export type ForgeConfig = {
   readonly storage: Storage
   readonly adminToken: string | undefined
   readonly publicRead: boolean
-  readonly maxPushBytes: number
+  readonly maxPushBytes?: number
+  readonly packfileUriBase?: string
+  readonly compactMaxBytes?: number
+  readonly waitUntil?: (promise: Promise<unknown>) => void
 }
+
+export const DEFAULT_COMPACT_MAX_BYTES = 128 * 1024 * 1024
 
 const json = (status: number, body: unknown, headers: Record<string, string> = {}) =>
   new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json', ...headers } })
@@ -98,7 +105,16 @@ export const handleRequest = async (request: Request, config: ForgeConfig): Prom
   const git = await handleGitRequest(request, {
     storage: config.storage,
     authorize: authorizer(config),
-    maxRequestBytes: config.maxPushBytes,
+    ...(config.maxPushBytes !== undefined ? { maxPushBytes: config.maxPushBytes } : {}),
+    ...(config.publicRead ? { packfileUris: publicPackfileUris(config.packfileUriBase) } : {}),
+    onPush: async (repo, outcome) => {
+      if (!outcome.pack) return
+      const compaction = compactRepository(config.storage, repo, { maxBytes: config.compactMaxBytes ?? DEFAULT_COMPACT_MAX_BYTES }).catch((error: unknown) =>
+        console.error(JSON.stringify({ event: 'compaction-failed', repo: `${repo.owner}/${repo.name}`, error: String(error) })),
+      )
+      if (config.waitUntil) config.waitUntil(compaction)
+      else await compaction
+    },
   })
   return git ?? json(404, { error: 'not found' })
 }

@@ -14,5 +14,5 @@
     }
   ],
   "triggers": { "crons": ["*/30 * * * *"] },
-  "vars": { "PUBLIC_READ": "true", "MAX_PUSH_BYTES": "16777216" }
+  "vars": { "PUBLIC_READ": "true" }
 }

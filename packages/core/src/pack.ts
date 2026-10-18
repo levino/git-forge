@@ -158,7 +158,7 @@ export const parsePack = async (bytes: Uint8Array, lookup: ExternalLookup): Prom
   return { objects, checksum, externalBases: [...externalBases] }
 }
 
-const encodeEntryHeader = (typeCode: number, size: number): Uint8Array => {
+export const encodeEntryHeader = (typeCode: number, size: number): Uint8Array => {
   const out: number[] = []
   let byte = (typeCode << 4) | (size & 0x0f)
   let rest = Math.floor(size / 16)

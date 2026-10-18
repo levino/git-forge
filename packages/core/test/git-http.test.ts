@@ -1,9 +1,10 @@
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
-import { handleGitRequest } from '../src/http.ts'
+import { compactRepository } from '../src/compaction.ts'
+import { type GitHttpOptions, handleGitRequest, publicPackfileUris } from '../src/http.ts'
 import { MemoryStorage } from '../src/memory-storage.ts'
-import { createRepository, readRefs } from '../src/repository.ts'
+import { createRepository, ObjectDatabase, packKey, readRefs } from '../src/repository.ts'
 import { commitAll, gitEnv, initRepo, sampleHistory, tempDir, writeFile } from './git-helpers.ts'
 import { type RunningServer, startServer } from './http-server.ts'
 
@@ -26,9 +27,10 @@ const gitFails = async (cwd: string, args: readonly string[]): Promise<string> =
 let storage: MemoryStorage
 let server: RunningServer
 let repoCounter = 0
+let extra: Partial<GitHttpOptions> = {}
 
 beforeAll(async () => {
-  server = await startServer(async (request) => (await handleGitRequest(request, { storage })) ?? new Response('not found', { status: 404 }))
+  server = await startServer(async (request) => (await handleGitRequest(request, { storage, ...extra })) ?? new Response('not found', { status: 404 }))
 })
 
 afterAll(async () => {
@@ -37,6 +39,7 @@ afterAll(async () => {
 
 beforeEach(() => {
   storage = new MemoryStorage()
+  extra = {}
 })
 
 const newRemote = async (): Promise<string> => {
@@ -173,5 +176,70 @@ describe('git over HTTP', () => {
     await Promise.all(clones.map((dir, i) => gitAsync(dir, ['push', '-q', 'origin', `HEAD:refs/heads/b${i}`])))
     const heads = await gitAsync(base, ['ls-remote', '--heads', remote])
     for (let i = 0; i < 4; i++) expect(heads).toContain(`refs/heads/b${i}`)
+  })
+
+  it('clones a repository of many packs with duplicate objects, in-band and over packfile-uris', async () => {
+    const remote = await newRemote()
+    const repo = { owner: 'test', name: `repo${repoCounter}` }
+    const source = initRepo()
+    for (let round = 1; round <= 4; round++) {
+      sampleHistory(source, round * 2)
+      await gitAsync(source, ['push', '-q', remote, 'main'])
+    }
+    expect((await new ObjectDatabase(storage, repo).packNames()).length).toBe(4)
+    const plain = tempDir()
+    await gitAsync(plain, ['clone', '-q', remote, 'out'])
+    expect(await log(`${plain}/out`)).toBe(await log(source))
+    expect(await gitAsync(`${plain}/out`, ['fsck', '--full', '--strict'])).toBe('')
+    expect(await gitAsync(`${plain}/out`, ['-c', 'transfer.fsckObjects=true', 'fetch', '-q', 'origin'])).toBe('')
+    const strict = tempDir()
+    await gitAsync(strict, ['-c', 'transfer.fsckObjects=true', 'clone', '-q', remote, 'out'])
+    extra = { packfileUris: publicPackfileUris() }
+    const before = server.requests.length
+    const viaUris = tempDir()
+    await gitAsync(viaUris, ['-c', 'fetch.uriProtocols=http', 'clone', '-q', remote, 'out'])
+    expect(await log(`${viaUris}/out`)).toBe(await log(source))
+    expect(await gitAsync(`${viaUris}/out`, ['fsck', '--full', '--strict'])).toBe('')
+    const downloads = server.requests.slice(before).filter((request) => request.path.includes('/objects/pack/pack-'))
+    expect(downloads.length).toBe(4)
+    const withoutUris = tempDir()
+    await gitAsync(withoutUris, ['clone', '-q', remote, 'out'])
+    expect(server.requests.slice(before).filter((request) => request.path.includes('/objects/pack/pack-')).length).toBe(4)
+  })
+
+  it('compacts packs into one without deleting anything and keeps every protocol working', async () => {
+    const remote = await newRemote()
+    const repo = { owner: 'test', name: `repo${repoCounter}` }
+    const source = initRepo()
+    sampleHistory(source, 2)
+    await gitAsync(source, ['push', '-q', remote, 'main'])
+    const early = tempDir()
+    await gitAsync(early, ['clone', '-q', remote, 'out'])
+    for (let round = 2; round <= 5; round++) {
+      sampleHistory(source, round * 2)
+      await gitAsync(source, ['push', '-q', remote, 'main'])
+    }
+    const odb = new ObjectDatabase(storage, repo)
+    const before = await odb.packNames()
+    expect(before.length).toBe(5)
+    const result = await compactRepository(storage, repo, { all: true })
+    expect(result?.merged.length).toBe(5)
+    expect(result?.duplicates).toBeGreaterThan(0)
+    expect(await odb.packNames()).toEqual([result?.pack])
+    for (const name of before) expect(await storage.head(packKey(repo, name))).not.toBeNull()
+    expect(await compactRepository(storage, repo, { all: true })).toBeNull()
+    const clone = tempDir()
+    await gitAsync(clone, ['clone', '-q', remote, 'out'])
+    expect(await log(`${clone}/out`)).toBe(await log(source))
+    expect(await gitAsync(`${clone}/out`, ['fsck', '--full', '--strict'])).toBe('')
+    const dumb = tempDir()
+    await gitAsync(dumb, ['-c', 'protocol.version=0', 'clone', '-q', remote, 'out'])
+    expect(await gitAsync(`${dumb}/out`, ['fsck', '--full', '--strict'])).toBe('')
+    await gitAsync(`${early}/out`, ['pull', '-q', '--ff-only'])
+    expect(await log(`${early}/out`)).toBe(await log(source))
+    sampleHistory(source, 12)
+    await gitAsync(source, ['push', '-q', remote, 'main'])
+    await gitAsync(`${early}/out`, ['pull', '-q', '--ff-only'])
+    expect(await gitAsync(`${early}/out`, ['fsck', '--full', '--strict'])).toBe('')
   })
 })

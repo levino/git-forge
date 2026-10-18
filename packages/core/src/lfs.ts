@@ -1,6 +1,6 @@
 import { fromUtf8, toHex } from './bytes.ts'
 import { createSha256 } from './hash.ts'
-import type { ResolvedObject } from './pack.ts'
+import type { GitObject } from './objects.ts'
 import { repositoryPrefix, type RepositoryName } from './repository.ts'
 import type { Storage } from './storage.ts'
 
@@ -247,7 +247,7 @@ export const parseLfsPointer = (data: Uint8Array): LfsObjectSpec | null => {
   return isLfsSize(size) ? { oid, size } : null
 }
 
-export const pointersIn = (objects: readonly ResolvedObject[]): LfsObjectSpec[] => {
+export const pointersIn = (objects: readonly GitObject[]): LfsObjectSpec[] => {
   const found = new Map<string, LfsObjectSpec>()
   for (const object of objects) {
     if (object.type !== 'blob') continue
@@ -257,16 +257,19 @@ export const pointersIn = (objects: readonly ResolvedObject[]): LfsObjectSpec[] 
   return [...found.values()]
 }
 
-export const missingLfsObjects = async (storage: Storage, repo: RepositoryName, objects: readonly ResolvedObject[]): Promise<LfsObjectSpec[]> => {
+export const missingLfsPointers = async (storage: Storage, repo: RepositoryName, pointers: readonly LfsObjectSpec[]): Promise<LfsObjectSpec[]> => {
   const missing: LfsObjectSpec[] = []
-  for (const pointer of pointersIn(objects)) if (!(await hasLfsObject(storage, repo, pointer))) missing.push(pointer)
+  for (const pointer of pointers) if (!(await hasLfsObject(storage, repo, pointer))) missing.push(pointer)
   return missing
 }
 
+export const missingLfsObjects = async (storage: Storage, repo: RepositoryName, objects: readonly GitObject[]): Promise<LfsObjectSpec[]> =>
+  missingLfsPointers(storage, repo, pointersIn(objects))
+
 export const lfsPushCheck =
   (storage: Storage, repo: RepositoryName) =>
-  async (objects: readonly ResolvedObject[]): Promise<string | null> => {
-    const missing = await missingLfsObjects(storage, repo, objects)
+  async (pushed: { readonly lfsPointers: readonly LfsObjectSpec[] }): Promise<string | null> => {
+    const missing = await missingLfsPointers(storage, repo, pushed.lfsPointers)
     if (missing.length === 0) return null
     const [first] = missing as [LfsObjectSpec]
     return missing.length === 1 ? `missing LFS object ${first.oid}` : `missing ${missing.length} LFS objects, e.g. ${first.oid}`

@@ -35,6 +35,7 @@
     "@git-forge/notifications": "workspace:*",
     "@git-forge/pages": "workspace:*",
     "@git-forge/releases": "workspace:*",
+    "@git-forge/s3": "workspace:*",
     "@git-forge/ses": "workspace:*",
     "astro": "7.4.0",
     "rehype-sanitize": "6.0.0",

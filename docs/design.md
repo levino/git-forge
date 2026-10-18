@@ -286,6 +286,8 @@ the [accounts README](../packages/accounts/README.md#branch-protection).
   README.txt                        # plain text: what this is, how to read it
 tmp/<repo>/<timestamp>-<uuid>/<n>   # staging chunks of a push or fetch, expired by the bucket
 tmp/<repo>/<timestamp>-<uuid>/asset # a release asset upload without a declared SHA-256 (§16)
+tmp/<repo>/<timestamp>-<uuid>/upload.json   # an upload session of git-remote-forge (§7)
+tmp/<repo>/<timestamp>-<uuid>/part/<nnnnn>  # its parts, 1-based, five digits
 ```
 
 - `<sha>` is the pack's trailing SHA-1 checksum, as with `git index-pack`.
@@ -307,6 +309,8 @@ tmp/<repo>/<timestamp>-<uuid>/asset # a release asset upload without a declared 
   are read back once to write the final pack and never again. The `Storage`
   interface has no delete; operators expire `tmp/` with a bucket lifecycle
   rule (e.g. one day). Pushes up to one chunk never touch `tmp/`.
+- **Upload sessions** (§7) live under `tmp/`: one session record, one object
+  per part, written once; unfinished uploads expire with the `tmp/` rule.
 - **Pages files** are stored the same way, under the SHA-256 of their
   content, and each deployment is one manifest that maps paths to those
   hashes (§20). Which deployment is active lives only in the database.
@@ -352,6 +356,7 @@ large files belong in LFS. The Worker sets no push size limit of its own
 **Large pushes** — a push is one HTTP request, and Cloudflare caps request
 bodies at 100 MB (Free/Pro), 200 MB (Business) and 500 MB (Enterprise). Three ways around it, none of which changes git:
 
+- *Remote helper* `git-remote-forge` (below): resumable upload in parts.
 - *Chunked push helper* `git forge push` (`packages/cli`, a single executable
   built with `bun build --compile`): splits the history not yet on the remote
   into pushes below a byte budget (default 80 MB, measured with
@@ -363,8 +368,20 @@ bodies at 100 MB (Free/Pro), 200 MB (Business) and 500 MB (Enterprise). Three wa
   a rerun: what landed is on the remote. Details in `packages/cli/README.md`.
 - *Server-side import* (below): the forge pulls from a URL, so no request
   body is involved at all.
-- Later: a remote helper uploading packs directly to object storage
-  (roadmap M5a).
+
+**Remote helper** — `git-remote-forge` (same executable as `git forge`)
+serves `forge::https://host/owner/repo`. Fetch is relayed to
+`git remote-https`. Push packs locally into `.git/forge-upload/<key>/`, then
+uses `/{owner}/{repo}.git/forge/uploads`: `GET` limits, `POST {parts}`
+creates the session (per part a presigned `PUT` bound to length and SHA-256,
+or `PUT …/{id}/parts/{n}` through the function), `GET …/{id}` lists missing
+parts with fresh URLs (resume), `POST …/{id}/finalize {commands, atomic}` runs
+`receivePack` on the commands plus the parts, so policy, LFS check and
+`onPush` are those of `git-receive-pack`, with the finalize request's token.
+Every call needs `write`. A server without the API gets plain receive-pack.
+Parts are separate objects, not S3 multipart: the indexer reads every byte
+anyway, no Complete/Abort (abort would be a delete), no 5 MiB minimum, every
+adapter works. Finalize indexes in one request, bounded by `cpu_ms`.
 
 **Import** — create or update a repository by pulling from any Git URL
 (smart HTTP v2 or dumb HTTP, optional token). It reuses the mirror client

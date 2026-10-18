@@ -1,11 +1,11 @@
 import { generateSigningKey, type SigningKey } from '@git-forge/accounts'
-import { type ImportJob, readImportState, readRefs } from '@git-forge/core'
-import { commitAll, initRepo, sampleHistory, tempDir, writeFile } from '@git-forge/core/test/git-helpers.ts'
+import { type ImportJob, readImportState, readRefs, sha256Hex, ZERO_ID } from '@git-forge/core'
+import { commitAll, gitBytes, initRepo, sampleHistory, tempDir, writeFile } from '@git-forge/core/test/git-helpers.ts'
 import { type RunningServer, startServer } from '@git-forge/core/test/http-server.ts'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { basicAuthorization, secretMatches } from '../../src/app.ts'
 import { git, gitFails } from '../e2e/history.ts'
-import { DEFAULT_COMPACT_MAX_BYTES, DEFAULT_MAX_LFS_OBJECT_BYTES, loadSecretsKey, parseActionsSettings, parseSettings } from '../../src/config.ts'
+import { DEFAULT_COMPACT_MAX_BYTES, DEFAULT_MAX_LFS_OBJECT_BYTES, loadSecretsKey, parseActionsSettings, parseR2Signing, parseSettings } from '../../src/config.ts'
 import { upstreamRepository } from '../../src/mirrors.ts'
 import { bootstrap, BOOTSTRAP_TOKEN, call, type NodeForge, nodeForge } from '../support/node-forge.ts'
 
@@ -65,6 +65,18 @@ describe('settings', () => {
     expect(() => parseActionsSettings({ ACTIONS: 'true', ACTIONS_REPOSITORIES: '[]' })).toThrow(/ACTIONS_REPOSITORIES/)
     expect(() => parseActionsSettings({ ACTIONS: 'true', ACTIONS_GITHUB_FALLBACK: 'http://insecure' })).toThrow(/ACTIONS_GITHUB_FALLBACK/)
     expect(parseActionsSettings({ ACTIONS: 'true', ACTIONS_GITHUB_FALLBACK: 'https://ghe.example/api/v3/' })?.githubFallback).toBe('https://ghe.example/api/v3')
+  })
+
+  it('parses the optional R2 signing settings for direct uploads', () => {
+    expect(parseR2Signing({})).toBeUndefined()
+    expect(() => parseR2Signing({ R2_BUCKET_NAME: 'forge' })).toThrow(/R2_S3_ENDPOINT/)
+    expect(() => parseR2Signing({ R2_S3_ENDPOINT: 'http://x', R2_BUCKET_NAME: 'b', R2_ACCESS_KEY_ID: 'k', R2_SECRET_ACCESS_KEY: 's' })).toThrow(/https/)
+    expect(parseR2Signing({ R2_S3_ENDPOINT: 'https://acct.r2.cloudflarestorage.com', R2_BUCKET_NAME: 'b', R2_ACCESS_KEY_ID: 'k', R2_SECRET_ACCESS_KEY: 's' })).toEqual({
+      endpoint: 'https://acct.r2.cloudflarestorage.com',
+      bucket: 'b',
+      accessKeyId: 'k',
+      secretAccessKey: 's',
+    })
   })
 
   it('compares secrets without accepting missing or different values', async () => {
@@ -211,6 +223,32 @@ describe('repositories with accounts', () => {
     expect((await call(forge, BASE, 'PUT', path, bob, { allow_force_pushes: false })).status).toBe(403)
     expect((await call(forge, BASE, 'PUT', path, alice, { allow_force_pushes: false })).status).toBe(200)
     expect((await call(forge, BASE, 'GET', '/api/repos/alice/notes/branch-protection', alice)).status).toBe(200)
+  })
+
+  it('accepts pack uploads with the permissions and branch protection of receive-pack', async () => {
+    const uploads = `${BASE}/alice/notes.git/forge/uploads`
+    const request = (method: string, url: string, authorization?: string, body?: unknown) =>
+      forge.fetch(
+        new Request(url, {
+          method,
+          headers: { ...(authorization ? { Authorization: authorization } : {}), ...(body instanceof Uint8Array ? { 'Content-Length': String(body.length) } : {}) },
+          ...(body instanceof Uint8Array ? { body: body as Uint8Array<ArrayBuffer> } : body !== undefined ? { body: JSON.stringify(body) } : {}),
+        }),
+      )
+    expect((await request('GET', uploads)).status).toBe(401)
+    expect((await request('GET', uploads, basic(aliceRead))).status).toBe(403)
+    expect(await json(await request('GET', uploads, basic(bob)))).toMatchObject({ maxPartBytes: 1024 * 1024, direct: false })
+    const source = initRepo()
+    const [tip] = sampleHistory(source, 1)
+    const pack = gitBytes(source, ['pack-objects', '--revs', '--stdout', '-q'], `${tip}\n`)
+    const created = await json<{ id: string }>(await request('POST', uploads, basic(bob), { parts: [{ size: pack.length, sha256: sha256Hex(pack) }] }))
+    expect((await request('PUT', `${uploads}/${created.id}/parts/1`, basic(aliceRead), pack)).status).toBe(403)
+    expect((await request('PUT', `${uploads}/${created.id}/parts/1`, basic(bob), pack)).status).toBe(201)
+    const finalize = (commands: unknown[]) => request('POST', `${uploads}/${created.id}/finalize`, basic(bob), { commands })
+    expect(await json(await finalize([{ name: 'refs/heads/main', oldId: ZERO_ID, newId: tip }]))).toEqual({ unpack: 'ok', results: [{ name: 'refs/heads/main', ok: true }] })
+    const deletion = await json<{ results: { ok: boolean; reason?: string }[] }>(await finalize([{ name: 'refs/heads/main', oldId: tip, newId: ZERO_ID }]))
+    expect(deletion.results[0]).toMatchObject({ ok: false, reason: expect.stringMatching(/^protected branch: /) })
+    expect((await readRefs(forge.storage, { owner: 'alice', name: 'notes' }))?.state.refs['refs/heads/main']).toBe(tip)
   })
 
   it('answers health checks and unknown paths', async () => {

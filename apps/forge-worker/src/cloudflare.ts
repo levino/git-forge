@@ -1,9 +1,10 @@
 import { d1Database, MIGRATIONS, migrateOnStart } from '@git-forge/accounts'
 import { consumeJobs, digestStreams, QueueJobs, R2Storage } from '@git-forge/cloudflare'
 import { continueImport, createConsoleEmailSender, type EmailSender, type ImportJob, type ImportScheduler, storagePublisher } from '@git-forge/core'
+import { S3Storage } from '@git-forge/s3'
 import { createSesEmailSender } from '@git-forge/ses'
 import { type AppJob, createForge, type Forge } from './app.ts'
-import { ACTIONS_CRON, type EmailSettings, type ForgeVars, loadSecretsKey, parseActionsSettings, parseEmailSettings, parseSettings, uiEnabled } from './config.ts'
+import { ACTIONS_CRON, type EmailSettings, type ForgeVars, loadSecretsKey, parseActionsSettings, parseEmailSettings, parseR2Signing, parseSettings, type R2SigningSettings, uiEnabled } from './config.ts'
 import { containerLauncher } from './runner-launcher.ts'
 import { captureLoginPage } from './ui/login-pages.ts'
 
@@ -28,6 +29,12 @@ const emailSender = (settings: EmailSettings | undefined): EmailSender | undefin
   return createSesEmailSender(settings)
 }
 
+const r2Signer = (settings: R2SigningSettings | undefined) => {
+  if (!settings) return undefined
+  const s3 = new S3Storage({ ...settings, region: 'auto', forcePathStyle: true })
+  return (key: string, size: number, sha256Hex: string, expiresInSeconds: number) => s3.presignPut(key, size, sha256Hex, expiresInSeconds)
+}
+
 let forge: Promise<Forge> | undefined
 
 export const forgeFor = (env: Env): Promise<Forge> => {
@@ -37,6 +44,7 @@ export const forgeFor = (env: Env): Promise<Forge> => {
       const actions = parseActionsSettings(env)
       const secretsKey = await loadSecretsKey(actions)
       const email = emailSender(parseEmailSettings(env))
+      const presignUploads = r2Signer(parseR2Signing(env))
       return createForge({
         ...settings,
         storage: new R2Storage(env.BUCKET),
@@ -46,6 +54,7 @@ export const forgeFor = (env: Env): Promise<Forge> => {
         ...(env.IMPORTS ? { scheduleImport: importScheduler(env.IMPORTS) } : {}),
         ...(env.JOBS ? { jobs: new QueueJobs(env.JOBS) } : {}),
         ...(email ? { email } : {}),
+        ...(presignUploads ? { presignUploads } : {}),
         ...(env.CDN_BUCKET ? { lfsPublisher: storagePublisher(new R2Storage(env.CDN_BUCKET), env.LFS_PUBLISH_PREFIX?.trim() ?? '') } : {}),
         ...(actions
           ? {

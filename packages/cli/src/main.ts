@@ -2,6 +2,8 @@ import { configDirectory, credentialFor, deviceLogin, gitCredential, normalizeHo
 import { configValue, runGit } from './git.ts'
 import { CommitTooLargeError } from './plan.ts'
 import { DEFAULT_BUDGET, forgePush } from './push.ts'
+import { isRemoteHelperName } from './helper-protocol.ts'
+import { runRemoteHelper } from './remote-helper.ts'
 import { formatSize, parseSize } from './size.ts'
 
 export const VERSION = '0.1.0'
@@ -10,6 +12,7 @@ const USAGE = `usage: git forge push [options] <remote> <refspec>...
        git forge auth login [<url>] [--no-setup-git]
        git forge auth status | logout [<url>] | setup-git [<url>] | token [<url>]
        git forge auth git-credential <get|store|erase>
+       git-remote-forge <remote> <url>   (git push/fetch forge::https://host/owner/repo)
 
 Pushes history in several smaller pushes so that no single request exceeds
 the budget, then performs the final ref update. Rerun to resume.
@@ -25,7 +28,12 @@ options:
 git forge auth login signs in through the browser (device flow), stores a
 token for Git and Git LFS in ~/.config/git-forge/hosts.json and makes git use
 it for that host through the credential helper git forge auth git-credential.
-Without <url> it uses the host of the remote origin.`
+Without <url> it uses the host of the remote origin.
+
+Invoked as git-remote-forge (a link to this executable on PATH), it is a git
+remote helper for URLs forge::https://host/owner/repo: fetches use smart HTTP,
+pushes upload the pack in parts directly to the forge's object storage and
+resume after an interruption when you run git push again.`
 
 type Parsed = {
   readonly remote: string
@@ -143,8 +151,19 @@ const auth = async (args: readonly string[]): Promise<number> => {
   }
 }
 
-export const main = async (args: readonly string[]): Promise<number> => {
+const remoteHelper = async (args: readonly string[]): Promise<number> => {
+  try {
+    return await runRemoteHelper(args)
+  } catch (error) {
+    process.stderr.write(`git-remote-forge: ${error instanceof Error ? error.message : String(error)}\n`)
+    return 1
+  }
+}
+
+export const main = async (args: readonly string[], argv0: string = process.argv0): Promise<number> => {
+  if (isRemoteHelperName(argv0)) return remoteHelper(args)
   const [command, ...rest] = args
+  if (command === 'remote-helper') return remoteHelper(rest)
   if (command === '--version' || command === 'version') {
     process.stdout.write(`git-forge ${VERSION}\n`)
     return 0

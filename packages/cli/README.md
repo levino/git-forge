@@ -15,6 +15,16 @@ git forge push origin +main            # rewritten history, archived as usual
 Because the executable is called `git-forge`, `git forge …` works as soon as it
 is on `PATH`. It needs `git` 2.38 or newer.
 
+The same executable is also the git remote helper `git-remote-forge`, which
+pushes packs of any size in resumable parts:
+
+```sh
+ln -s git-forge /usr/local/bin/git-remote-forge   # once, next to git-forge
+git remote add origin forge::https://forge.example/acme/site
+git push origin main                               # or: git push forge::https://forge.example/acme/site main
+git clone forge::https://forge.example/acme/site
+```
+
 ## Login and the credential helper
 
 ```sh
@@ -48,13 +58,25 @@ token stays until you log in again. `--no-setup-git` skips the git
 configuration; `git forge auth setup-git [<url>]` writes it later and
 `git forge auth token [<url>]` prints the token for scripts.
 
+## Remote helper `git-remote-forge`
+
+Run as `git-remote-forge` (link or copy of `git-forge`) or
+`git forge remote-helper <remote> <url>`. Fetch is relayed to
+`git remote-https`. Push packs into `.git/forge-upload/<key>/`, uploads parts
+(presigned or through the forge) and finalizes with receive-pack's checks; a
+rerun of the same `git push` uploads only missing parts. Forges without the
+upload API get a plain receive-pack. `forge.uploadPartBytes` (or
+`GIT_FORGE_UPLOAD_PART_BYTES`) caps the part size. Credentials come from
+`git credential`. For named remotes it sets `remote.<name>.lfsurl` when unset.
+
 ## Installation
 
 Download the single executable for your platform from a git-forge release
 (`git-forge-linux-x64`, `-linux-arm64`, `-darwin-x64`, `-darwin-arm64`,
 `-windows-x64.exe`; checksums in `CLI-SHA256SUMS`), rename it to `git-forge`
 (`git-forge.exe` on Windows) and put it on `PATH`. No Node.js, npm or Bun is
-needed.
+needed. For the remote helper add a link named `git-remote-forge` (or a copy
+`git-remote-forge.exe` on Windows) in the same directory.
 
 During development run it from the repository:
 
@@ -64,7 +86,7 @@ pnpm --filter @git-forge/cli build        # dist/git-forge for this machine, nee
 sh packages/cli/build-executables.sh out/  # all platforms plus CLI-SHA256SUMS
 ```
 
-## Options
+## Options of `git forge push`
 
 | Option | Meaning |
 |---|---|
@@ -75,7 +97,7 @@ sh packages/cli/build-executables.sh out/  # all platforms plus CLI-SHA256SUMS
 Exit codes: `0` success, `1` error, `2` a single commit is larger than the
 budget.
 
-## How it works
+## How `git forge push` works
 
 For each refspec:
 
@@ -148,5 +170,10 @@ instances is unaffected.
 with a small request limit: a split push lands the same refs and objects as a
 normal push, an interrupted chunk resumes without resending, merged side
 branches go through temporary refs, rewrites archive once, an oversized commit
-is refused. The Worker's end-to-end suite pushes 24 MiB through `wrangler dev`
+is refused.
+
+`test/remote-helper.test.ts` drives real `git` and `git lfs` through
+`git-remote-forge`: presigned and proxied parts, resume, policy, atomic,
+LFS check, deletions and the receive-pack fallback.
+The Worker's end-to-end suite pushes 24 MiB through `wrangler dev`
 with `MAX_PUSH_BYTES` set to 16 MiB.

@@ -36,6 +36,7 @@ read functions of `@git-forge/core` and check access with the same
 | `INSTANCE_KEY` | secret, optional | Ed25519 private JWK of this instance. Needed to mirror private repositories from other instances; also publishes `/.well-known/openid-configuration` and `/.well-known/jwks.json`. Generate with `pnpm --filter forge-worker instance-key`. |
 | `PUBLIC_URL` | var, optional | Base URL of the instance, used as its issuer (when minting) and audience (when verifying instance tokens). Defaults to the origin of the request; scheduled sync with instance tokens needs it set. |
 | `MAX_PUSH_BYTES` | var, optional | Largest accepted push request. Unset by default: pushes are streamed, so only Cloudflare's request body limit applies (see Large pushes). |
+| `R2_S3_ENDPOINT`, `R2_BUCKET_NAME`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` | vars/secrets, optional | All four or none. S3 endpoint and name of the `BUCKET` bucket plus an R2 token: `git-remote-forge` parts go directly to R2 via presigned URLs instead of through the Worker. |
 | `PACKFILE_URI_BASE` | var, optional | Base URL for `packfile-uris` (e.g. a CDN in front of the forge). Defaults to the origin of the request. Pack URIs are only offered for repositories anyone may read. |
 | `COMPACT_MAX_BYTES` | var, optional | Largest pack compaction run after a push through `waitUntil`, default 128 MiB; `0` disables it. |
 | `MAX_LFS_OBJECT_BYTES` | var | Largest accepted LFS object, default 100 MiB (Cloudflare's request body limit on the Free and Pro plans). Larger objects get a per-object error in the batch API and `413` on `PUT`. |
@@ -531,6 +532,9 @@ reaches the Worker. Ways around it:
 
 - **Git LFS for large files.** LFS objects go straight to the bucket through
   presigned URLs and never pass through the Worker.
+- **The remote helper.** `git push forge::https://forge.example/acme/site main`
+  (`git-remote-forge`, `packages/cli`) uploads resumable parts; finalize is
+  bounded by `limits.cpu_ms`, not the body limit.
 - **Chunked pushes.** `git forge push` from `packages/cli` splits a push into
   several pushes below a budget: `git forge push --max-bytes 90MiB <url> main`.
   Each push only carries the objects the forge does not have yet.

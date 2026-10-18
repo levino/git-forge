@@ -1,8 +1,9 @@
 import type { OkpPublicJwk } from './jose.ts'
 import { BreakGlassError, verifyBreakGlassToken } from './break-glass.ts'
+import { CLI_OOB_REDIRECT, cleanClientText, cliRequestPath, isClientState, isPkceChallenge, loopbackRedirect, parseCliRedirect, pkceMatches } from './cli-login.ts'
 import { DEVICE_CLIENT_ID, DEVICE_TOKEN_TTL_MS, normalizeUserCode } from './device.ts'
 import { base64UrlDecode, base64UrlEncode, randomBytes, randomId } from './encoding.ts'
-import type { LoginStore, PendingDevice } from './login-store.ts'
+import type { LoginStore, PendingCliRequest, PendingDevice } from './login-store.ts'
 import {
   authorizationUrl,
   createPkce,
@@ -17,18 +18,23 @@ import {
 } from './oidc.ts'
 import { BREAK_GLASS_SESSION_TTL_MS, SESSION_TTL_MS, type SessionMethod } from './sessions.ts'
 import { type AccountsStore, LOGIN_PATTERN } from './store.ts'
+import { grantedScope, parseRequestedScope, type TokenScope } from './tokens.ts'
 import { assertionCredential, creationOptions, type RelyingParty, requestOptions, verifyAuthentication, verifyRegistration, WebAuthnError } from './webauthn.ts'
 
 export const LOGIN_CHALLENGE_TTL_MS = 10 * 60 * 1000
 
-export const DEVICE_TOKEN_SCOPES = ['repo:write'] as const
+export const DEFAULT_CLI_SCOPE: TokenScope = 'repo:write'
+
+export const DEFAULT_CLIENT_NAME = 'git forge auth login'
 
 export const OIDC_CALLBACK_PATH = '/login/oidc/callback'
 
-export type LoginErrorCode = 'invalid_request' | 'not_configured' | 'no_account' | 'forbidden' | 'expired' | 'verification_failed' | 'conflict'
+export type LoginErrorCode = 'invalid_request' | 'invalid_scope' | 'rate_limited' | 'not_configured' | 'no_account' | 'forbidden' | 'expired' | 'verification_failed' | 'conflict'
 
 const STATUS: Record<LoginErrorCode, number> = {
   invalid_request: 400,
+  invalid_scope: 400,
+  rate_limited: 429,
   not_configured: 404,
   no_account: 403,
   forbidden: 403,
@@ -371,10 +377,26 @@ export type DeviceStart = {
 
 export const DEVICE_PATH = '/login/device'
 
-export const startDeviceAuthorization = async (context: LoginContext, input: { readonly clientId: string | null; readonly clientName?: string | null }): Promise<DeviceStart> => {
+const requestedScope = (scope: string | null | undefined): TokenScope => {
+  const parsed = parseRequestedScope(scope, DEFAULT_CLI_SCOPE)
+  if (!parsed) throw new LoginError('invalid_scope', 'scope must be one of repo:read, repo:write, repo:admin')
+  return parsed
+}
+
+const clientHostOf = (value: string | null | undefined): string | null => (value ? cleanClientText(value, '') || null : null)
+
+export const startDeviceAuthorization = async (
+  context: LoginContext,
+  input: { readonly clientId: string | null; readonly clientName?: string | null; readonly clientHost?: string | null; readonly scope?: string | null; readonly requestIp?: string | null },
+): Promise<DeviceStart> => {
   if (input.clientId !== DEVICE_CLIENT_ID) throw new LoginError('invalid_request', `unknown client_id; use ${DEVICE_CLIENT_ID}`)
-  const name = typeof input.clientName === 'string' && input.clientName.trim() !== '' ? input.clientName.trim() : 'git forge auth login'
-  const device = await context.logins.createDevice({ clientName: name, scopes: DEVICE_TOKEN_SCOPES.join(' ') })
+  const scope = requestedScope(input.scope)
+  const device = await context.logins.createDevice({
+    clientName: cleanClientText(input.clientName, DEFAULT_CLIENT_NAME),
+    clientHost: clientHostOf(input.clientHost),
+    requestIp: input.requestIp ?? null,
+    scopes: scope,
+  })
   const verificationUri = `${context.origin}${DEVICE_PATH}`
   return {
     deviceCode: device.deviceCode,
@@ -391,15 +413,35 @@ export const lookupDevice = async (context: LoginContext, userCode: string): Pro
   return normalized ? context.logins.findDevice(normalized) : null
 }
 
-export const decideDeviceAuthorization = async (context: LoginContext, input: { readonly userId: string; readonly userCode: string; readonly approve: boolean }): Promise<void> => {
+export const decideDeviceAuthorization = async (
+  context: LoginContext,
+  input: { readonly userId: string; readonly userCode: string; readonly approve: boolean; readonly scope?: string | null },
+): Promise<void> => {
   const normalized = normalizeUserCode(input.userCode)
   if (!normalized) throw new LoginError('invalid_request', 'the code has the wrong format')
-  if (!(await context.logins.decideDevice(normalized, input.userId, input.approve))) throw new LoginError('expired', 'this code is unknown, expired or already used')
+  const device = await context.logins.findDevice(normalized)
+  const requested = device ? parseRequestedScope(device.scopes, DEFAULT_CLI_SCOPE) : null
+  const decision = input.approve ? { approve: true as const, scopes: grantedScope(requested ?? 'repo:read', input.scope) } : { approve: false as const }
+  if (!device || device.status !== 'pending' || !(await context.logins.decideDevice(normalized, input.userId, decision))) {
+    throw new LoginError('expired', 'this code is unknown, expired or already used')
+  }
 }
+
+export type TokenGrantError = 'authorization_pending' | 'slow_down' | 'access_denied' | 'expired_token' | 'invalid_grant' | 'invalid_request'
 
 export type DeviceTokenResult =
   | { readonly kind: 'token'; readonly token: string; readonly login: string; readonly scope: string; readonly expiresAt: number }
-  | { readonly kind: 'error'; readonly error: 'authorization_pending' | 'slow_down' | 'access_denied' | 'expired_token' | 'invalid_grant'; readonly interval?: number }
+  | { readonly kind: 'error'; readonly error: TokenGrantError; readonly interval?: number }
+
+const issueCliToken = async (context: LoginContext, input: { readonly userId: string | null; readonly name: string; readonly scopes: string }) => {
+  const user = input.userId ? await context.store.findUserById(input.userId) : null
+  const scope = parseRequestedScope(input.scopes, DEFAULT_CLI_SCOPE)
+  if (!user || !scope) return null
+  const expiresAt = context.now() + DEVICE_TOKEN_TTL_MS
+  const created = await context.store.createPersonalAccessToken(user.id, { name: input.name, scopes: [scope], expiresAt }, { kind: 'user', id: user.id })
+  const result: DeviceTokenResult = { kind: 'token', token: created.token, login: user.login, scope, expiresAt }
+  return { id: created.id, result }
+}
 
 export const pollDeviceToken = async (context: LoginContext, input: { readonly deviceCode: string | null; readonly clientId: string | null }): Promise<DeviceTokenResult> => {
   if (input.clientId !== DEVICE_CLIENT_ID || !input.deviceCode) return { kind: 'error', error: 'invalid_grant' }
@@ -407,16 +449,88 @@ export const pollDeviceToken = async (context: LoginContext, input: { readonly d
   if (!poll) return { kind: 'error', error: 'invalid_grant' }
   if (poll.outcome.kind === 'slow_down') return { kind: 'error', error: 'slow_down', interval: poll.outcome.intervalSeconds }
   if (poll.outcome.kind !== 'approved') return { kind: 'error', error: poll.outcome.kind }
-  const user = poll.userId ? await context.store.findUserById(poll.userId) : null
-  if (!user) return { kind: 'error', error: 'access_denied' }
-  const expiresAt = context.now() + DEVICE_TOKEN_TTL_MS
-  const created = await context.store.createPersonalAccessToken(
-    user.id,
-    { name: poll.clientName, scopes: [...DEVICE_TOKEN_SCOPES], expiresAt },
-    { kind: 'user', id: user.id },
-  )
-  await context.logins.attachDeviceToken(input.deviceCode, created.id)
-  return { kind: 'token', token: created.token, login: user.login, scope: DEVICE_TOKEN_SCOPES.join(' '), expiresAt }
+  const issued = await issueCliToken(context, { userId: poll.userId, name: poll.clientName, scopes: poll.scopes })
+  if (!issued) return { kind: 'error', error: 'access_denied' }
+  await context.logins.attachDeviceToken(input.deviceCode, issued.id)
+  return issued.result
+}
+
+export type CliStart = {
+  readonly id: string
+  readonly url: string
+  readonly expiresIn: number
+}
+
+export const startCliAuthorization = async (
+  context: LoginContext,
+  input: {
+    readonly clientId: string | null
+    readonly redirectUri: string | null
+    readonly codeChallenge: string | null
+    readonly codeChallengeMethod?: string | null
+    readonly state?: string | null
+    readonly scope?: string | null
+    readonly clientName?: string | null
+    readonly clientHost?: string | null
+    readonly requestIp?: string | null
+  },
+): Promise<CliStart> => {
+  if (input.clientId !== DEVICE_CLIENT_ID) throw new LoginError('invalid_request', `unknown client_id; use ${DEVICE_CLIENT_ID}`)
+  const redirect = parseCliRedirect(input.redirectUri)
+  if (!redirect) throw new LoginError('invalid_request', `redirect_uri must be an http address on 127.0.0.1, [::1] or localhost, or ${CLI_OOB_REDIRECT}`)
+  if ((input.codeChallengeMethod ?? 'S256') !== 'S256' || !isPkceChallenge(input.codeChallenge)) throw new LoginError('invalid_request', 'a PKCE code_challenge with method S256 is required')
+  const state = input.state ?? null
+  if (redirect.kind === 'loopback' && !isClientState(state)) throw new LoginError('invalid_request', 'state is required for a loopback redirect')
+  if (state !== null && !isClientState(state)) throw new LoginError('invalid_request', 'state is malformed')
+  const created = await context.logins.createCliRequest({
+    clientName: cleanClientText(input.clientName, DEFAULT_CLIENT_NAME),
+    clientHost: clientHostOf(input.clientHost),
+    requestIp: input.requestIp ?? null,
+    redirectUri: redirect.uri,
+    state,
+    codeChallenge: input.codeChallenge,
+    scopes: requestedScope(input.scope),
+  })
+  return { id: created.id, url: `${context.origin}${cliRequestPath(created.id)}`, expiresIn: Math.round((created.expiresAt - context.now()) / 1000) }
+}
+
+export const lookupCliRequest = (context: LoginContext, id: string): Promise<PendingCliRequest | null> => context.logins.findCliRequest(id)
+
+export type CliDecision =
+  | { readonly kind: 'redirect'; readonly location: string; readonly approved: boolean }
+  | { readonly kind: 'code'; readonly code: string; readonly expiresAt: number }
+  | { readonly kind: 'denied' }
+
+export const decideCliRequest = async (
+  context: LoginContext,
+  input: { readonly userId: string; readonly id: string; readonly approve: boolean; readonly scope?: string | null },
+): Promise<CliDecision> => {
+  const pending = await context.logins.findCliRequest(input.id)
+  const requested = pending ? parseRequestedScope(pending.scopes, DEFAULT_CLI_SCOPE) : null
+  const decision = input.approve ? { approve: true as const, scopes: grantedScope(requested ?? 'repo:read', input.scope) } : { approve: false as const }
+  const decided = pending ? await context.logins.decideCliRequest(input.id, input.userId, decision) : null
+  if (!pending || !decided) throw new LoginError('expired', 'this request is unknown, expired or already answered; run the login again')
+  const redirect = parseCliRedirect(pending.redirectUri)
+  if (redirect?.kind === 'loopback') {
+    const params: Record<string, string> = decided.code ? { code: decided.code } : { error: 'access_denied' }
+    return { kind: 'redirect', approved: decided.code !== null, location: loopbackRedirect(redirect.uri, { ...params, ...(pending.state ? { state: pending.state } : {}) }) }
+  }
+  return decided.code ? { kind: 'code', code: decided.code, expiresAt: decided.expiresAt } : { kind: 'denied' }
+}
+
+export const exchangeCliCode = async (
+  context: LoginContext,
+  input: { readonly clientId: string | null; readonly code: string | null; readonly codeVerifier: string | null; readonly redirectUri: string | null },
+): Promise<DeviceTokenResult> => {
+  if (input.clientId !== DEVICE_CLIENT_ID) return { kind: 'error', error: 'invalid_grant' }
+  const code = input.code?.trim() ?? ''
+  if (code === '' || !input.codeVerifier || !input.redirectUri) return { kind: 'error', error: 'invalid_request' }
+  const grant = await context.logins.takeCliCode(code)
+  if (!grant || grant.redirectUri !== input.redirectUri || !(await pkceMatches(input.codeVerifier, grant.codeChallenge))) return { kind: 'error', error: 'invalid_grant' }
+  const issued = await issueCliToken(context, { userId: grant.userId, name: grant.clientName, scopes: grant.scopes })
+  if (!issued) return { kind: 'error', error: 'invalid_grant' }
+  await context.logins.attachCliToken(code, issued.id)
+  return issued.result
 }
 
 export const breakGlassLogin = async (context: LoginContext, token: string): Promise<LoggedInUser> => {

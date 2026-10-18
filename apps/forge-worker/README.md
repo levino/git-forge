@@ -36,12 +36,10 @@ read functions of `@git-forge/core` and check access with the same
 | `INSTANCE_KEY` | secret, optional | Ed25519 private JWK of this instance. Needed to mirror private repositories from other instances; also publishes `/.well-known/openid-configuration` and `/.well-known/jwks.json`. Generate with `pnpm --filter forge-worker instance-key`. |
 | `PUBLIC_URL` | var, optional | Base URL of the instance, used as its issuer (when minting) and audience (when verifying instance tokens). Defaults to the origin of the request; scheduled sync with instance tokens needs it set. |
 | `MAX_PUSH_BYTES` | var, optional | Largest accepted push request. Unset by default: pushes are streamed, so only Cloudflare's request body limit applies (see Large pushes). |
+| `R2_S3_ENDPOINT`, `R2_BUCKET_NAME`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` | vars/secrets, optional | All four or none. `https://<account>.r2.cloudflarestorage.com`, the `BUCKET` bucket name and a bucket-scoped R2 key (token id, hex SHA-256 of the token value; see the instance README). `git-remote-forge` parts and LFS objects go directly to R2 via presigned URLs (LFS verify re-hashes through the binding). |
 | `PACKFILE_URI_BASE` | var, optional | Base URL for `packfile-uris` (e.g. a CDN in front of the forge). Defaults to the origin of the request. Pack URIs are only offered for repositories anyone may read. |
 | `COMPACT_MAX_BYTES` | var, optional | Largest pack compaction run after a push through `waitUntil`, default 128 MiB; `0` disables it. |
 | `MAX_LFS_OBJECT_BYTES` | var | Largest accepted LFS object, default 100 MiB (Cloudflare's request body limit on the Free and Pro plans). Larger objects get a per-object error in the batch API and `413` on `PUT`. With presigned R2 URLs up to about 5 GiB. |
-| `R2_ACCOUNT_ID`, `R2_BUCKET` | vars, optional | Account id and bucket name of `BUCKET`. With the two secrets, LFS uses presigned R2 URLs (bound to length and SHA-256; verify re-hashes through the binding). |
-| `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` | secrets, optional | Bucket-scoped R2 key (token id, hex SHA-256 of the token value); see the instance README. Partial configuration is an error. |
-| `R2_S3_ENDPOINT` | var, optional | S3 endpoint instead of `https://<R2_ACCOUNT_ID>.r2.cloudflarestorage.com` (jurisdictions). |
 | `MIRROR_INTERVAL_MINUTES` | var | Minimum time between two scheduled syncs of a mirror, default 30; `wrangler.jsonc` sets 1440 (daily) because notifications carry the real-time updates; `0` syncs on every cron tick. |
 | `MIRROR_UNIT_BYTES` | var | `0` (default): a mirror sync copies all new packs and LFS objects in one job. Otherwise a byte budget per invocation: one job per pack and per LFS object, a final job moves the refs, units above the budget stay pending (`docs/design.md` §12). For a mirror on the Workers Free plan. |
 | `MIRROR_DEEP_CHECK_DAYS` | var | Every how many days a mirror gets the full re-verification (re-hash every object, recompute every index), default 30, `0` = only on demand. |
@@ -90,7 +88,7 @@ There is no global "public read" switch any more.
   (cookie) plus the CSRF token from `GET /api/session` in `X-CSRF-Token` for
   every state-changing request from the same origin.
 - **People** sign in interactively with OIDC, passkeys or the break-glass key;
-  the CLI gets a `repo:write` token through the device flow. See
+  the CLI gets a token with the chosen scope through `git forge auth login`. See
   [Login](#login).
 
 ## API
@@ -126,7 +124,7 @@ There is no global "public read" switch any more.
 | `POST /api/repos/{owner}/{name}/mirrors/{remote}/detach` | repository admin | Stops syncing. |
 | `GET /api/repos/{owner}/{name}/mirrors/overview` | read access | Mirror overview for the UI (`docs/design.md` §10): this repository's ref checksum, every mirror known from subscriptions or attestations with `state` (`current`, `behind`, `diverged`, `unknown`, `stale`, `unattested`), `lagSeconds`, `alarms`, the last signed attestation and spot check, and the repository's own upstreams. With an instance key, `signed` is the same summary as a JWT signed by this instance. |
 | `POST /api/federation/attestations` | trusted mirror (signed body, `application/jwt`) | A mirror's signed ref checksum after a sync. `401` for an untrusted issuer or invalid token, `404` if the issuer may not read the repository, `202` when recorded (and a spot check is enqueued at most once a day). |
-| `POST /api/repos/{owner}/{name}/import` `{url, token?, username?, lfs?, lfsUrl?, commitsPerStep?, visibility?, defaultBranch?}` | repository admin or instance admin; for a new repository the owner or an instance admin | Imports from a Git URL (smart HTTP v2 or dumb HTTP) without a request body limit, creating the repository first if needed (as `POST /api/repos`). `token` is sent as HTTP Basic password with `username` (default `git`), travels only in the queue messages and is never stored. Refs land in `refs/heads/*` and `refs/tags/*`; rewritten refs are archived, local refs missing upstream are kept. `202` with the state and a `Location`, `409` while an import runs; an import without progress for 30 minutes (its worker or process died) is taken over and continues from its last step. |
+| `POST /api/repos/{owner}/{name}/import` `{url, token?, username?, lfs?, lfsUrl?, commitsPerStep?, visibility?, defaultBranch?}` | repository admin or instance admin; for a new repository the owner or an instance admin | Imports from a Git URL (smart HTTP v2 or dumb HTTP) without a request body limit, creating the repository first if needed (as `POST /api/repos`). `token` is sent as HTTP Basic password with `username` (default `git`), travels only in the queue messages and is never stored. Refs land in `refs/heads/*` and `refs/tags/*`; rewritten refs are archived, local refs missing upstream are kept. Without `lfsUrl` the LFS endpoint comes from `.lfsconfig` (git-lfs precedence); LFS objects of any size are imported. `202` with the state and a `Location`, `409` while an import runs; an import without progress for 30 minutes (its worker or process died) is taken over and continues from its last step. |
 | `GET /api/repos/{owner}/{name}/import` | repository admin | Import state: `phase` (`discover`, `graph`, `fetch`, `lfs`, `refs`, `done`, `failed`), progress, ref updates, missing LFS objects, last error. Starting a failed import again with the same URL resumes it. |
 | `POST /api/admin/invites` `{login?, user?, email?, expiresInDays?}` | instance admin | Invite for a new account (`login` fixed or chosen by the invitee) or for an existing `user` (to add a passkey or link OIDC). Returns `{code, url, expiresAt}`; the URL is `/login/invite/{code}`, valid once, 7 days by default. |
 | `GET /api/user` | token or session | The authenticated user: `{id, login, admin, via, ceiling}`. |
@@ -194,13 +192,19 @@ their tokens and passkeys at `/settings`.
 | `POST /login/passkey/options`, `POST /login/passkey` | WebAuthn authentication (discoverable credentials, user verification required). |
 | `POST /login/passkey/register/options` `{invite?, login?}`, `POST /login/passkey/register` `{handle, credential, name?}` | WebAuthn registration, attestation `none`. With a session (and CSRF token) it adds a passkey to that account; with an invite or `SELF_SIGNUP` it creates the account. |
 | `GET /login/invite/{code}` | Invite page (OIDC or passkey). |
-| `POST /login/device/code` `client_id=git-forge-cli&client_name=…` | RFC 8628 device authorization: `device_code`, `user_code` (`BCDF-GHJK`), `verification_uri`, 15 minutes, interval 5 s. |
-| `GET /login/device?user_code=…`, `POST /login/device` | The user-code page: requires a session, shows the client and scope, approve or deny with the CSRF token. |
-| `POST /login/device/token` | Polling: `authorization_pending`, `slow_down` (interval + 5 s), `access_denied`, `expired_token`, or a `repo:write` personal access token valid 90 days (`access_token`, `login`, `expires_in`). Each approval yields exactly one token. |
+| `POST /login/cli/start` | Starts a CLI login (PKCE S256, scope, `redirect_uri` out-of-band or loopback); returns `authorization_url` `/login/cli/{id}`. |
+| `GET\|POST /login/cli/{id}` | Consent page; approve shows a one-time code or redirects to the loopback URI. |
+| `POST /login/cli/token` | Redeems the code once with the PKCE verifier for a token with the granted scope. |
+| `POST /login/device/code` `client_id=git-forge-cli&client_host=…&scope=…` | RFC 8628 device authorization, 15 minutes, interval 5 s. |
+| `GET /login/device?user_code=…`, `POST /login/device` | Consent page (session, CSRF). |
+| `POST /login/device/token` | Polling: `authorization_pending`, `slow_down`, `access_denied`, `expired_token`, or a 90-day token with the granted scope. |
 | `GET\|POST /login/break-glass` | Paste a token signed with the offline break-glass key; opens a one-hour session for an instance admin. |
 | `POST /logout` | Revokes the session (CSRF token required). |
 | `GET /api/session` | `{login, userId, method, expiresAt, csrfToken, admin}` or `401`. |
 | `GET /api/user/passkeys`, `DELETE /api/user/passkeys/{id}` | The signed-in user's passkeys. |
+
+Login endpoints are rate-limited per `CF-Connecting-IP` (`429`); the cron
+purges expired login state (design §8).
 
 Session cookies are `HttpOnly`, `SameSite=Lax`, `Path=/`, 30 days (break-glass
 one hour), and on `https` origins `Secure` with the `__Host-` prefix
@@ -534,6 +538,9 @@ reaches the Worker. Ways around it:
 
 - **Git LFS for large files.** With the `R2_*` key, LFS objects go straight to
   the bucket through presigned URLs; without it they are proxied.
+- **The remote helper.** `git push forge::https://forge.example/acme/site main`
+  (`git-remote-forge`, `packages/cli`) uploads resumable parts; finalize is
+  bounded by `limits.cpu_ms`, not the body limit.
 - **Chunked pushes.** `git forge push` from `packages/cli` splits a push into
   several pushes below a budget: `git forge push --max-bytes 90MiB <url> main`.
   Each push only carries the objects the forge does not have yet.
@@ -541,8 +548,8 @@ reaches the Worker. Ways around it:
   with `POST /api/repos/{owner}/{name}/import`. Each step runs as one queue
   message with its own CPU budget (`limits.cpu_ms`), fetches about
   `commitsPerStep` commits and at most 32 MiB of pack, and streams it into the
-  same indexer as a push (`docs/design.md` §7, Import). Mirrors fetch the same
-  way.
+  same indexer as a push (`docs/design.md` §7, Import); larger commits and
+  blobs are split, so imports have no size limit. Mirrors fetch the same way.
 
 Every staging chunk is one R2 write and is read back once when the final pack
 is written, so a 500 MB push performs a few hundred R2 operations.
@@ -646,17 +653,21 @@ argument.
   `@git-forge/accounts`: invite and self-signup, phishing origin, missing user
   verification, replayed counters, CSRF and origin checks, OIDC without
   invite, unbound and forged callbacks, the device flow (pending, slow_down,
-  approve, deny, one token per approval) and break-glass (replay, non-admin,
-  foreign key).
+  approve, deny, one token per approval, scope cap), the CLI login (paste,
+  loopback), rate limits, purging and break-glass (replay, non-admin, foreign
+  key).
 - `test/e2e/login.e2e.test.ts` starts `wrangler dev` against a mock OIDC
   provider (ES256) on a local HTTP server: an unknown identity is refused, an
   invite links it to the bootstrapped admin, the session creates a
   repository with its CSRF token; then the real CLI runs
-  `git forge auth login` (device flow, approved through the session), and
-  plain `git push` and `git clone` with an LFS file work through the
-  configured credential helper alone; a passkey-only account is created from
+  `git forge auth login --scopes repo:admin` (code pasted from the consent
+  page), `git forge repo create --remote origin`, and plain `git push` and
+  `git clone` with an LFS file work through the configured credential helper
+  alone; `--browser-redirect` (loopback) and `--device` log in too; a passkey-only account is created from
   an invite and signs in again; the break-glass key opens an admin session
   once.
+- `test/browser/cli-login.spec.ts`: CLI consent in Chromium (code page,
+  loopback redirect under the CSP).
 - `test/unit/events.test.ts` pushes with
   the real `git` client into a forge without a job queue and checks the push
   webhook (commits read from the object database), watcher notifications and

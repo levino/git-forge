@@ -4,7 +4,7 @@ import { continueImport, createConsoleEmailSender, type EmailSender, type Import
 import { S3Storage } from '@git-forge/s3'
 import { createSesEmailSender } from '@git-forge/ses'
 import { type AppJob, createForge, type Forge } from './app.ts'
-import { ACTIONS_CRON, type EmailSettings, type ForgeVars, loadSecretsKey, parseActionsSettings, parseEmailSettings, parseR2PresignSettings, parseSettings, uiEnabled } from './config.ts'
+import { ACTIONS_CRON, type EmailSettings, type ForgeVars, loadSecretsKey, parseActionsSettings, parseEmailSettings, parseR2Signing, parseSettings, uiEnabled } from './config.ts'
 import { containerLauncher } from './runner-launcher.ts'
 import { captureLoginPage } from './ui/login-pages.ts'
 
@@ -38,17 +38,18 @@ export const forgeFor = (env: Env): Promise<Forge> => {
       const actions = parseActionsSettings(env)
       const secretsKey = await loadSecretsKey(actions)
       const email = emailSender(parseEmailSettings(env))
-      const presign = parseR2PresignSettings(env)
+      const signing = parseR2Signing(env)
       return createForge({
         ...settings,
         storage: new R2Storage(env.BUCKET),
         db: d1Database(env.DB),
         digests: digestStreams,
-        ...(presign ? { lfsPresigner: new S3Storage(presign) } : {}),
+        clientAddress: (request) => request.headers.get('CF-Connecting-IP'),
         ...(uiEnabled(env) ? { renderLoginPage: captureLoginPage } : {}),
         ...(env.IMPORTS ? { scheduleImport: importScheduler(env.IMPORTS) } : {}),
         ...(env.JOBS ? { jobs: new QueueJobs(env.JOBS) } : {}),
         ...(email ? { email } : {}),
+        ...(signing ? { presigner: new S3Storage({ ...signing, region: 'auto', forcePathStyle: true }) } : {}),
         ...(env.CDN_BUCKET ? { lfsPublisher: storagePublisher(new R2Storage(env.CDN_BUCKET), env.LFS_PUBLISH_PREFIX?.trim() ?? '') } : {}),
         ...(actions
           ? {
@@ -93,7 +94,7 @@ export const backgroundHandlers = {
     const queue = env.IMPORTS
     if (!queue) throw new Error('IMPORTS queue binding is missing')
     for (const message of (batch as MessageBatch<ImportJob>).messages) {
-      const state = await continueImport(message.body, { storage: new R2Storage(env.BUCKET), schedule: importScheduler(queue) })
+      const state = await continueImport(message.body, { storage: new R2Storage(env.BUCKET), digests: digestStreams, schedule: importScheduler(queue) })
       console.log(JSON.stringify({ event: 'import-step', repo: `${message.body.owner}/${message.body.name}`, phase: state.phase, steps: state.steps, error: state.error }))
       message.ack()
     }

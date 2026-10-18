@@ -353,6 +353,9 @@ importers:
 
   packages/cli:
     devDependencies:
+      '@git-forge/accounts':
+        specifier: workspace:*
+        version: link:../accounts
       '@git-forge/core':
         specifier: workspace:*
         version: link:../core

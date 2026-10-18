@@ -1,0 +1,20 @@
+---
+import { accessChoices, type TokenScope } from '@git-forge/accounts'
+
+type Props = { max?: TokenScope; selected?: TokenScope }
+
+const { max = 'repo:admin', selected = max } = Astro.props
+---
+
+<fieldset class="flex flex-col gap-2">
+  <legend class="text-sm font-semibold mb-1">Access</legend>
+  {
+    accessChoices(max).map((choice) => (
+      <label class="flex items-center gap-2">
+        <input type="radio" class="radio radio-sm" name="scope" value={choice.scope} checked={choice.scope === selected} />
+        <span class="text-sm">{choice.label}</span>
+        <span class="font-mono text-xs text-base-content/60">{choice.scope}</span>
+      </label>
+    ))
+  }
+</fieldset>

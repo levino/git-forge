@@ -38,9 +38,13 @@ discussions.
 - [x] Instance keys (Ed25519), `/.well-known/openid-configuration`, `/.well-known/jwks.json`
 - [x] Short-lived instance JWTs, trust table "issuer X may read repo Y", optional pinned thumbprint
 - [x] Device flow (`git forge auth login`, RFC 8628) and git credential helper (`git forge auth git-credential`)
+- [x] CLI login: paste a PKCE-bound code (default), `--browser-redirect`, `--device`; `--scopes`; consent with host, IP, time, phishing warning
+- [x] `git forge repo create`
+- [x] Rate limits on login and device endpoints; purging expired challenges and device codes
+- [x] One read / write / admin access choice for tokens and consent pages
 - [x] Break-glass key (offline Ed25519, one-hour admin session)
 - [x] Session list and revocation, list and unlink linked OIDC identities (account page)
-- [ ] Login follow-ups: OIDC groups → teams, rate limits on login and device endpoints, purging expired challenges and device codes, device-flow scope choice
+- [ ] Login follow-ups: OIDC groups → teams
 - [ ] SAML, SCIM
 - [x] Branch protection rules (patterns, force push, deletion, push restrictions, admin bypass) enforced in `receive-pack`, API under `/api/repos/{owner}/{repo}/branches/{branch}/protection`
 - [x] Branch protection API and push policy wired into the Worker app (accounts on D1), API with browser sessions and CSRF
@@ -75,7 +79,9 @@ discussions.
 - [x] Server-side import: create or update a repository by pulling from a URL (no request body limit), in resumable steps driven by a queue
 - [x] Chunked push helper: `git forge push` splits history into pushes below the platform body limit, using the unmodified git client; single executables per platform from the release workflow
 - [x] Import and mirror sync: stream fetched packs into the streaming indexer (via `ingestPack`)
-- [ ] Remote helper `git-remote-forge`: resumable multipart pack upload directly to object storage via presigned URLs, then a finalize call that indexes the pack and updates refs
+- [x] Import commits, blobs and LFS objects of any size; LFS endpoint from `.lfsconfig` (#51)
+- [x] Remote helper `git-remote-forge`: resumable pack upload in parts (presigned or through the function), then a finalize call that indexes the pack and updates refs
+- [ ] Finalize beyond one invocation's CPU budget (queued or stepwise)
 
 ## M5b — CI and distribution
 

@@ -84,7 +84,7 @@ issues, pull requests and discussions.
 - Reactions, search in issues and discussions.
 - Edit and upload files in the browser (commit via form).
 - Releases (§16).
-- `gh auth login`-style device flow for the command line.
+- Browser login for the command line (`git forge auth login`, §8).
 
 **Later / maybe**
 
@@ -283,9 +283,12 @@ the [accounts README](../packages/accounts/README.md#branch-protection).
   pages/deployments/<sha256>.json   # immutable Pages manifest, keyed by its own hash (§20)
   import/status.json                # progress of the last import
   import/commits.txt                # commit order of the last import
+  import/blobs.txt                  # blobs of the commit an import is splitting
   README.txt                        # plain text: what this is, how to read it
 tmp/<repo>/<timestamp>-<uuid>/<n>   # staging chunks of a push or fetch, expired by the bucket
 tmp/<repo>/<timestamp>-<uuid>/asset # a release asset upload without a declared SHA-256 (§16)
+tmp/<repo>/<timestamp>-<uuid>/upload.json   # an upload session of git-remote-forge (§7)
+tmp/<repo>/<timestamp>-<uuid>/part/<nnnnn>  # its parts, 1-based, five digits
 ```
 
 - `<sha>` is the pack's trailing SHA-1 checksum, as with `git index-pack`.
@@ -306,7 +309,11 @@ tmp/<repo>/<timestamp>-<uuid>/asset # a release asset upload without a declared 
   which is only known at the end, and `put` needs a key and a size. The chunks
   are read back once to write the final pack and never again. The `Storage`
   interface has no delete; operators expire `tmp/` with a bucket lifecycle
-  rule (e.g. one day). Pushes up to one chunk never touch `tmp/`.
+  rule (e.g. one day). Pushes up to one chunk never touch `tmp/`. Fetched
+  packs are staged the same way; chunks of failed attempts and unlisted packs
+  are never reused and stay until expired.
+- **Upload sessions** (§7) live under `tmp/`: one session record, one object
+  per part, written once; unfinished uploads expire with the `tmp/` rule.
 - **Pages files** are stored the same way, under the SHA-256 of their
   content, and each deployment is one manifest that maps paths to those
   hashes (§20). Which deployment is active lives only in the database.
@@ -352,6 +359,7 @@ large files belong in LFS. The Worker sets no push size limit of its own
 **Large pushes** — a push is one HTTP request, and Cloudflare caps request
 bodies at 100 MB (Free/Pro), 200 MB (Business) and 500 MB (Enterprise). Three ways around it, none of which changes git:
 
+- *Remote helper* `git-remote-forge` (below): resumable upload in parts.
 - *Chunked push helper* `git forge push` (`packages/cli`, a single executable
   built with `bun build --compile`): splits the history not yet on the remote
   into pushes below a byte budget (default 80 MB, measured with
@@ -363,8 +371,20 @@ bodies at 100 MB (Free/Pro), 200 MB (Business) and 500 MB (Enterprise). Three wa
   a rerun: what landed is on the remote. Details in `packages/cli/README.md`.
 - *Server-side import* (below): the forge pulls from a URL, so no request
   body is involved at all.
-- Later: a remote helper uploading packs directly to object storage
-  (roadmap M5a).
+
+**Remote helper** — `git-remote-forge` (same executable as `git forge`)
+serves `forge::https://host/owner/repo`. Fetch is relayed to
+`git remote-https`. Push packs locally into `.git/forge-upload/<key>/`, then
+uses `/{owner}/{repo}.git/forge/uploads`: `GET` limits, `POST {parts}`
+creates the session (per part a presigned `PUT` bound to length and SHA-256,
+or `PUT …/{id}/parts/{n}` through the function), `GET …/{id}` lists missing
+parts with fresh URLs (resume), `POST …/{id}/finalize {commands, atomic}` runs
+`receivePack` on the commands plus the parts, so policy, LFS check and
+`onPush` are those of `git-receive-pack`, with the finalize request's token.
+Every call needs `write`. A server without the API gets plain receive-pack.
+Parts are separate objects, not S3 multipart: the indexer reads every byte
+anyway, no Complete/Abort (abort would be a delete), no 5 MiB minimum, every
+adapter works. Finalize indexes in one request, bounded by `cpu_ms`.
 
 **Import** — create or update a repository by pulling from any Git URL
 (smart HTTP v2 or dumb HTTP, optional token). It reuses the mirror client
@@ -386,11 +406,34 @@ as a sequence of stateless steps, each persisting its progress in
    `want` the last commit of the range, `have` every earlier range end and all
    local tips, so the server sends exactly the new objects; store the pack,
    check connectivity, collect LFS pointers. A step whose pack exceeds
-   `maxStepBytes` (32 MiB) is retried with a quarter of the commits; small
-   packs double the range. A final fetch picks up tag objects. Servers without
-   `filter`, and dumb servers, are fetched in one step.
-4. *lfs* — 100 LFS objects per step via the upstream's batch API; missing
-   objects are recorded, not fatal.
+   `maxStepBytes` (32 MiB), or with a delta result above 64 MiB, is retried
+   with a quarter of the commits; small packs double the range. A final fetch
+   without byte limit picks up tag objects. Servers without `filter`, and dumb
+   servers, are fetched in one step.
+
+   *Split* — a one-commit range that is still too large is spread over steps
+   (`split` in the state): fetch it with `filter blob:none` into a pack that
+   stays unlisted, write the missing blobs of its new trees to
+   `import/blobs.txt`, then `want` them by id in batches (halved on overflow,
+   doubled after small packs); a batch of one blob has no byte limit and
+   arrives undeltified (no `thin-pack`), so the indexer only streams it. After
+   the last batch the tree pack is listed and the commit becomes a cut.
+   Unlisted until complete, an abandoned split never exposes a commit without
+   its blobs. github.com supports both (no `object-info`). Bound: one blob per
+   invocation, about 6 s CPU per 100 MiB (JavaScript inflate and SHA-1), so
+   about 1 GiB at `cpu_ms` 60000.
+4. *lfs* — via the upstream's batch API, at most 100 objects and
+   `maxLfsStepBytes` (512 MiB) per step, at least one object; objects are
+   streamed into storage with native SHA-256 (`DigestStream`, `node:crypto`),
+   so any size up to the storage's single `put` (5 GiB on R2) works;
+   `MAX_LFS_OBJECT_BYTES` only limits uploads. A 538 MB object costs about
+   1.7 s CPU. Missing objects are recorded, not fatal.
+   Endpoint precedence as in git-lfs: `lfsUrl`, then `.lfsconfig` of the
+   default branch (other tips, then tags, only if it has none; `lfs.url`
+   before `remote.origin.lfsurl`), then `<url>.git/info/lfs`. URLs are
+   normalized (http(s), no credentials, trailing `/objects/batch` removed);
+   other keys are ignored. The token goes to a `.lfsconfig` endpoint only if
+   it has the import URL's origin.
 5. *refs* — update refs via compare-and-swap and rewrite `info/refs`; an
    empty repository adopts the upstream `HEAD`.
 
@@ -580,7 +623,7 @@ SQLite database. A new instance works without an external identity provider.
 | Passkeys (WebAuthn) | Default, built in; passkey-only accounts need no IdP |
 | OIDC (ZITADEL, Keycloak, Authentik, Pocket ID, Google, …) | Connect existing identities; one provider per instance; groups → teams later |
 | Personal access tokens | Git over HTTPS (as HTTP Basic password), JSON API |
-| Device flow (`git forge auth login`, like `gh auth login`) | Command line: issues a `repo:write` token, git uses it through the credential helper |
+| Command-line login (`git forge auth login`) | Paste a one-time code from the browser (PKCE), optionally a loopback redirect or the RFC 8628 device flow; issues a token with the chosen scope, git uses it through the credential helper |
 | Break-glass key | Offline Ed25519 key, opens a short admin session when the IdP is down |
 | SAML, SCIM | Later, for organizations that require them |
 
@@ -657,16 +700,38 @@ including `/api/user/passkeys`), and the login page model carries
 buttons and no ceremony script. Stored credentials are kept, not deleted.
 Break-glass and the device flow are unaffected.
 
-**Device flow.** RFC 8628 with the fixed client id `git-forge-cli`. The user
-code (8 letters without vowels and look-alikes) is entered or confirmed at
-`/login/device` in a signed-in browser, which shows the client name and the
-scope before approval. The first successful poll consumes the authorization
-and issues a personal access token with `repo:write`, 90 days; a poll faster
-than the interval gets `slow_down`. The CLI stores the token per host in
-`~/.config/git-forge/hosts.json` (0600) and configures
-`credential.<host>.helper = !git-forge auth git-credential` (after an empty
-helper, which resets others), so plain `git` and `git-lfs` authenticate
-without tokens in URLs.
+**Access levels.** `repo:read` < `repo:write` < `repo:admin` are cumulative
+ceilings; forms offer one radio choice (`accessChoices`). Effective rights are
+the minimum of ceiling and repository role.
+
+**Command-line login.** `git forge auth login [--scopes …]` gets a 90-day
+token for client id `git-forge-cli`. Consent pages (session + CSRF) show
+client, reported host, request IP, time and a phishing warning; the user may
+lower the requested scope, never raise it.
+
+1. *Paste (default).* `POST /login/cli/start` stores the PKCE challenge (S256)
+   and scope under a random id (`cli_authorizations`, 10 minutes) and returns
+   `/login/cli/{id}`. After approval the page shows a one-time code; the CLI
+   redeems it with the verifier at `POST /login/cli/token`.
+2. *Loopback (`--browser-redirect`, RFC 8252).* Same, but approval redirects
+   to `http://127.0.0.1|[::1]|localhost:{port}` with `code` and `state`; that
+   consent page's CSP `form-action` allows loopback origins.
+3. *Device flow (`--device`, RFC 8628),* for compatibility; the CLI prints
+   `verification_uri_complete`.
+
+All three are phishable the same way (whoever starts the request and sends
+the link gets the token), hence the consent details. Paste works over SSH and
+in containers and a leaked code is useless without the verifier; loopback
+needs a local browser; the device code is the only secret of the device flow.
+The token goes to `hosts.json` (0600) and the git credential helper.
+`git forge repo create` uses it against `POST /api/repos` (needs `repo:admin`).
+
+**Rate limits and purging.** Login, consent and token endpoints are limited
+per client address (`LOGIN_RATE_LIMITS`, sliding window in `rate_limits`,
+`429` with `Retry-After`). The address is `CF-Connecting-IP` on Cloudflare and
+the socket (or last `X-Forwarded-For` hop with `TRUST_PROXY`) on Node. The
+scheduled handler deletes challenges, device and CLI authorizations an hour
+after expiry and stale rate-limit windows.
 
 **Break-glass.** An Ed25519 key pair generated offline
 (`pnpm --filter forge-worker break-glass keygen`); only the public JWK is
@@ -692,7 +757,7 @@ with presigned R2 URLs (§11) it can be raised to about 5 GiB.
 Not supported, by decision. Serverless functions accept only HTTP; SSH would
 need an always-on host or a TCP-capable container platform, and SSH over
 WebSocket needs client-side configuration. Git uses HTTPS with tokens, made
-convenient by `git forge auth login` (credential helper, device flow, §8).
+convenient by `git forge auth login` (credential helper, browser login, §8).
 
 ## 10. Mirror overview and verification
 
@@ -864,10 +929,10 @@ plain directory per key, lock files for conditional writes), `R2Storage`
 uploads bind `Content-Length` and `x-amz-checksum-sha256` into the signature,
 so the bucket rejects any other content.
 
-**Presigned R2.** With `R2_ACCOUNT_ID` (or `R2_S3_ENDPOINT`), `R2_BUCKET`,
+**Presigned R2.** With `R2_S3_ENDPOINT`, `R2_BUCKET_NAME`,
 `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` the Worker wraps the binding with
 `withPresigner(R2Storage, S3Storage)`: the binding does all I/O, the S3
-adapter only signs LFS URLs on the same keys. Verify re-hashes through the
+adapter only signs (LFS and pack-upload URLs) on the same keys. Verify re-hashes through the
 binding (`crypto.DigestStream`, ~2 s CPU for 600 MB). Without the key LFS is
 proxied, and the size error carries `oversizeHint`. The key is an account API
 token with "Workers R2 Storage Bucket Item Read/Write"

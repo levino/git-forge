@@ -36,14 +36,25 @@ export const requestUrl = (incoming: IncomingMessage, trustProxy = false): strin
   return new URL(incoming.url ?? '/', `${protocol}://${host}`).toString()
 }
 
+export const CLIENT_ADDRESS_HEADER = 'X-Forge-Client-Address'
+
+export const clientAddressOf = (incoming: IncomingMessage, trustProxy = false): string | null => {
+  const header = incoming.headers['x-forwarded-for']
+  const forwarded = trustProxy ? [header ?? []].flat().join(',').split(',').at(-1)?.trim() : undefined
+  const address = forwarded || incoming.socket.remoteAddress || null
+  return address?.replace(/^::ffff:/, '') ?? null
+}
+
 export const toRequest = (incoming: IncomingMessage, signal: AbortSignal, trustProxy = false): Request => {
   const headers = new Headers()
   const raw = incoming.rawHeaders
   for (let i = 0; i + 1 < raw.length; i += 2) {
     const name = raw[i]!
-    if (name.startsWith(':')) continue
+    if (name.startsWith(':') || name.toLowerCase() === CLIENT_ADDRESS_HEADER.toLowerCase()) continue
     headers.append(name, raw[i + 1]!)
   }
+  const address = clientAddressOf(incoming, trustProxy)
+  if (address) headers.set(CLIENT_ADDRESS_HEADER, address)
   const method = incoming.method ?? 'GET'
   const init: RequestInit & { duplex?: 'half' } = { method, headers, signal }
   if (!BODYLESS.has(method)) {

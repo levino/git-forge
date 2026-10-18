@@ -12,7 +12,6 @@ import {
   type PrivateJwk,
   type SigningKey,
 } from '@git-forge/accounts'
-import type { S3StorageConfig } from '@git-forge/s3'
 import { PagesConfigError, type PagesHosts, parsePagesHosts } from '@git-forge/pages'
 
 export type ForgeVars = {
@@ -23,11 +22,6 @@ export type ForgeVars = {
   readonly PACKFILE_URI_BASE?: string
   readonly COMPACT_MAX_BYTES?: string
   readonly MAX_LFS_OBJECT_BYTES?: string
-  readonly R2_ACCOUNT_ID?: string
-  readonly R2_BUCKET?: string
-  readonly R2_ACCESS_KEY_ID?: string
-  readonly R2_SECRET_ACCESS_KEY?: string
-  readonly R2_S3_ENDPOINT?: string
   readonly MIRROR_INTERVAL_MINUTES?: string
   readonly ALLOW_INSECURE_FEDERATION?: string
   readonly ACTIONS?: string
@@ -55,10 +49,21 @@ export type ForgeVars = {
   readonly SELF_SIGNUP?: string
   readonly PASSKEYS?: string
   readonly BREAK_GLASS_PUBLIC_KEY?: string
+  readonly R2_S3_ENDPOINT?: string
+  readonly R2_BUCKET_NAME?: string
+  readonly R2_ACCESS_KEY_ID?: string
+  readonly R2_SECRET_ACCESS_KEY?: string
   readonly PAGES_HOST?: string
   readonly PAGES_DOMAINS?: string
   readonly PAGES_MAX_AGE?: string
   readonly LFS_PUBLISH_PREFIX?: string
+}
+
+export type R2SigningSettings = {
+  readonly endpoint: string
+  readonly bucket: string
+  readonly accessKeyId: string
+  readonly secretAccessKey: string
 }
 
 export type PagesSettings = {
@@ -237,19 +242,6 @@ export const parsePagesSettings = (vars: ForgeVars): PagesSettings => {
   }
 }
 
-export const parseR2PresignSettings = (vars: ForgeVars): S3StorageConfig | undefined => {
-  const accountId = present(vars.R2_ACCOUNT_ID)
-  const endpoint = present(vars.R2_S3_ENDPOINT) ?? (accountId && `https://${accountId}.r2.cloudflarestorage.com`)
-  const bucket = present(vars.R2_BUCKET)
-  const accessKeyId = present(vars.R2_ACCESS_KEY_ID)
-  const secretAccessKey = present(vars.R2_SECRET_ACCESS_KEY)
-  if (!accessKeyId && !secretAccessKey) return undefined
-  if (!accessKeyId || !secretAccessKey || !bucket || !endpoint) {
-    throw new ConfigurationError('presigned LFS URLs need R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET and R2_ACCOUNT_ID (or R2_S3_ENDPOINT)')
-  }
-  return { endpoint, region: 'auto', bucket, accessKeyId, secretAccessKey, forcePathStyle: true }
-}
-
 export const parseSettings = async (vars: ForgeVars): Promise<ForgeSettings> => {
   const publicUrl = present(vars.PUBLIC_URL)
   return {
@@ -268,6 +260,18 @@ export const parseSettings = async (vars: ForgeVars): Promise<ForgeSettings> => 
     login: parseLoginSettings(vars),
     pages: parsePagesSettings(vars),
   }
+}
+
+export const parseR2Signing = (vars: ForgeVars): R2SigningSettings | undefined => {
+  const endpoint = present(vars.R2_S3_ENDPOINT)
+  const bucket = present(vars.R2_BUCKET_NAME)
+  const accessKeyId = present(vars.R2_ACCESS_KEY_ID)
+  const secretAccessKey = present(vars.R2_SECRET_ACCESS_KEY)
+  if (!endpoint && !bucket && !accessKeyId && !secretAccessKey) return undefined
+  if (!endpoint || !bucket || !accessKeyId || !secretAccessKey) {
+    throw new ConfigurationError('presigned R2 uploads need R2_S3_ENDPOINT, R2_BUCKET_NAME, R2_ACCESS_KEY_ID and R2_SECRET_ACCESS_KEY')
+  }
+  return { endpoint, bucket, accessKeyId, secretAccessKey }
 }
 
 export const parseEmailSettings = (vars: ForgeVars): EmailSettings | undefined => {

@@ -1,8 +1,9 @@
 ---
-import { PASSKEY_SCRIPT } from '@git-forge/accounts'
+import { accessLabel, CONSENT_WARNING, COPY_SCRIPT, formatRequestTime, PASSKEY_SCRIPT } from '@git-forge/accounts'
+import AccessChoice from '../../components/AccessChoice.astro'
 import NotFound from '../../components/NotFound.astro'
 import Layout from '../../layouts/Layout.astro'
-import { LOGIN_CONTENT_SECURITY_POLICY, loginPageTitle } from '../../ui/login-pages.ts'
+import { loginContentSecurityPolicy, loginPageTitle } from '../../ui/login-pages.ts'
 
 const page = Astro.locals.loginPage
 if (page) {
@@ -10,7 +11,7 @@ if (page) {
   Astro.response.headers.set('Cache-Control', 'no-store')
   Astro.response.headers.set('X-Frame-Options', 'DENY')
   Astro.response.headers.set('Referrer-Policy', 'same-origin')
-  Astro.response.headers.set('Content-Security-Policy', LOGIN_CONTENT_SECURITY_POLICY)
+  Astro.response.headers.set('Content-Security-Policy', loginContentSecurityPolicy(page))
 }
 const config =
   (page?.kind === 'login' || page?.kind === 'invite') && !page.passkeys
@@ -140,24 +141,94 @@ const configJson = config ? JSON.stringify(config).replace(/</g, '\\u003c') : nu
               ) : (
                 <>
                   <p>
-                    <strong>{page.device.clientName}</strong> asks for a token for Git and Git LFS (<code class="font-mono">{page.device.scopes}</code>) on behalf of{' '}
-                    <strong>{page.user.login}</strong>.
+                    <strong>{page.device.clientName}</strong> asks for a token for Git, Git LFS and the API on <strong>{page.instance}</strong> on behalf of{' '}
+                    <strong>{page.user.login}</strong>, with {accessLabel(page.device.scope)} access.
                   </p>
-                  <p>
-                    Code: <code class="font-mono text-xl tracking-widest">{page.device.userCode}</code>. Only continue if your device shows the same code.
-                  </p>
-                  <form method="post" action="/login/device" class="flex gap-2">
+                  <dl class="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm" aria-label="Request details">
+                    <dt class="font-semibold">Device</dt>
+                    <dd>{page.device.clientHost ?? 'not reported'} (reported by the device)</dd>
+                    <dt class="font-semibold">Requested from</dt>
+                    <dd>
+                      {page.device.requestIp ?? 'unknown'}
+                      {page.viewerIp && <span class="text-base-content/70"> (this browser: {page.viewerIp})</span>}
+                    </dd>
+                    <dt class="font-semibold">Requested at</dt>
+                    <dd>{formatRequestTime(page.device.requestedAt)}</dd>
+                    <dt class="font-semibold">Code</dt>
+                    <dd>
+                      <code class="font-mono tracking-widest">{page.device.userCode}</code>
+                    </dd>
+                  </dl>
+                  <div role="alert" class="alert alert-warning">{CONSENT_WARNING}</div>
+                  <form method="post" action="/login/device" class="flex flex-col gap-3">
                     <input type="hidden" name="csrf" value={page.user.csrf} />
                     <input type="hidden" name="user_code" value={page.device.userCode} />
-                    <button class="btn btn-primary" name="decision" value="approve">
-                      Authorize
-                    </button>
-                    <button class="btn" name="decision" value="deny">
-                      Deny
-                    </button>
+                    <AccessChoice max={page.device.scope} />
+                    <div class="flex gap-2">
+                      <button class="btn btn-primary" name="decision" value="approve">
+                        Approve
+                      </button>
+                      <button class="btn" name="decision" value="deny">
+                        Deny
+                      </button>
+                    </div>
                   </form>
                 </>
               )}
+            </>
+          )}
+          {page.kind === 'cli' && (
+            <>
+              <p>
+                Authorize <strong>{page.request.clientName}</strong>
+                {page.request.clientHost && (
+                  <>
+                    {' '}
+                    on <strong>{page.request.clientHost}</strong>
+                  </>
+                )}{' '}
+                to act as <strong>{page.user.login}</strong> on <strong>{page.instance}</strong> with {accessLabel(page.request.scope)} access?
+              </p>
+              <dl class="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm" aria-label="Request details">
+                <dt class="font-semibold">Requested from</dt>
+                <dd>{page.request.requestIp ?? 'unknown'}</dd>
+                <dt class="font-semibold">Requested at</dt>
+                <dd>{formatRequestTime(page.request.requestedAt)}</dd>
+              </dl>
+              <p class="text-sm">
+                {page.request.redirect === 'loopback' ? (
+                  <>
+                    The token goes to <code class="font-mono">{page.request.redirectUri}</code> on this computer.
+                  </>
+                ) : (
+                  'You will get a one-time code to paste into your terminal.'
+                )}
+              </p>
+              <div role="alert" class="alert alert-warning">{CONSENT_WARNING}</div>
+              <form method="post" action={`/login/cli/${page.request.id}`} class="flex flex-col gap-3">
+                <input type="hidden" name="csrf" value={page.user.csrf} />
+                <AccessChoice max={page.request.scope} />
+                <div class="flex gap-2">
+                  <button class="btn btn-primary" name="decision" value="approve">
+                    Approve
+                  </button>
+                  <button class="btn" name="decision" value="deny">
+                    Deny
+                  </button>
+                </div>
+              </form>
+            </>
+          )}
+          {page.kind === 'cli-code' && (
+            <>
+              <p>Paste this one-time code into your terminal. It works once, only for the terminal that asked for it, and expires at {formatRequestTime(page.expiresAt)}.</p>
+              <div class="join w-full">
+                <input id="cli-code" class="input join-item flex-1 font-mono" readonly value={page.code} aria-label="Authorization code" />
+                <button class="btn join-item" type="button" data-copy="cli-code">
+                  Copy
+                </button>
+              </div>
+              <script is:inline set:html={COPY_SCRIPT} />
             </>
           )}
           {page.kind === 'device-result' && <p>{page.approved ? 'You can close this window and return to your terminal.' : 'The device received no token.'}</p>}

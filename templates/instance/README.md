@@ -180,7 +180,7 @@ OIDC_NAME = "Example ID"
 | `BREAK_GLASS_PUBLIC_KEY` | | Public half of the offline break-glass key, see the [forge-worker README](https://github.com/levino/git-forge/tree/main/apps/forge-worker#break-glass-key). |
 | `UI` | `true` | `false` for a headless instance (for example a backup mirror): Git, LFS and the API only. |
 | `MAX_LFS_OBJECT_BYTES`, `MIRROR_INTERVAL_MINUTES`, `MIRROR_DEEP_CHECK_DAYS` | see the forge-worker README | Limits and mirror schedule. |
-| `R2_ACCOUNT_ID`, `R2_BUCKET`, `R2_S3_ENDPOINT` | none: LFS through the Worker | Presigned LFS uploads straight to R2, see [Large LFS objects](#large-lfs-objects). |
+| `R2_S3_ENDPOINT`, `R2_BUCKET_NAME` | none: LFS through the Worker | Presigned uploads straight to R2, see [Large LFS objects](#large-lfs-objects). |
 | `EMAIL_PROVIDER` | `none` | `ses` or `console`, see [Email](#notifications-email-and-webhooks). |
 | `PAGES_HOST`, `PAGES_DOMAINS`, `PAGES_MAX_AGE` | none: no Pages; `60` | Pages hosts, custom domains and cache lifetime, see [Pages](#pages). |
 | `LFS_PUBLISH_PREFIX` | | Key prefix in `CDN_BUCKET`, see [Public LFS bucket](#public-lfs-bucket). |
@@ -238,9 +238,9 @@ echo "$RESPONSE" | jq -r .result.value | tr -d '\n' | sha256sum | cut -d' ' -f1 
 Dashboard alternative: **R2 → Manage API tokens → Create Account API token**,
 "Object Read & Write" on this bucket only, then put the shown access key id
 and secret with the same two `wrangler secret put` commands. Then set the
-vars `R2_ACCOUNT_ID`, `R2_BUCKET` and raise `MAX_LFS_OBJECT_BYTES` (up to
-about 5 GiB). For a jurisdiction bucket replace `default` by it and set
-`R2_S3_ENDPOINT`.
+vars `R2_S3_ENDPOINT` (`https://<account id>.r2.cloudflarestorage.com`, or
+the jurisdiction endpoint), `R2_BUCKET_NAME` and raise `MAX_LFS_OBJECT_BYTES`
+(up to about 5 GiB).
 
 ## Imports
 

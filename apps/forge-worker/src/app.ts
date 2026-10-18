@@ -199,10 +199,11 @@ export type ForgeOptions = ForgeSettings & {
   readonly actions?: ActionsOptions
   readonly jobs?: JobQueue<AppJob>
   readonly digests?: DigestFactory
-  readonly lfsPresigner?: Presigner
+  readonly presigner?: Presigner
   readonly scheduleImport?: ImportScheduler
   readonly email?: EmailSender
   readonly renderLoginPage?: LoginPageRenderer
+  readonly clientAddress?: (request: Request) => string | null
   readonly artifacts?: ArtifactSource
   readonly lfsPublisher?: LfsPublisher
 }
@@ -218,7 +219,7 @@ export type WaitUntil = (promise: Promise<unknown>) => void
 export const ACTIONS_SERVICE_PATH = '/_services/actions'
 
 export const PRESIGN_HINT =
-  'the instance admin can let larger objects go straight to R2 by setting R2_ACCOUNT_ID, R2_BUCKET, R2_ACCESS_KEY_ID and R2_SECRET_ACCESS_KEY and raising MAX_LFS_OBJECT_BYTES (see "Large LFS objects" in the instance README)'
+  'the instance admin can let larger objects go straight to R2 by setting R2_S3_ENDPOINT, R2_BUCKET_NAME, R2_ACCESS_KEY_ID and R2_SECRET_ACCESS_KEY and raising MAX_LFS_OBJECT_BYTES (see "Large LFS objects" in the instance README)'
 
 export const RAISE_LIMIT_HINT = 'the instance admin can raise MAX_LFS_OBJECT_BYTES up to about 5 GiB'
 
@@ -431,7 +432,7 @@ type Route = { readonly pattern: RegExp; readonly method: string; readonly handl
 
 export const createForge = (options: ForgeOptions): Forge => {
   const { storage, db } = options
-  const presigningStorage = options.lfsPresigner ? withPresigner(storage, options.lfsPresigner) : storage
+  const presigningStorage = options.presigner ? withPresigner(storage, options.presigner) : storage
   const now = options.now ?? (() => new Date())
   const store: AccountsStore = createAccountsStore(db, { now: () => now().getTime() })
   const verification = createMirrorVerificationStore(db, { now: () => now().getTime() })
@@ -463,7 +464,12 @@ export const createForge = (options: ForgeOptions): Forge => {
       fetch: outbound,
       now: () => now().getTime(),
     }
-    return { context, secureCookies: origin.startsWith('https:'), ...(options.renderLoginPage ? { renderPage: options.renderLoginPage } : {}) }
+    return {
+      context,
+      secureCookies: origin.startsWith('https:'),
+      ...(options.renderLoginPage ? { renderPage: options.renderLoginPage } : {}),
+      ...(options.clientAddress ? { clientAddress: options.clientAddress } : {}),
+    }
   }
 
   const principalOf = async (request: Request): Promise<Principal> => {
@@ -1557,7 +1563,8 @@ export const createForge = (options: ForgeOptions): Forge => {
       authorize,
       pushPolicy: access.pushPolicy,
       ...(options.maxPushBytes !== undefined ? { maxPushBytes: options.maxPushBytes } : {}),
-      lfs: { maxObjectBytes: options.maxLfsObjectBytes, oversizeHint: options.lfsPresigner ? RAISE_LIMIT_HINT : PRESIGN_HINT, ...(options.digests ? { digests: options.digests } : {}) },
+      lfs: { maxObjectBytes: options.maxLfsObjectBytes, oversizeHint: options.presigner ? RAISE_LIMIT_HINT : PRESIGN_HINT, ...(options.digests ? { digests: options.digests } : {}) },
+      ...(options.presigner ? { uploads: { presignPut: options.presigner.presignPut.bind(options.presigner) } } : {}),
       packfileUris: (incoming, repo) => packfileUris(incoming, repo, authorize),
       onPush: async (repo, outcome) => {
         await compactAfterPush(waitUntil)(repo, outcome)
@@ -1651,6 +1658,8 @@ export const createForge = (options: ForgeOptions): Forge => {
     scheduled: async (at = now()) => {
       const sweep = await notifications.sweep().catch((error: unknown) => ({ error: String(error) }))
       console.log(JSON.stringify({ event: 'notification-sweep', ...sweep }))
+      const purged = await logins.purgeExpired().catch((error: unknown) => ({ error: String(error) }))
+      console.log(JSON.stringify({ event: 'login-purge', ...purged }))
       return federation ? enqueueDueMirrors(federation, at, options.mirrorIntervalMinutes) : syncDueMirrors(mirrorContext(options.publicUrl), at, options.mirrorIntervalMinutes)
     },
     actionsTick: async () => {

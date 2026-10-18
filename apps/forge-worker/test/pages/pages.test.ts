@@ -268,16 +268,67 @@ describe('login and account pages', () => {
         forge: forge.services,
         principal: user(),
         session: session(),
-        loginPage: { kind: 'device', userCode: 'BCDF-GHJK', device: { userCode: 'BCDF-GHJK', clientName: '<b>cli</b>', scopes: 'repo:write' }, user: { login: 'alice', csrf: 'csrf-token' } },
+        loginPage: {
+          kind: 'device',
+          userCode: 'BCDF-GHJK',
+          device: { userCode: 'BCDF-GHJK', clientName: '<b>cli</b>', clientHost: '<i>box</i>', requestIp: '203.0.113.9', requestedAt: Date.UTC(2026, 0, 2, 3, 4, 5), scope: 'repo:write' },
+          user: { login: 'alice', csrf: 'csrf-token' },
+          instance: 'forge.example',
+          viewerIp: '198.51.100.1',
+        },
       },
       partial: false,
     })
     const html = await response.text()
     expect(html).toContain('&lt;b&gt;cli&lt;/b&gt;')
+    expect(html).toContain('&lt;i&gt;box&lt;/i&gt;')
+    expect(html).toContain('203.0.113.9')
+    expect(html).toContain('this browser: 198.51.100.1')
+    expect(html).toContain('2026-01-02 03:04:05 UTC')
+    expect(html).toContain('Only approve a request you started yourself')
     expect(html).toContain('name="csrf" value="csrf-token"')
     expect(html).toContain('value="approve"')
+    expect(html).toMatch(/type="radio"[^>]*name="scope"[^>]*value="repo:read"/)
+    expect(html).toContain('write (includes read)')
+    expect(html).not.toContain('value="repo:admin"')
+    expect(response.headers.get('Content-Security-Policy')).toContain("form-action 'self';")
     expect(response.headers.get('Content-Security-Policy')).toContain("frame-ancestors 'none'")
     expect(response.headers.get('Cache-Control')).toBe('no-store')
+  })
+
+  it('renders the command line consent with loopback form action and the code page with a copy button', async () => {
+    const consent = await container.renderToResponse(Login, {
+      request: new Request(`${BASE}/login/cli/abcdefghijklmnopqrstuv`),
+      locals: {
+        forge: forge.services,
+        principal: user(),
+        session: session(),
+        loginPage: {
+          kind: 'cli',
+          user: { login: 'alice', csrf: 'csrf-token' },
+          instance: 'forge.example',
+          request: {
+            id: 'abcdefghijklmnopqrstuv',
+            clientName: 'git forge auth login',
+            clientHost: 'laptop',
+            requestIp: '203.0.113.9',
+            requestedAt: 0,
+            redirect: 'loopback',
+            redirectUri: 'http://127.0.0.1:4000/callback',
+            scope: 'repo:admin',
+          },
+        },
+      },
+      partial: false,
+    })
+    const html = await consent.text()
+    expect(html).toContain('action="/login/cli/abcdefghijklmnopqrstuv"')
+    expect(html).toContain('admin (includes write)')
+    expect(html).toContain('http://127.0.0.1:4000/callback')
+    expect(consent.headers.get('Content-Security-Policy')).toContain("form-action 'self' http://127.0.0.1:* http://localhost:*")
+    const code = await render(Login, '/login/cli/abcdefghijklmnopqrstuv', {}, user(), { loginPage: { kind: 'cli-code', code: 'gfc_abc', expiresAt: 0 } })
+    expect(code.html).toContain('value="gfc_abc"')
+    expect(code.html).toContain('data-copy="cli-code"')
   })
 
   it('uses the status of login errors and answers 404 without a page model', async () => {
@@ -299,9 +350,13 @@ describe('login and account pages', () => {
         services: { verifySessionWrite: async () => verified },
       })
     }
-    expect((await post({ action: 'create-token', name: 'laptop', scopes: 'repo:read', expires: '30' }, null)).status).toBe(403)
-    expect((await post({ action: 'create-token', name: 'laptop', scopes: 'repo:root', expires: '30' })).status).toBe(400)
-    const created = await post({ action: 'create-token', name: 'laptop', scopes: ['repo:read', 'repo:write'], expires: '30' })
+    expect((await post({ action: 'create-token', name: 'laptop', scope: 'repo:read', expires: '30' }, null)).status).toBe(403)
+    expect((await post({ action: 'create-token', name: 'laptop', scope: 'repo:root', expires: '30' })).status).toBe(400)
+    const form = await render(Settings, '/settings', {}, user(), { session: session() })
+    expect(form.html).toMatch(/type="radio"[^>]*name="scope"[^>]*value="repo:write"[^>]*checked/)
+    expect(form.html).toContain('admin (includes write)')
+    expect(form.html).not.toContain('type="checkbox"')
+    const created = await post({ action: 'create-token', name: 'laptop', scope: 'repo:write', expires: '30' })
     expect(created.status).toBe(200)
     const token = /value="(gfp_[^"]+)"/.exec(created.html)?.[1]
     expect(token).toBeDefined()

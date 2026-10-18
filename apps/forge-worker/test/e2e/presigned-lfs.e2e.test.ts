@@ -85,7 +85,7 @@ beforeAll(async () => {
     vars: {
       BOOTSTRAP_TOKEN,
       R2_S3_ENDPOINT: `http://127.0.0.1:${(bucket.address() as AddressInfo).port}`,
-      R2_BUCKET: BUCKET,
+      R2_BUCKET_NAME: BUCKET,
       R2_ACCESS_KEY_ID: 'e2e-key',
       R2_SECRET_ACCESS_KEY: 'e2e-secret',
     },

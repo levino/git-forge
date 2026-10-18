@@ -1,15 +1,40 @@
-import { configDirectory, credentialFor, deviceLogin, gitCredential, normalizeHost, readHosts, removeGitSetup, setupGit, writeHosts } from './auth.ts'
+import { createInterface } from 'node:readline/promises'
+import {
+  type BrowserIO,
+  configDirectory,
+  credentialFor,
+  defaultLoginRequest,
+  deviceLogin,
+  gitCredential,
+  type HostCredential,
+  normalizeHost,
+  openBrowser,
+  parseLoginArguments,
+  pasteLogin,
+  readHosts,
+  redirectLogin,
+  removeGitSetup,
+  setupGit,
+  writeHosts,
+} from './auth.ts'
+import { createRemoteRepository, parseRepoCreate } from './repo.ts'
 import { configValue, runGit } from './git.ts'
 import { CommitTooLargeError } from './plan.ts'
 import { DEFAULT_BUDGET, forgePush } from './push.ts'
+import { isRemoteHelperName } from './helper-protocol.ts'
+import { runRemoteHelper } from './remote-helper.ts'
 import { formatSize, parseSize } from './size.ts'
 
 export const VERSION = '0.1.0'
 
 const USAGE = `usage: git forge push [options] <remote> <refspec>...
-       git forge auth login [<url>] [--no-setup-git]
+       git forge auth login [<url>] [--scopes repo:read|repo:write|repo:admin]
+                            [--no-browser] [--browser-redirect | --device] [--no-setup-git]
        git forge auth status | logout [<url>] | setup-git [<url>] | token [<url>]
        git forge auth git-credential <get|store|erase>
+       git forge repo create [<owner>/]<name> [--private | --public]
+                             [--default-branch <branch>] [--remote <name>] [--host <url>]
+       git-remote-forge <remote> <url>   (git push/fetch forge::https://host/owner/repo)
 
 Pushes history in several smaller pushes so that no single request exceeds
 the budget, then performs the final ref update. Rerun to resume.
@@ -22,10 +47,21 @@ options:
   -h, --help          show this help
   --version           print the version
 
-git forge auth login signs in through the browser (device flow), stores a
-token for Git and Git LFS in ~/.config/git-forge/hosts.json and makes git use
-it for that host through the credential helper git forge auth git-credential.
-Without <url> it uses the host of the remote origin.`
+git forge auth login prints a link (and opens it when a browser is at hand);
+approve in the browser and paste the one-time code it shows. The token
+(default repo:write: Git and Git LFS; repo:admin also creates repositories) is
+stored in ~/.config/git-forge/hosts.json and git uses it for that host through
+the credential helper git forge auth git-credential. --browser-redirect sends
+the code back to a local port instead, --device uses the RFC 8628 device flow.
+Without <url> it uses the host of the remote origin.
+
+git forge repo create creates a repository with the stored token (needs
+repo:admin) and with --remote adds it as a remote of the current repository.
+
+Invoked as git-remote-forge (a link to this executable on PATH), it is a git
+remote helper for URLs forge::https://host/owner/repo: fetches use smart HTTP,
+pushes upload the pack in parts directly to the forge's object storage and
+resume after an interruption when you run git push again.`
 
 type Parsed = {
   readonly remote: string
@@ -81,20 +117,76 @@ const resolveHost = async (explicit: string | undefined): Promise<string> => {
 
 const sleep = (ms: number) => new Promise<void>((done) => setTimeout(done, ms))
 
+const prompt = async (question: string): Promise<string> => {
+  const reader = createInterface({ input: process.stdin, output: process.stderr, terminal: process.stdin.isTTY === true })
+  try {
+    return await reader.question(question)
+  } finally {
+    reader.close()
+  }
+}
+
+const login = async (args: readonly string[], directory: string): Promise<number> => {
+  const parsed = parseLoginArguments(args)
+  const host = await resolveHost(parsed.target)
+  const io: BrowserIO = {
+    fetch: (input, init) => fetch(input, init),
+    sleep,
+    log: (line) => process.stderr.write(`${line}\n`),
+    prompt,
+    ...(parsed.openBrowser ? { open: (url: string) => openBrowser(url) } : {}),
+  }
+  const request = defaultLoginRequest(parsed.scope)
+  const credential: HostCredential =
+    parsed.mode === 'device' ? await deviceLogin(host, io, request) : parsed.mode === 'redirect' ? await redirectLogin(host, io, request) : await pasteLogin(host, io, request)
+  writeHosts(directory, { ...readHosts(directory), [host]: credential })
+  if (parsed.setupGit) await setupGit(host)
+  process.stderr.write(`Logged in to ${host} as ${credential.login} (${credential.scope ?? parsed.scope}).${parsed.setupGit ? ' git now uses this token for that host.' : ''}\n`)
+  return 0
+}
+
+const storedHost = async (explicit: string | null, hosts: Record<string, HostCredential>): Promise<string> => {
+  if (explicit) return normalizeHost(explicit)
+  const { stdout, code } = await runGit(['remote', 'get-url', 'origin'], { allowFailure: true })
+  if (code === 0 && stdout.trim() !== '') {
+    const origin = normalizeHost(stdout.trim())
+    if (hosts[origin]) return origin
+  }
+  const known = Object.keys(hosts)
+  if (known.length === 1) return known[0]!
+  throw new Error(known.length === 0 ? 'not logged in; run git forge auth login <url> first' : 'logged in to several forges; pass --host <url>')
+}
+
+const repo = async (args: readonly string[]): Promise<number> => {
+  const [action, ...rest] = args
+  if (action !== 'create') {
+    process.stderr.write(`git-forge: unknown repo command ${action ?? ''}\n${USAGE}\n`)
+    return 1
+  }
+  const input = parseRepoCreate(rest)
+  const hosts = readHosts(configDirectory())
+  const host = await storedHost(input.host, hosts)
+  const url = new URL(host)
+  const credential = credentialFor(new Map([['protocol', url.protocol.slice(0, -1)], ['host', url.host]]), hosts)
+  if (!credential) throw new Error(`not logged in to ${host}, or the token expired; run git forge auth login --scopes repo:admin ${host}`)
+  const created = await createRemoteRepository(host, credential, input)
+  process.stderr.write(`Created ${created.visibility} repository ${created.owner}/${created.name} on ${host}.\n`)
+  if (input.remote) {
+    await runGit(['remote', 'add', input.remote, created.cloneUrl])
+    process.stderr.write(`Added remote ${input.remote}.\n`)
+  }
+  process.stdout.write(`${created.cloneUrl}\n`)
+  return 0
+}
+
 const auth = async (args: readonly string[]): Promise<number> => {
   const [action, ...rest] = args
   const flags = new Set(rest.filter((arg) => arg.startsWith('--')))
   const [target] = rest.filter((arg) => !arg.startsWith('--'))
   const directory = configDirectory()
   switch (action) {
-    case 'login': {
-      const host = await resolveHost(target)
-      const credential = await deviceLogin(host, { fetch: (input, init) => fetch(input, init), sleep, log: (line) => process.stderr.write(`${line}\n`) })
-      writeHosts(directory, { ...readHosts(directory), [host]: credential })
-      if (!flags.has('--no-setup-git')) await setupGit(host)
-      process.stderr.write(`Logged in to ${host} as ${credential.login}.${flags.has('--no-setup-git') ? '' : ' git now uses this token for that host.'}\n`)
-      return 0
-    }
+    case 'login':
+      return login(rest, directory)
     case 'logout': {
       const host = await resolveHost(target)
       const { [host]: removed, ...others } = readHosts(directory)
@@ -143,8 +235,19 @@ const auth = async (args: readonly string[]): Promise<number> => {
   }
 }
 
-export const main = async (args: readonly string[]): Promise<number> => {
+const remoteHelper = async (args: readonly string[]): Promise<number> => {
+  try {
+    return await runRemoteHelper(args)
+  } catch (error) {
+    process.stderr.write(`git-remote-forge: ${error instanceof Error ? error.message : String(error)}\n`)
+    return 1
+  }
+}
+
+export const main = async (args: readonly string[], argv0: string = process.argv0): Promise<number> => {
+  if (isRemoteHelperName(argv0)) return remoteHelper(args)
   const [command, ...rest] = args
+  if (command === 'remote-helper') return remoteHelper(rest)
   if (command === '--version' || command === 'version') {
     process.stdout.write(`git-forge ${VERSION}\n`)
     return 0
@@ -153,9 +256,9 @@ export const main = async (args: readonly string[]): Promise<number> => {
     process.stdout.write(`${USAGE}\n`)
     return command ? 0 : 1
   }
-  if (command === 'auth') {
+  if (command === 'auth' || command === 'repo') {
     try {
-      return await auth(rest)
+      return await (command === 'auth' ? auth(rest) : repo(rest))
     } catch (error) {
       process.stderr.write(`git-forge: ${error instanceof Error ? error.message : String(error)}\n`)
       return 1

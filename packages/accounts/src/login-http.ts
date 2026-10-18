@@ -1,4 +1,5 @@
 import { readAll, SizeLimitError } from '@git-forge/core'
+import { AUTHORIZATION_CODE_GRANT, CLI_OOB_REDIRECT, isCliRequestId } from './cli-login.ts'
 import { DEVICE_CLIENT_ID, DEVICE_GRANT_TYPE } from './device.ts'
 import {
   beginOidcLogin,
@@ -8,11 +9,16 @@ import {
   completeOidcLogin,
   completePasskeyLogin,
   completePasskeyRegistration,
+  decideCliRequest,
   decideDeviceAuthorization,
+  DEFAULT_CLI_SCOPE,
+  exchangeCliCode,
   LOGIN_CHALLENGE_TTL_MS,
   type LoginContext,
   LoginError,
   lookupDevice,
+  lookupCliRequest,
+  startCliAuthorization,
   passkeysEnabled,
   pollDeviceToken,
   type RegistrationSubject,
@@ -23,6 +29,8 @@ import {
 import type { Session } from './login-store.ts'
 import { type LoginPage, type LoginPageRenderer, renderLoginPage } from './login-pages.ts'
 import type { UserPrincipal } from './permissions.ts'
+import type { RateLimit } from './rate-limit.ts'
+import { parseRequestedScope } from './tokens.ts'
 import {
   clearCookie,
   CSRF_FIELD,
@@ -42,6 +50,35 @@ export type LoginHttpOptions = {
   readonly context: LoginContext
   readonly secureCookies: boolean
   readonly renderPage?: LoginPageRenderer
+  readonly clientAddress?: (request: Request) => string | null
+}
+
+const MINUTE_MS = 60 * 1000
+
+export const LOGIN_RATE_LIMITS = {
+  login: { name: 'login', limit: 60, windowMs: 10 * MINUTE_MS },
+  breakGlass: { name: 'break-glass', limit: 10, windowMs: 60 * MINUTE_MS },
+  deviceCode: { name: 'device-code', limit: 30, windowMs: 60 * MINUTE_MS },
+  token: { name: 'token', limit: 300, windowMs: 10 * MINUTE_MS },
+  consent: { name: 'consent', limit: 60, windowMs: 10 * MINUTE_MS },
+} as const satisfies Record<string, RateLimit>
+
+const CLI_REQUEST_PATH = /^\/login\/cli\/([A-Za-z0-9_-]+)$/
+
+const cliRequestIdOf = (pathname: string): string | null => {
+  const id = CLI_REQUEST_PATH.exec(pathname)?.[1]
+  return id && isCliRequestId(id) ? id : null
+}
+
+export const loginRateLimitFor = (method: string, pathname: string, search: URLSearchParams): RateLimit | null => {
+  if (method === 'POST' && pathname.startsWith('/login/passkey')) return LOGIN_RATE_LIMITS.login
+  if (method === 'GET' && (pathname === '/login/oidc' || pathname === '/login/oidc/callback')) return LOGIN_RATE_LIMITS.login
+  if (method === 'POST' && pathname === '/login/break-glass') return LOGIN_RATE_LIMITS.breakGlass
+  if (method === 'POST' && (pathname === '/login/device/code' || pathname === '/login/cli/start')) return LOGIN_RATE_LIMITS.deviceCode
+  if (method === 'POST' && (pathname === '/login/device/token' || pathname === '/login/cli/token')) return LOGIN_RATE_LIMITS.token
+  if (pathname === '/login/device' && (method === 'POST' || search.has('user_code'))) return LOGIN_RATE_LIMITS.consent
+  if (cliRequestIdOf(pathname) !== null && (method === 'GET' || method === 'POST')) return LOGIN_RATE_LIMITS.consent
+  return null
 }
 
 export type ActiveSession = {
@@ -226,29 +263,124 @@ export const createLoginHandler = (options: LoginHttpOptions) => {
     return page(request, { kind: 'invite', code, login: existing?.login ?? invite.login, existingUser: existing !== null, oidcName: context.oidc?.config.name ?? null, passkeys: passkeysEnabled(context) })
   }
 
+  const clientAddress = (request: Request): string | null => options.clientAddress?.(request) ?? null
+
+  const instance = new URL(context.origin).host
+
+  const signInFirst = (url: URL) => redirect(`/login?return_to=${encodeURIComponent(`${url.pathname}${url.search}`)}`)
+
   const devicePage = async (request: Request, url: URL): Promise<Response> => {
     const active = await readActiveSession(request, options)
-    if (!active) return redirect(`/login?return_to=${encodeURIComponent(`${url.pathname}${url.search}`)}`)
+    if (!active) return signInFirst(url)
     const userCode = url.searchParams.get('user_code')
-    const user = { login: active.session.login, csrf: active.csrf }
-    if (!userCode) return page(request, { kind: 'device', userCode: null, device: null, user })
+    const base = { kind: 'device', user: { login: active.session.login, csrf: active.csrf }, instance, viewerIp: clientAddress(request) } as const
+    if (!userCode) return page(request, { ...base, userCode: null, device: null })
     const device = await lookupDevice(context, userCode)
-    if (!device || device.status !== 'pending') return page(request, { kind: 'device', userCode, device: null, user, message: 'This code is unknown, expired or already used.' })
-    return page(request, { kind: 'device', userCode, device: { userCode: device.userCode, clientName: device.clientName, scopes: device.scopes }, user })
+    if (!device || device.status !== 'pending') return page(request, { ...base, userCode, device: null, message: 'This code is unknown, expired or already used.' })
+    return page(request, {
+      ...base,
+      userCode,
+      device: {
+        userCode: device.userCode,
+        clientName: device.clientName,
+        clientHost: device.clientHost,
+        requestIp: device.requestIp,
+        requestedAt: device.createdAt,
+        scope: parseRequestedScope(device.scopes, DEFAULT_CLI_SCOPE) ?? DEFAULT_CLI_SCOPE,
+      },
+    })
   }
 
   const decideDevice = async (request: Request): Promise<Response> => {
     const active = await requireSession(request)
     const form = await readForm(request)
     const approve = form.get('decision') === 'approve'
-    await decideDeviceAuthorization(context, { userId: active.session.userId, userCode: form.get('user_code') ?? '', approve })
+    await decideDeviceAuthorization(context, { userId: active.session.userId, userCode: form.get('user_code') ?? '', approve, scope: form.get('scope') })
     return page(request, { kind: 'device-result', approved: approve })
+  }
+
+  const cliPage = async (request: Request, url: URL, id: string): Promise<Response> => {
+    const active = await readActiveSession(request, options)
+    if (!active) return signInFirst(url)
+    const pending = await lookupCliRequest(context, id)
+    if (!pending) throw new LoginError('expired', 'This login request is unknown, expired or already answered. Run the login in your terminal again.')
+    return page(request, {
+      kind: 'cli',
+      user: { login: active.session.login, csrf: active.csrf },
+      instance,
+      request: {
+        id,
+        clientName: pending.clientName,
+        clientHost: pending.clientHost,
+        requestIp: pending.requestIp,
+        requestedAt: pending.createdAt,
+        redirect: pending.redirectUri === CLI_OOB_REDIRECT ? 'oob' : 'loopback',
+        redirectUri: pending.redirectUri,
+        scope: parseRequestedScope(pending.scopes, DEFAULT_CLI_SCOPE) ?? DEFAULT_CLI_SCOPE,
+      },
+    })
+  }
+
+  const decideCli = async (request: Request, id: string): Promise<Response> => {
+    const active = await requireSession(request)
+    const form = await readForm(request)
+    const decision = await decideCliRequest(context, { userId: active.session.userId, id, approve: form.get('decision') === 'approve', scope: form.get('scope') })
+    if (decision.kind === 'redirect') return redirect(decision.location)
+    if (decision.kind === 'code') return page(request, { kind: 'cli-code', code: decision.code, expiresAt: decision.expiresAt })
+    return page(request, { kind: 'device-result', approved: false })
+  }
+
+  const cliStart = async (request: Request): Promise<Response> => {
+    const params = await readParams(request)
+    try {
+      const started = await startCliAuthorization(context, {
+        clientId: params.get('client_id'),
+        redirectUri: params.get('redirect_uri'),
+        codeChallenge: params.get('code_challenge'),
+        codeChallengeMethod: params.get('code_challenge_method'),
+        state: params.get('state'),
+        scope: params.get('scope'),
+        clientName: params.get('client_name'),
+        clientHost: params.get('client_host'),
+        requestIp: clientAddress(request),
+      })
+      return json(200, { request_id: started.id, authorization_url: started.url, expires_in: started.expiresIn })
+    } catch (error) {
+      if (error instanceof LoginError) return json(400, { error: error.code === 'invalid_scope' ? 'invalid_scope' : 'invalid_request', error_description: error.message })
+      throw error
+    }
+  }
+
+  const tokenResponse = (result: Awaited<ReturnType<typeof exchangeCliCode>>): Response => {
+    if (result.kind === 'error') return json(400, { error: result.error, ...(result.interval ? { interval: result.interval } : {}) })
+    return json(200, {
+      access_token: result.token,
+      token_type: 'bearer',
+      scope: result.scope,
+      expires_in: Math.round((result.expiresAt - context.now()) / 1000),
+      login: result.login,
+    })
+  }
+
+  const cliToken = async (request: Request): Promise<Response> => {
+    const params = await readParams(request)
+    if (params.get('grant_type') !== AUTHORIZATION_CODE_GRANT) return json(400, { error: 'unsupported_grant_type' })
+    if (params.get('client_id') !== DEVICE_CLIENT_ID) return json(400, { error: 'invalid_client' })
+    return tokenResponse(
+      await exchangeCliCode(context, { clientId: params.get('client_id'), code: params.get('code'), codeVerifier: params.get('code_verifier'), redirectUri: params.get('redirect_uri') }),
+    )
   }
 
   const deviceCode = async (request: Request): Promise<Response> => {
     const params = await readParams(request)
     try {
-      const started = await startDeviceAuthorization(context, { clientId: params.get('client_id'), clientName: params.get('client_name') })
+      const started = await startDeviceAuthorization(context, {
+        clientId: params.get('client_id'),
+        clientName: params.get('client_name'),
+        clientHost: params.get('client_host'),
+        scope: params.get('scope'),
+        requestIp: clientAddress(request),
+      })
       return json(200, {
         device_code: started.deviceCode,
         user_code: started.userCode,
@@ -258,7 +390,7 @@ export const createLoginHandler = (options: LoginHttpOptions) => {
         interval: started.interval,
       })
     } catch (error) {
-      if (error instanceof LoginError) return json(400, { error: 'invalid_client', error_description: error.message })
+      if (error instanceof LoginError) return json(400, { error: error.code === 'invalid_scope' ? 'invalid_scope' : 'invalid_client', error_description: error.message })
       throw error
     }
   }
@@ -267,15 +399,7 @@ export const createLoginHandler = (options: LoginHttpOptions) => {
     const params = await readParams(request)
     if (params.get('grant_type') !== DEVICE_GRANT_TYPE) return json(400, { error: 'unsupported_grant_type' })
     if (params.get('client_id') !== DEVICE_CLIENT_ID) return json(400, { error: 'invalid_client' })
-    const result = await pollDeviceToken(context, { deviceCode: params.get('device_code'), clientId: params.get('client_id') })
-    if (result.kind === 'error') return json(400, { error: result.error, ...(result.interval ? { interval: result.interval } : {}) })
-    return json(200, {
-      access_token: result.token,
-      token_type: 'bearer',
-      scope: result.scope,
-      expires_in: Math.round((result.expiresAt - context.now()) / 1000),
-      login: result.login,
-    })
+    return tokenResponse(await pollDeviceToken(context, { deviceCode: params.get('device_code'), clientId: params.get('client_id') }))
   }
 
   const breakGlass = async (request: Request): Promise<Response> => {
@@ -327,7 +451,7 @@ export const createLoginHandler = (options: LoginHttpOptions) => {
     return new Response(null, { status: 204 })
   }
 
-  const isPage = (pathname: string) => pathname === '/login' || pathname === '/login/device' || pathname === '/login/break-glass' || pathname.startsWith('/login/invite/') || pathname.startsWith('/login/oidc')
+  const isPage = (pathname: string) => pathname === '/login' || pathname === '/login/device' || cliRequestIdOf(pathname) !== null || pathname === '/login/break-glass' || pathname.startsWith('/login/invite/') || pathname.startsWith('/login/oidc')
 
   const dispatch = async (request: Request, url: URL): Promise<Response | null> => {
     const { pathname } = url
@@ -343,6 +467,11 @@ export const createLoginHandler = (options: LoginHttpOptions) => {
     if (pathname === '/login/device' && method === 'POST') return decideDevice(request)
     if (pathname === '/login/device/code' && method === 'POST') return deviceCode(request)
     if (pathname === '/login/device/token' && method === 'POST') return deviceToken(request)
+    if (pathname === '/login/cli/start' && method === 'POST') return cliStart(request)
+    if (pathname === '/login/cli/token' && method === 'POST') return cliToken(request)
+    const cliRequest = cliRequestIdOf(pathname)
+    if (cliRequest && method === 'GET') return cliPage(request, url, cliRequest)
+    if (cliRequest && method === 'POST') return decideCli(request, cliRequest)
     if (pathname === '/login/break-glass' && method === 'GET') {
       if (!context.breakGlassKey) throw new LoginError('not_configured', 'no break-glass key is configured on this instance')
       return page(request, { kind: 'break-glass' })
@@ -360,16 +489,30 @@ export const createLoginHandler = (options: LoginHttpOptions) => {
 
   const handles = (pathname: string) => pathname === '/login' || pathname.startsWith('/login/') || pathname === '/logout' || pathname === '/api/session' || pathname === '/api/user/passkeys' || pathname.startsWith('/api/user/passkeys/')
 
+  const rateLimited = async (request: Request, url: URL, retryAfterSeconds: number): Promise<Response> => {
+    const message = `Too many attempts; try again in ${retryAfterSeconds} seconds.`
+    const isHtml = (isPage(url.pathname) && request.method === 'GET') || url.pathname === '/login/device' || cliRequestIdOf(url.pathname) !== null || url.pathname === '/login/break-glass'
+    const response = isHtml ? await page(request, { kind: 'error', status: 429, message }) : json(429, { error: 'rate_limited', error_description: message })
+    const limited = new Response(response.body, response)
+    limited.headers.set('Retry-After', String(retryAfterSeconds))
+    return limited
+  }
+
   return async (request: Request): Promise<Response | null> => {
     const url = new URL(request.url)
     if (!handles(url.pathname)) return null
     try {
       if (isUnsafeMethod(request.method) && !sameOrigin(request, context.origin)) throw new LoginError('forbidden', 'cross-origin request refused')
+      const limit = loginRateLimitFor(request.method, url.pathname, url.searchParams)
+      if (limit) {
+        const decision = await context.logins.hitRateLimit(limit, `ip:${clientAddress(request) ?? 'unknown'}`)
+        if (!decision.allowed) return rateLimited(request, url, decision.retryAfterSeconds)
+      }
       return (await dispatch(request, url)) ?? json(405, { error: 'method not allowed' })
     } catch (error) {
       if (!(error instanceof LoginError)) throw error
       if (isPage(url.pathname) && request.method === 'GET') return page(request, { kind: 'error', status: error.status, message: error.message })
-      if (url.pathname === '/login/device' || url.pathname === '/login/break-glass') return page(request, { kind: 'error', status: error.status, message: error.message })
+      if (url.pathname === '/login/device' || cliRequestIdOf(url.pathname) !== null || url.pathname === '/login/break-glass') return page(request, { kind: 'error', status: error.status, message: error.message })
       return json(error.status, { error: error.message, code: error.code })
     }
   }

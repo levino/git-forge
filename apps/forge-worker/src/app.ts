@@ -97,6 +97,8 @@ import {
   handleContentRequest,
   handleGitRequest,
   type JobQueue,
+  importLfsObject,
+  type ImportLfsJob,
   type ImportScheduler,
   type ImportState,
   ImportRunningError,
@@ -210,7 +212,7 @@ export type ForgeOptions = ForgeSettings & {
 
 export type LfsPublishJob = { readonly kind: 'lfs-publish'; readonly owner: string; readonly name: string; readonly oids: readonly string[] | null }
 
-export type AppJob = ForgeJob | NotificationJob | PagesJob | LfsPublishJob
+export type AppJob = ForgeJob | NotificationJob | PagesJob | LfsPublishJob | ImportLfsJob
 
 export const LFS_PUBLISH_BATCH = 100
 
@@ -1679,6 +1681,7 @@ export const createForge = (options: ForgeOptions): Forge => {
       if (isNotificationJob(job)) return notifications.runJob(job)
       if (isPagesJob(job)) return pages.runJob(job)
       if (job.kind === 'lfs-publish') return publishLfs(job)
+      if (job.kind === 'import-lfs') return void (await importLfsObject(job, { storage, ...(options.fetch ? { fetch: options.fetch } : {}), ...(options.digests ? { digests: options.digests } : {}) }))
       if (!federation) throw new Error('jobs need PUBLIC_URL, INSTANCE_KEY and a job queue')
       await runJob(federation, job)
     },

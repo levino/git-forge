@@ -434,6 +434,14 @@ as a sequence of stateless steps, each persisting its progress in
    normalized (http(s), no credentials, trailing `/objects/batch` removed);
    other keys are ignored. The token goes to a `.lfsconfig` endpoint only if
    it has the import URL's origin.
+   With a job queue (`scheduleLfs`), each pointer becomes an `import-lfs` job
+   as soon as a fetch step finds it (`lfsPending`), carrying the token and the
+   endpoint known so far (provisionally the setting or `<url>.git/info/lfs`;
+   jobs are re-queued once `.lfsconfig` names another); *lfs* then only checks
+   presence, re-queues after 10 minutes without progress (doubling,
+   `lfsRound`), and after three rounds hands the rest to the sequential path
+   above, which records them as missing. States without `lfsPending` and
+   runtimes without a queue use the sequential path.
 5. *refs* — update refs via compare-and-swap and rewrite `info/refs`; an
    empty repository adopts the upstream `HEAD`.
 

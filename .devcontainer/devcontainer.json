@@ -2,21 +2,13 @@
   "name": "git-forge",
   "image": "mcr.microsoft.com/devcontainers/typescript-node:1-22-bookworm",
   "features": {
-    "ghcr.io/devcontainers/features/common-utils:2": {},
     "ghcr.io/devcontainers/features/github-cli:1": {},
     "ghcr.io/devcontainers/features/git-lfs:1": {},
-    "ghcr.io/devcontainers/features/go:1": {},
-    "ghcr.io/devcontainers/features/docker-in-docker:2": {}
+    "ghcr.io/devcontainers/features/docker-in-docker:2": {},
+    "ghcr.io/anthropics/devcontainer-features/claude-code:1": {}
   },
-  "updateContentCommand": {
-    "pnpm": "corepack enable && pnpm install --frozen-lockfile",
-    "claude": "curl -fsSL https://claude.ai/install.sh | bash"
-  },
-  "postCreateCommand": {
-    "git-lfs": "git lfs install --skip-repo",
-    "playwright": "pnpm --filter forge-worker exec playwright install --with-deps chromium",
-    "versitygw": "go install github.com/versity/versitygw/cmd/versitygw@v1.9.0"
-  },
+  "updateContentCommand": "pnpm install --frozen-lockfile && pnpm --filter forge-worker exec playwright install --with-deps chromium",
+  "postCreateCommand": "git lfs install --skip-repo",
   "customizations": {
     "vscode": {
       "extensions": [
@@ -24,11 +16,8 @@
         "bradlc.vscode-tailwindcss",
         "vitest.explorer",
         "ms-playwright.playwright",
-        "Anthropic.claude-code"
-      ],
-      "settings": {
-        "terminal.integrated.defaultProfile.linux": "zsh"
-      }
+        "anthropic.claude-code"
+      ]
     }
   }
 }

@@ -80,7 +80,8 @@ never overwrites an existing one.
 
 `handleGitRequest` runs `lfsPushCheck` before any custom
 `receive.beforeUpdate`. It parses every blob of the pushed pack as an LFS
-pointer (strict spec format: `version` first, remaining keys sorted,
+pointer (strict spec format: `version` first (the current or the legacy
+`hawser` URL), remaining keys sorted,
 `oid sha256:<64 hex>`, canonical `size`, trailing newline, under 1024 bytes) and
 rejects the whole push with `missing LFS object <oid>` if any referenced object
 is not present. `git-lfs` uploads objects in its pre-push hook, so a regular

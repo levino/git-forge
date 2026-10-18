@@ -8,6 +8,8 @@ export const LFS_CONTENT_TYPE = 'application/vnd.git-lfs+json'
 
 export const LFS_POINTER_VERSION = 'https://git-lfs.github.com/spec/v1'
 
+export const LFS_LEGACY_POINTER_VERSION = 'https://hawser.github.com/spec/v1'
+
 export const LFS_POINTER_MAX_SIZE = 1024
 
 export type LfsOperation = 'upload' | 'download'
@@ -63,8 +65,10 @@ export const isLfsSize = (value: unknown): value is number => typeof value === '
 
 export const lfsPrefix = (repo: RepositoryName): string => `${repositoryPrefix(repo)}lfs/`
 
-export const lfsObjectKey = (repo: RepositoryName, oid: string): string =>
-  `${lfsPrefix(repo)}objects/${oid.slice(0, 2)}/${oid.slice(2, 4)}/${oid}`
+export const lfsObjectKey = (repo: RepositoryName, oid: string): string => {
+  if (!isLfsOid(oid)) throw new LfsRequestError(422, `invalid LFS oid ${oid}`)
+  return `${lfsPrefix(repo)}objects/${oid.slice(0, 2)}/${oid.slice(2, 4)}/${oid}`
+}
 
 export const LFS_MAX_BATCH_OBJECTS = 1000
 
@@ -144,7 +148,7 @@ export const verifyingStream = (expected: LfsObjectSpec): TransformStream<Uint8A
     flush() {
       if (seen !== expected.size) throw new LfsIntegrityError(`body has ${seen} bytes, expected ${expected.size}`)
       const actual = toHex(hash.digest())
-      if (actual !== expected.oid) throw new LfsIntegrityError(`body hashes to ${actual}, expected ${expected.oid}`)
+      if (actual !== expected.oid) throw new LfsIntegrityError(`body has sha256 ${actual}, expected ${expected.oid}`)
     },
   })
 }
@@ -224,7 +228,7 @@ const POINTER_LINE = /^([a-z0-9.-]+) ([^\r\n]*)$/
 export const parseLfsPointer = (data: Uint8Array): LfsObjectSpec | null => {
   if (data.length === 0 || data.length >= LFS_POINTER_MAX_SIZE || data[data.length - 1] !== 0x0a) return null
   const text = fromUtf8(data)
-  if (!text.startsWith(`version ${LFS_POINTER_VERSION}\n`)) return null
+  if (!text.startsWith(`version ${LFS_POINTER_VERSION}\n`) && !text.startsWith(`version ${LFS_LEGACY_POINTER_VERSION}\n`)) return null
   const lines = text.slice(0, -1).split('\n')
   const values = new Map<string, string>()
   let previous = ''

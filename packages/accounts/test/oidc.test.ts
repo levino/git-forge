@@ -6,6 +6,8 @@ import {
   createPkce,
   exchangeAuthorizationCode,
   isAllowedOidcUrl,
+  mergeUserinfo,
+  needsUserinfo,
   normalizeOidcIssuer,
   OidcError,
   parseJwks,
@@ -82,6 +84,17 @@ describe('OIDC configuration', () => {
   })
 })
 
+describe('userinfo', () => {
+  it('fills missing profile claims only for the same subject', () => {
+    const base = checkIdTokenClaims(claims(), expected)
+    expect(needsUserinfo(base)).toBe(true)
+    const merged = mergeUserinfo(base, { sub: 'user-1', preferred_username: 'alice', email: 'a@example.org', email_verified: true })
+    expect(merged).toMatchObject({ preferredUsername: 'alice', email: 'a@example.org', emailVerified: true })
+    expect(needsUserinfo(merged)).toBe(false)
+    expect(() => mergeUserinfo(base, { sub: 'user-2', preferred_username: 'mallory' })).toThrow(/another subject/)
+  })
+})
+
 describe('ID token verification', () => {
   for (const alg of ['RS256', 'ES256', 'EdDSA'] as MockOidcAlgorithm[]) {
     it(`verifies ${alg} ID tokens against the JWKS`, async () => {
@@ -125,7 +138,7 @@ describe('ID token verification', () => {
     const authorizeAgain = await mock.handle(
       new Request(authorizationUrl({ metadata, client: provider.config, redirectUri: 'https://forge.example/cb', state: 's', nonce: 'n', codeChallenge: pkce.challenge })),
     )
-    const idToken = await exchangeAuthorizationCode(
+    const { idToken } = await exchangeAuthorizationCode(
       { ...exchange, code: new URL(authorizeAgain.headers.get('Location')!).searchParams.get('code')!, codeVerifier: pkce.verifier },
       fetch,
     )

@@ -12,6 +12,7 @@
     "test:e2e": "vitest run --config vitest.e2e.config.ts",
     "bench": "node --experimental-transform-types --no-warnings --expose-gc scripts/bench.ts",
     "instance-key": "node --experimental-transform-types --no-warnings scripts/instance-key.ts",
+    "break-glass": "node --experimental-transform-types --no-warnings scripts/break-glass.ts",
     "bench:mirror": "node --experimental-transform-types --no-warnings scripts/bench-mirror.ts"
   },
   "dependencies": {

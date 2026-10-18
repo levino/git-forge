@@ -30,13 +30,14 @@ discussions.
 - [x] Users, organizations, teams, roles, PATs, apps in SQLite
 - [x] Instance admins, one-time bootstrap of the first admin
 - [x] Private repositories by default, per-repository visibility
-- [ ] Login: OIDC (ZITADEL etc.), passkeys
+- [x] Login: OIDC (authorization code + PKCE, ZITADEL as first target), passkeys (WebAuthn, attestation none, UV required), browser sessions with CSRF protection, invites and optional self-signup
 - [x] Git over HTTPS with PATs and app tokens
 - [x] Git and LFS as separate authorization surfaces (`git:read` / `lfs:read`)
 - [x] Instance keys (Ed25519), `/.well-known/openid-configuration`, `/.well-known/jwks.json`
 - [x] Short-lived instance JWTs, trust table "issuer X may read repo Y", optional pinned thumbprint
-- [ ] Device flow (`gh auth login`-style)
-- [ ] Break-glass key
+- [x] Device flow (`git forge auth login`, RFC 8628) and git credential helper (`git forge auth git-credential`)
+- [x] Break-glass key (offline Ed25519, one-hour admin session)
+- [ ] Login follow-ups: OIDC groups → teams, session list and revocation in the UI, rate limits on login and device endpoints, purging expired challenges and device codes, branch protection API with sessions, device-flow scope choice
 - [ ] SAML, SCIM
 - [x] Branch protection rules (patterns, force push, deletion, push restrictions, admin bypass) enforced in `receive-pack`, API under `/api/repos/{owner}/{repo}/branches/{branch}/protection`
 - [ ] Branch protection API and push policy wired into the Worker app (needs accounts on D1 there)

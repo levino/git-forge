@@ -18,6 +18,7 @@ export type MockOidc = {
   readonly clientSecret: string
   user: MockUser
   claimOverrides: Record<string, unknown>
+  userinfoOnly: boolean
   readonly handle: (request: Request) => Promise<Response>
   readonly sign: (claims: Record<string, unknown>) => Promise<string>
   readonly tokenRequests: number
@@ -41,6 +42,7 @@ export const createMockOidc = async (options: { readonly issuer?: string; readon
   const kid = `mock-${alg.toLowerCase()}`
   const publicJwk = { ...Object.fromEntries(Object.entries(exported).filter(([key]) => ['kty', 'crv', 'x', 'y', 'n', 'e'].includes(key))), kid, alg, use: 'sig' }
   const codes = new Map<string, PendingCode>()
+  const accessTokens = new Map<string, MockUser>()
   let tokenRequests = 0
 
   const sign = async (claims: Record<string, unknown>): Promise<string> => {
@@ -55,6 +57,7 @@ export const createMockOidc = async (options: { readonly issuer?: string; readon
     clientSecret: options.clientSecret ?? 'forge-secret',
     user: { sub: 'user-1', preferred_username: 'alice', email: 'alice@example.org', email_verified: true, name: 'Alice' },
     claimOverrides: {},
+    userinfoOnly: false,
     sign,
     get tokenRequests() {
       return tokenRequests
@@ -68,6 +71,7 @@ export const createMockOidc = async (options: { readonly issuer?: string; readon
           authorization_endpoint: `${mock.issuer}/authorize`,
           token_endpoint: `${mock.issuer}/token`,
           jwks_uri: `${mock.issuer}/jwks`,
+          userinfo_endpoint: `${mock.issuer}/userinfo`,
           response_types_supported: ['code'],
           subject_types_supported: ['public'],
           id_token_signing_alg_values_supported: [alg],
@@ -75,6 +79,10 @@ export const createMockOidc = async (options: { readonly issuer?: string; readon
         })
       }
       if (path === '/jwks') return json({ keys: [publicJwk] })
+      if (path === '/userinfo') {
+        const user = accessTokens.get((request.headers.get('Authorization') ?? '').replace(/^Bearer /, ''))
+        return user ? json(user) : json({ error: 'invalid_token' }, 401)
+      }
       if (path === '/authorize') {
         const params = url.searchParams
         if (params.get('client_id') !== mock.clientId || params.get('response_type') !== 'code' || params.get('code_challenge_method') !== 'S256') {
@@ -99,8 +107,11 @@ export const createMockOidc = async (options: { readonly issuer?: string; readon
         if (!pending || form.get('grant_type') !== 'authorization_code' || form.get('redirect_uri') !== pending.redirectUri) return json({ error: 'invalid_grant' }, 400)
         if ((await pkceChallenge(form.get('code_verifier') ?? '')) !== pending.challenge) return json({ error: 'invalid_grant', error_description: 'PKCE' }, 400)
         const now = Math.floor(Date.now() / 1000)
-        const idToken = await sign({ iss: mock.issuer, aud: mock.clientId, iat: now, exp: now + 300, nonce: pending.nonce, ...pending.user, ...mock.claimOverrides })
-        return json({ access_token: 'mock-access', token_type: 'Bearer', expires_in: 300, id_token: idToken })
+        const profile = mock.userinfoOnly ? { sub: pending.user.sub } : pending.user
+        const idToken = await sign({ iss: mock.issuer, aud: mock.clientId, iat: now, exp: now + 300, nonce: pending.nonce, ...profile, ...mock.claimOverrides })
+        const accessToken = base64UrlEncode(crypto.getRandomValues(new Uint8Array(16)))
+        accessTokens.set(accessToken, pending.user)
+        return json({ access_token: accessToken, token_type: 'Bearer', expires_in: 300, id_token: idToken })
       }
       return json({ error: 'not_found' }, 404)
     },

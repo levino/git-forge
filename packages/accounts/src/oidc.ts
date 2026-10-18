@@ -18,6 +18,7 @@ export type OidcMetadata = {
   readonly authorizationEndpoint: string
   readonly tokenEndpoint: string
   readonly jwksUri: string
+  readonly userinfoEndpoint: string | null
   readonly algorithms: readonly JwsAlgorithm[]
 }
 
@@ -64,6 +65,7 @@ export const parseOidcMetadata = (issuer: string, document: unknown): OidcMetada
     authorizationEndpoint: requireUrl(value, 'authorization_endpoint'),
     tokenEndpoint: requireUrl(value, 'token_endpoint'),
     jwksUri: requireUrl(value, 'jwks_uri'),
+    userinfoEndpoint: typeof value.userinfo_endpoint === 'string' && isAllowedOidcUrl(value.userinfo_endpoint) ? value.userinfo_endpoint : null,
     algorithms: offered,
   }
 }
@@ -137,7 +139,12 @@ export type TokenExchange = {
   readonly codeVerifier: string
 }
 
-export const exchangeAuthorizationCode = async (exchange: TokenExchange, fetch: FetchLike): Promise<string> => {
+export type TokenResponse = {
+  readonly idToken: string
+  readonly accessToken: string | null
+}
+
+export const exchangeAuthorizationCode = async (exchange: TokenExchange, fetch: FetchLike): Promise<TokenResponse> => {
   const body = new URLSearchParams({ grant_type: 'authorization_code', code: exchange.code, redirect_uri: exchange.redirectUri, code_verifier: exchange.codeVerifier })
   const headers: Record<string, string> = { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' }
   if (exchange.client.clientSecret) headers.Authorization = basicCredentials(exchange.client.clientId, exchange.client.clientSecret)
@@ -152,7 +159,7 @@ export const exchangeAuthorizationCode = async (exchange: TokenExchange, fetch: 
   const value = (typeof document === 'object' && document !== null ? document : {}) as Record<string, unknown>
   if (!response.ok) throw new OidcError(`token endpoint answered ${response.status}: ${String(value.error ?? 'error')}`)
   if (typeof value.id_token !== 'string') throw new OidcError('token response lacks an id_token')
-  return value.id_token
+  return { idToken: value.id_token, accessToken: typeof value.access_token === 'string' ? value.access_token : null }
 }
 
 export type IdTokenClaims = {
@@ -222,6 +229,32 @@ export const verifyIdToken = async (token: string, keys: readonly VerificationJw
   const verified = await verifyCompactJws(token, keys)
   if (!verified) throw new OidcError('ID token signature does not verify')
   return checkIdTokenClaims(parseIdTokenClaims(verified.payload), expected)
+}
+
+export const needsUserinfo = (claims: IdTokenClaims): boolean => claims.preferredUsername === null && claims.email === null && claims.name === null
+
+export const mergeUserinfo = (claims: IdTokenClaims, userinfo: unknown): IdTokenClaims => {
+  if (typeof userinfo !== 'object' || userinfo === null) throw new OidcError('userinfo is not a JSON object')
+  const value = userinfo as Record<string, unknown>
+  if (value.sub !== claims.sub) throw new OidcError('userinfo is about another subject')
+  return {
+    ...claims,
+    email: claims.email ?? optionalString(value.email),
+    emailVerified: claims.email ? claims.emailVerified : value.email_verified === true,
+    preferredUsername: claims.preferredUsername ?? optionalString(value.preferred_username),
+    name: claims.name ?? optionalString(value.name),
+  }
+}
+
+export const fetchUserinfo = async (metadata: OidcMetadata, accessToken: string, fetch: FetchLike): Promise<unknown> => {
+  if (!metadata.userinfoEndpoint) throw new OidcError('the provider has no userinfo endpoint')
+  const response = await fetch(metadata.userinfoEndpoint, { headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json' } })
+  if (!response.ok) throw new OidcError(`userinfo answered ${response.status}`)
+  try {
+    return await response.json()
+  } catch {
+    throw new OidcError('userinfo did not return JSON')
+  }
 }
 
 export type OidcProvider = {

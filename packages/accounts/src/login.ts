@@ -8,6 +8,9 @@ import {
   createPkce,
   exchangeAuthorizationCode,
   type FetchLike,
+  fetchUserinfo,
+  mergeUserinfo,
+  needsUserinfo,
   OidcError,
   type OidcProvider,
   verifyIdTokenWith,
@@ -210,11 +213,14 @@ export const completeOidcLogin = async (
   const metadata = await provider.metadata()
   let claims
   try {
-    const idToken = await exchangeAuthorizationCode(
+    const tokens = await exchangeAuthorizationCode(
       { metadata, client: provider.config, code: input.code, redirectUri: `${context.origin}${OIDC_CALLBACK_PATH}`, codeVerifier: String(data.verifier) },
       context.fetch,
     )
-    claims = await verifyIdTokenWith(provider, idToken, { nonce: String(data.nonce), now: context.now() })
+    claims = await verifyIdTokenWith(provider, tokens.idToken, { nonce: String(data.nonce), now: context.now() })
+    if (needsUserinfo(claims) && tokens.accessToken && metadata.userinfoEndpoint) {
+      claims = mergeUserinfo(claims, await fetchUserinfo(metadata, tokens.accessToken, context.fetch))
+    }
   } catch (error) {
     if (error instanceof OidcError) throw new LoginError('verification_failed', error.message)
     throw error

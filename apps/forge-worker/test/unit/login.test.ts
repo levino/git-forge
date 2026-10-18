@@ -196,6 +196,15 @@ describe('OIDC', () => {
     expect(await json(await browser.fetch('/api/session'))).toMatchObject({ login: 'root', admin: true })
   })
 
+  it('takes the login from userinfo when the ID token carries only the subject', async () => {
+    mock.userinfoOnly = true
+    mock.user = { sub: 'zitadel-42', preferred_username: 'levin@dorf.example', email: 'levin@dorf.example', email_verified: true }
+    const forge = await loginForge(oidcSettings(true), mock)
+    const browser = new Browser(forge)
+    expect((await signIn(browser)).status).toBe(303)
+    expect(await json(await browser.fetch('/api/session'))).toMatchObject({ login: 'levin' })
+  })
+
   it('creates accounts with self-signup and refuses unbound or forged callbacks', async () => {
     const forge = await loginForge(oidcSettings(true), mock)
     const browser = new Browser(forge)

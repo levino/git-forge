@@ -5,6 +5,7 @@ import { createRepository, handleGitRequest, lfsObjectKey, sha256Hex, withPresig
 import { gitEnv, tempDir, writeFile } from '@git-forge/core/test/git-helpers.ts'
 import { type RunningServer, startServer } from '@git-forge/core/test/http-server.ts'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import type { S3Storage } from '../src/s3-storage.ts'
 import { makeS3TestStorage, s3TestConfig } from './env.ts'
 
 const run = promisify(execFile)
@@ -39,13 +40,14 @@ const randomBytes = (size: number, seed: number): Uint8Array => {
 }
 
 describe.skipIf(!s3TestConfig)('git lfs through presigned URLs onto the same bucket', () => {
-  const base = makeS3TestStorage()
-  const storage = withPresigner(base, makeS3TestStorage())
   const repo = { owner: 'presigned', name: `lfs-${Date.now().toString(36)}` }
   const oversized: string[] = []
+  let base: S3Storage
   let server: RunningServer
 
   beforeAll(async () => {
+    base = makeS3TestStorage()
+    const storage = withPresigner(base, makeS3TestStorage())
     await createRepository(base, repo)
     server = await startServer(async (request) => {
       const length = Number(request.headers.get('content-length') ?? '0')

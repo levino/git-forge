@@ -29,6 +29,7 @@ export type LoginPage =
       readonly oidcName: string | null
       readonly selfSignup: boolean
       readonly breakGlass: boolean
+      readonly passkeys: boolean
       readonly user: { readonly login: string; readonly csrf: string } | null
       readonly message?: string
     }
@@ -38,6 +39,7 @@ export type LoginPage =
       readonly login: string | null
       readonly existingUser: boolean
       readonly oidcName: string | null
+      readonly passkeys: boolean
     }
   | {
       readonly kind: 'device'
@@ -155,22 +157,21 @@ const renderBody = (page: LoginPage): { title: string; body: string; config: Rec
         return {
           title: 'Signed in',
           body: `<p>Signed in as <strong>${escapeHtml(page.user.login)}</strong>.</p>
-<p><button data-passkey="register">Add a passkey</button></p>
-<form method="post" action="/logout">${csrfField(page.user.csrf)}<button>Sign out</button></form>`,
-          config: { returnTo: page.returnTo, csrf: page.user.csrf },
+${page.passkeys ? '<p><button data-passkey="register">Add a passkey</button></p>\n' : ''}<form method="post" action="/logout">${csrfField(page.user.csrf)}<button>Sign out</button></form>`,
+          config: page.passkeys ? { returnTo: page.returnTo, csrf: page.user.csrf } : null,
         }
       }
       const oidc = page.oidcName
         ? `<p><a href="/login/oidc?return_to=${encodeURIComponent(page.returnTo)}"><button type="button">Sign in with ${escapeHtml(page.oidcName)}</button></a></p>`
         : ''
-      const signup = page.selfSignup
+      const signup = page.passkeys && page.selfSignup
         ? `<form><label>New account: <input id="login" name="login" autocomplete="username" required></label> <button data-passkey="register">Create with a passkey</button></form>`
         : ''
       const breakGlass = page.breakGlass ? '<p><small><a href="/login/break-glass">Break-glass login</a></small></p>' : ''
       return {
         title: 'Sign in',
-        body: `${page.message ? `<p>${escapeHtml(page.message)}</p>` : ''}${oidc}<p><button data-passkey="login">Sign in with a passkey</button></p>${signup}${breakGlass}`,
-        config: { returnTo: page.returnTo, csrf: null },
+        body: `${page.message ? `<p>${escapeHtml(page.message)}</p>` : ''}${oidc}${page.passkeys ? '<p><button data-passkey="login">Sign in with a passkey</button></p>' : ''}${signup}${breakGlass}`,
+        config: page.passkeys ? { returnTo: page.returnTo, csrf: null } : null,
       }
     }
     case 'invite': {
@@ -181,8 +182,8 @@ const renderBody = (page: LoginPage): { title: string; body: string; config: Rec
         : ''
       return {
         title: 'Accept invite',
-        body: `<p>You were invited ${who}.</p>${oidc}<form>${loginField}<button data-passkey="register">Use a passkey</button></form>`,
-        config: { returnTo: '/', csrf: null, invite: page.code },
+        body: `<p>You were invited ${who}.</p>${oidc}${page.passkeys ? `<form>${loginField}<button data-passkey="register">Use a passkey</button></form>` : ''}`,
+        config: page.passkeys ? { returnTo: '/', csrf: null, invite: page.code } : null,
       }
     }
     case 'device': {

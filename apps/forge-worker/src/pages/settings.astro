@@ -22,7 +22,8 @@ if (Astro.request.method === 'POST') {
 }
 Astro.response.headers.set('Cache-Control', 'no-store')
 const user = session.principal
-const [tokens, passkeys] = await Promise.all([forge.account.listTokens(user), forge.account.listPasskeys(user)])
+const passkeysEnabled = forge.loginOptions.passkeys
+const [tokens, passkeys, identities, sessions] = await Promise.all([forge.account.listTokens(user), passkeysEnabled ? forge.account.listPasskeys(user) : [], forge.account.listIdentities(user), forge.account.listSessions(user)])
 const oidcName = forge.loginOptions.oidcName
 const day = (ms: number | null) => (ms === null ? 'never' : isoTime(Math.floor(ms / 1000)).slice(0, 10))
 const configJson = JSON.stringify({ returnTo: '/settings', csrf: session.csrf }).replace(/</g, '\\u003c')
@@ -42,6 +43,8 @@ const configJson = JSON.stringify({ returnTo: '/settings', csrf: session.csrf })
   }
   {result?.kind === 'token-revoked' && <div role="status" class="alert alert-success mb-6">Token revoked.</div>}
   {result?.kind === 'passkey-removed' && <div role="status" class="alert alert-success mb-6">Passkey removed.</div>}
+  {result?.kind === 'identity-unlinked' && <div role="status" class="alert alert-success mb-6">Account unlinked.</div>}
+  {result?.kind === 'session-revoked' && <div role="status" class="alert alert-success mb-6">Session ended.</div>}
   {result?.kind === 'error' && <div role="alert" class="alert alert-error mb-6">{result.message}</div>}
 
   <section class="mb-10" aria-labelledby="tokens">
@@ -112,48 +115,96 @@ const configJson = JSON.stringify({ returnTo: '/settings', csrf: session.csrf })
     </form>
   </section>
 
-  <section class="mb-10" aria-labelledby="passkeys">
-    <h2 id="passkeys" class="text-xl font-semibold mb-4">Passkeys</h2>
+  {
+    passkeysEnabled && (
+    <section class="mb-10" aria-labelledby="passkeys">
+      <h2 id="passkeys" class="text-xl font-semibold mb-4">Passkeys</h2>
+      {
+        passkeys.length === 0 ? (
+          <p class="mb-4">No passkeys yet.</p>
+        ) : (
+          <ul class="border border-base-300 rounded-box divide-y divide-base-300 mb-4">
+            {passkeys.map((passkey) => (
+              <li class="flex flex-wrap items-center gap-3 px-4 py-3">
+                <span class="font-semibold">{passkey.name}</span>
+                <span class="text-sm text-base-content/70">
+                  added {day(passkey.createdAt)}, last used {passkey.lastUsedAt === null ? 'never' : day(passkey.lastUsedAt)}
+                </span>
+                <form method="post" class="ml-auto">
+                  <input type="hidden" name="csrf" value={session.csrf} />
+                  <input type="hidden" name="action" value="remove-passkey" />
+                  <input type="hidden" name="id" value={passkey.id} />
+                  <button class="btn btn-xs btn-error btn-outline" aria-label={`Remove passkey ${passkey.name}`}>
+                    Remove
+                  </button>
+                </form>
+              </li>
+            ))}
+          </ul>
+        )
+      }
+      <button class="btn" type="button" data-passkey="register">Add a passkey</button>
+      <p id="message" role="alert" class="text-error mt-2 empty:hidden"></p>
+    </section>
+    )
+  }
+
+  <section class="mb-10" aria-labelledby="identities">
+    <h2 id="identities" class="text-xl font-semibold mb-4">Linked accounts</h2>
     {
-      passkeys.length === 0 ? (
-        <p class="mb-4">No passkeys yet.</p>
+      identities.length === 0 ? (
+        <p class="mb-4">No linked accounts.</p>
       ) : (
         <ul class="border border-base-300 rounded-box divide-y divide-base-300 mb-4">
-          {passkeys.map((passkey) => (
+          {identities.map((identity) => (
             <li class="flex flex-wrap items-center gap-3 px-4 py-3">
-              <span class="font-semibold">{passkey.name}</span>
-              <span class="text-sm text-base-content/70">
-                added {day(passkey.createdAt)}, last used {passkey.lastUsedAt === null ? 'never' : day(passkey.lastUsedAt)}
-              </span>
-              <form method="post" class="ml-auto">
+              <span class="font-mono text-sm break-all flex-1">{identity.issuer}</span>
+              {identity.email && <span class="text-sm text-base-content/70">{identity.email}</span>}
+              <span class="text-sm text-base-content/70">linked {day(identity.createdAt)}</span>
+              <form method="post">
                 <input type="hidden" name="csrf" value={session.csrf} />
-                <input type="hidden" name="action" value="remove-passkey" />
-                <input type="hidden" name="id" value={passkey.id} />
-                <button class="btn btn-xs btn-error btn-outline" aria-label={`Remove passkey ${passkey.name}`}>
-                  Remove
-                </button>
+                <input type="hidden" name="action" value="unlink-identity" />
+                <input type="hidden" name="issuer" value={identity.issuer} />
+                <input type="hidden" name="subject" value={identity.subject} />
+                <button class="btn btn-xs btn-error btn-outline" aria-label={`Unlink ${identity.issuer}`}>Unlink</button>
               </form>
             </li>
           ))}
         </ul>
       )
     }
-    <button class="btn" type="button" data-passkey="register">Add a passkey</button>
-    <p id="message" role="alert" class="text-error mt-2 empty:hidden"></p>
-  </section>
-
-  {
-    oidcName && (
-      <section aria-labelledby="identities">
-        <h2 id="identities" class="text-xl font-semibold mb-4">
-          Linked accounts
-        </h2>
+    {
+      oidcName && (
         <a class="btn" href={`/login/oidc?link=1&return_to=${encodeURIComponent('/settings')}`}>
           Link a {oidcName} account
         </a>
-      </section>
-    )
-  }
-  <script type="application/json" id="login-config" set:html={configJson} />
-  <script is:inline set:html={PASSKEY_SCRIPT} />
+      )
+    }
+  </section>
+
+  <section class="mb-10" aria-labelledby="sessions">
+    <h2 id="sessions" class="text-xl font-semibold mb-4">Sessions</h2>
+    <ul class="border border-base-300 rounded-box divide-y divide-base-300">
+      {sessions.map((item) => (
+        <li class="flex flex-wrap items-center gap-3 px-4 py-3">
+          <span class="badge badge-sm">{item.method}</span>
+          <span class="text-sm break-all flex-1">{item.userAgent ?? 'unknown browser'}</span>
+          <span class="text-sm text-base-content/70">since {day(item.createdAt)}, last seen {day(item.lastSeenAt)}</span>
+          {item.id === session.sessionId ? (
+            <span class="badge badge-success badge-sm">this browser</span>
+          ) : (
+            <form method="post">
+              <input type="hidden" name="csrf" value={session.csrf} />
+              <input type="hidden" name="action" value="revoke-session" />
+              <input type="hidden" name="id" value={item.id} />
+              <button class="btn btn-xs btn-error btn-outline" aria-label={`End session started ${day(item.createdAt)}`}>End</button>
+            </form>
+          )}
+        </li>
+      ))}
+    </ul>
+  </section>
+
+  {passkeysEnabled && <script type="application/json" id="login-config" set:html={configJson} />}
+  {passkeysEnabled && <script is:inline set:html={PASSKEY_SCRIPT} />}
 </Layout>

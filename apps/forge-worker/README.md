@@ -61,7 +61,13 @@ read functions of `@git-forge/core` and check access with the same
 | `OIDC_NAME` | var, optional | Name of the provider on the login page, e.g. `Dorf-ID`. |
 | `OIDC_SCOPES` | var, optional | Default `openid profile email`. |
 | `SELF_SIGNUP` | var | `true` lets unknown OIDC identities and new passkeys create accounts. Default `false`: an invite (`POST /api/admin/invites`) or an existing link is needed. |
+| `PASSKEYS` | var | `false` turns passkeys off for an OIDC-only instance: the passkey login, registration and `/api/user/passkeys` endpoints answer `404`, and the sign-in, invite and settings pages show no passkey buttons. Stored passkeys stay in the database but cannot be used. Break-glass is unaffected. Default `true`. |
 | `BREAK_GLASS_PUBLIC_KEY` | var, optional | Ed25519 public JWK of the offline break-glass key (see [Login](#login)). Empty: break-glass login is off. |
+| `PAGES_HOST` | var, optional | Host pattern of Pages sites, e.g. `{owner}.pages.example.org` (optionally with `http://`/`https://` and a port; default `https`). Project sites are served at `https://<owner>.pages.example.org/<repo>/`, the repository named like the host (`<owner>.pages.example.org`) at the root. Empty: Pages hosts are off. Needs a Workers route for the wildcard host, see [Pages](#pages). |
+| `PAGES_DOMAINS` | var, optional | Custom domains per repository as JSON, e.g. `{"docs.example.com": "acme/handbook"}`. Each domain must also be declared as a Workers custom domain in `routes`. |
+| `PAGES_MAX_AGE` | var | `Cache-Control` max-age of public Pages responses in seconds, default 60. |
+| `CDN_BUCKET` | R2 binding, optional | Public bucket for [LFS publish](#lfs-publish): LFS objects of public repositories are copied there on push, keyed by oid. |
+| `LFS_PUBLISH_PREFIX` | var, optional | Key prefix inside `CDN_BUCKET`, e.g. `lfs/`. Default: none. |
 | `RUNNER` | Durable Object + Container | `RunnerContainer` (`src/runner-container.ts`, image `runner/Dockerfile`): one container per CI job with the official `actions/runner` and a JIT config. Declared in every environment; without the binding, jobs wait for a runner registered by hand. |
 
 Repositories are **private by default**; visibility is set per repository.
@@ -91,7 +97,19 @@ There is no global "public read" switch any more.
 | `POST /api/bootstrap` `{login, email?}` | `Bearer <BOOTSTRAP_TOKEN>` | Creates the first instance admin and returns `{login, token}` (a `repo:admin` token without expiry). `409` once an admin exists. |
 | `POST /api/admin/users` `{login, email?, admin?}` | instance admin | Creates a user. |
 | `POST /api/admin/users/{login}/tokens` `{name?, scopes?, expiresAt?}` | instance admin | Issues a personal access token (shown once). |
-| `POST /api/admin/instances` `{issuer, pinnedThumbprint?}` | instance admin | Trusts another instance. |
+| `GET /api/admin/instances` | instance admin | Trusted instances: `[{issuer, pinnedThumbprint, createdAt}]`. |
+| `POST /api/admin/instances` `{issuer, pinnedThumbprint?}` | instance admin | Trusts another instance (`422` for an issuer that is not an http(s) URL). |
+| `DELETE /api/admin/instances/{issuer}` | instance admin | Stops trusting an instance (issuer URL-encoded). `204`. |
+| `GET /api/admin/admins` | instance admin | Instance admins: `[{id, login}]`. |
+| `PUT\|DELETE /api/admin/admins/{login}` | instance admin | Makes a user an instance admin or removes them; the last admin cannot be removed (`422`). `204`. |
+| `GET /api/admin/mirrors` | instance admin | Every mirror of the instance: `[{repository, config, status}]`. |
+| `POST /api/orgs` `{login}` | signed-in user (session or `repo:admin` token) | Creates an organization; the caller becomes its first owner. Reserved names (`api`, `explore`, `settings`, `orgs`, …) answer `422`. |
+| `GET /api/orgs/{org}` | members, instance admins | `{organization, membership, canAdminister, members, teams}`; `404` for everyone else. |
+| `PUT\|DELETE /api/orgs/{org}/members/{login}` `{role}` | organization owner, instance admin | Adds a member, changes the role (`member`, `owner`) or removes them; the last owner stays (`422`). `204`. |
+| `POST /api/orgs/{org}/teams` `{slug, name?}` | organization owner, instance admin | Creates a team. |
+| `GET /api/orgs/{org}/teams/{slug}` | members, instance admins | Team with members and repository roles. |
+| `PUT\|DELETE /api/orgs/{org}/teams/{slug}/members/{login}` `{role}` | organization owner, instance admin | Team membership (`member`, `maintainer`); only organization members can join. `204`. |
+| `PUT\|DELETE /api/orgs/{org}/teams/{slug}/repos/{name}` `{role}` | organization owner, instance admin | Role of the team on a repository of the organization. `204`. |
 | `POST /api/repos` `{owner, name, visibility?, defaultBranch?}` | the owner, or an instance admin | Creates a repository in R2 and D1 (`visibility` defaults to `private`). |
 | `PATCH /api/repos/{owner}/{name}` `{visibility}` | repository admin | Changes visibility. |
 | `PUT /api/repos/{owner}/{name}/collaborators/{login}` `{role}` | repository admin | Sets a collaborator role. |
@@ -247,6 +265,96 @@ Worker on a cache miss, nothing is uploaded.
 Then `https://<zone>.b-cdn.net/acme/site/raw/main/photos/a.jpg` redirects to
 `https://<zone>.b-cdn.net/acme/site/media/<oid>/a.jpg`, which the CDN keeps.
 
+## Pages
+
+Static sites per repository, like GitHub Pages, served by the same Worker
+under `PAGES_HOST` and `PAGES_DOMAINS` (design: `docs/design.md` §20).
+
+- **Branch source** (`build_type: legacy`): the files of a branch, at `/` or
+  `/docs`, are deployed when Pages is enabled and on every push to that
+  branch. No Jekyll build: the files are served as they are.
+- **Workflow source** (`build_type: workflow`): `POST
+  /api/v3/repos/{owner}/{repo}/pages/deployments` with `artifact_id` (what
+  `actions/deploy-pages` sends) once the instance can read workflow
+  artifacts, or today with the site as a tar body (`Content-Type:
+  application/x-tar`, gzip allowed; the format `actions/upload-pages-artifact`
+  produces) from any CI:
+
+```sh
+tar -czf site.tar.gz -C dist .
+curl -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/x-tar' \
+  --data-binary @site.tar.gz "https://git.example.org/api/v3/repos/acme/site/pages/deployments?pages_build_version=$(git rev-parse HEAD)"
+```
+
+| Route | Access |
+|---|---|
+| `GET /api/v3/repos/{owner}/{repo}/pages` | read |
+| `POST\|PUT\|DELETE /api/v3/repos/{owner}/{repo}/pages {build_type?, source?: {branch, path}}` | admin |
+| `GET /api/v3/repos/{owner}/{repo}/pages/builds`, `…/builds/latest`, `…/builds/{id}` | read |
+| `POST /api/v3/repos/{owner}/{repo}/pages/builds` | write; redeploys the source branch |
+| `POST /api/v3/repos/{owner}/{repo}/pages/deployments` | write, or the `GITHUB_TOKEN` of a trusted, non-pull-request run of the repository |
+| `GET /api/v3/repos/{owner}/{repo}/pages/deployments/{id}`, `POST …/{id}/cancel` | read / write |
+
+Every deployment is immutable and content-addressed; the newest successful
+one becomes active in one database update. Paths resolve like GitHub Pages
+(`/dir/` → `dir/index.html`, `/page` → `page.html`, `404.html` for misses),
+`Content-Type` comes from the extension (HTML is `text/html` here, unlike the
+raw URLs), and every file has its SHA-256 as `ETag`. LFS files of public
+repositories redirect to the immutable media URL on `PUBLIC_URL`.
+
+**Hosts.** Use a separate registrable domain for Pages (like `github.io`),
+not a subdomain of the forge, so that site scripts cannot set cookies for
+the forge. On Cloudflare declare the wildcard as a route on its zone and
+custom domains as custom domains:
+
+```jsonc
+"routes": [
+  { "pattern": "git.example.com", "custom_domain": true },
+  { "pattern": "*.pages.example.net/*", "zone_name": "example.net" },
+  { "pattern": "docs.example.com", "custom_domain": true }
+],
+"vars": { "PAGES_HOST": "{owner}.pages.example.net", "PAGES_DOMAINS": "{\"docs.example.com\": \"acme/handbook\"}" }
+```
+
+plus a proxied wildcard DNS record `*.pages` and an edge certificate that
+covers it (Advanced Certificate Manager for a second-level wildcard).
+
+**Private sites** are readable for users with read access only. A visitor
+without a Pages session is sent to `<PUBLIC_URL>/_pages/authorize`; with a
+forge session (after signing in if needed) the forge hands a one-time code
+(two minutes) to `/__pages/callback` on the Pages host, which sets an
+`HttpOnly` cookie for that host only (twelve hours). Tokens work too
+(`Authorization: Bearer`), e.g. for a pull-zone CDN. Private responses are
+`private, no-cache`; public ones `public, max-age=<PAGES_MAX_AGE>`, so a
+pull-zone CDN can sit in front of the Pages host the same way as in front of
+the media URLs. Private sites need `PUBLIC_URL`.
+
+## LFS publish
+
+With a `CDN_BUCKET` binding, every push to a **public** repository copies
+the LFS objects it references to that bucket under `<LFS_PUBLISH_PREFIX><oid>`
+(a job per 100 objects; inline without `JOBS`). Objects are never
+overwritten or deleted, so a CDN (or anything else) can be refilled from
+hashes alone, and the bucket outlives the forge. `POST
+/api/repos/{owner}/{repo}/lfs/publish` (repository admin) backfills all LFS
+objects of a public repository, e.g. after it was made public. Private
+repositories are never published.
+
+```jsonc
+"r2_buckets": [
+  { "binding": "BUCKET", "bucket_name": "git-forge" },
+  { "binding": "CDN_BUCKET", "bucket_name": "git-forge-public" }
+]
+```
+
+Make the bucket public (custom domain or `r2.dev`) and fetch
+`https://cdn.example.org/<oid>`. With an external pull-zone CDN such as
+Bunny you do not need this: point the pull zone at the media URLs (see
+above); it fills itself on cache misses from `/{owner}/{repo}/media/{oid}`,
+which is immutable as well. Publishing is for setups that want the bytes
+outside the forge (a static bucket, a second CDN, a mirror that serves from
+hashes), or a CDN that should never reach the Worker.
+
 ## Deploying to Cloudflare
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/levino/git-forge/tree/main/templates/instance)
@@ -384,13 +492,15 @@ The runner container is declared in `wrangler.jsonc` for every environment
 `wrangler deploy` builds `runner/Dockerfile` (the official
 `ghcr.io/actions/actions-runner` image plus Git and Node.js) and pushes it to
 the Cloudflare registry; Docker must be available where you deploy, and
-Containers need the Workers Paid plan. `release/build-release.sh` bundles
-with `--containers-rollout=none`, which skips the image. `RunnerContainer`
-starts the container with the entrypoint `run.sh --jitconfig <config>`; the
-runner is ephemeral and the container stops after its job. Pin
-`RUNNER_VERSION` in the Dockerfile to a runner release you have tested. This
-path has not been deployed yet. `wrangler dev` runs with
-`dev.enable_containers: false`.
+Containers need the Workers Paid plan. Workers Builds has Docker, so a
+Git-connected deploy builds the image as well. `release/build-release.sh`
+bundles with `--containers-rollout=none`, which skips the image.
+`RunnerContainer` starts the container with the entrypoint
+`run.sh --jitconfig <config>` and an inactivity timeout of 6 hours; the runner
+is ephemeral and the container stops after its job. The instance type is
+`basic` (1/4 vCPU, 1 GiB, 4 GB disk); the image does not fit `lite`. Pin
+`RUNNER_VERSION` in the Dockerfile to a runner release you have tested.
+`wrangler dev` runs with `dev.enable_containers: false`.
 
 ## Several instances: `alpha`, `beta`, `gamma`
 
@@ -487,12 +597,43 @@ argument.
 - `test/pages/collaboration.test.ts`: issue, pull request and discussion pages
   against the real collaboration backend (create, comment, close, permission
   refusals, review, line comment, merge, answers).
+- `test/pages/settings.test.ts`: repository settings as admin and non-admin
+  (visibility, collaborators, branch protection read back through the API,
+  mirrors, federation grants).
+- `test/pages/organizations.test.ts`: creating an organization, people,
+  teams and team members as owner, member and outsider; sessions on the
+  account page.
+- `test/pages/actions.test.ts`: workflow runs and jobs from a real push, the
+  live job log (escape codes removed, polling URL), runs of other
+  repositories hidden, the workflow filter, cancel and re-run (refused to
+  readers and visitors, refused while the run is still in progress).
+- `test/pages/admin.test.ts`: the instance admin page (404 for others, the
+  last admin stays, trusting and distrusting instances, mirror overview).
+- `test/unit/admin-api.test.ts`: the organization and team JSON API and the
+  instance admin API (admins, trusted instances, mirrors, reserved names).
 - `test/browser/collaboration.spec.ts`: a passkey user comments on a diff line
   through the inline form and opens an issue.
+- `test/browser/settings.spec.ts`: creating an organization and a team, the
+  session list, repository settings (visibility, collaborator, branch
+  protection), cancelling and re-running a workflow run, and the instance
+  admin page (trust an instance, mirror overview).
 - `test/browser/login.spec.ts`: an invited user signs up with a passkey
   (Chromium's virtual authenticator), creates and revokes a token at
   `/settings`, signs out and signs in with the passkey again; a cross-site
   settings form is refused.
+- `test/browser/pages.spec.ts`: an invited user signs up with a passkey,
+  gets read access to a private repository with a Pages site and opens it on
+  `octo.pages.localhost`: the forge session is handed to the Pages host and
+  the host-only cookie is set; a visitor without a session lands on the
+  sign-in page.
+- `test/e2e/pages.e2e.test.ts`: Pages on `wrangler dev` with repositories
+  pushed by `git` and `git-lfs`: a branch deployment with types, redirects,
+  `404.html` and `ETag`, LFS files redirected to the media URL, redeploy on
+  push through the job queue, an uploaded tar deployment, and private sites
+  (sign-in redirect, token access, streamed LFS bytes).
+- `test/unit/pages.test.ts`: Pages and LFS publish in the Node forge with
+  real `git`/`git-lfs` pushes over HTTP: publish on push only for public
+  repositories, backfill, redeploy on push, private sites.
 - `test/e2e/headless.e2e.test.ts`: the same bundle with `UI=false` serves only
   the forge; with the UI, pages and the API answer and cross-site form posts
   are refused.

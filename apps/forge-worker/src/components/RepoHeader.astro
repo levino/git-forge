@@ -16,6 +16,7 @@ const tabs: { id: Tab; label: string; href: string; count?: number }[] = [
   { id: 'branches', label: 'Branches', href: repoUrl(name, 'branches'), count: repo.branches.length },
   { id: 'tags', label: 'Tags', href: repoUrl(name, 'tags'), count: repo.tags.length },
   { id: 'releases', label: 'Releases', href: repoUrl(name, 'releases') },
+  { id: 'actions', label: 'Actions', href: repoUrl(name, 'actions') },
   ...(repo.canAdmin ? [{ id: 'settings' as const, label: 'Settings', href: repoUrl(name, 'settings') }] : []),
 ]
 const clone = cloneUrl(Astro.url.origin, name)

@@ -7,6 +7,7 @@ import { visibleRepositories } from '../../ui/listing.ts'
 const { forge, principal } = Astro.locals
 const account = await forge.store.findAccount(Astro.params.owner!)
 const repositories = account ? await visibleRepositories(forge, principal, account.login) : []
+const membership = account?.kind === 'organization' ? (await forge.organizations.view(principal, account.login)).membership !== null || (await forge.isInstanceAdmin(principal)) : false
 ---
 
 {
@@ -23,6 +24,9 @@ const repositories = account ? await visibleRepositories(forge, principal, accou
           </div>
           <h1 class="text-2xl font-semibold break-all">{account.login}</h1>
           <p class="text-base-content/70">{account.kind === 'organization' ? 'Organization' : 'User'}</p>
+          {account.kind === 'organization' && membership && (
+            <a class="btn btn-sm mt-4" href={`/orgs/${account.login}`}>People and teams</a>
+          )}
         </aside>
         <section class="flex-1 min-w-0" aria-labelledby="repositories">
           <h2 id="repositories" class="text-xl font-semibold mb-4">

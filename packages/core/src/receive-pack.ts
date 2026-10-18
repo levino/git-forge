@@ -58,6 +58,7 @@ export type PushOutcome = {
   readonly pack: string | null
   readonly objectCount: number
   readonly archived: readonly { readonly name: string; readonly id: ObjectId }[]
+  readonly lfsPointers?: readonly LfsObjectSpec[]
 }
 
 export type RefPolicy = (command: RefCommand & { readonly fastForward: boolean }) => string | null
@@ -238,6 +239,7 @@ export const receivePack = async (
       pack: packName,
       objectCount,
       archived: atomic && anyFailed ? [] : archived,
+      lfsPointers: pack?.lfsPointers ?? [],
     }
     if (finalResults.every((result) => !result.ok)) return { response: report(outcome, useSideband), outcome }
     const state: RefsState = { ...current.state, refs }

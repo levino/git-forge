@@ -1,0 +1,105 @@
+---
+import { OrganizationError, type OrganizationView } from '@git-forge/accounts'
+import NotFound from '../../../components/NotFound.astro'
+import Layout from '../../../layouts/Layout.astro'
+import { handleOrganizationPost, type OrganizationOutcome } from '../../../ui/organizations.ts'
+
+const { forge, principal, session } = Astro.locals
+const login = Astro.params.org!
+let outcome: OrganizationOutcome | null = null
+if (Astro.request.method === 'POST') {
+  outcome = await handleOrganizationPost(forge, Astro.request, login)
+  if (outcome.kind === 'redirect') return Astro.redirect(outcome.location, 303)
+  if (outcome.kind === 'error') Astro.response.status = outcome.status
+}
+let view: OrganizationView | null = null
+try {
+  view = await forge.organizations.view(principal, login)
+} catch (error) {
+  if (!(error instanceof OrganizationError)) throw error
+}
+---
+
+{
+  !view || (!view.membership && !view.canAdminister) ? (
+    <NotFound />
+  ) : (
+    <Layout title={`${view.organization.login} · People and teams`}>
+      <h1 class="text-2xl font-semibold mb-1">
+        <a class="link link-hover" href={`/${view.organization.login}`}>{view.organization.login}</a>
+      </h1>
+      <p class="text-base-content/70 mb-6">People and teams</p>
+      {outcome && <div role={outcome.kind === 'error' ? 'alert' : 'status'} class:list={['alert mb-6', outcome.kind === 'error' ? 'alert-error' : 'alert-success']}>{outcome.message}</div>}
+      <div class="grid gap-10 md:grid-cols-2">
+        <section aria-labelledby="people">
+          <h2 id="people" class="text-xl font-semibold mb-2">People</h2>
+          <ul class="border border-base-300 rounded-box divide-y divide-base-300 mb-4">
+            {view.members.map((member) => (
+              <li class="flex flex-wrap items-center gap-2 px-4 py-2">
+                <a href={`/${member.login}`} class="link link-hover font-semibold flex-1">{member.login}</a>
+                {view!.canAdminister && session ? (
+                  <>
+                    <form method="post" class="flex gap-1">
+                      <input type="hidden" name="csrf" value={session.csrf} />
+                      <input type="hidden" name="action" value="member" />
+                      <input type="hidden" name="login" value={member.login} />
+                      <select name="role" class="select select-xs w-auto" aria-label={`Role of ${member.login}`}>
+                        <option selected={member.role === 'member'}>member</option>
+                        <option selected={member.role === 'owner'}>owner</option>
+                      </select>
+                      <button class="btn btn-xs">Save</button>
+                    </form>
+                    <form method="post">
+                      <input type="hidden" name="csrf" value={session.csrf} />
+                      <input type="hidden" name="action" value="remove-member" />
+                      <input type="hidden" name="login" value={member.login} />
+                      <button class="btn btn-xs btn-error btn-outline" aria-label={`Remove ${member.login}`}>Remove</button>
+                    </form>
+                  </>
+                ) : (
+                  <span class="badge badge-sm">{member.role}</span>
+                )}
+              </li>
+            ))}
+          </ul>
+          {view.canAdminister && session && (
+            <form method="post" class="flex flex-wrap items-end gap-2" aria-label="Add a member">
+              <input type="hidden" name="csrf" value={session.csrf} />
+              <input type="hidden" name="action" value="member" />
+              <label class="flex flex-col gap-1 text-sm">User<input name="login" class="input input-sm" required autocomplete="off" /></label>
+              <label class="flex flex-col gap-1 text-sm">
+                Role
+                <select name="role" class="select select-sm"><option>member</option><option>owner</option></select>
+              </label>
+              <button class="btn btn-sm">Add</button>
+            </form>
+          )}
+        </section>
+        <section aria-labelledby="teams">
+          <h2 id="teams" class="text-xl font-semibold mb-2">Teams</h2>
+          {view.teams.length === 0 ? (
+            <p class="mb-4 text-base-content/70">No teams yet.</p>
+          ) : (
+            <ul class="border border-base-300 rounded-box divide-y divide-base-300 mb-4">
+              {view.teams.map((team) => (
+                <li class="flex items-center gap-2 px-4 py-2">
+                  <a href={`/orgs/${view!.organization.login}/teams/${team.slug}`} class="link link-hover font-semibold flex-1">{team.name}</a>
+                  <span class="text-sm text-base-content/70">{team.members} member{team.members === 1 ? '' : 's'}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+          {view.canAdminister && session && (
+            <form method="post" class="flex flex-wrap items-end gap-2" aria-label="New team">
+              <input type="hidden" name="csrf" value={session.csrf} />
+              <input type="hidden" name="action" value="team" />
+              <label class="flex flex-col gap-1 text-sm">Slug<input name="slug" class="input input-sm font-mono" required pattern="[a-z0-9][a-z0-9-]*" /></label>
+              <label class="flex flex-col gap-1 text-sm">Name<input name="name" class="input input-sm" /></label>
+              <button class="btn btn-sm">Create team</button>
+            </form>
+          )}
+        </section>
+      </div>
+    </Layout>
+  )
+}

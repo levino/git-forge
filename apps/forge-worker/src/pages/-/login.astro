@@ -14,7 +14,9 @@ if (page) {
   Astro.response.headers.set('Content-Security-Policy', loginContentSecurityPolicy(page))
 }
 const config =
-  page?.kind === 'login'
+  (page?.kind === 'login' || page?.kind === 'invite') && !page.passkeys
+    ? null
+    : page?.kind === 'login'
     ? { returnTo: page.returnTo, csrf: page.user?.csrf ?? null }
     : page?.kind === 'invite'
       ? { returnTo: '/', csrf: null, invite: page.code }
@@ -40,9 +42,11 @@ const configJson = config ? JSON.stringify(config).replace(/</g, '\\u003c') : nu
                 <a class="btn btn-primary" href={page.returnTo}>
                   Continue
                 </a>
-                <button class="btn" type="button" data-passkey="register">
-                  Add a passkey
-                </button>
+                {page.passkeys && (
+                  <button class="btn" type="button" data-passkey="register">
+                    Add a passkey
+                  </button>
+                )}
                 <form method="post" action="/logout">
                   <input type="hidden" name="csrf" value={page.user.csrf} />
                   <button class="btn btn-ghost">Sign out</button>
@@ -57,10 +61,12 @@ const configJson = config ? JSON.stringify(config).replace(/</g, '\\u003c') : nu
                   Sign in with {page.oidcName}
                 </a>
               )}
-              <button class="btn" type="button" data-passkey="login">
-                Sign in with a passkey
-              </button>
-              {page.selfSignup && (
+              {page.passkeys && (
+                <button class="btn" type="button" data-passkey="login">
+                  Sign in with a passkey
+                </button>
+              )}
+              {page.passkeys && page.selfSignup && (
                 <form class="flex flex-col gap-2" aria-label="Create an account">
                   <label class="text-sm font-semibold" for="login">
                     New account
@@ -104,19 +110,21 @@ const configJson = config ? JSON.stringify(config).replace(/</g, '\\u003c') : nu
                   Continue with {page.oidcName}
                 </a>
               )}
-              <form class="flex flex-col gap-2">
-                {!page.existingUser && !page.login && (
-                  <>
-                    <label class="text-sm font-semibold" for="login">
-                      Login
-                    </label>
-                    <input id="login" name="login" class="input w-full" autocomplete="username" required />
-                  </>
-                )}
-                <button class="btn" data-passkey="register">
-                  Use a passkey
-                </button>
-              </form>
+              {page.passkeys && (
+                <form class="flex flex-col gap-2">
+                  {!page.existingUser && !page.login && (
+                    <>
+                      <label class="text-sm font-semibold" for="login">
+                        Login
+                      </label>
+                      <input id="login" name="login" class="input w-full" autocomplete="username" required />
+                    </>
+                  )}
+                  <button class="btn" data-passkey="register">
+                    Use a passkey
+                  </button>
+                </form>
+              )}
             </>
           )}
           {page.kind === 'device' && (

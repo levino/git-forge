@@ -210,23 +210,26 @@ const generateJitConfig = async (options: GhesApiOptions, request: Request, owne
   }
 }
 
-const jobLogs = async (options: GhesApiOptions, run: RunRow, job: JobRow): Promise<Response> => {
+export const readJobLog = async (db: Database, storage: Storage, run: RunRow, job: JobRow): Promise<Uint8Array[]> => {
   const prefix = jobPrefix(run.owner, run.repo, job.id)
   const parts: Uint8Array[] = []
-  for (const log of await listLogs(options.db, job.id)) {
+  for (const log of await listLogs(db, job.id)) {
     for (let chunk = 0; chunk < log.chunks; chunk++) {
-      const stored = await options.storage.get(logChunkKey(prefix, log.id, chunk))
+      const stored = await storage.get(logChunkKey(prefix, log.id, chunk))
       if (stored) parts.push(await readAll(stored.body))
     }
   }
   if (parts.length === 0) {
-    for await (const info of options.storage.list(consolePrefix(prefix))) {
-      const stored = await options.storage.get(info.key)
+    for await (const info of storage.list(consolePrefix(prefix))) {
+      const stored = await storage.get(info.key)
       if (stored) parts.push(await readAll(stored.body))
     }
   }
-  return new Response(new Blob(parts as Uint8Array<ArrayBuffer>[]), { headers: { 'Content-Type': 'text/plain; charset=utf-8' } })
+  return parts
 }
+
+const jobLogs = async (options: GhesApiOptions, run: RunRow, job: JobRow): Promise<Response> =>
+  new Response(new Blob((await readJobLog(options.db, options.storage, run, job)) as Uint8Array<ArrayBuffer>[]), { headers: { 'Content-Type': 'text/plain; charset=utf-8' } })
 
 const runnerRegistration = async (options: GhesApiOptions, request: Request, now: number): Promise<Response> => {
   const header = request.headers.get('Authorization') ?? ''

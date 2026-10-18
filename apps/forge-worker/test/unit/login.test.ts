@@ -3,7 +3,7 @@ import { base64UrlEncode, generateSigningKey, pkceChallenge, type PrivateJwk, si
 import { createMockOidc, type MockOidc } from '@git-forge/accounts/test/support/mock-oidc.ts'
 import { createSoftAuthenticator } from '@git-forge/accounts/test/support/soft-authenticator.ts'
 import { beforeEach, describe, expect, it } from 'vitest'
-import type { LoginSettings } from '../../src/config.ts'
+import { type LoginSettings, parseLoginSettings } from '../../src/config.ts'
 import { bootstrap, call, type NodeForge, nodeForge } from '../support/node-forge.ts'
 
 const BASE = 'https://forge.example'
@@ -142,6 +142,28 @@ describe('passkeys', () => {
     expect((await registerPasskey(browser, second, {}, await browser.csrf())).status).toBe(200)
     expect(await json<unknown[]>(await browser.fetch('/api/user/passkeys'))).toHaveLength(2)
     expect((await passkeyLogin(new Browser(forge), second)).status).toBe(200)
+  })
+  it('turns passkey login, registration and management off with PASSKEYS=false, keeping break-glass', async () => {
+    expect(parseLoginSettings({}).passkeys).toBe(true)
+    expect(parseLoginSettings({ PASSKEYS: 'true' }).passkeys).toBe(true)
+    expect(parseLoginSettings({ PASSKEYS: 'false' }).passkeys).toBe(false)
+    const { privateJwk } = await generateSigningKey()
+    const forge = await loginForge({ selfSignup: true, passkeys: false, breakGlassKey: { kty: 'OKP', crv: 'Ed25519', x: privateJwk.x } })
+    await bootstrap(forge, BASE, 'root')
+    const anonymous = new Browser(forge)
+    expect((await anonymous.json('/login/passkey/options', {})).status).toBe(404)
+    expect((await anonymous.json('/login/passkey', { handle: 'x', credential: {} })).status).toBe(404)
+    expect((await anonymous.json('/login/passkey/register/options', { login: 'mallory' })).status).toBe(404)
+    expect((await anonymous.json('/login/passkey/register', { handle: 'x', credential: {} })).status).toBe(404)
+    const page = await (await anonymous.fetch('/login')).text()
+    expect(page).not.toContain('data-passkey')
+    expect(page).toContain('href="/login/break-glass"')
+    const admin = new Browser(forge)
+    expect((await admin.form('/login/break-glass', { token: await signBreakGlassToken({ privateJwk, audience: BASE, login: 'root' }) })).status).toBe(303)
+    const csrf = await admin.csrf()
+    expect((await admin.json('/login/passkey/register/options', {}, csrf)).status).toBe(404)
+    expect((await admin.fetch('/api/user/passkeys')).status).toBe(404)
+    expect((await admin.fetch('/api/user/passkeys/abc', { method: 'DELETE', csrf })).status).toBe(404)
   })
 })
 

@@ -223,7 +223,9 @@ export const pullJson = (urls: Urls, repository: RepositorySubject, pull: PullRe
     assignees: issue.assignees,
     requested_reviewers: pull.requestedReviewers.map((user) => userJson(urls, user)),
     requested_teams: [],
-    head: branchJson(urls, repository, pull.headRef, pull.headSha, owner),
+    head: pull.headRepository
+      ? branchJson(urls, pull.headRepository, pull.headRef, pull.headSha, { kind: 'user', id: pull.headRepository.ownerId, login: pull.headRepository.owner, name: null, email: null })
+      : branchJson(urls, repository, pull.headRef, pull.headSha, owner),
     base: branchJson(urls, repository, pull.baseRef, pull.baseSha, owner),
     author_association: issue.author_association,
     auto_merge: null,
@@ -233,7 +235,7 @@ export const pullJson = (urls: Urls, repository: RepositorySubject, pull: PullRe
     merge_method: pull.mergeMethod,
     comments: pull.comments,
     review_comments: reviewComments,
-    maintainer_can_modify: false,
+    maintainer_can_modify: pull.maintainerCanModify,
     ...(details
       ? {
           mergeable: details.mergeable,

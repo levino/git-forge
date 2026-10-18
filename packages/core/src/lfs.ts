@@ -1,7 +1,7 @@
 import { fromUtf8, toHex } from './bytes.ts'
 import { type DigestFactory, javascriptDigests } from './digest.ts'
 import type { GitObject } from './objects.ts'
-import { repositoryPrefix, type RepositoryName } from './repository.ts'
+import { alternateRepositories, repositoryPrefix, type RepositoryName } from './repository.ts'
 import { ChecksumMismatchError, type PutOptions, type PutResult, type Storage } from './storage.ts'
 
 export const LFS_CONTENT_TYPE = 'application/vnd.git-lfs+json'
@@ -96,8 +96,22 @@ export const objectError = (object: LfsObjectSpec): string | null => {
   return null
 }
 
+export type LfsLocation = { readonly key: string; readonly size: number }
+
+export const locateLfsObject = async (storage: Storage, repo: RepositoryName, oid: string): Promise<LfsLocation | null> => {
+  const own = lfsObjectKey(repo, oid)
+  const info = await storage.head(own)
+  if (info) return { key: own, size: info.size }
+  for (const alternate of await alternateRepositories(storage, repo)) {
+    const key = lfsObjectKey(alternate, oid)
+    const found = await storage.head(key)
+    if (found) return { key, size: found.size }
+  }
+  return null
+}
+
 export const lfsObjectSize = async (storage: Storage, repo: RepositoryName, oid: string): Promise<number | null> =>
-  (await storage.head(lfsObjectKey(repo, oid)))?.size ?? null
+  (await locateLfsObject(storage, repo, oid))?.size ?? null
 
 export const hasLfsObject = async (storage: Storage, repo: RepositoryName, object: LfsObjectSpec): Promise<boolean> =>
   (await lfsObjectSize(storage, repo, object.oid)) === object.size
@@ -304,3 +318,13 @@ export const lfsPushCheck =
     const [first] = missing as [LfsObjectSpec]
     return missing.length === 1 ? `missing LFS object ${first.oid}` : `missing ${missing.length} LFS objects, e.g. ${first.oid}`
   }
+
+export const copyLfsObjects = async (storage: Storage, from: RepositoryName, to: RepositoryName, pointers: readonly LfsObjectSpec[]): Promise<number> => {
+  let copied = 0
+  for (const pointer of await missingLfsPointers(storage, to, pointers)) {
+    const source = await locateLfsObject(storage, from, pointer.oid)
+    const object = source?.size === pointer.size ? await storage.get(source.key) : null
+    if (object && (await storeLfsObject(storage, to, pointer, object.body)).ok) copied++
+  }
+  return copied
+}

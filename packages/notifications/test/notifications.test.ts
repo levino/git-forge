@@ -1,6 +1,8 @@
 import { createHmac } from 'node:crypto'
 import { beforeEach, describe, expect, it } from 'vitest'
 import {
+  discussionCommentEvent,
+  discussionEvent,
   type EventContext,
   extractMentions,
   issueCommentEvent,
@@ -150,6 +152,31 @@ describe('notification inbox', () => {
     expect((await inbox(fixture, 'alice')).map((thread) => thread.reason)).toEqual(['author'])
     expect((await inbox(fixture, 'bob')).map((thread) => thread.reason)).toEqual(['mention'])
     expect(await inbox(fixture, 'dave', '?participating=true')).toEqual([])
+  })
+
+  it('notifies about discussions and their comments', async () => {
+    const discussion = {
+      number: 3,
+      title: 'Which boiler?',
+      body: 'Ideas, @bob?',
+      state: 'open' as const,
+      author: 'alice',
+      category: { slug: 'q-a', name: 'Q&A', answerable: true },
+      createdAt: '2026-10-18T10:00:00Z',
+      updatedAt: '2026-10-18T10:00:00Z',
+    }
+    const created = discussionEvent(contextOf(fixture, 'alice'), 'created', discussion)
+    expect(created.payload).toMatchObject({ action: 'created', discussion: { number: 3, category: { slug: 'q-a', is_answerable: true }, html_url: `${BASE}/alice/engine/discussions/3` } })
+    await fixture.notifications.emit(created)
+    await fixture.queue.drain()
+    const [mentioned] = await inbox(fixture, 'bob')
+    expect(mentioned).toMatchObject({ reason: 'mention', subject: { title: 'Which boiler?', type: 'Discussion' } })
+    fixture.clock.now += 1000
+    const reply = discussionCommentEvent(contextOf(fixture, 'bob'), 'created', discussion, { id: 9, body: 'The blue one.', author: 'bob', createdAt: 1, updatedAt: 1, parentId: null })
+    expect(reply.payload).toMatchObject({ comment: { id: 9, parent_id: null, html_url: `${BASE}/alice/engine/discussions/3#discussioncomment-9` } })
+    await fixture.notifications.emit(reply)
+    await fixture.queue.drain()
+    expect((await inbox(fixture, 'alice')).map((thread) => [thread.reason, thread.subject.type])).toEqual([['author', 'Discussion']])
   })
 
   it('marks threads read, lists all, and stops after ignoring a thread', async () => {

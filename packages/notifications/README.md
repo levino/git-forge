@@ -24,6 +24,7 @@ await notifications.emit(issueCommentEvent(context, 'created', issue, { id: 7, b
 | `issueCommentEvent` | `issue_comment` | thread participants, mentions, watchers; the commenter becomes a participant |
 | `pullRequestEvent` | `pull_request` | author, assignees, requested reviewers, mentions, watchers on open/close/reopen |
 | `pullRequestReviewEvent`, `pullRequestReviewCommentEvent` | `pull_request_review`, `pull_request_review_comment` | participants, mentions, watchers |
+| `discussionEvent`, `discussionCommentEvent` | `discussion`, `discussion_comment` | author, mentions (on `created`), participants (the commenter, the answer's author), watchers on create/close/reopen |
 | `workflowRunEvent` (`completed`), `workflowJobEvent` | `workflow_run`, `workflow_job` | the triggering user (`ci_activity`) |
 | `releaseEvent` (`published`) | `release` | watchers with `all` or `releases` |
 | `mirrorAlarmEvent` | `mirror_alarm` (custom) | repository admins (`security_alert`) and watchers |

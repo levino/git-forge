@@ -304,6 +304,7 @@ the [accounts README](../packages/accounts/README.md#branch-protection).
     HEAD
     info/refs
     objects/info/packs              # the current pack set
+    objects/info/alternates         # forks only: ../../../../<owner>/<name>/git/objects
     objects/pack/pack-<sha>.pack
     objects/pack/pack-<sha>.idx
   lfs/
@@ -351,6 +352,18 @@ tmp/<repo>/<timestamp>-<uuid>/part/<nnnnn>  # its parts, 1-based, five digits
 - **CI caches and artifacts** are stored as the uploaded parts, each under a
   fresh key; which parts make up an entry lives only in the database (§15).
   Evicting or deleting only stops referencing them.
+- **Forks share objects through alternates.** A fork created on the same
+  instance gets its own `refs.json`, an empty pack list and
+  `objects/info/alternates` (git's format, a path relative to the objects
+  directory, so a plain bucket clone resolves it like git does). The object
+  database reads its own packs first, then the packs of the alternates
+  (recursively, at most five levels); LFS lookups fall back to the
+  alternates' `lfs/objects/`. Because packs are never deleted, the upstream's
+  objects stay readable for the fork whatever happens upstream. Compaction
+  only merges a repository's own packs. Over dumb HTTP a fork serves a
+  combined `objects/info/packs` and falls back to the alternates for
+  `objects/pack/*`, so dumb clients and copy-only mirrors get a
+  self-contained repository; the alternates file itself is not served.
 - **Release assets** are content-addressed like LFS objects
   (`lfs/objects/…`, §16). Which asset belongs to which release lives only in
   the database; a deleted asset or release leaves its bytes in place.
@@ -1968,20 +1981,40 @@ Issues, pull requests, reviews, commit statuses, check runs and discussions
   merge commit (parents base and head), squash (parent base), rebase
   (cherry-picks parents first, drops commits that become empty, refuses
   merge commits). Results are compared commit by commit with `git merge
-  --no-ff`, `git merge --squash` and `git rebase --force-rebase`. Rename
-  detection is not implemented; to stay safe, situations where git's rename
-  or directory-rename detection could change the outcome (a file deleted on
-  both sides while a similar file was added on one side, a directory removed
-  on one side while the other adds to it) are reported as conflicts. The
-  merge is therefore never clean where git conflicts, and identical where
-  both are clean.
+  --no-ff`, `git merge --squash` and `git rebase --force-rebase`. Renames
+  are detected like `merge-ort` does (`rename.ts`, a port of
+  `diffcore-rename`): per side, base→side deletions are rename sources and
+  additions destinations (empty files excluded); only sources whose other
+  side changed or removed the file are relevant; exact matches first, then
+  same-basename pairs at 75% similarity (with git's directory hint for
+  non-unique basenames), then the similarity matrix at 50% (git's span-hash
+  score, four candidates per destination, stable sort, greedy pairing,
+  rename limit 7000). A rename on one side with an edit on the other merges
+  the content at the new path; both sides renaming to the same path merge
+  there; rename/delete, rename/rename to different paths and rename/add are
+  conflicts. Similarity scores are checked against `git diff -M` and
+  randomized rename histories against `git merge`, `git merge --squash` and
+  `git rebase`. Where git's result could depend on its hash-map iteration or
+  traversal order (several identical files competing for one rename, tied
+  scores or tied directory hints) or the comparison budget (250 000 pairs) is
+  exceeded, the relevant sources are reported as conflicts instead.
+  Directory renames: a path the other side adds below a directory that one
+  side removed is a `directory-rename` conflict when a file of that
+  directory was renamed (git's default `merge.directoryRenames=conflict`),
+  and merges cleanly when it was only deleted. Sources in such directories
+  are always considered for renames. The merge is therefore never clean
+  where git conflicts, and identical where both are clean.
 - **Branch protection on merge.** The merge calls the same
   `evaluateBranchUpdate(rule, actor, update, { via: 'pull-request', … })` as
   receive-pack, with approvals from reviewers with write access (the
   author's own reviews never count), requested changes, the last-push
   approval, the strict up-to-date flag and the latest statuses and check
-  runs of the head. `require_code_owner_reviews` is only satisfiable while
-  the base has no `CODEOWNERS` file. Required status checks on direct pushes
+  runs of the head. `require_code_owner_reviews` reads `CODEOWNERS` from
+  the base branch (GitHub's locations and syntax; patterns are gitignore
+  patterns, checked against `git check-ignore`, except that a final `/*`
+  does not reach into subdirectories, as GitHub documents) and needs an
+  approval from an owner of every changed owned file; user owners are
+  requested as reviewers automatically. Required status checks on direct pushes
   still see no statuses (the push policy is synchronous); the pull request
   is the path that satisfies them.
 - **Statuses and check runs** are stored here and written by CI (directly
@@ -1991,9 +2024,29 @@ Issues, pull requests, reviews, commit statuses, check runs and discussions
   pipeline as a push (CI dispatch, mirror notifications, `push` events).
   Every mutation reports an activity (`onActivity`) that the Worker turns
   into notification events (§16: `issues`, `issue_comment`,
-  `pull_request`, `pull_request_review`, `pull_request_review_comment`);
+  `pull_request`, `pull_request_review`, `pull_request_review_comment`,
+  `discussion`, `discussion_comment`);
   the collaboration package itself does not depend on the notifications
   package.
+- **Forks.** `POST /repos/{o}/{r}/forks` creates a fork on the same
+  instance (bucket: alternates, §6; database: `repository_forks` with parent
+  and root, migration `0011_forks`). Anyone with read access may fork into
+  their own account or an organization they own; the fork has the
+  upstream's visibility and is an independent repository (its own
+  collaborators; upstream collaborators get no access to a private fork).
+  Pull requests may use a head from another repository of the same fork
+  network (`head: owner:branch`, `head_repo` when an owner has several).
+  Their head objects are copied into the base repository when the pull
+  request is opened and whenever the head moves (a pack streamed from the
+  head repository, like GitHub's `refs/pull/N/head` but without a ref), so
+  diffs, reviews, merges and CI read only the base repository and the base
+  never depends on the fork. LFS objects of pointers in the copied pack are
+  copied with it (content-addressed, written once, hash verified). Pushes to
+  a fork refresh the pull requests it heads. With `maintainer_can_modify` (set by the author) users with write
+  access to the base may push to that one head branch of the fork, and
+  read the fork, through a `delegatedBranches` hook of the git access check;
+  every other ref stays denied. CI for pull requests from forks runs
+  untrusted (`trusted: false`: no secrets, read-only token).
 - **Imported data** (§7 *metadata*). Numbers, authors and times are kept.
   Every imported item has an `imported_items` row (node id, source key
   such as `issue:7` or `review-comment:301`, original URL, author login,
@@ -2006,10 +2059,9 @@ Issues, pull requests, reviews, commit statuses, check runs and discussions
   that do not anchor (`validateAnchor` on their original commit and line)
   become issue comments quoting path and line. Releases keep their times;
   assets are deduplicated by name.
-- **Limits of v1.** Same-repository pull requests only (forks later),
-  computing mergeability and file lists loads the involved objects through
-  the in-memory object database, no reactions,
-  no CODEOWNERS parsing, no in-browser conflict resolution.
+- **Limits of v1.** Computing mergeability and file lists loads the involved
+  objects through the in-memory object database, no reactions, no
+  in-browser conflict resolution.
 
 ## 18. Web UI
 
@@ -2165,6 +2217,13 @@ goes through the service function, which checks the permission again, after
 `verifySessionWrite`. Collaboration errors are shown on the page with their
 status. Links that come from the API (check run `details_url`, status
 `target_url`) are rendered only for `http(s)` URLs.
+
+Forks: the repository header has a *Fork* button (`…/fork`: owner and
+name, `createFork`), the fork count (`…/forks`, with a *Compare* link per
+fork) and, on a fork, *forked from* with a *Contribute* link. *New pull
+request* takes `head_repo` (any readable repository of the fork network)
+and offers that repository's branches; *Allow edits by maintainers* sets
+`maintainer_can_modify`.
 
 Inline review comments on the *Files changed* tab use the only client script
 of these pages: a click on a line's `+` clones a `<template>` form below the

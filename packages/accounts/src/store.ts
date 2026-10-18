@@ -612,6 +612,73 @@ export const createAccountsStore = (db: Database, options: AccountsStoreOptions 
       return { id }
     },
 
+    createFork: async (
+      input: { readonly ownerId: string; readonly name: string; readonly visibility: Visibility; readonly parentId: string; readonly storagePath?: string },
+      actor: AuditActor = SYSTEM,
+    ): Promise<{ readonly id: string }> => {
+      if (!isValidName(input.name)) throw new AccountsError(`invalid repository name ${input.name}`)
+      if (input.visibility !== 'public' && input.visibility !== 'private') throw new AccountsError(`invalid visibility ${String(input.visibility)}`)
+      const owner = await first<{ login: string }>(db, sql('SELECT login FROM accounts WHERE id = ?', input.ownerId))
+      if (!owner) throw new AccountsError(`no account ${input.ownerId}`)
+      const parent = await first<{ id: string; root_id: string | null }>(
+        db,
+        sql('SELECT r.id, f.root_id FROM repositories r LEFT JOIN repository_forks f ON f.repository_id = r.id WHERE r.id = ?', input.parentId),
+      )
+      if (!parent) throw new AccountsError(`no repository ${input.parentId}`)
+      const id = randomId()
+      const at = now()
+      await write(
+        actor,
+        { action: 'repository.fork', subjectKind: 'repository', subjectId: id, repositoryId: id, data: { name: input.name, visibility: input.visibility, parent: input.parentId } },
+        [
+          ...freeRepositoryName(input.ownerId, owner.login, input.name, at),
+          sql(
+            'INSERT INTO repositories (id, owner_id, name, visibility, created_at, storage_path) VALUES (?, ?, ?, ?, ?, ?)',
+            id,
+            input.ownerId,
+            input.name,
+            input.visibility,
+            at,
+            input.storagePath ?? `${owner.login}/${input.name}`,
+          ),
+          sql('INSERT INTO repository_forks (repository_id, parent_id, root_id, created_at) VALUES (?, ?, ?, ?)', id, parent.id, parent.root_id ?? parent.id, at),
+        ],
+      )
+      return { id }
+    },
+
+    forkInfo: async (repositoryId: string): Promise<{ readonly parent: RepositorySubject; readonly root: RepositorySubject } | null> => {
+      const row = await first<{ parent_id: string; root_id: string }>(db, sql('SELECT parent_id, root_id FROM repository_forks WHERE repository_id = ?', repositoryId))
+      if (!row) return null
+      const rows = await db.all<RepositoryRow>(sql(`${REPOSITORY_SELECT} WHERE r.id IN (?, ?)`, row.parent_id, row.root_id))
+      const parent = rows.find((candidate) => candidate.id === row.parent_id)
+      const root = rows.find((candidate) => candidate.id === row.root_id)
+      return parent && root ? { parent: toSubject(parent), root: toSubject(root) } : null
+    },
+
+    listForks: async (parentId: string): Promise<RepositorySubject[]> =>
+      (
+        await db.all<RepositoryRow>(
+          sql(`${REPOSITORY_SELECT} JOIN repository_forks f ON f.repository_id = r.id WHERE f.parent_id = ? AND ${LIVE} ORDER BY f.created_at, r.id`, parentId),
+        )
+      ).map(toSubject),
+
+    forkNetwork: async (repositoryId: string): Promise<{ readonly root: RepositorySubject; readonly forks: readonly (RepositorySubject & { readonly parentId: string })[] } | null> => {
+      const fork = await first<{ root_id: string }>(db, sql('SELECT root_id FROM repository_forks WHERE repository_id = ?', repositoryId))
+      const rootId = fork?.root_id ?? repositoryId
+      const root = await first<RepositoryRow>(db, sql(`${REPOSITORY_SELECT} WHERE r.id = ?`, rootId))
+      if (!root) return null
+      const forks = await db.all<RepositoryRow & { parent_id: string }>(
+        sql(`${REPOSITORY_SELECT.replace('SELECT ', 'SELECT f.parent_id, ')} JOIN repository_forks f ON f.repository_id = r.id WHERE f.root_id = ? AND ${LIVE} ORDER BY f.created_at, r.id`, rootId),
+      )
+      return { root: toSubject(root), forks: forks.map((row) => ({ ...toSubject(row), parentId: row.parent_id })) }
+    },
+
+    findRepositoryById: async (repositoryId: string): Promise<RepositorySubject | null> => {
+      const row = await first<RepositoryRow>(db, sql(`${REPOSITORY_SELECT} WHERE r.id = ? AND ${LIVE}`, repositoryId))
+      return row ? toSubject(row) : null
+    },
+
     repositoryNameBlock: async (ownerId: string, name: string, self: string | null = null): Promise<string | null> => {
       const owner = await first<{ login: string }>(db, sql('SELECT login FROM accounts WHERE id = ?', ownerId))
       if (!owner) return `no account ${ownerId}`

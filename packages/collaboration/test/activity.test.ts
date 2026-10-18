@@ -3,12 +3,17 @@ import {
   type Activity,
   changeRequestedReviewers,
   createComment,
+  createDiscussion,
+  createDiscussionComment,
   createIssue,
   createPull,
   createReview,
   createReviewComment,
   mergePull,
   openRepository,
+  setAnswer,
+  setDiscussionLocked,
+  updateDiscussion,
   updateIssue,
 } from '../src/index.ts'
 import { createFixture } from './fixture.ts'
@@ -42,5 +47,27 @@ describe('activity hook', () => {
     expect(seen[0]!.actor).toEqual({ kind: 'user', id: fixture.users.bob.id })
     expect(seen[2]!.changes).toEqual({ title: { from: 'Broken' } })
     expect(seen[4]!.requestedReviewer).toBe('alice')
+  })
+  it('reports discussion and discussion comment activity', async () => {
+    const fixture = await createFixture()
+    const seen: Activity[] = []
+    const options = { ...fixture.options, onActivity: async (_: unknown, activity: Activity) => void seen.push(activity) }
+    const as = (user: 'alice' | 'bob' | 'carol') => openRepository(options, fixture.users[user].principal, 'alice', 'site')
+    const carol = await as('carol')
+    const discussion = await createDiscussion(carol, { title: 'How to build?', body: 'Asking @bob', category: 'q-a' })
+    const comment = await createDiscussionComment(await as('bob'), discussion.number, { body: 'Run make' })
+    await updateDiscussion(carol, discussion.number, { title: 'How do I build?' })
+    await setAnswer(carol, discussion.number, comment.id)
+    await setDiscussionLocked(await as('alice'), discussion.number, true)
+    await updateDiscussion(carol, discussion.number, { state: 'closed' })
+    expect(seen.map((activity) => [activity.kind, activity.action, activity.number, activity.commentId])).toEqual([
+      ['discussion', 'created', discussion.number, undefined],
+      ['discussion_comment', 'created', discussion.number, comment.id],
+      ['discussion', 'edited', discussion.number, undefined],
+      ['discussion', 'answered', discussion.number, comment.id],
+      ['discussion', 'locked', discussion.number, undefined],
+      ['discussion', 'closed', discussion.number, undefined],
+    ])
+    expect(seen[2]!.changes).toEqual({ title: { from: 'How to build?' } })
   })
 })

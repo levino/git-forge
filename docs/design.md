@@ -320,6 +320,20 @@ tmp/<repo>/<timestamp>-<uuid>/part/<nnnnn>  # its parts, 1-based, five digits
 - **Release assets** are content-addressed like LFS objects
   (`lfs/objects/…`, §16). Which asset belongs to which release lives only in
   the database; a deleted asset or release leaves its bytes in place.
+- **Stable prefixes:** `<repo>` is the repository's `storage_path`
+  (migration `0024`, backfilled with `<owner>/<name>` at migration time), not
+  its current name. Rename, transfer and account renames change only the
+  database; `locatedStorage` in `createForge` maps every `repos/<o>/<n>/` and
+  `tmp/repos/<o>/<n>/` key through `locateRepository` (live name, then a
+  redirect, so queued imports and jobs under an old name keep working). New
+  repositories use `<owner>/<name>`, or `<owner>/<name>.<random>` if that
+  prefix is already claimed. Live lookups are cached for 30 s per isolate, so
+  a name freed by a rename can be reused only after two minutes.
+- **Deletion** sets `deleted_at` (a tombstone); the prefix becomes
+  unreachable (reads miss, writes fail) and the name is free after seven days.
+  The bytes stay. Operators reclaim space at bucket level: list tombstones
+  (`SELECT storage_path FROM repositories WHERE deleted_at IS NOT NULL`) and
+  delete `repos/<storage_path>/` with the provider's tools.
 - The bucket layout is a durable format and may only change
   backwards-compatibly.
 
@@ -1938,7 +1952,21 @@ API routes and the page call the same principal-based operations in
 `addMirror`, `syncMirror`, `verifyMirror`, `detachMirror`,
 `branchProtection`, `setBranchProtection`, `deleteBranchProtection`); each
 starts with the same admin check (`adminOf`: authenticated user, token with
-`repo:admin`, `repositoryAccess(…, 'admin')`). Branch protection forms are
+`repo:admin`, `repositoryAccess(…, 'admin')`). The same object holds `setMetadata`
+(description, website, up to 20 topics), `setArchived`, `move` (rename and
+transfer to an account the actor may create repositories in) and `remove`,
+behind `PATCH|DELETE /api/repos/{owner}/{repo}`, `POST …/transfer` and the
+GitHub routes `PATCH|DELETE /api/v3/repos/{owner}/{repo}`, `…/transfer`,
+`GET|PUT …/topics`. Archived repositories refuse every write below admin
+(`archivedBlocks`: pushes, LFS uploads, issues). `services.renameAccount`
+(`PATCH /api/accounts/{login}`, account page, organization page, admin page)
+lets users rename themselves, owners their organizations and instance admins
+anyone; reserved logins stay refused. Old names live in
+`repository_redirects` and `account_redirects`: a 401/403/404 on a path of
+an old name answers 301 (`GET`/`HEAD`) or 307 to the new one, for pages, the
+API, Git and LFS, but only if the caller may read the target. Name-keyed
+tables (actions, mirror subscriptions and checksums) are rewritten in the
+same batch. Branch protection forms are
 translated into the GitHub-shaped JSON body and parsed by
 `parseBranchProtectionSettings` of `@git-forge/accounts`, the parser of the
 protection API. Errors carry the API's status (`ForgeError`) and are shown

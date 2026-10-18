@@ -24,5 +24,8 @@ export const onRequest = defineMiddleware(async (context, next) => {
   }
   if (isCrossSiteWrite(context.request)) return new Response('cross-site request refused\n', { status: 403, headers: { 'Content-Type': 'text/plain; charset=utf-8' } })
   await signIn()
-  return next()
+  const response = await next()
+  if (response.status !== 404) return response
+  const location = await forge.services.redirect(context.request, context.locals.principal)
+  return location ? new Response(null, { status: context.request.method === 'GET' ? 301 : 307, headers: { Location: location } }) : response
 })

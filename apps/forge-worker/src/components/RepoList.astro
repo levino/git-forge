@@ -18,6 +18,9 @@ const { repositories, showOwner = true, empty = 'No repositories yet.' } = Astro
             {showOwner ? `${repo.owner}/${repo.name}` : repo.name}
           </a>
           <span class="badge badge-outline badge-sm">{repo.visibility === 'public' ? 'Public' : 'Private'}</span>
+          {repo.archived && <span class="badge badge-warning badge-outline badge-sm">Archived</span>}
+          {repo.topics.map((topic) => <span class="badge badge-primary badge-soft badge-sm">{topic}</span>)}
+          {repo.description && <p class="w-full text-sm text-base-content/70">{repo.description}</p>}
         </li>
       ))}
     </ul>

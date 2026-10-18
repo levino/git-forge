@@ -93,10 +93,11 @@ export const backgroundHandlers = {
     }
     const queue = env.IMPORTS
     if (!queue) throw new Error('IMPORTS queue binding is missing')
+    const instance = await forgeFor(env)
     for (const message of (batch as MessageBatch<ImportJob>).messages) {
       const jobs = env.JOBS ? new QueueJobs(env.JOBS) : null
       const state = await continueImport(message.body, {
-        storage: new R2Storage(env.BUCKET),
+        storage: instance.services.storage,
         digests: digestStreams,
         schedule: importScheduler(queue),
         ...(jobs ? { scheduleLfs: (job) => jobs.enqueue(job) } : {}),

@@ -111,7 +111,7 @@ export const resolveActor = async (accounts: AccountsDirectory, principal: Princ
     const restricted = limits?.repositoryIds && !limits.repositoryIds.includes(repository.id)
     if (!restricted) access = limits ? minAccess('admin', limits.ceiling) : 'admin'
   }
-  const writable = principal.kind !== 'anonymous' && (limits === null || atLeast(limits.ceiling, 'write'))
+  const writable = principal.kind !== 'anonymous' && !repository.archived && (limits === null || atLeast(limits.ceiling, 'write'))
   return { principal, access, writable, ref: actorRefOf(principal) }
 }
 

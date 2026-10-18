@@ -182,7 +182,11 @@ export const createJwksCache = (options: JwksCacheOptions = {}): JwksSource => {
 
   const getJson = async (url: URL): Promise<unknown> => {
     requireScheme(url)
-    const response = await fetcher(url.href, { headers: { Accept: 'application/json' }, redirect: 'error' })
+    const response = await fetcher(url.href, { headers: { Accept: 'application/json' }, redirect: 'manual' })
+    if (response.status >= 300 && response.status < 400) {
+      await response.body?.cancel()
+      throw new FederationError(`${url.href} redirects; redirects are not followed`)
+    }
     if (!response.ok) throw new FederationError(`${url.href} answered ${response.status}`)
     return readLimited(response, limit)
   }

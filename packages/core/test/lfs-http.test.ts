@@ -295,3 +295,49 @@ describe('git lfs with presigning storage', () => {
     expect(verify?.status).toBe(422)
   })
 })
+
+describe('authorization surface and object size limit', () => {
+  const repo = { owner: 'test', name: 'limits' }
+  const base = 'https://forge.example/test/limits.git'
+  const oid = 'a'.repeat(64)
+
+  it('tells the authorizer whether a request is git or LFS', async () => {
+    const store = new MemoryStorage()
+    await createRepository(store, repo)
+    const seen: string[] = []
+    const recording: Authorize = async (_request, _repo, access, surface) => {
+      seen.push(`${surface}:${access}`)
+      return null
+    }
+    const call = (path: string, init?: RequestInit) => handleGitRequest(new Request(`${base}${path}`, init), { storage: store, authorize: recording })
+    await call('/info/refs?service=git-upload-pack', { headers: { 'Git-Protocol': 'version=2' } })
+    await call('/info/refs?service=git-receive-pack')
+    await call('/info/lfs/objects/batch', { method: 'POST', body: JSON.stringify({ operation: 'download', objects: [{ oid, size: 1 }] }) })
+    await call('/info/lfs/objects/batch', { method: 'POST', body: JSON.stringify({ operation: 'upload', objects: [{ oid, size: 1 }] }) })
+    await call(`/info/lfs/objects/${oid}`)
+    expect(seen).toEqual(['git:read', 'git:write', 'lfs:read', 'lfs:write', 'lfs:read'])
+  })
+
+  it('refuses objects above maxObjectBytes in the batch API and on PUT', async () => {
+    const store = new MemoryStorage()
+    await createRepository(store, repo)
+    const options = { storage: store, lfs: { maxObjectBytes: 4 } }
+    const response = await handleGitRequest(
+      new Request(`${base}/info/lfs/objects/batch`, {
+        method: 'POST',
+        body: JSON.stringify({ operation: 'upload', objects: [{ oid, size: 5 }, { oid: 'b'.repeat(64), size: 4 }] }),
+      }),
+      options,
+    )
+    const body = (await response!.json()) as { objects: { error?: { code: number; message: string }; actions?: unknown }[] }
+    expect(body.objects[0]).toMatchObject({ error: { code: 422, message: 'object exceeds 4 bytes' } })
+    expect(body.objects[1]!.actions).toBeDefined()
+    const bytes = utf8('hello')
+    const put = await handleGitRequest(
+      new Request(`${base}/info/lfs/objects/${await sha256Hex(bytes)}`, { method: 'PUT', body: bytes as Uint8Array<ArrayBuffer>, headers: { 'Content-Length': '5' } }),
+      options,
+    )
+    expect(put!.status).toBe(413)
+    expect(await store.head(lfsObjectKey(repo, await sha256Hex(bytes)))).toBeNull()
+  })
+})

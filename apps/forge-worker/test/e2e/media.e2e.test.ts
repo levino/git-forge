@@ -9,8 +9,9 @@ import { startWranglerDev, type WranglerDev } from './wrangler-dev.ts'
 
 const run = promisify(execFile)
 
-const ADMIN_TOKEN = `e2e-admin-${crypto.randomUUID()}`
-const READ_TOKEN = `e2e-read-${crypto.randomUUID()}`
+const BOOTSTRAP_TOKEN = `e2e-bootstrap-${crypto.randomUUID()}`
+let ADMIN_TOKEN = ''
+let READ_TOKEN = ''
 
 const lfsFilterConfig = [
   ['filter.lfs.process', 'git-lfs filter-process'],
@@ -43,12 +44,16 @@ const get = (path: string, headers: Record<string, string> = {}, method = 'GET')
   fetch(`${dev.url}${path}`, { method, headers: { Authorization: `Bearer ${READ_TOKEN}`, ...headers }, redirect: 'manual' })
 
 beforeAll(async () => {
-  dev = await startWranglerDev({ ADMIN_TOKEN, READ_TOKEN, PUBLIC_READ: 'false' })
-  const created = await fetch(`${dev.url}/api/admin/repos`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${ADMIN_TOKEN}` },
-    body: JSON.stringify({ owner: 'e2e', name: 'archive' }),
-  })
+  dev = await startWranglerDev({ vars: { BOOTSTRAP_TOKEN } })
+  const post = async (path: string, token: string, body: unknown) =>
+    fetch(`${dev.url}${path}`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+  const bootstrapped = await post('/api/bootstrap', BOOTSTRAP_TOKEN, { login: 'e2e' })
+  expect(bootstrapped.status).toBe(201)
+  ADMIN_TOKEN = ((await bootstrapped.json()) as { token: string }).token
+  const reader = await post('/api/admin/users/e2e/tokens', ADMIN_TOKEN, { name: 'cdn', scopes: ['repo:read'] })
+  expect(reader.status).toBe(201)
+  READ_TOKEN = ((await reader.json()) as { token: string }).token
+  const created = await post('/api/repos', ADMIN_TOKEN, { owner: 'e2e', name: 'archive' })
   expect(created.status).toBe(201)
   const dir = tempDir()
   await git(dir, ['init', '-q', '-b', 'main'])

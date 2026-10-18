@@ -110,7 +110,7 @@ export const handleContentRequest = async (request: Request, options: ContentHtt
   if (!route) return null
   if (request.method !== 'GET' && request.method !== 'HEAD') return text(405, 'method not allowed\n', { Allow: 'GET, HEAD' })
   const { storage } = options
-  const denied = await options.authorize?.(request, route.repo, 'read')
+  const denied = await options.authorize?.(request, route.repo, 'read', route.kind === 'media' ? 'lfs' : 'git')
   if (denied) return denied
   const refs = await readRefs(storage, route.repo)
   if (!refs) return text(404, 'repository not found\n')

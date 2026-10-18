@@ -1,16 +1,16 @@
-import { MemoryStorage, readAll, utf8 } from '@git-forge/core'
+import { readAll, utf8 } from '@git-forge/core'
+import { describeStorageConformance } from '@git-forge/core/test/storage-conformance.ts'
 import { env } from 'cloudflare:workers'
 import { describe, expect, it } from 'vitest'
 import { R2Storage } from '../src/r2-storage.ts'
-import { describeStorageConformance } from './storage-conformance.ts'
 
 const bucket = (env as unknown as { BUCKET: R2Bucket }).BUCKET
 
 let counter = 0
 
-describeStorageConformance('MemoryStorage', () => new MemoryStorage())
-
-describeStorageConformance('R2Storage', () => new R2Storage(bucket, { prefix: `run-${++counter}/`, listPageSize: 7 }))
+describeStorageConformance('R2Storage', () => new R2Storage(bucket, { prefix: `run-${++counter}/`, listPageSize: 7 }), {
+  paginationKeys: 25,
+})
 
 describe('R2Storage specifics', () => {
   it('keeps keys under its prefix and strips it when listing', async () => {

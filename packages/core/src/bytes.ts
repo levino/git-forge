@@ -83,3 +83,28 @@ export const streamOf = (bytes: Uint8Array): ReadableStream<Uint8Array> =>
       controller.close()
     },
   })
+
+export const exactLength = (size: number): TransformStream<Uint8Array, Uint8Array> => {
+  let seen = 0
+  let held: Uint8Array | undefined
+  return new TransformStream<Uint8Array, Uint8Array>({
+    transform(chunk, controller) {
+      if (chunk.length === 0) return
+      seen += chunk.length
+      if (seen > size) {
+        controller.error(new Error(`size mismatch: more than ${size} bytes`))
+        return
+      }
+      if (held) controller.enqueue(held)
+      if (chunk.length > 1) controller.enqueue(chunk.subarray(0, chunk.length - 1))
+      held = chunk.subarray(chunk.length - 1)
+    },
+    flush(controller) {
+      if (seen !== size) {
+        controller.error(new Error(`size mismatch: expected ${size}, got ${seen}`))
+        return
+      }
+      if (held) controller.enqueue(held)
+    },
+  })
+}

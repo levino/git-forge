@@ -5,7 +5,7 @@ compatibility_date = "2026-10-01"
 workers_dev = true
 
 [build]
-command = "V=0.8.0 S=baa0866b33ee1294794b2e0d3c30ddd95fe51c0410fc7f52a9ab12e7701ce44a && U=${GIT_FORGE_RELEASE_URL:-https://github.com/levino/git-forge/releases/download/v$V} && mkdir -p dist && cd dist && curl -fsSL -O $U/SHA256SUMS -O $U/git-forge-worker.mjs && echo \"$S  SHA256SUMS\" | sha256sum -c - && sha256sum -c --ignore-missing SHA256SUMS"
+command = "V=0.8.2 S=70dbb0a3aeedbc99d5cd106cadc73af8eadfc4b980e0963685e940d777d32acf && U=${GIT_FORGE_RELEASE_URL:-https://github.com/levino/git-forge/releases/download/v$V} && mkdir -p dist && cd dist && curl -fsSL -O $U/SHA256SUMS -O $U/git-forge-worker.mjs && echo \"$S  SHA256SUMS\" | sha256sum -c - && sha256sum -c --ignore-missing SHA256SUMS"
 
 [limits]
 cpu_ms = 60000

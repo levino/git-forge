@@ -29,8 +29,9 @@ export type SecretScope = {
   readonly environment: string
 }
 
-const additionalData = (scope: SecretScope, name: string): Uint8Array<ArrayBuffer> =>
-  utf8(JSON.stringify(['git-forge-actions-secret', scope.owner, scope.repo, scope.environment, name])) as Uint8Array<ArrayBuffer>
+const contextData = (context: readonly string[]): Uint8Array<ArrayBuffer> => utf8(JSON.stringify(context)) as Uint8Array<ArrayBuffer>
+
+const additionalData = (scope: SecretScope, name: string): Uint8Array<ArrayBuffer> => contextData(['git-forge-actions-secret', scope.owner, scope.repo, scope.environment, name])
 
 export type SealedSecret = {
   readonly keyId: string
@@ -38,21 +39,29 @@ export type SealedSecret = {
   readonly ciphertext: string
 }
 
-export const sealSecret = async (key: SecretsKey, scope: SecretScope, name: string, value: string): Promise<SealedSecret> => {
+const seal = async (key: SecretsKey, data: Uint8Array<ArrayBuffer>, value: string): Promise<SealedSecret> => {
   const iv = crypto.getRandomValues(new Uint8Array(12))
-  const ciphertext = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: additionalData(scope, name) }, key.key, utf8(value) as Uint8Array<ArrayBuffer>))
+  const ciphertext = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: data }, key.key, utf8(value) as Uint8Array<ArrayBuffer>))
   return { keyId: key.id, iv: base64UrlEncode(iv), ciphertext: base64UrlEncode(ciphertext) }
 }
 
-export const openSecret = async (key: SecretsKey, scope: SecretScope, name: string, sealed: SealedSecret): Promise<string> => {
+const open = async (key: SecretsKey, data: Uint8Array<ArrayBuffer>, name: string, sealed: SealedSecret): Promise<string> => {
   if (sealed.keyId !== key.id) throw new SecretsKeyError(`secret ${name} was sealed with another key (${sealed.keyId})`)
   const plain = await crypto.subtle.decrypt(
-    { name: 'AES-GCM', iv: base64UrlDecode(sealed.iv) as Uint8Array<ArrayBuffer>, additionalData: additionalData(scope, name) },
+    { name: 'AES-GCM', iv: base64UrlDecode(sealed.iv) as Uint8Array<ArrayBuffer>, additionalData: data },
     key.key,
     base64UrlDecode(sealed.ciphertext) as Uint8Array<ArrayBuffer>,
   )
   return fromUtf8(new Uint8Array(plain))
 }
+
+export const sealSecret = (key: SecretsKey, scope: SecretScope, name: string, value: string): Promise<SealedSecret> => seal(key, additionalData(scope, name), value)
+
+export const openSecret = (key: SecretsKey, scope: SecretScope, name: string, sealed: SealedSecret): Promise<string> => open(key, additionalData(scope, name), name, sealed)
+
+export const sealValue = (key: SecretsKey, context: readonly string[], value: string): Promise<SealedSecret> => seal(key, contextData(context), value)
+
+export const openValue = (key: SecretsKey, context: readonly string[], sealed: SealedSecret): Promise<string> => open(key, contextData(context), context.join('/'), sealed)
 
 export const SECRET_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/
 

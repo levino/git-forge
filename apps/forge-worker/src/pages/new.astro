@@ -19,7 +19,7 @@ if (Astro.request.method === 'POST') {
     if (result.kind === 'redirect') return Astro.redirect(result.location, 303)
     Astro.response.status = result.status
     error = result.message
-    values = Object.fromEntries(['action', 'owner', 'name', 'visibility', 'defaultBranch', 'url'].map((key) => [key, String(form.get(key) ?? '')]))
+    values = Object.fromEntries(['action', 'owner', 'name', 'visibility', 'defaultBranch', 'url', 'account'].map((key) => [key, String(form.get(key) ?? '')]))
   }
 }
 Astro.response.headers.set('Cache-Control', 'no-store')
@@ -117,5 +117,28 @@ const importsEnabled = forge.repositories.importsEnabled
         <p class="text-sm text-base-content/70">Imports are not available on this instance (they need the IMPORTS queue).</p>
       )
     }
+  </section>
+
+  <section class="panel max-w-2xl" aria-labelledby="github-title">
+    <h2 id="github-title" class="panel-title">Mirror a GitHub account</h2>
+    <form method="post" class="flex flex-col gap-3" aria-label="Mirror a GitHub account">
+      <div class="contents">
+        <p class="text-sm text-base-content/70">Creates one mirror per repository of a GitHub user or organization. Existing repositories are skipped.</p>
+        <input type="hidden" name="csrf" value={session.csrf} />
+        <input type="hidden" name="action" value="github" />
+        <label class="text-sm font-semibold" for="github-account">GitHub user or organization</label>
+        <input id="github-account" name="account" class="input w-full" required maxlength="100" value={values.action === 'github' ? values.account : ''} />
+        <label class="text-sm font-semibold" for="github-owner">Owner on this forge</label>
+        <select id="github-owner" name="owner" class="select">
+          {owners.map((owner) => <option value={owner} selected={owner === selectedOwner}>{owner}</option>)}
+        </select>
+        <label class="text-sm font-semibold" for="github-token">GitHub token (needed for private repositories and webhooks)</label>
+        <input id="github-token" name="token" type="password" class="input w-full" autocomplete="off" />
+        <label class="flex items-center gap-2"><input type="checkbox" class="checkbox checkbox-sm" name="archived" checked /><span>Include archived repositories</span></label>
+        <label class="flex items-center gap-2"><input type="checkbox" class="checkbox checkbox-sm" name="forks" /><span>Include forks</span></label>
+        <label class="flex items-center gap-2"><input type="checkbox" class="checkbox checkbox-sm" name="webhook" /><span>Register push webhooks (token with admin:repo_hook)</span></label>
+        <button class="btn self-start">Mirror repositories</button>
+      </div>
+    </form>
   </section>
 </Layout>

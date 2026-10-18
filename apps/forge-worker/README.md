@@ -173,17 +173,26 @@ To use your own domain, add a `routes` entry with `custom_domain: true` to
 ## Several instances: `alpha`, `beta`, `gamma`
 
 `wrangler.jsonc` defines three environments, each with its own Worker name,
-R2 bucket and D1 database (`git-forge-alpha`, …). They exist to run a small
-federation, locally or on one account:
+R2 bucket and D1 database (`git-forge-alpha`, …). Every Cloudflare resource
+comes from the config, nothing is created in the dashboard: buckets and
+databases have names but no IDs, so the first `wrangler deploy` provisions
+them; migrations come from `migrations_dir`; cron, vars and the required
+secret (`secrets.required`) are declared as well. An environment goes from
+nothing to running with:
 
 ```sh
 npx wrangler deploy --env alpha
-npx wrangler d1 migrations apply DB --remote --env alpha
-npx wrangler d1 migrations apply DB --local --env beta
-npx wrangler dev --env beta --port 8788
+npx wrangler d1 migrations apply DB --env alpha --remote
+npx wrangler secret put BOOTSTRAP_TOKEN --env alpha
 ```
 
-Each needs its own `BOOTSTRAP_TOKEN`, `INSTANCE_KEY` and `PUBLIC_URL`.
+Later deployments apply migrations first, then deploy. For federation each
+environment also needs `INSTANCE_KEY` (secret) and `PUBLIC_URL` (var). Locally:
+
+```sh
+npx wrangler d1 migrations apply DB --env beta --local
+npx wrangler dev --env beta --port 8788
+```
 
 ## Local development
 

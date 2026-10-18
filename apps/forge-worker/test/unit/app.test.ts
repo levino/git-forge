@@ -262,6 +262,7 @@ describe('deployment configuration', () => {
     }
     const migrations = '../../packages/accounts/migrations'
     expect(app.d1_databases).toEqual([{ binding: 'DB', database_name: 'git-forge', migrations_dir: migrations }])
+    expect(app.secrets).toEqual({ required: ['BOOTSTRAP_TOKEN'] })
     expect(Object.keys(env)).toEqual(['alpha', 'beta', 'gamma'])
     for (const [name, config] of Object.entries(env)) {
       expect(config).toEqual({
@@ -269,6 +270,7 @@ describe('deployment configuration', () => {
         r2_buckets: [{ binding: 'BUCKET', bucket_name: `git-forge-${name}` }],
         d1_databases: [{ binding: 'DB', database_name: `git-forge-${name}`, migrations_dir: migrations }],
         vars: app.vars,
+        secrets: { required: ['BOOTSTRAP_TOKEN'] },
       })
     }
   })

@@ -32,6 +32,11 @@
     "MAX_LFS_OBJECT_BYTES": "104857600",
     "MIRROR_INTERVAL_MINUTES": "30"
   },
+  "secrets": {
+    "required": [
+      "BOOTSTRAP_TOKEN"
+    ]
+  },
   "env": {
     "alpha": {
       "name": "git-forge-alpha",
@@ -52,6 +57,11 @@
         "MAX_PUSH_BYTES": "16777216",
         "MAX_LFS_OBJECT_BYTES": "104857600",
         "MIRROR_INTERVAL_MINUTES": "30"
+      },
+      "secrets": {
+        "required": [
+          "BOOTSTRAP_TOKEN"
+        ]
       }
     },
     "beta": {
@@ -73,6 +83,11 @@
         "MAX_PUSH_BYTES": "16777216",
         "MAX_LFS_OBJECT_BYTES": "104857600",
         "MIRROR_INTERVAL_MINUTES": "30"
+      },
+      "secrets": {
+        "required": [
+          "BOOTSTRAP_TOKEN"
+        ]
       }
     },
     "gamma": {
@@ -94,6 +109,11 @@
         "MAX_PUSH_BYTES": "16777216",
         "MAX_LFS_OBJECT_BYTES": "104857600",
         "MIRROR_INTERVAL_MINUTES": "30"
+      },
+      "secrets": {
+        "required": [
+          "BOOTSTRAP_TOKEN"
+        ]
       }
     }
   }

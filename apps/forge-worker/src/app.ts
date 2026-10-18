@@ -57,8 +57,10 @@ import {
   type RepositoryName,
   SizeLimitError,
   startImport,
+  type PushOutcome,
   type Storage,
 } from '@git-forge/core'
+import { type BranchUpdate, type CollaborationOptions, handleCollaborationApi, handlePushedRefs, loadUsers, systemScope, actorRefOf } from '@git-forge/collaboration'
 import type { ForgeSettings } from './config.ts'
 import {
   enqueueDueMirrors,
@@ -544,6 +546,36 @@ export const createForge = (options: ForgeOptions): Forge => {
     return principal?.kind ?? 'unknown'
   }
 
+  const afterRefUpdate = async (request: Request, repo: RepositoryName, outcome: PushOutcome, actor: string): Promise<void> => {
+    if (federation) await notifyAfterPush(federation)(repo, outcome)
+    if (options.actions) await queueRunsForPush(dispatchOptions(request), { repo, outcome, actor })
+  }
+
+  const collaborationOptions = (request: Request): CollaborationOptions => ({
+    db,
+    storage,
+    accounts: store,
+    now: () => now().getTime(),
+    onBranchUpdated: async (update: BranchUpdate) => {
+      const actor = (await loadUsers(db, [update.actor]))(update.actor).login
+      const outcome: PushOutcome = { unpack: 'ok', results: [{ name: update.ref, oldId: update.oldId, newId: update.newId, ok: true }], objects: [], archived: [] }
+      await afterRefUpdate(request, update.repo, outcome, actor)
+    },
+  })
+
+  const refreshCollaboration = async (request: Request, repo: RepositoryName, outcome: PushOutcome): Promise<void> => {
+    const updates = outcome.results.filter((result) => result.ok)
+    if (updates.length === 0) return
+    try {
+      const scope = await systemScope(collaborationOptions(request), repo.owner, repo.name)
+      if (!scope) return
+      const principal = await authenticateRequest(request, authenticateOptions(request))
+      await handlePushedRefs(scope, updates, (principal && actorRefOf(principal)) ?? { kind: 'system', id: null })
+    } catch (error) {
+      console.log(JSON.stringify({ event: 'collaboration-push-failed', repository: `${repo.owner}/${repo.name}`, error: (error as Error).message }))
+    }
+  }
+
   const health = async () => json(200, { ok: true, service: 'git-forge' })
 
   const SEGMENT = '([^/]+)'
@@ -586,6 +618,12 @@ export const createForge = (options: ForgeOptions): Forge => {
     const authentication = authenticateOptions(request)
     const protection = await handleBranchProtectionRequest(request, { store, verifyInstance: authentication.verifyInstance })
     if (protection) return protection
+    const collaboration = await handleCollaborationApi(request, {
+      ...collaborationOptions(request),
+      verifyInstance: authentication.verifyInstance,
+      ...(options.publicUrl ? { publicUrl: options.publicUrl } : {}),
+    })
+    if (collaboration) return collaboration
     try {
       const actions = await actionsRoute(request)
       if (actions) return actions
@@ -606,14 +644,10 @@ export const createForge = (options: ForgeOptions): Forge => {
       pushPolicy: access.pushPolicy,
       maxRequestBytes: options.maxPushBytes,
       lfs: { maxObjectBytes: options.maxLfsObjectBytes },
-      ...(options.actions || federation
-        ? {
-            onPush: async (repo, outcome) => {
-              if (federation) await notifyAfterPush(federation)(repo, outcome)
-              if (options.actions) await queueRunsForPush(dispatchOptions(request), { repo, outcome, actor: await actorOf(request) })
-            },
-          }
-        : {}),
+      onPush: async (repo, outcome) => {
+        await refreshCollaboration(request, repo, outcome)
+        if (options.actions || federation) await afterRefUpdate(request, repo, outcome, await actorOf(request))
+      },
     })
     return git ?? json(404, { error: 'not found' })
   }

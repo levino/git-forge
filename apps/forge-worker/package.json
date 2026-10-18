@@ -18,6 +18,7 @@
     "@git-forge/accounts": "workspace:*",
     "@git-forge/actions": "workspace:*",
     "@git-forge/cloudflare": "workspace:*",
+    "@git-forge/collaboration": "workspace:*",
     "@git-forge/core": "workspace:*"
   },
   "devDependencies": {

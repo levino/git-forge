@@ -177,6 +177,9 @@ importers:
       '@git-forge/cloudflare':
         specifier: workspace:*
         version: link:../../packages/cloudflare
+      '@git-forge/collaboration':
+        specifier: workspace:*
+        version: link:../../packages/collaboration
       '@git-forge/core':
         specifier: workspace:*
         version: link:../../packages/core

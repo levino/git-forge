@@ -79,7 +79,16 @@ Instance admins count as admins of every repository.
 Branch protection rules use the GitHub-style API of `@git-forge/accounts`
 (`GET /api/repos/{owner}/{name}/branch-protection`,
 `GET|PUT|DELETE /api/repos/{owner}/{name}/branches/{pattern}/protection`) and
-are enforced on every push.
+are enforced on every push and every pull request merge.
+
+Issues, pull requests, reviews, statuses, check runs and discussions are
+served under `/api/v3/repos/{owner}/{name}/…` with GitHub-compatible shapes
+(routes in the [collaboration README](../../packages/collaboration/README.md#rest-api-apiv3));
+the GHES subset of the CI package keeps `/api/v3/repos/{owner}/{name}/actions/…`.
+Every successful push refreshes the repository's open pull requests (head
+sha, stale-review dismissal, merges done with plain `git push`) and closes
+issues referenced with a closing keyword by commits on the default branch.
+A merge through the API dispatches CI and notifies mirrors like a push.
 
 ## Media and raw URLs
 

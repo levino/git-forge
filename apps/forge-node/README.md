@@ -35,7 +35,7 @@ Environment variables. The names shared with the Worker mean the same
 `ACTIONS_SECRETS_KEY`, `ACTIONS_REPOSITORIES`, `ACTIONS_GITHUB_FALLBACK`,
 `ACTIONS_INSTANCE_ID`, and the login settings `OIDC_ISSUER`,
 `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`, `OIDC_NAME`, `OIDC_SCOPES`,
-`SELF_SIGNUP`, `BREAK_GLASS_PUBLIC_KEY`, and the Pages settings
+`SELF_SIGNUP`, `PASSKEYS`, `BREAK_GLASS_PUBLIC_KEY`, and the Pages settings
 `PAGES_HOST`, `PAGES_DOMAINS`, `PAGES_MAX_AGE` (point the Pages hosts at the
 same process; behind a proxy keep the `Host` header). Push notifications need `PUBLIC_URL` and
 `INSTANCE_KEY`; without them mirrors sync only on the schedule. With

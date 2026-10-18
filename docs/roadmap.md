@@ -37,10 +37,10 @@ discussions.
 - [x] Short-lived instance JWTs, trust table "issuer X may read repo Y", optional pinned thumbprint
 - [x] Device flow (`git forge auth login`, RFC 8628) and git credential helper (`git forge auth git-credential`)
 - [x] Break-glass key (offline Ed25519, one-hour admin session)
-- [ ] Login follow-ups: OIDC groups → teams, session list and revocation in the UI, rate limits on login and device endpoints, purging expired challenges and device codes, branch protection API with sessions, device-flow scope choice
+- [ ] Login follow-ups: OIDC groups → teams, session list and revocation in the UI, rate limits on login and device endpoints, purging expired challenges and device codes, device-flow scope choice
 - [ ] SAML, SCIM
 - [x] Branch protection rules (patterns, force push, deletion, push restrictions, admin bypass) enforced in `receive-pack`, API under `/api/repos/{owner}/{repo}/branches/{branch}/protection`
-- [ ] Branch protection API and push policy wired into the Worker app (needs accounts on D1 there)
+- [x] Branch protection API and push policy wired into the Worker app (accounts on D1), API with browser sessions and CSRF
 
 ## M4 — Mirrors
 
@@ -84,7 +84,8 @@ Design: [design.md §15](design.md#ci).
 - [x] Spike, part 1: dispatch on push, one ephemeral JIT runner per job via `RunnerLauncher`, `needs` with skip on failure; job tokens (`GITHUB_TOKEN` read over Git HTTP, runtime token per job), instance secrets
 - [x] Spike, part 1: Cloudflare Container definition for the runner (Dockerfile, `wrangler.jsonc`)
 - [x] Spike, part 2: the real-runner integration test runs in GitHub CI
-- [ ] Deploy the runner container and deploy a hello-world Worker with `wrangler` from our own CI
+- [x] Runner container on Cloudflare Containers from the instance repository: Workers Builds builds `runner/Dockerfile`, `basic` instance type by default, inactivity timeout for jobs longer than 15 minutes
+- [ ] Hello-world workflow on the production instance; deploy a Worker with `wrangler` from our own CI
 - [x] `uses:` actions: `ActionDownloadInfo` with tarballs streamed from repositories on the forge (mirrors of `actions/checkout`, …), name mapping, optional fallback to github.com tarballs; shallow fetch (`deepen`) for `actions/checkout`
 - [x] Expressions server-side: job-level `if`, `runs-on` expressions, `strategy`/`matrix` (include/exclude, fail-fast, max-parallel), job outputs across `needs`, `env`/`defaults`, step `if`/`continue-on-error`/`timeout-minutes`, workflow `concurrency`
 - [x] Cancellation (`JobCancellation`), job timeouts, reaper for expired locks, dead runners and lost launches, re-runs (all, failed, one job) as new attempts

@@ -61,6 +61,7 @@ read functions of `@git-forge/core` and check access with the same
 | `OIDC_NAME` | var, optional | Name of the provider on the login page, e.g. `Dorf-ID`. |
 | `OIDC_SCOPES` | var, optional | Default `openid profile email`. |
 | `SELF_SIGNUP` | var | `true` lets unknown OIDC identities and new passkeys create accounts. Default `false`: an invite (`POST /api/admin/invites`) or an existing link is needed. |
+| `PASSKEYS` | var | `false` turns passkeys off for an OIDC-only instance: the passkey login, registration and `/api/user/passkeys` endpoints answer `404`, and the sign-in, invite and settings pages show no passkey buttons. Stored passkeys stay in the database but cannot be used. Break-glass is unaffected. Default `true`. |
 | `BREAK_GLASS_PUBLIC_KEY` | var, optional | Ed25519 public JWK of the offline break-glass key (see [Login](#login)). Empty: break-glass login is off. |
 | `PAGES_HOST` | var, optional | Host pattern of Pages sites, e.g. `{owner}.pages.example.org` (optionally with `http://`/`https://` and a port; default `https`). Project sites are served at `https://<owner>.pages.example.org/<repo>/`, the repository named like the host (`<owner>.pages.example.org`) at the root. Empty: Pages hosts are off. Needs a Workers route for the wildcard host, see [Pages](#pages). |
 | `PAGES_DOMAINS` | var, optional | Custom domains per repository as JSON, e.g. `{"docs.example.com": "acme/handbook"}`. Each domain must also be declared as a Workers custom domain in `routes`. |
@@ -143,7 +144,12 @@ request origin when it is unset.
 Branch protection rules use the GitHub-style API of `@git-forge/accounts`
 (`GET /api/repos/{owner}/{name}/branch-protection`,
 `GET|PUT|DELETE /api/repos/{owner}/{name}/branches/{pattern}/protection`) and
-are enforced on every push and every pull request merge.
+are enforced on every push and every pull request merge. The rules live in
+D1 (`DB`); the API accepts `repo:admin` tokens, instance JWTs and browser
+sessions (CSRF token and same origin on `PUT` and `DELETE`), and
+`receive-pack` asks `createGitAccess(...).pushPolicy` before every ref
+transaction. `forge-node` runs the same `createForge` and gets the same
+wiring over its SQLite file.
 
 Issues, pull requests, reviews, statuses, check runs and discussions are
 served under `/api/v3/repos/{owner}/{name}/…` with GitHub-compatible shapes
@@ -468,13 +474,15 @@ The runner container is declared in `wrangler.jsonc` for every environment
 `wrangler deploy` builds `runner/Dockerfile` (the official
 `ghcr.io/actions/actions-runner` image plus Git and Node.js) and pushes it to
 the Cloudflare registry; Docker must be available where you deploy, and
-Containers need the Workers Paid plan. `release/build-release.sh` bundles
-with `--containers-rollout=none`, which skips the image. `RunnerContainer`
-starts the container with the entrypoint `run.sh --jitconfig <config>`; the
-runner is ephemeral and the container stops after its job. Pin
-`RUNNER_VERSION` in the Dockerfile to a runner release you have tested. This
-path has not been deployed yet. `wrangler dev` runs with
-`dev.enable_containers: false`.
+Containers need the Workers Paid plan. Workers Builds has Docker, so a
+Git-connected deploy builds the image as well. `release/build-release.sh`
+bundles with `--containers-rollout=none`, which skips the image.
+`RunnerContainer` starts the container with the entrypoint
+`run.sh --jitconfig <config>` and an inactivity timeout of 6 hours; the runner
+is ephemeral and the container stops after its job. The instance type is
+`basic` (1/4 vCPU, 1 GiB, 4 GB disk); the image does not fit `lite`. Pin
+`RUNNER_VERSION` in the Dockerfile to a runner release you have tested.
+`wrangler dev` runs with `dev.enable_containers: false`.
 
 ## Several instances: `alpha`, `beta`, `gamma`
 
@@ -594,7 +602,8 @@ argument.
   the forge; with the UI, pages and the API answer and cross-site form posts
   are refused.
 - Unit tests (`test/unit`) run the app in Node with `MemoryStorage` and
-  `node:sqlite`: settings, media/raw authorization, branch protection API, bootstrap, admin API, PAT authorization, private
+  `node:sqlite`: settings, media/raw authorization, branch protection API and
+  push policy with the real `git` client, bootstrap, admin API, PAT authorization, private
   defaults, visibility and collaborators, the LFS size limit, the import
   endpoint's authorization and validation, federation and
   scheduled sync between two in-process instances over real HTTP, and the
@@ -627,6 +636,13 @@ argument.
   redelivery with the same delivery id, and a release whose asset is uploaded
   to R2, redirected from `browser_download_url` and served by the media URL,
   with the tag visible to `git ls-remote`.
+- `test/e2e/protection.e2e.test.ts` starts `wrangler dev` with a fresh D1
+  database, protects `main` and `release/*` through the API (only the
+  repository admin may), and checks with the real `git` client that a writer's
+  force push and deletion of `main` are rejected as `[remote rejected]`
+  (also with `--atomic`), that `release/*` allows force pushes but no
+  deletion, that fast-forwards still work, and that the admin bypasses the
+  rule until `enforce_admins` is set.
 - `test/e2e/forge.e2e.test.ts` starts `wrangler dev` with a fresh local R2
   bucket and D1 database, bootstraps an admin, creates repositories, pushes a
   generated history of 120 commits with the real `git` client, clones it with

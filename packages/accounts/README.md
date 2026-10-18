@@ -293,9 +293,13 @@ writes `refs/upstream/*` directly and is not subject to branch protection.
 
 ### API
 
-`handleBranchProtectionRequest(request, { store, verifyInstance?, prefix = '/api' })`
+`handleBranchProtectionRequest(request, { store, verifyInstance?, authenticate?, prefix = '/api' })`
 serves GitHub's REST shape under the prefix. All routes need `admin` access
-(`401` anonymous, `404` not visible, `403` otherwise).
+(`401` anonymous, `404` not visible, `403` otherwise). Without `authenticate`
+the principal comes from the `Authorization` header (`authenticateRequest`);
+`createForge` passes its API authenticator, which also accepts a browser
+session and returns no principal (`401`) when an unsafe request lacks the
+CSRF token or comes from another origin.
 
 | Method and path | Meaning |
 |---|---|

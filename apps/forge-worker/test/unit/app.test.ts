@@ -1,10 +1,10 @@
 import { generateSigningKey, type SigningKey } from '@git-forge/accounts'
 import { type ImportJob, readImportState, readRefs } from '@git-forge/core'
-import { initRepo, sampleHistory } from '@git-forge/core/test/git-helpers.ts'
+import { commitAll, initRepo, sampleHistory, tempDir, writeFile } from '@git-forge/core/test/git-helpers.ts'
 import { type RunningServer, startServer } from '@git-forge/core/test/http-server.ts'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { basicAuthorization, secretMatches } from '../../src/app.ts'
-import { git } from '../e2e/history.ts'
+import { git, gitFails } from '../e2e/history.ts'
 import { DEFAULT_COMPACT_MAX_BYTES, DEFAULT_MAX_LFS_OBJECT_BYTES, loadSecretsKey, parseActionsSettings, parseSettings } from '../../src/config.ts'
 import { upstreamRepository } from '../../src/mirrors.ts'
 import { bootstrap, BOOTSTRAP_TOKEN, call, type NodeForge, nodeForge } from '../support/node-forge.ts'
@@ -220,6 +220,70 @@ describe('repositories with accounts', () => {
   })
 })
 
+describe('branch protection on push', () => {
+  let forge: NodeForge
+  let server: RunningServer
+  let owner: string
+  let writer: string
+
+  const bearer = (token: string) => ['-c', `http.extraHeader=Authorization: Bearer ${token}`]
+  const remote = () => `${server.url}/owner/guarded.git`
+  const refs = async () => (await readRefs(forge.storage, { owner: 'owner', name: 'guarded' }))!.state.refs
+  const clone = async (token: string) => {
+    const dir = tempDir()
+    await git(dir, [...bearer(token), 'clone', '-q', remote(), 'out'])
+    return `${dir}/out`
+  }
+  const protect = async (body: unknown) =>
+    expect((await call(forge, server.url, 'PUT', '/api/repos/owner/guarded/branches/main/protection', owner, body)).status).toBe(200)
+
+  beforeAll(async () => {
+    let handler = (_request: Request) => Promise.resolve(new Response('starting', { status: 503 }))
+    server = await startServer((request) => handler(request))
+    forge = await nodeForge()
+    handler = forge.fetch
+    owner = await bootstrap(forge, server.url, 'owner')
+    await call(forge, server.url, 'POST', '/api/admin/users', owner, { login: 'wanda' })
+    writer = (await json<{ token: string }>(await call(forge, server.url, 'POST', '/api/admin/users/wanda/tokens', owner, { scopes: ['repo:write'] }))).token
+    expect((await call(forge, server.url, 'POST', '/api/repos', owner, { owner: 'owner', name: 'guarded' })).status).toBe(201)
+    expect((await call(forge, server.url, 'PUT', '/api/repos/owner/guarded/collaborators/wanda', owner, { role: 'write' })).status).toBe(200)
+    const seed = initRepo()
+    sampleHistory(seed, 2)
+    await git(seed, [...bearer(writer), 'push', '-q', remote(), 'main', 'main:refs/heads/topic'])
+    await protect({ required_status_checks: null, enforce_admins: null, required_pull_request_reviews: null, restrictions: null })
+  })
+
+  afterAll(async () => {
+    await server.close()
+  })
+
+  it('rejects force pushes and deletions of a protected branch and archives nothing', async () => {
+    const dir = await clone(writer)
+    const before = await refs()
+    await git(dir, ['commit', '-q', '--amend', '-m', 'rewritten'])
+    expect(await gitFails(dir, [...bearer(writer), 'push', '--force', 'origin', 'main'])).toContain('! [remote rejected] main -> main (protected branch: force push is not allowed)')
+    expect(await gitFails(dir, [...bearer(writer), 'push', 'origin', ':main'])).toContain('! [remote rejected] main (protected branch: deletion is not allowed)')
+    expect(await refs()).toEqual(before)
+    await git(dir, [...bearer(writer), 'push', '-q', '--force', 'origin', 'main:topic'])
+    await git(dir, [...bearer(writer), 'push', '-q', 'origin', ':topic'])
+    await git(dir, ['reset', '-q', '--hard', 'origin/main'])
+    writeFile(dir, 'next.txt', 'next\n')
+    commitAll(dir, 'next')
+    await git(dir, [...bearer(writer), 'push', '-q', 'origin', 'main'])
+    expect((await refs())['refs/heads/main']).toBe((await git(dir, ['rev-parse', 'main'])).trim())
+    expect((await refs())['refs/heads/topic']).toBeUndefined()
+  })
+
+  it('lets repository admins bypass the rule unless enforce_admins is set', async () => {
+    const dir = await clone(owner)
+    await git(dir, ['commit', '-q', '--amend', '-m', 'admin rewrite'])
+    await git(dir, [...bearer(owner), 'push', '-q', '--force', 'origin', 'main'])
+    await protect({ required_status_checks: null, enforce_admins: true, required_pull_request_reviews: null, restrictions: null })
+    await git(dir, ['commit', '-q', '--amend', '-m', 'second admin rewrite'])
+    expect(await gitFails(dir, [...bearer(owner), 'push', '--force', 'origin', 'main'])).toContain('(protected branch: force push is not allowed)')
+  })
+})
+
 describe('federation between two instances', () => {
   let upstream: NodeForge
   let downstream: NodeForge
@@ -401,7 +465,7 @@ describe('deployment configuration', () => {
         migrations: app.migrations,
       })
     }
-    expect(app.containers).toEqual([{ class_name: 'RunnerContainer', image: './runner/Dockerfile', instance_type: 'standard-1', max_instances: 4 }])
+    expect(app.containers).toEqual([{ class_name: 'RunnerContainer', image: './runner/Dockerfile', instance_type: 'basic', max_instances: 4 }])
     expect(app.durable_objects).toEqual({ bindings: [{ name: 'RUNNER', class_name: 'RunnerContainer' }] })
     expect(app.migrations).toEqual([{ tag: 'v1', new_sqlite_classes: ['RunnerContainer'] }])
     expect(app.dev).toEqual({ enable_containers: false })

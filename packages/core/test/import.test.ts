@@ -6,6 +6,7 @@ import { handleGitRequest } from '../src/http.ts'
 import {
   commitOrder,
   continueImport,
+  ingestInMemory,
   type ImportJob,
   ImportRunningError,
   importStep,
@@ -163,7 +164,17 @@ describe('server-side import', () => {
     expect(started.phase).toBe('discover')
     await expect(startImport(storage, target, { url: `${remote.url}/source.git` })).rejects.toBeInstanceOf(ImportRunningError)
 
-    const state = await runImport({ storage, repo: target, maxStepBytes: 400_000 })
+    const ingested: number[] = []
+    const state = await runImport({
+      storage,
+      repo: target,
+      maxStepBytes: 400_000,
+      ingestPack: async (odb, pack) => {
+        ingested.push(pack.length)
+        return ingestInMemory(odb, pack)
+      },
+    })
+    expect(ingested.length).toBe(state.fetched.packs)
     expect(state.phase).toBe('done')
     expect(state.stepped).toBe(true)
     expect(state.protocol).toBe('v2')

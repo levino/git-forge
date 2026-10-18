@@ -264,6 +264,12 @@ as a sequence of stateless steps, each persisting its progress in
 5. *refs* — update refs via compare-and-swap and rewrite `info/refs`; an
    empty repository adopts the upstream `HEAD`.
 
+Fetched packs are handed to a `PackIngester` (`ingestPack`); the default
+parses and indexes the pack in memory like the mirror does. Once streaming
+pack indexing (a resumable job behind a job adapter, roadmap M5a) is on
+`main`, the import streams each fetched pack into storage and hands it to
+that job instead, so a step no longer holds the pack in memory.
+
 A failing step is retried with exponential backoff (15 s … 10 min); after
 five failures in a row the import is `failed`, and starting it again with the
 same URL resumes at the failed phase. Credentials are never written to the

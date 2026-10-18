@@ -160,9 +160,21 @@ export const startImport = async (storage: Storage, repo: RepositoryName, settin
   throw new Error('could not start import')
 }
 
+export type IngestedPack = {
+  readonly name: string | null
+  readonly objects: readonly GitObjectWithId[]
+}
+
+export type GitObjectWithId = GitObject & { readonly id: ObjectId }
+
+export type PackIngester = (odb: ObjectDatabase, pack: Uint8Array) => Promise<IngestedPack>
+
+export const ingestInMemory: PackIngester = (odb, pack) => storeFetchedPack(odb, pack)
+
 export type ImportStepOptions = {
   readonly storage: Storage
   readonly repo: RepositoryName
+  readonly ingestPack?: PackIngester
   readonly fetch?: FetchFunction
   readonly getAuthorization?: AuthorizationSupplier
   readonly now?: () => Date
@@ -355,7 +367,7 @@ const fetchStepped = async (context: StepContext, state: ImportState): Promise<I
       }
       throw error
     }
-    const stored = await storeFetchedPack(odb, pack)
+    const stored = await (options.ingestPack ?? ingestInMemory)(odb, pack)
     const fresh = new Map<ObjectId, GitObject>(stored.objects.map((object) => [object.id, object]))
     await verifyFetched(odb, fresh, missing)
     fetched = { objects: fetched.objects + stored.objects.length, packs: fetched.packs + (stored.name ? 1 : 0), bytes: fetched.bytes + pack.length }

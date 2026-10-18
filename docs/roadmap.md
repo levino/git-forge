@@ -116,8 +116,15 @@ Design: [design.md §15](design.md#ci).
 
 ## Later
 
-- [ ] Notifications, email, webhooks
-- [ ] Releases
+- [x] Email adapter in the core, Amazon SES v2 implementation (`@git-forge/ses`), console adapter for development
+- [ ] SMTP email adapter for the Node deployment
+- [x] Notifications: event log, watching and participating subscriptions, mentions, per-user settings, inbox API (`/api/v3/notifications`), email digests (instant, hourly, daily) via the job queue (design §16)
+- [x] Event producers: push, create/delete, mirror alarms, CI job and run completion, releases
+- [ ] Event producers: issues, pull requests, reviews, comments (builders exist; emitted by the collaboration package)
+- [x] Webhooks per repository and organization: GitHub-compatible payloads and headers, signatures, delivery log, retries, redelivery, ping
+- [ ] Webhooks: `POST …/hooks/{id}/tests`, GitHub App installations, encrypted secrets
+- [x] Releases: GitHub-compatible REST API, tags created on publish, assets stored as LFS objects behind the media URL, download redirects
+- [ ] Releases: source archives (`tarball_url`, `zipball_url`), generated release notes, web UI
 - [ ] Encrypted full backups, partial visibility
 - [ ] External mirror verification
 - [ ] Pages

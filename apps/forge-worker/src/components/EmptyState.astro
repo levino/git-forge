@@ -1,0 +1,13 @@
+---
+import Icon, { type IconName } from './Icon.astro'
+
+type Props = { icon: IconName; title: string }
+
+const { icon, title } = Astro.props
+---
+
+<div class="border border-dashed border-base-300 rounded-box px-6 py-10 flex flex-col items-center gap-2 text-center">
+  <Icon name={icon} class="size-6 text-base-content/40" />
+  <p class="font-semibold">{title}</p>
+  {Astro.slots.has('default') && <div class="text-base-content/70 flex flex-col items-center gap-3"><slot /></div>}
+</div>

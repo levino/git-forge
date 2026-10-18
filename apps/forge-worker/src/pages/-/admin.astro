@@ -1,0 +1,121 @@
+---
+import { InstanceAdministrationError, type InstanceView } from '@git-forge/accounts'
+import NotFound from '../../components/NotFound.astro'
+import Layout from '../../layouts/Layout.astro'
+import type { MirrorOverviewEntry } from '../../app.ts'
+import { type AdminOutcome, handleAdminPost, mirrorHealth } from '../../ui/admin.ts'
+import { relativeTime } from '../../ui/format.ts'
+import { repoUrl } from '../../ui/repository.ts'
+
+const { forge, session } = Astro.locals
+if (!session) return Astro.redirect(`/login?return_to=${encodeURIComponent('/-/admin')}`)
+let outcome: AdminOutcome | null = null
+if (Astro.request.method === 'POST') {
+  outcome = await handleAdminPost(forge, Astro.request)
+  if (outcome.kind === 'error') Astro.response.status = outcome.status
+}
+let view: InstanceView | null = null
+let mirrors: MirrorOverviewEntry[] = []
+try {
+  view = await forge.instance.view(session.principal)
+  mirrors = await forge.instance.mirrors(session.principal)
+} catch (error) {
+  if (!(error instanceof InstanceAdministrationError)) throw error
+}
+if (!view) Astro.response.status = 404
+Astro.response.headers.set('Cache-Control', 'no-store')
+const now = Math.floor(Date.now() / 1000)
+const ago = (iso: string | undefined) => (iso ? relativeTime(Math.floor(Date.parse(iso) / 1000), now) : 'never')
+---
+
+{
+  !view ? (
+    <NotFound />
+  ) : (
+    <Layout title="Instance administration" narrow>
+      <h1 class="text-xl font-semibold mb-5">Instance administration</h1>
+      {outcome && <div role={outcome.kind === 'error' ? 'alert' : 'status'} class:list={['alert mb-6', outcome.kind === 'error' ? 'alert-error' : 'alert-success']}>{outcome.message}</div>}
+      <div class="grid gap-x-6 md:grid-cols-2 items-start">
+        <section class="panel" aria-labelledby="admins">
+          <h2 id="admins" class="panel-title">Admins</h2>
+          <ul class="border border-base-300 rounded-box divide-y divide-base-300">
+            {view.admins.map((admin) => (
+              <li class="flex items-center gap-2 px-4 py-2">
+                <a href={`/${admin.login}`} class="link link-hover font-semibold flex-1">{admin.login}</a>
+                <form method="post">
+                  <input type="hidden" name="csrf" value={session.csrf} />
+                  <input type="hidden" name="action" value="remove-admin" />
+                  <input type="hidden" name="login" value={admin.login} />
+                  <button class="btn btn-xs btn-error btn-outline" aria-label={`Remove ${admin.login} as admin`}>Remove</button>
+                </form>
+              </li>
+            ))}
+          </ul>
+          <form method="post" class="flex flex-wrap items-end gap-2" aria-label="Add an admin">
+            <input type="hidden" name="csrf" value={session.csrf} />
+            <input type="hidden" name="action" value="add-admin" />
+            <label class="field">User<input name="login" class="input input-sm" required autocomplete="off" /></label>
+            <button class="btn btn-sm">Add admin</button>
+          </form>
+        </section>
+        <section class="panel" aria-labelledby="instances">
+          <h2 id="instances" class="panel-title">Trusted instances</h2>
+          <p class="text-base-content/70">Instances whose signed tokens this instance accepts. Each repository still decides which of them may read it.</p>
+          {view.trustedInstances.length === 0 ? (
+            <p class="text-base-content/70">No trusted instances.</p>
+          ) : (
+            <ul class="border border-base-300 rounded-box divide-y divide-base-300">
+              {view.trustedInstances.map((trusted) => (
+                <li class="flex flex-wrap items-center gap-2 px-4 py-2">
+                  <span class="font-mono text-sm break-all flex-1">{trusted.issuer}</span>
+                  {trusted.pinnedThumbprint && <span class="badge badge-sm" title={trusted.pinnedThumbprint}>pinned key</span>}
+                  <form method="post">
+                    <input type="hidden" name="csrf" value={session.csrf} />
+                    <input type="hidden" name="action" value="distrust" />
+                    <input type="hidden" name="issuer" value={trusted.issuer} />
+                    <button class="btn btn-xs btn-error btn-outline" aria-label={`Stop trusting ${trusted.issuer}`}>Remove</button>
+                  </form>
+                </li>
+              ))}
+            </ul>
+          )}
+          <form method="post" class="flex flex-wrap items-end gap-2" aria-label="Trust an instance">
+            <input type="hidden" name="csrf" value={session.csrf} />
+            <input type="hidden" name="action" value="trust" />
+            <label class="field">Issuer<input name="issuer" type="url" class="input input-sm font-mono" required placeholder="https://mirror.example" /></label>
+            <label class="field">Key thumbprint (optional)<input name="thumbprint" class="input input-sm font-mono" autocomplete="off" /></label>
+            <button class="btn btn-sm">Trust</button>
+          </form>
+        </section>
+      </div>
+      <section class="panel" aria-labelledby="mirrors">
+        <h2 id="mirrors" class="panel-title">Mirrors</h2>
+        {mirrors.length === 0 ? (
+          <p class="text-base-content/70">No repository on this instance mirrors another one.</p>
+        ) : (
+          <div class="overflow-x-auto border border-base-300 rounded-box">
+            <table class="table table-sm">
+              <thead>
+                <tr><th>Repository</th><th>Upstream</th><th>Mode</th><th>Status</th><th>Last success</th></tr>
+              </thead>
+              <tbody>
+                {mirrors.map(({ repository, config, status }) => (
+                  <tr>
+                    <td><a class="link link-hover font-semibold" href={`${repoUrl(repository, 'settings')}#mirrors`}>{repository.owner}/{repository.name}</a> <span class="text-base-content/60">{config.remote}</span></td>
+                    <td class="font-mono text-xs break-all">{config.url}</td>
+                    <td>{config.mode}</td>
+                    <td>
+                      <span class:list={['badge badge-sm whitespace-nowrap', mirrorHealth(config.detachedAt !== undefined, status).badge]}>{mirrorHealth(config.detachedAt !== undefined, status).label}</span>
+                      {status?.lastRun?.error && <p class="text-xs text-error mt-1 break-words">{status.lastRun.error}</p>}
+                    </td>
+                    <td class="whitespace-nowrap">{ago(status?.lastSuccessAt)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+    </Layout>
+  )
+}

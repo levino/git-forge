@@ -1,0 +1,98 @@
+---
+import { OrganizationError, ROLES, type TeamView } from '@git-forge/accounts'
+import NotFound from '../../../../components/NotFound.astro'
+import Layout from '../../../../layouts/Layout.astro'
+import { handleOrganizationPost, type OrganizationOutcome } from '../../../../ui/organizations.ts'
+
+const { forge, principal, session } = Astro.locals
+const org = Astro.params.org!
+const slug = Astro.params.slug!
+let outcome: OrganizationOutcome | null = null
+if (Astro.request.method === 'POST') {
+  outcome = await handleOrganizationPost(forge, Astro.request, org)
+  if (outcome.kind === 'redirect') return Astro.redirect(outcome.location, 303)
+  if (outcome.kind === 'error') Astro.response.status = outcome.status
+}
+let view: TeamView | null = null
+try {
+  view = await forge.organizations.team(principal, org, slug)
+} catch (error) {
+  if (!(error instanceof OrganizationError)) throw error
+}
+---
+
+{
+  !view ? (
+    <NotFound />
+  ) : (
+    <Layout title={`${view.team.name} · ${org}`} narrow>
+      <p class="text-sm mb-1"><a class="link" href={`/orgs/${org}`}>← {org}</a></p>
+      <h1 class="text-xl font-semibold mb-5">{view.team.name} <span class="text-base-content/50 font-mono text-lg">@{org}/{view.team.slug}</span></h1>
+      {outcome && <div role={outcome.kind === 'error' ? 'alert' : 'status'} class:list={['alert mb-6', outcome.kind === 'error' ? 'alert-error' : 'alert-success']}>{outcome.message}</div>}
+      <div class="grid gap-x-6 md:grid-cols-2 items-start">
+        <section class="panel" aria-labelledby="members">
+          <h2 id="members" class="panel-title">Members</h2>
+          <ul class="border border-base-300 rounded-box divide-y divide-base-300">
+            {view.members.length === 0 && <li class="px-4 py-2 text-base-content/70">No members yet.</li>}
+            {view.members.map((member) => (
+              <li class="flex items-center gap-2 px-4 py-2">
+                <a href={`/${member.login}`} class="link link-hover font-semibold flex-1">{member.login}</a>
+                <span class="badge badge-sm">{member.role}</span>
+                {view!.canAdminister && session && (
+                  <form method="post">
+                    <input type="hidden" name="csrf" value={session.csrf} />
+                    <input type="hidden" name="action" value="remove-team-member" />
+                    <input type="hidden" name="team" value={view!.team.slug} />
+                    <input type="hidden" name="login" value={member.login} />
+                    <button class="btn btn-xs btn-error btn-outline" aria-label={`Remove ${member.login}`}>Remove</button>
+                  </form>
+                )}
+              </li>
+            ))}
+          </ul>
+          {view.canAdminister && session && (
+            <form method="post" class="flex flex-wrap items-end gap-2" aria-label="Add a team member">
+              <input type="hidden" name="csrf" value={session.csrf} />
+              <input type="hidden" name="action" value="team-member" />
+              <input type="hidden" name="team" value={view.team.slug} />
+              <label class="field">User<input name="login" class="input input-sm" required autocomplete="off" /></label>
+              <label class="field">Role<select name="role" class="select select-sm"><option>member</option><option>maintainer</option></select></label>
+              <button class="btn btn-sm">Add</button>
+            </form>
+          )}
+        </section>
+        <section class="panel" aria-labelledby="repositories">
+          <h2 id="repositories" class="panel-title">Repositories</h2>
+          <ul class="border border-base-300 rounded-box divide-y divide-base-300">
+            {view.repositories.length === 0 && <li class="px-4 py-2 text-base-content/70">No repositories yet.</li>}
+            {view.repositories.map((repository) => (
+              <li class="flex items-center gap-2 px-4 py-2">
+                <a href={`/${org}/${repository.name}`} class="link link-hover font-semibold flex-1">{repository.name}</a>
+                <span class="badge badge-sm">{repository.role}</span>
+                {view!.canAdminister && session && (
+                  <form method="post">
+                    <input type="hidden" name="csrf" value={session.csrf} />
+                    <input type="hidden" name="action" value="remove-team-repository" />
+                    <input type="hidden" name="team" value={view!.team.slug} />
+                    <input type="hidden" name="repository" value={repository.name} />
+                    <button class="btn btn-xs btn-error btn-outline" aria-label={`Remove ${repository.name}`}>Remove</button>
+                  </form>
+                )}
+              </li>
+            ))}
+          </ul>
+          {view.canAdminister && session && (
+            <form method="post" class="flex flex-wrap items-end gap-2" aria-label="Give the team a repository">
+              <input type="hidden" name="csrf" value={session.csrf} />
+              <input type="hidden" name="action" value="team-repository" />
+              <input type="hidden" name="team" value={view.team.slug} />
+              <label class="field">Repository<input name="repository" class="input input-sm" required autocomplete="off" /></label>
+              <label class="field">Role<select name="role" class="select select-sm">{ROLES.map((role) => <option selected={role === 'write'}>{role}</option>)}</select></label>
+              <button class="btn btn-sm">Save</button>
+            </form>
+          )}
+        </section>
+      </div>
+    </Layout>
+  )
+}

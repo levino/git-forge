@@ -183,6 +183,12 @@ importers:
       '@git-forge/s3':
         specifier: workspace:*
         version: link:../../packages/s3
+      '@git-forge/ses':
+        specifier: workspace:*
+        version: link:../../packages/ses
+      '@git-forge/smtp':
+        specifier: workspace:*
+        version: link:../../packages/smtp
       forge-worker:
         specifier: workspace:*
         version: link:../forge-worker
@@ -220,9 +226,15 @@ importers:
       '@git-forge/notifications':
         specifier: workspace:*
         version: link:../../packages/notifications
+      '@git-forge/pages':
+        specifier: workspace:*
+        version: link:../../packages/pages
       '@git-forge/releases':
         specifier: workspace:*
         version: link:../../packages/releases
+      '@git-forge/s3':
+        specifier: workspace:*
+        version: link:../../packages/s3
       '@git-forge/ses':
         specifier: workspace:*
         version: link:../../packages/ses
@@ -347,6 +359,9 @@ importers:
 
   packages/cli:
     devDependencies:
+      '@git-forge/accounts':
+        specifier: workspace:*
+        version: link:../accounts
       '@git-forge/core':
         specifier: workspace:*
         version: link:../core
@@ -461,6 +476,31 @@ importers:
         specifier: 4.1.11
         version: 4.1.11(@types/node@22.20.5)(vite@8.3.4(@types/node@22.20.5))
 
+  packages/pages:
+    dependencies:
+      '@git-forge/accounts':
+        specifier: workspace:*
+        version: link:../accounts
+      '@git-forge/core':
+        specifier: workspace:*
+        version: link:../core
+      '@git-forge/notifications':
+        specifier: workspace:*
+        version: link:../notifications
+    devDependencies:
+      '@git-forge/accounts-node':
+        specifier: workspace:*
+        version: link:../accounts-node
+      '@types/node':
+        specifier: 22.20.5
+        version: 22.20.5
+      typescript:
+        specifier: 6.0.3
+        version: 6.0.3
+      vitest:
+        specifier: 4.1.11
+        version: 4.1.11(@types/node@22.20.5)(vite@8.3.4(@types/node@22.20.5))
+
   packages/releases:
     dependencies:
       '@git-forge/accounts':
@@ -513,6 +553,22 @@ importers:
       aws4fetch:
         specifier: 1.0.20
         version: 1.0.20
+    devDependencies:
+      '@types/node':
+        specifier: 22.20.5
+        version: 22.20.5
+      typescript:
+        specifier: 6.0.3
+        version: 6.0.3
+      vitest:
+        specifier: 4.1.11
+        version: 4.1.11(@types/node@22.20.5)(vite@8.3.4(@types/node@22.20.5))
+
+  packages/smtp:
+    dependencies:
+      '@git-forge/core':
+        specifier: workspace:*
+        version: link:../core
     devDependencies:
       '@types/node':
         specifier: 22.20.5

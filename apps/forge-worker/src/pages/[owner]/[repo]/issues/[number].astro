@@ -1,0 +1,89 @@
+---
+import Avatar from '../../../../components/Avatar.astro'
+import { can, createComment, getIssue, timeline, updateIssue } from '@git-forge/collaboration'
+import IssueHeader from '../../../../components/IssueHeader.astro'
+import NotFound from '../../../../components/NotFound.astro'
+import RepoHeader from '../../../../components/RepoHeader.astro'
+import Timeline from '../../../../components/Timeline.astro'
+import Layout from '../../../../layouts/Layout.astro'
+import { field, type FormOutcome, parseNumber, renderBody, renderTimeline, runForm, scopeFor, unlessMissing } from '../../../../ui/collaboration.ts'
+import { openRepository, repoUrl } from '../../../../ui/repository.ts'
+
+const { forge, principal, session } = Astro.locals
+const repo = await openRepository(forge, principal, Astro.params.owner!, Astro.params.repo!)
+const number = parseNumber(Astro.params.number)
+let outcome: FormOutcome | null = null
+if (repo.kind === 'ok' && number !== null && Astro.request.method === 'POST') {
+  const here = repoUrl(repo.name, 'issues', String(number))
+  outcome = await runForm(forge, Astro.request, repo, async (scope, form) => {
+    const action = field(form, 'action')
+    const body = field(form, 'body').trim()
+    if (body !== '') {
+      const comment = await createComment(scope, number, body)
+      if (action === 'comment') return `${here}#comment-${comment.id}`
+    }
+    if (action === 'close') await updateIssue(scope, number, { state: 'closed', stateReason: field(form, 'reason') === 'not_planned' ? 'not_planned' : 'completed' })
+    if (action === 'reopen') await updateIssue(scope, number, { state: 'open' })
+    return here
+  })
+  if (outcome.kind === 'redirect') return Astro.redirect(outcome.location, 303)
+  Astro.response.status = outcome.status
+}
+const scope = repo.kind === 'ok' ? await scopeFor(forge, Astro.request, principal, repo) : null
+const issue = scope && number !== null ? await unlessMissing(getIssue(scope, number)) : null
+if (repo.kind === 'ok' && issue?.isPull) return Astro.redirect(repoUrl(repo.name, 'pull', String(issue.number)))
+const items = repo.kind === 'ok' && scope && issue ? await renderTimeline(repo, await timeline(scope, issue.number)) : []
+const body = repo.kind === 'ok' && issue ? await renderBody(repo, issue.body) : null
+const canComment = scope && issue ? can(scope, 'comment:create', { locked: issue.locked }) : false
+const canClose = scope && issue ? can(scope, 'issue:close', { author: issue.authorRef }) : false
+---
+
+{
+  repo.kind !== 'ok' || !scope || !issue ? (
+    <NotFound />
+  ) : (
+    <Layout title={`${issue.title} · Issue #${issue.number} · ${repo.name.owner}/${repo.name.name}`}>
+      <RepoHeader repo={repo} tab="issues" />
+      <IssueHeader issue={issue} state={issue.state === 'open' ? { label: 'Open', badge: 'badge-success' } : { label: 'Closed', badge: 'badge-neutral' }} />
+      {outcome?.kind === 'error' && <div role="alert" class="alert alert-error mb-4">{outcome.message}</div>}
+      <article class="border border-base-300 rounded-box mb-4 overflow-hidden" aria-label="Description">
+        <header class="px-4 py-2 text-sm bg-base-200 border-b border-base-300 flex items-center gap-1.5">
+          <Avatar name={issue.author.login} size={20} />
+          <span class="font-semibold">{issue.author.login}</span> wrote
+        </header>
+        {body ? <div class="markdown-body p-4 overflow-x-auto" set:html={body} /> : <p class="p-4 text-sm text-base-content/70">No description provided.</p>}
+      </article>
+      <Timeline items={items} />
+      {session && (canComment || canClose) ? (
+        <form method="post" class="mt-6 flex flex-col gap-2" aria-label="Add a comment">
+          <input type="hidden" name="csrf" value={session.csrf} />
+          {canComment && (
+            <>
+              <label class="text-sm font-semibold" for="body">Add a comment</label>
+              <textarea id="body" name="body" rows="6" class="textarea w-full font-mono" placeholder="Markdown is supported" />
+            </>
+          )}
+          <div class="flex flex-wrap gap-2 justify-end">
+            {canClose && issue.state === 'open' && (
+              <>
+                <select name="reason" class="select select-sm w-auto" aria-label="Close reason">
+                  <option value="completed">as completed</option>
+                  <option value="not_planned">as not planned</option>
+                </select>
+                <button class="btn btn-sm" name="action" value="close">Close issue</button>
+              </>
+            )}
+            {canClose && issue.state === 'closed' && <button class="btn btn-sm" name="action" value="reopen">Reopen issue</button>}
+            {canComment && <button class="btn btn-sm btn-primary" name="action" value="comment">Comment</button>}
+          </div>
+        </form>
+      ) : (
+        !session && (
+          <p class="mt-6 text-sm">
+            <a class="link link-primary" href={`/login?return_to=${encodeURIComponent(Astro.url.pathname)}`}>Sign in</a> to comment.
+          </p>
+        )
+      )}
+    </Layout>
+  )
+}

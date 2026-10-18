@@ -31,4 +31,5 @@ The Worker reads `EMAIL_PROVIDER=ses`, `EMAIL_FROM`, `SES_REGION`, the
 secrets `SES_ACCESS_KEY_ID` and `SES_SECRET_ACCESS_KEY`, and optionally
 `SES_ENDPOINT` and `SES_CONFIGURATION_SET` (see `apps/forge-worker/README.md`).
 
-An SMTP adapter for the Node deployment will implement the same interface.
+`@git-forge/smtp` implements the same interface over SMTP for the Node
+deployment.

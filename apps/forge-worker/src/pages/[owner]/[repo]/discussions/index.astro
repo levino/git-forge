@@ -1,0 +1,105 @@
+---
+import EmptyState from '../../../../components/EmptyState.astro'
+import { can, CollaborationError, type Discussion, type DiscussionCategory, listCategories, listDiscussions } from '@git-forge/collaboration'
+import NotFound from '../../../../components/NotFound.astro'
+import RepoHeader from '../../../../components/RepoHeader.astro'
+import Layout from '../../../../layouts/Layout.astro'
+import { scopeFor } from '../../../../ui/collaboration.ts'
+import { isoTime, relativeTime } from '../../../../ui/format.ts'
+import { parsePage } from '../../../../ui/history.ts'
+import { openRepository, repoUrl } from '../../../../ui/repository.ts'
+
+const { forge, principal } = Astro.locals
+const repo = await openRepository(forge, principal, Astro.params.owner!, Astro.params.repo!)
+const scope = repo.kind === 'ok' ? await scopeFor(forge, Astro.request, principal, repo) : null
+const category = Astro.url.searchParams.get('category') ?? undefined
+const page = parsePage(Astro.url.searchParams.get('page'))
+const PER_PAGE = 25
+let disabled = false
+let categories: DiscussionCategory[] = []
+let list: { items: readonly Discussion[]; total: number } = { items: [], total: 0 }
+if (scope) {
+  try {
+    categories = await listCategories(scope)
+    list = await listDiscussions(scope, { ...(category ? { category } : {}), state: 'all' }, { page, perPage: PER_PAGE })
+  } catch (error) {
+    if (!(error instanceof CollaborationError && error.status === 410)) throw error
+    disabled = true
+  }
+}
+const now = Math.floor(Date.now() / 1000)
+const seconds = (ms: number) => Math.floor(ms / 1000)
+const query = (next: number) => `?${category ? `category=${encodeURIComponent(category)}&` : ''}page=${next}`
+---
+
+{
+  repo.kind !== 'ok' || !scope ? (
+    <NotFound />
+  ) : (
+    <Layout title={`Discussions · ${repo.name.owner}/${repo.name.name}`}>
+      <RepoHeader repo={repo} tab="discussions" />
+      {disabled ? (
+        <p>Discussions are turned off for this repository.</p>
+      ) : (
+        <div class="flex flex-col md:flex-row gap-6">
+          <nav class="md:w-56 flex-none" aria-label="Categories">
+            <ul class="menu menu-sm border border-base-300 rounded-box w-full">
+              <li>
+                <a href={repoUrl(repo.name, 'discussions')} class:list={{ 'menu-active': !category }}>
+                  All discussions
+                </a>
+              </li>
+              {categories.map((item) => (
+                <li>
+                  <a href={`?category=${encodeURIComponent(item.slug)}`} class:list={{ 'menu-active': category === item.slug }}>
+                    <span aria-hidden="true">{item.emoji}</span> {item.name}
+                  </a>
+                </li>
+              ))}
+            </ul>
+          </nav>
+          <div class="flex-1 min-w-0">
+            {can(scope, 'discussion:create') && (
+              <div class="flex mb-4">
+                <a class="btn btn-sm btn-primary ml-auto" href={repoUrl(repo.name, 'discussions', 'new')}>
+                  New discussion
+                </a>
+              </div>
+            )}
+            {list.items.length === 0 ? (
+              <EmptyState icon="discussion" title="No discussions yet." />
+            ) : (
+              <ul class="border border-base-300 rounded-box divide-y divide-base-300" aria-label="Discussions">
+                {list.items.map((discussion) => (
+                  <li class="flex flex-wrap items-start gap-x-3 gap-y-1 px-4 py-3">
+                    <span aria-hidden="true">{discussion.category.emoji}</span>
+                    <div class="min-w-0 flex-1">
+                      <a href={repoUrl(repo.name, 'discussions', String(discussion.number))} class="font-semibold link link-hover break-words">
+                        {discussion.title}
+                      </a>
+                      {discussion.answerCommentId !== null && <span class="badge badge-success badge-sm ml-1">Answered</span>}
+                      {discussion.state === 'closed' && <span class="badge badge-neutral badge-sm ml-1">Closed</span>}
+                      <p class="text-sm text-base-content/70">
+                        {discussion.author.login} started in {discussion.category.name} ·{' '}
+                        <time datetime={isoTime(seconds(discussion.createdAt))}>{relativeTime(seconds(discussion.createdAt), now)}</time>
+                      </p>
+                    </div>
+                    <span class="text-sm text-base-content/70" aria-label={`${discussion.comments} comments`}>
+                      💬 {discussion.comments}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            )}
+            {(page > 1 || page * PER_PAGE < list.total) && (
+              <nav class="join mt-6 flex justify-center" aria-label="Pagination">
+                {page > 1 ? <a class="join-item btn btn-sm" href={query(page - 1)} rel="prev">Previous</a> : <span class="join-item btn btn-sm btn-disabled">Previous</span>}
+                {page * PER_PAGE < list.total ? <a class="join-item btn btn-sm" href={query(page + 1)} rel="next">Next</a> : <span class="join-item btn btn-sm btn-disabled">Next</span>}
+              </nav>
+            )}
+          </div>
+        </div>
+      )}
+    </Layout>
+  )
+}

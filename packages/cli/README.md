@@ -15,24 +15,34 @@ git forge push origin +main            # rewritten history, archived as usual
 Because the executable is called `git-forge`, `git forge …` works as soon as it
 is on `PATH`. It needs `git` 2.38 or newer.
 
+The same executable is also the git remote helper `git-remote-forge`, which
+pushes packs of any size in resumable parts:
+
+```sh
+ln -s git-forge /usr/local/bin/git-remote-forge   # once, next to git-forge
+git remote add origin forge::https://forge.example/acme/site
+git push origin main                               # or: git push forge::https://forge.example/acme/site main
+git clone forge::https://forge.example/acme/site
+```
+
 ## Login and the credential helper
 
 ```sh
 git forge auth login https://forge.example   # or without URL: the host of origin
+git forge auth login --scopes repo:admin     # also lets you create repositories
 git clone https://forge.example/acme/site.git  # no token in the URL
 git forge auth status
 git forge auth logout https://forge.example
 ```
 
-`auth login` works like `gh auth login`: it asks the forge for a device code
-(`POST /login/device/code`, RFC 8628), prints the code and
-`https://forge.example/login/device`, and polls until you approve the request
-in the browser, signed in with OIDC or a passkey. The forge then issues a
-personal access token with the scope `repo:write` (Git and Git LFS, no admin
-API) valid for 90 days. The token is stored in
-`~/.config/git-forge/hosts.json` (`$XDG_CONFIG_HOME/git-forge`, or
-`GIT_FORGE_CONFIG_DIR`), mode `0600`, and git is configured globally to use it
-for that host only:
+`auth login` prints a short link (opened when a local browser is available),
+you approve in the browser and paste the one-time code shown there; without a
+terminal on stdin it uses the device flow. Options:
+`--scopes repo:read|repo:write|repo:admin` (default `repo:write`),
+`--paste` (force the paste flow), `--browser-redirect` (code via `http://127.0.0.1:<port>`), `--device`
+(RFC 8628), `--no-browser`, `--no-setup-git`. The token (90 days) is stored in
+`~/.config/git-forge/hosts.json` (mode `0600`, or `GIT_FORGE_CONFIG_DIR`) and
+git uses it for that host:
 
 ```ini
 [credential "https://forge.example"]
@@ -44,9 +54,30 @@ The empty `helper =` resets other helpers for that host, so a stale password
 from the system keychain is never tried first. `git forge auth git-credential
 get` answers git's credential protocol from `hosts.json` (`username` is your
 login, `password` the token); `store` and `erase` do nothing, so a rejected
-token stays until you log in again. `--no-setup-git` skips the git
-configuration; `git forge auth setup-git [<url>]` writes it later and
-`git forge auth token [<url>]` prints the token for scripts.
+token stays until you log in again. `git forge auth setup-git [<url>]` writes
+the git configuration later and `git forge auth token [<url>]` prints the
+token for scripts.
+
+## Creating repositories
+
+```sh
+git forge repo create acme/site --public --remote origin
+git forge repo create notes                  # owned by you, private
+```
+
+`repo create` needs a `repo:admin` token, prints the clone URL and with
+`--remote` adds it to the current repository.
+
+## Remote helper `git-remote-forge`
+
+Run as `git-remote-forge` (link or copy of `git-forge`) or
+`git forge remote-helper <remote> <url>`. Fetch is relayed to
+`git remote-https`. Push packs into `.git/forge-upload/<key>/`, uploads parts
+(presigned or through the forge) and finalizes with receive-pack's checks; a
+rerun of the same `git push` uploads only missing parts. Forges without the
+upload API get a plain receive-pack. `forge.uploadPartBytes` (or
+`GIT_FORGE_UPLOAD_PART_BYTES`) caps the part size. Credentials come from
+`git credential`. For named remotes it sets `remote.<name>.lfsurl` when unset.
 
 ## Installation
 
@@ -54,7 +85,8 @@ Download the single executable for your platform from a git-forge release
 (`git-forge-linux-x64`, `-linux-arm64`, `-darwin-x64`, `-darwin-arm64`,
 `-windows-x64.exe`; checksums in `CLI-SHA256SUMS`), rename it to `git-forge`
 (`git-forge.exe` on Windows) and put it on `PATH`. No Node.js, npm or Bun is
-needed.
+needed. For the remote helper add a link named `git-remote-forge` (or a copy
+`git-remote-forge.exe` on Windows) in the same directory.
 
 During development run it from the repository:
 
@@ -64,7 +96,7 @@ pnpm --filter @git-forge/cli build        # dist/git-forge for this machine, nee
 sh packages/cli/build-executables.sh out/  # all platforms plus CLI-SHA256SUMS
 ```
 
-## Options
+## Options of `git forge push`
 
 | Option | Meaning |
 |---|---|
@@ -75,7 +107,7 @@ sh packages/cli/build-executables.sh out/  # all platforms plus CLI-SHA256SUMS
 Exit codes: `0` success, `1` error, `2` a single commit is larger than the
 budget.
 
-## How it works
+## How `git forge push` works
 
 For each refspec:
 
@@ -148,5 +180,10 @@ instances is unaffected.
 with a small request limit: a split push lands the same refs and objects as a
 normal push, an interrupted chunk resumes without resending, merged side
 branches go through temporary refs, rewrites archive once, an oversized commit
-is refused. The Worker's end-to-end suite pushes 24 MiB through `wrangler dev`
+is refused.
+
+`test/remote-helper.test.ts` drives real `git` and `git lfs` through
+`git-remote-forge`: presigned and proxied parts, resume, policy, atomic,
+LFS check, deletions and the receive-pack fallback.
+The Worker's end-to-end suite pushes 24 MiB through `wrangler dev`
 with `MAX_PUSH_BYTES` set to 16 MiB.

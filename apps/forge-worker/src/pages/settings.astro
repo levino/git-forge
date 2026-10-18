@@ -1,5 +1,6 @@
 ---
-import { PASSKEY_SCRIPT, TOKEN_SCOPES } from '@git-forge/accounts'
+import { PASSKEY_SCRIPT } from '@git-forge/accounts'
+import AccessChoice from '../components/AccessChoice.astro'
 import Layout from '../layouts/Layout.astro'
 import { accountAction, type AccountAction, EXPIRY_DAYS } from '../ui/account.ts'
 import { isoTime } from '../ui/format.ts'
@@ -21,14 +22,15 @@ if (Astro.request.method === 'POST') {
 }
 Astro.response.headers.set('Cache-Control', 'no-store')
 const user = session.principal
-const [tokens, passkeys] = await Promise.all([forge.account.listTokens(user), forge.account.listPasskeys(user)])
+const passkeysEnabled = forge.loginOptions.passkeys
+const [tokens, passkeys, identities, sessions] = await Promise.all([forge.account.listTokens(user), passkeysEnabled ? forge.account.listPasskeys(user) : [], forge.account.listIdentities(user), forge.account.listSessions(user)])
 const oidcName = forge.loginOptions.oidcName
 const day = (ms: number | null) => (ms === null ? 'never' : isoTime(Math.floor(ms / 1000)).slice(0, 10))
 const configJson = JSON.stringify({ returnTo: '/settings', csrf: session.csrf }).replace(/</g, '\\u003c')
 ---
 
-<Layout title="Settings">
-  <h1 class="text-2xl font-semibold mb-6">Settings for {user.login}</h1>
+<Layout title="Settings" narrow>
+  <h1 class="text-xl font-semibold mb-5">Settings for {user.login}</h1>
   {
     result?.kind === 'token-created' && (
       <div role="status" class="alert alert-success mb-6 flex-col items-start">
@@ -41,14 +43,16 @@ const configJson = JSON.stringify({ returnTo: '/settings', csrf: session.csrf })
   }
   {result?.kind === 'token-revoked' && <div role="status" class="alert alert-success mb-6">Token revoked.</div>}
   {result?.kind === 'passkey-removed' && <div role="status" class="alert alert-success mb-6">Passkey removed.</div>}
+  {result?.kind === 'identity-unlinked' && <div role="status" class="alert alert-success mb-6">Account unlinked.</div>}
+  {result?.kind === 'session-revoked' && <div role="status" class="alert alert-success mb-6">Session ended.</div>}
   {result?.kind === 'error' && <div role="alert" class="alert alert-error mb-6">{result.message}</div>}
 
-  <section class="mb-10" aria-labelledby="tokens">
-    <h2 id="tokens" class="text-xl font-semibold mb-2">Personal access tokens</h2>
-    <p class="text-sm text-base-content/70 mb-4">For Git, Git LFS and the API. Use them as password with any user name.</p>
+  <section class="panel" aria-labelledby="tokens">
+    <h2 id="tokens" class="panel-title">Personal access tokens</h2>
+    <p class="text-base-content/70">For Git, Git LFS and the API. Use them as password with any user name.</p>
     {
       tokens.length > 0 && (
-        <div class="overflow-x-auto mb-4">
+        <div class="overflow-x-auto border border-base-300 rounded-box">
           <table class="table table-sm">
             <thead>
               <tr>
@@ -93,24 +97,14 @@ const configJson = JSON.stringify({ returnTo: '/settings', csrf: session.csrf })
         </div>
       )
     }
-    <form method="post" class="card bg-base-200 max-w-xl" aria-label="Create a token">
-      <div class="card-body gap-3">
+    <form method="post" class="flex flex-col gap-3 max-w-md border-t border-base-300 pt-4" aria-label="Create a token">
+      <div class="contents">
         <h3 class="font-semibold">New token</h3>
         <input type="hidden" name="csrf" value={session.csrf} />
         <input type="hidden" name="action" value="create-token" />
         <label class="text-sm font-semibold" for="token-name">Name</label>
         <input id="token-name" name="name" class="input w-full" maxlength="100" required />
-        <fieldset class="flex flex-wrap gap-4">
-          <legend class="text-sm font-semibold mb-1">Scopes</legend>
-          {
-            TOKEN_SCOPES.map((scope) => (
-              <label class="flex items-center gap-2">
-                <input type="checkbox" class="checkbox checkbox-sm" name="scopes" value={scope} checked={scope === 'repo:write'} />
-                <span class="font-mono text-sm">{scope}</span>
-              </label>
-            ))
-          }
-        </fieldset>
+        <AccessChoice selected="repo:write" />
         <label class="text-sm font-semibold" for="token-expires">Expires</label>
         <select id="token-expires" name="expires" class="select w-full">
           {EXPIRY_DAYS.map((days) => <option value={String(days)} selected={days === 90}>in {days} days</option>)}
@@ -121,48 +115,96 @@ const configJson = JSON.stringify({ returnTo: '/settings', csrf: session.csrf })
     </form>
   </section>
 
-  <section class="mb-10" aria-labelledby="passkeys">
-    <h2 id="passkeys" class="text-xl font-semibold mb-4">Passkeys</h2>
+  {
+    passkeysEnabled && (
+    <section class="panel" aria-labelledby="passkeys">
+      <h2 id="passkeys" class="panel-title">Passkeys</h2>
+      {
+        passkeys.length === 0 ? (
+          <p class="text-base-content/70">No passkeys yet.</p>
+        ) : (
+          <ul class="border border-base-300 rounded-box divide-y divide-base-300">
+            {passkeys.map((passkey) => (
+              <li class="flex flex-wrap items-center gap-3 px-4 py-3">
+                <span class="font-semibold">{passkey.name}</span>
+                <span class="text-sm text-base-content/70">
+                  added {day(passkey.createdAt)}, last used {passkey.lastUsedAt === null ? 'never' : day(passkey.lastUsedAt)}
+                </span>
+                <form method="post" class="ml-auto">
+                  <input type="hidden" name="csrf" value={session.csrf} />
+                  <input type="hidden" name="action" value="remove-passkey" />
+                  <input type="hidden" name="id" value={passkey.id} />
+                  <button class="btn btn-xs btn-error btn-outline" aria-label={`Remove passkey ${passkey.name}`}>
+                    Remove
+                  </button>
+                </form>
+              </li>
+            ))}
+          </ul>
+        )
+      }
+      <button class="btn btn-sm self-start" type="button" data-passkey="register">Add a passkey</button>
+      <p id="message" role="alert" class="text-error empty:hidden"></p>
+    </section>
+    )
+  }
+
+  <section class="panel" aria-labelledby="identities">
+    <h2 id="identities" class="panel-title">Linked accounts</h2>
     {
-      passkeys.length === 0 ? (
-        <p class="mb-4">No passkeys yet.</p>
+      identities.length === 0 ? (
+        <p class="text-base-content/70">No linked accounts.</p>
       ) : (
-        <ul class="border border-base-300 rounded-box divide-y divide-base-300 mb-4">
-          {passkeys.map((passkey) => (
+        <ul class="border border-base-300 rounded-box divide-y divide-base-300">
+          {identities.map((identity) => (
             <li class="flex flex-wrap items-center gap-3 px-4 py-3">
-              <span class="font-semibold">{passkey.name}</span>
-              <span class="text-sm text-base-content/70">
-                added {day(passkey.createdAt)}, last used {passkey.lastUsedAt === null ? 'never' : day(passkey.lastUsedAt)}
-              </span>
-              <form method="post" class="ml-auto">
+              <span class="font-mono text-sm break-all flex-1">{identity.issuer}</span>
+              {identity.email && <span class="text-sm text-base-content/70">{identity.email}</span>}
+              <span class="text-sm text-base-content/70">linked {day(identity.createdAt)}</span>
+              <form method="post">
                 <input type="hidden" name="csrf" value={session.csrf} />
-                <input type="hidden" name="action" value="remove-passkey" />
-                <input type="hidden" name="id" value={passkey.id} />
-                <button class="btn btn-xs btn-error btn-outline" aria-label={`Remove passkey ${passkey.name}`}>
-                  Remove
-                </button>
+                <input type="hidden" name="action" value="unlink-identity" />
+                <input type="hidden" name="issuer" value={identity.issuer} />
+                <input type="hidden" name="subject" value={identity.subject} />
+                <button class="btn btn-xs btn-error btn-outline" aria-label={`Unlink ${identity.issuer}`}>Unlink</button>
               </form>
             </li>
           ))}
         </ul>
       )
     }
-    <button class="btn" type="button" data-passkey="register">Add a passkey</button>
-    <p id="message" role="alert" class="text-error mt-2 empty:hidden"></p>
-  </section>
-
-  {
-    oidcName && (
-      <section aria-labelledby="identities">
-        <h2 id="identities" class="text-xl font-semibold mb-4">
-          Linked accounts
-        </h2>
-        <a class="btn" href={`/login/oidc?link=1&return_to=${encodeURIComponent('/settings')}`}>
+    {
+      oidcName && (
+        <a class="btn btn-sm self-start" href={`/login/oidc?link=1&return_to=${encodeURIComponent('/settings')}`}>
           Link a {oidcName} account
         </a>
-      </section>
-    )
-  }
-  <script type="application/json" id="login-config" set:html={configJson} />
-  <script is:inline set:html={PASSKEY_SCRIPT} />
+      )
+    }
+  </section>
+
+  <section class="panel" aria-labelledby="sessions">
+    <h2 id="sessions" class="panel-title">Sessions</h2>
+    <ul class="border border-base-300 rounded-box divide-y divide-base-300">
+      {sessions.map((item) => (
+        <li class="flex flex-wrap items-center gap-3 px-4 py-3">
+          <span class="badge badge-sm">{item.method}</span>
+          <span class="text-sm break-all flex-1">{item.userAgent ?? 'unknown browser'}</span>
+          <span class="text-sm text-base-content/70">since {day(item.createdAt)}, last seen {day(item.lastSeenAt)}</span>
+          {item.id === session.sessionId ? (
+            <span class="badge badge-success badge-sm">this browser</span>
+          ) : (
+            <form method="post">
+              <input type="hidden" name="csrf" value={session.csrf} />
+              <input type="hidden" name="action" value="revoke-session" />
+              <input type="hidden" name="id" value={item.id} />
+              <button class="btn btn-xs btn-error btn-outline" aria-label={`End session started ${day(item.createdAt)}`}>End</button>
+            </form>
+          )}
+        </li>
+      ))}
+    </ul>
+  </section>
+
+  {passkeysEnabled && <script type="application/json" id="login-config" set:html={configJson} />}
+  {passkeysEnabled && <script is:inline set:html={PASSKEY_SCRIPT} />}
 </Layout>

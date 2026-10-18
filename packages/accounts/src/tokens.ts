@@ -33,6 +33,38 @@ export const scopeCeiling = (scopes: readonly TokenScope[]): Access => {
   return 'none'
 }
 
+export type AccessChoice = {
+  readonly scope: TokenScope
+  readonly label: string
+}
+
+export const ACCESS_CHOICES: readonly AccessChoice[] = [
+  { scope: 'repo:read', label: 'read' },
+  { scope: 'repo:write', label: 'write (includes read)' },
+  { scope: 'repo:admin', label: 'admin (includes write)' },
+]
+
+const scopeRank = (scope: TokenScope): number => TOKEN_SCOPES.indexOf(scope)
+
+export const accessChoices = (max: TokenScope = 'repo:admin'): readonly AccessChoice[] => ACCESS_CHOICES.filter((choice) => scopeRank(choice.scope) <= scopeRank(max))
+
+export const highestScope = (scopes: readonly TokenScope[]): TokenScope | null => {
+  const ceiling = scopeCeiling(scopes)
+  return ceiling === 'none' ? null : (`repo:${ceiling}` as TokenScope)
+}
+
+export const parseRequestedScope = (text: string | null | undefined, fallback: TokenScope = 'repo:write'): TokenScope | null => {
+  if (text === null || text === undefined || text.trim() === '') return fallback
+  const words = text.trim().split(/\s+/)
+  if (!words.every(isTokenScope)) return null
+  return highestScope(words as TokenScope[])
+}
+
+export const grantedScope = (requested: TokenScope, chosen: string | null | undefined): TokenScope => {
+  if (!isTokenScope(chosen)) return requested
+  return scopeRank(chosen) < scopeRank(requested) ? chosen : requested
+}
+
 export const tokenKindOf = (token: string): TokenKind | null => {
   const match = TOKEN_PATTERN.exec(token)
   if (!match) return null

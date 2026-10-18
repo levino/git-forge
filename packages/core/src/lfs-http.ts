@@ -10,10 +10,12 @@ import {
   type LfsLinks,
   type LfsObjectSpec,
   LfsRequestError,
+  oversizeMessage,
   parseBatchRequest,
   storeLfsObject,
   verifyLfsObject,
 } from './lfs.ts'
+import type { DigestFactory } from './digest.ts'
 import { readRefs, type RepositoryName } from './repository.ts'
 import type { Storage } from './storage.ts'
 
@@ -21,6 +23,8 @@ export type LfsHttpOptions = {
   readonly expiresInSeconds?: number
   readonly maxJsonBytes?: number
   readonly maxObjectBytes?: number
+  readonly digests?: DigestFactory
+  readonly oversizeHint?: string
 }
 
 export type LfsContext = {
@@ -96,7 +100,10 @@ export const handleLfsRequest = async (request: Request, repo: RepositoryName, p
       const denied = await context.authorize?.(request, repo, batch.operation === 'upload' ? 'write' : 'read', 'lfs')
       if (denied) return denied
       if (!(await readRefs(storage, repo))) return failure(404, 'repository not found')
-      const limits = context.lfs?.maxObjectBytes !== undefined ? { maxObjectBytes: context.lfs.maxObjectBytes } : {}
+      const limits = {
+        ...(context.lfs?.maxObjectBytes !== undefined ? { maxObjectBytes: context.lfs.maxObjectBytes } : {}),
+        ...(context.lfs?.oversizeHint ? { oversizeHint: context.lfs.oversizeHint } : {}),
+      }
       return json(200, await lfsBatch(storage, repo, batch, selfLinks(request, base, storage, repo, expiresIn), limits))
     }
     if (path === '/info/lfs/objects/verify') {
@@ -104,7 +111,10 @@ export const handleLfsRequest = async (request: Request, repo: RepositoryName, p
       const denied = await context.authorize?.(request, repo, 'write', 'lfs')
       if (denied) return denied
       const spec = parseSpec(await readJson(request, 64 * 1024))
-      const result = await verifyLfsObject(storage, repo, spec, { checkHash: storage.presignPut !== undefined })
+      const result = await verifyLfsObject(storage, repo, spec, {
+        checkHash: storage.presignPut !== undefined,
+        ...(context.lfs?.digests ? { digests: context.lfs.digests } : {}),
+      })
       return result.ok ? json(200, { message: 'ok' }) : failure(result.status, result.message)
     }
     const oid = OBJECT_PATH.exec(path)?.[1]
@@ -118,7 +128,7 @@ export const handleLfsRequest = async (request: Request, repo: RepositoryName, p
       const max = context.lfs?.maxObjectBytes
       if (max !== undefined && size > max) {
         await request.body?.cancel()
-        return failure(413, `object exceeds ${max} bytes`)
+        return failure(413, oversizeMessage(max, context.lfs?.oversizeHint))
       }
       if (!(await readRefs(storage, repo))) return failure(404, 'repository not found')
       const result = await storeLfsObject(storage, repo, { oid, size }, request.body ?? new ReadableStream({ start: (c) => c.close() }))

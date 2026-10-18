@@ -13,6 +13,7 @@ const releaseRoot = resolve(import.meta.dirname, '..')
 const templateRoot = resolve(releaseRoot, '../templates/instance')
 const wrangler = join(releaseRoot, 'node_modules/.bin/wrangler')
 const BOOTSTRAP_TOKEN = `release-${crypto.randomUUID()}`
+const PIN = /V=\S+ S=[0-9a-f]{64}/
 
 const gitEnv = {
   GIT_AUTHOR_NAME: 'Release',
@@ -32,12 +33,20 @@ const git = async (cwd: string, args: readonly string[]): Promise<string> =>
 
 const sha256 = (path: string): string => createHash('sha256').update(readFileSync(path)).digest('hex')
 
-const pin = (instance: string, version: string, sum: string): void =>
-  writeFileSync(join(instance, 'git-forge.json'), `${JSON.stringify({ version, sha256: sum }, null, 2)}\n`)
+const buildCommand = (toml: string): string => {
+  const line = /^command = (".*")$/m.exec(toml)?.[1]
+  if (!line) throw new Error('wrangler.toml has no [build] command')
+  return JSON.parse(line) as string
+}
+
+const pin = (instance: string, version: string, sum: string): void => {
+  const path = join(instance, 'wrangler.toml')
+  writeFileSync(path, readFileSync(path, 'utf8').replace(PIN, `V=${version} S=${sum}`))
+}
 
 const newInstance = (version: string, sum: string): string => {
   const instance = join(tempDir(), 'instance')
-  cpSync(templateRoot, instance, { recursive: true, filter: (path) => !/\/(dist|dist\.tmp|\.wrangler)(\/|$)/.test(path) })
+  cpSync(templateRoot, instance, { recursive: true, filter: (path) => !/\/(dist|\.wrangler)(\/|$)/.test(path) })
   pin(instance, version, sum)
   return instance
 }
@@ -46,7 +55,8 @@ type Result = { readonly code: number; readonly output: string }
 
 const buildInstance = async (instance: string, releaseUrl: string): Promise<Result> => {
   try {
-    const { stdout, stderr } = await run('sh', [join(instance, 'build.sh')], { env: { ...process.env, GIT_FORGE_RELEASE_URL: releaseUrl } })
+    const command = buildCommand(readFileSync(join(instance, 'wrangler.toml'), 'utf8'))
+    const { stdout, stderr } = await run('sh', ['-c', command], { cwd: instance, env: { ...process.env, GIT_FORGE_RELEASE_URL: releaseUrl } })
     return { code: 0, output: stdout + stderr }
   } catch (error) {
     const failure = error as { code?: number; stdout?: string; stderr?: string }
@@ -136,13 +146,35 @@ describe('release bundle', () => {
   })
 })
 
-describe('instance template build script', () => {
+describe('instance template', () => {
+  const toml = readFileSync(join(templateRoot, 'wrangler.toml'), 'utf8')
+
+  it('consists of one wrangler.toml that pins a published release', () => {
+    expect(readdirSync(templateRoot).sort()).toEqual(['.dev.vars.example', '.gitignore', 'README.md', 'runner', 'wrangler.toml'])
+    const pins = toml.match(new RegExp(PIN, 'g')) ?? []
+    expect(pins).toHaveLength(1)
+    expect(pins[0]).toMatch(/^V=\d+\.\d+\.\d+ S=(?!0{64})[0-9a-f]{64}$/)
+    expect(buildCommand(toml)).toContain('https://github.com/levino/git-forge/releases/download/v$V')
+  })
+
+  it('declares every resource by name only, so the first deploy provisions it', () => {
+    expect(toml).not.toMatch(/\b(database_id|id)\s*=/)
+    expect(toml).toMatch(/\[\[d1_databases\]\]\nbinding = "DB"\ndatabase_name = "[^"]+"\n\n/)
+    expect(toml).toMatch(/\[\[r2_buckets\]\]\nbinding = "BUCKET"\nbucket_name = "[^"]+"\n\n/)
+    expect(toml).toMatch(/queue = "[^"]+-jobs"/)
+  })
+
+  it('asks for BOOTSTRAP_TOKEN as the only secret', () => {
+    expect(readFileSync(join(templateRoot, '.dev.vars.example'), 'utf8')).toBe('BOOTSTRAP_TOKEN=change-me-to-a-long-random-string\n')
+  })
+})
+
+describe('instance template build command', () => {
   it('refuses a release whose SHA256SUMS does not match the pin', async () => {
     const wrong = newInstance('0.0.0-test', '0'.repeat(64))
     const result = await buildInstance(wrong, releaseUrl)
     expect(result.code).not.toBe(0)
-    expect(result.output).toContain('does not match the sha256 in git-forge.json')
-    expect(existsSync(join(wrong, 'dist'))).toBe(false)
+    expect(result.output).toContain('SHA256SUMS: FAILED')
   })
 
   it('refuses a tampered bundle', async () => {
@@ -152,50 +184,32 @@ describe('instance template build script', () => {
     const other = newInstance('0.0.0-test', pinned)
     const result = await buildInstance(other, `file://${tampered}`)
     expect(result.code).not.toBe(0)
-    expect(result.output).toContain('release assets do not match SHA256SUMS')
-    expect(existsSync(join(other, 'dist'))).toBe(false)
+    expect(result.output).toContain('git-forge-worker.mjs: FAILED')
   })
 
-  it('downloads and verifies the pinned release, and is idempotent', async () => {
-    const first = await buildInstance(instance, releaseUrl)
-    expect(first).toMatchObject({ code: 0 })
+  it('downloads and verifies the pinned release, also over an earlier build', async () => {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const result = await buildInstance(instance, releaseUrl)
+      expect(result).toMatchObject({ code: 0 })
+      expect(result.output).toContain('git-forge-worker.mjs: OK')
+    }
     expect(readFileSync(join(instance, 'dist/git-forge-worker.mjs'))).toEqual(readFileSync(join(release, 'git-forge-worker.mjs')))
-    expect(existsSync(join(instance, 'dist/migrations/0001_initial.sql'))).toBe(true)
-    const second = await buildInstance(instance, 'file:///nonexistent')
-    expect(second.code).toBe(0)
-    expect(second.output).toContain('already matches')
-  })
-
-  it('applies the bundled D1 migrations', async () => {
-    const { stdout, stderr } = await run(wrangler, ['d1', 'migrations', 'apply', 'DB', '--local', '--persist-to', persist], { cwd: instance, env: wranglerEnv(releaseUrl) })
-    expect(stdout + stderr).toContain('0001_initial.sql')
-    expect(stdout + stderr).toContain('0003_instance_admins.sql')
-  })
-})
-
-describe('instance template deploy script', () => {
-  const deployWith = async (databaseExists: boolean): Promise<string[]> => {
-    const target = newInstance('0.0.0-test', pinned)
-    const calls = join(tempDir(), 'calls')
-    const stub = join(tempDir(), 'wrangler')
-    writeFileSync(stub, `#!/bin/sh\necho "$*" >> '${calls}'\nif [ "$1 $2" = "d1 info" ]; then exit ${databaseExists ? 0 : 1}; fi\n`, { mode: 0o755 })
-    await run('sh', [join(target, 'deploy.sh')], { env: { ...process.env, GIT_FORGE_RELEASE_URL: releaseUrl, WRANGLER: stub } })
-    expect(existsSync(join(target, 'dist/git-forge-worker.mjs'))).toBe(true)
-    return readFileSync(calls, 'utf8').trim().split('\n')
-  }
-
-  it('migrates before deploying an existing instance', async () => {
-    expect(await deployWith(true)).toEqual(['d1 info DB', 'd1 migrations apply DB --remote', 'deploy'])
-  })
-
-  it('deploys first to provision the database on the first deploy', async () => {
-    expect(await deployWith(false)).toEqual(['d1 info DB', 'deploy', 'd1 migrations apply DB --remote'])
+    expect(existsSync(join(instance, 'dist/migrations.tar.gz'))).toBe(false)
   })
 })
 
 describe('instance on wrangler dev', () => {
-  it('serves a push and a clone with the real git client', async () => {
+  it('migrates its database on start and accepts a one-time admin claim', async () => {
     await startDev()
+    const { stdout } = await run(
+      wrangler,
+      ['d1', 'execute', 'DB', '--local', '--persist-to', persist, '--json', '--command', "INSERT INTO instance_admin_claims (identity, created_at) VALUES ('admin@example.org', unixepoch() * 1000)"],
+      { cwd: instance, env: wranglerEnv(releaseUrl) },
+    )
+    expect(JSON.parse(stdout)).toMatchObject([{ success: true }])
+  })
+
+  it('serves a push and a clone with the real git client', async () => {
     const post = (path: string, token: string, body: unknown) =>
       fetch(`${url}${path}`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
     const bootstrapped = await post('/api/bootstrap', BOOTSTRAP_TOKEN, { login: 'smoke' })

@@ -195,6 +195,7 @@ export type TokenGrant = {
   readonly jobId?: string
   readonly owner?: string
   readonly repo?: string
+  readonly scope?: string
   readonly ttlMs: number
 }
 
@@ -218,6 +219,7 @@ const mintToken = (grant: TokenGrant, now: number): string => {
     iat: seconds,
     exp: Math.floor((now + grant.ttlMs) / 1000),
     ...(grant.jobId ? { orchid: grant.jobId } : {}),
+    ...(grant.scope ? { scp: grant.scope } : {}),
   }
   return `${base64UrlJson({ typ: 'JWT', alg: 'HS256' })}.${base64UrlJson(payload)}.${base64UrlEncode(randomBytes(32))}`
 }
@@ -246,8 +248,13 @@ export const verifyToken = async (db: Database, token: string, kind: TokenKind, 
 }
 
 export const revokeJobTokens = async (db: Database, jobId: string, now: number): Promise<void> => {
-  await db.run(sql('UPDATE actions_tokens SET expires_at = ? WHERE job_id = ? AND expires_at > ?', now, jobId, now))
+  await db.batch([
+    sql('UPDATE actions_tokens SET expires_at = ? WHERE job_id = ? AND expires_at > ?', now, jobId, now),
+    sql('UPDATE actions_blob_grants SET expires_at = ? WHERE job_id = ? AND expires_at > ?', now, jobId, now),
+  ])
 }
+
+export const resultsScope = (runId: number, jobId: string): string => `Actions.Results:${runId}:${jobId}`
 
 export const createSession = async (db: Database, runnerId: number, ownerName: string, now: number): Promise<string> => {
   const id = crypto.randomUUID()
@@ -324,8 +331,23 @@ export const startRunAttempt = async (db: Database, id: number, attempt: number)
 export const activeRunsInGroup = async (db: Database, owner: string, repo: string, group: string): Promise<RunRow[]> =>
   db.all<RunRow>(sql('SELECT * FROM actions_runs WHERE owner = ? AND repo = ? AND concurrency_group = ? AND completed_at IS NULL ORDER BY id', owner, repo, group))
 
-export const listRuns = async (db: Database, owner: string, repo: string, limit = 30): Promise<RunRow[]> =>
-  db.all<RunRow>(sql('SELECT * FROM actions_runs WHERE owner = ? AND repo = ? ORDER BY id DESC LIMIT ?', owner, repo, limit))
+export const listRuns = async (db: Database, owner: string, repo: string, limit = 30, workflowPath: string | null = null): Promise<RunRow[]> =>
+  db.all<RunRow>(
+    workflowPath === null
+      ? sql('SELECT * FROM actions_runs WHERE owner = ? AND repo = ? ORDER BY id DESC LIMIT ?', owner, repo, limit)
+      : sql('SELECT * FROM actions_runs WHERE owner = ? AND repo = ? AND workflow_path = ? ORDER BY id DESC LIMIT ?', owner, repo, workflowPath, limit),
+  )
+
+export type RunWorkflow = { readonly path: string; readonly name: string }
+
+export const listRunWorkflows = async (db: Database, owner: string, repo: string): Promise<RunWorkflow[]> =>
+  db.all<RunWorkflow>(
+    sql(
+      'SELECT r.workflow_path AS path, r.workflow_name AS name FROM actions_runs r WHERE r.owner = ? AND r.repo = ? AND r.id = (SELECT MAX(id) FROM actions_runs WHERE owner = r.owner AND repo = r.repo AND workflow_path = r.workflow_path) ORDER BY r.workflow_name, r.workflow_path',
+      owner,
+      repo,
+    ),
+  )
 
 export const getRun = async (db: Database, id: number): Promise<RunRow | null> => first<RunRow>(db, sql('SELECT * FROM actions_runs WHERE id = ?', id))
 
@@ -481,7 +503,10 @@ export const listJobsByStatus = async (db: Database, statuses: readonly JobStatu
 export const listStaleSessions = async (db: Database, before: number): Promise<SessionRow[]> =>
   db.all<SessionRow>(sql('SELECT * FROM actions_sessions WHERE closed_at IS NULL AND last_seen_at < ? LIMIT 200', before))
 
-export const deleteExpiredTokens = async (db: Database, before: number): Promise<number> => (await db.run(sql('DELETE FROM actions_tokens WHERE expires_at < ?', before))).changes
+export const deleteExpiredTokens = async (db: Database, before: number): Promise<number> => {
+  const [tokens, grants] = await db.batch([sql('DELETE FROM actions_tokens WHERE expires_at < ?', before), sql('DELETE FROM actions_blob_grants WHERE expires_at < ?', before)])
+  return tokens!.changes + grants!.changes
+}
 
 export const getJob = async (db: Database, requestId: number): Promise<JobRow | null> => first<JobRow>(db, sql('SELECT * FROM actions_jobs WHERE request_id = ?', requestId))
 
@@ -598,8 +623,27 @@ export const recordLogChunk = async (db: Database, id: number, chunk: number): P
   await db.run(sql('UPDATE actions_logs SET chunks = MAX(chunks, ?) WHERE id = ?', chunk + 1, id))
 }
 
-export const promoteJob = async (db: Database, requestId: number): Promise<boolean> =>
-  (await db.run(sql("UPDATE actions_jobs SET status = 'queued' WHERE request_id = ? AND status = 'pending'", requestId))).changes === 1
+export type JobGroup = { readonly owner: string; readonly repo: string; readonly group: string }
+
+const IN_GROUP = "json_extract(j.definition, '$.concurrency.group') = ? AND j.run_id IN (SELECT id FROM actions_runs WHERE owner = ? AND repo = ?)"
+
+export const promoteJob = async (db: Database, requestId: number, group: JobGroup | null = null): Promise<boolean> =>
+  (
+    await db.run(
+      group
+        ? sql(
+            `UPDATE actions_jobs SET status = 'queued' WHERE request_id = ? AND status = 'pending' AND NOT EXISTS (SELECT 1 FROM actions_jobs j WHERE j.status IN ('queued', 'assigned', 'in_progress') AND ${IN_GROUP})`,
+            requestId,
+            group.group,
+            group.owner,
+            group.repo,
+          )
+        : sql("UPDATE actions_jobs SET status = 'queued' WHERE request_id = ? AND status = 'pending'", requestId),
+    )
+  ).changes === 1
+
+export const jobsInGroup = async (db: Database, group: JobGroup): Promise<JobRow[]> =>
+  db.all<JobRow>(sql(`SELECT j.* FROM actions_jobs j WHERE j.status != 'completed' AND ${IN_GROUP} ORDER BY j.request_id`, group.group, group.owner, group.repo))
 
 export const skipJob = async (db: Database, requestId: number, now: number): Promise<boolean> =>
   (await db.run(sql("UPDATE actions_jobs SET status = 'completed', conclusion = 'skipped', completed_at = ? WHERE request_id = ? AND status = 'pending'", now, requestId)))

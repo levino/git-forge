@@ -1,38 +1,61 @@
 ---
-import { cloneUrl, commitsUrl, type OpenRepository, treeUrl } from '../ui/repository.ts'
+import { cloneUrl, commitsUrl, type OpenRepository, repoUrl, treeUrl } from '../ui/repository.ts'
 import type { TreeView } from '../ui/browse.ts'
 import Breadcrumbs from './Breadcrumbs.astro'
+import CopyField from './CopyField.astro'
 import FileList from './FileList.astro'
+import Icon from './Icon.astro'
 import LatestCommit from './LatestCommit.astro'
 import Readme from './Readme.astro'
 import RefPicker from './RefPicker.astro'
 
-type Props = { repo: OpenRepository; view: TreeView | { kind: 'empty' } }
+type Props = { repo: OpenRepository; view: TreeView | { kind: 'empty' }; importing?: boolean }
 
-const { repo, view } = Astro.props
+const { repo, view, importing = false } = Astro.props
 const origin = Astro.url.origin
 ---
 
 {
   view.kind === 'empty' ? (
-    <section class="border border-base-300 rounded-box p-6" aria-labelledby="empty-title">
-      <h2 id="empty-title" class="text-lg font-semibold mb-2">
-        This repository is empty
-      </h2>
-      <p class="mb-4">Push an existing repository from the command line:</p>
-      <pre class="bg-base-200 rounded-box p-4 text-sm overflow-x-auto">
-        <code>{`git remote add origin ${cloneUrl(origin, repo.name)}\ngit push -u origin main`}</code>
-      </pre>
+    <section class="border border-base-300 rounded-box p-6 flex flex-col gap-4 max-w-3xl" aria-labelledby="empty-title">
+      <div class="flex items-center gap-3">
+        <Icon name="repo" class="size-6 text-base-content/40" />
+        <h2 id="empty-title" class="text-base font-semibold">
+          This repository is empty
+        </h2>
+      </div>
+      {importing && (
+        <p>
+          An import into this repository exists. <a class="link link-primary" href={repoUrl(repo.name, 'import')}>View the import status</a>
+        </p>
+      )}
+      <div>
+        <CopyField id="empty-clone-url" value={cloneUrl(origin, repo.name)} label="Clone over HTTPS" />
+      </div>
+      <p class="text-base-content/70">Push an existing repository from the command line:</p>
+      <pre class="bg-base-200 border border-base-300 rounded-box p-4 text-xs overflow-x-auto"><code>{`git remote add origin ${cloneUrl(origin, repo.name)}\ngit push -u origin ${repo.refs.head.replace(/^refs\/heads\//, '')}`}</code></pre>
     </section>
   ) : (
     <>
-      <div class="flex flex-wrap items-center gap-3 mb-3">
+      <div class="flex flex-wrap items-center gap-x-3 gap-y-2 mb-3">
         <RefPicker repo={repo} current={view.target.ref} link={(ref: string) => treeUrl(repo.name, ref, view.target.path)} />
         <Breadcrumbs repo={repo} refName={view.target.ref} path={view.target.path} />
+        {view.target.path.length === 0 && (
+          <div class="flex items-center gap-4 ml-auto text-base-content/70">
+            <a href={repoUrl(repo.name, 'branches')} class="flex items-center gap-1 hover:text-primary">
+              <Icon name="branch" />
+              <span class="font-semibold text-base-content">{repo.branches.length}</span> {repo.branches.length === 1 ? 'branch' : 'branches'}
+            </a>
+            <a href={repoUrl(repo.name, 'tags')} class="flex items-center gap-1 hover:text-primary">
+              <Icon name="tag" />
+              <span class="font-semibold text-base-content">{repo.tags.length}</span> {repo.tags.length === 1 ? 'tag' : 'tags'}
+            </a>
+          </div>
+        )}
       </div>
       <div class="border border-base-300 rounded-box overflow-hidden">
         {view.latest && <LatestCommit repo={repo.name} commit={view.latest} historyHref={commitsUrl(repo.name, view.target.ref, view.target.path)} />}
-        <FileList repo={repo} refName={view.target.ref} path={view.target.path} entries={view.entries} />
+        <FileList repo={repo} refName={view.target.ref} path={view.target.path} entries={view.entries} lfs={view.lfs} />
       </div>
       {view.readme && <Readme readme={view.readme} />}
     </>

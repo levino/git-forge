@@ -1,0 +1,144 @@
+---
+import Layout from '../layouts/Layout.astro'
+import { newRepositoryAction } from '../ui/new-repository.ts'
+
+const { forge } = Astro.locals
+let session = Astro.locals.session
+if (!session) return Astro.redirect(`/login?return_to=${encodeURIComponent('/new')}`)
+let error: string | null = null
+let values: Record<string, string> = {}
+if (Astro.request.method === 'POST') {
+  const verified = await forge.verifySessionWrite(Astro.request)
+  if (!verified) {
+    Astro.response.status = 403
+    error = 'The form expired. Reload the page and try again.'
+  } else {
+    session = verified
+    const form = await Astro.request.formData()
+    const result = await newRepositoryAction(forge, verified, form)
+    if (result.kind === 'redirect') return Astro.redirect(result.location, 303)
+    Astro.response.status = result.status
+    error = result.message
+    values = Object.fromEntries(['action', 'owner', 'name', 'visibility', 'defaultBranch', 'url', 'account'].map((key) => [key, String(form.get(key) ?? '')]))
+  }
+}
+Astro.response.headers.set('Cache-Control', 'no-store')
+const user = session.principal
+const owners = await forge.repositories.owners(user)
+const selectedOwner = values.owner || Astro.url.searchParams.get('owner') || user.login
+const importing = values.action === 'import'
+const importsEnabled = forge.repositories.importsEnabled
+---
+
+<Layout title="New repository" narrow>
+  <h1 class="text-xl font-semibold mb-5">New repository</h1>
+  {error && <div role="alert" class="alert alert-error mb-6 max-w-2xl">{error}</div>}
+
+  <form method="post" class="panel max-w-2xl" aria-label="Create a repository">
+    <h2 class="panel-title">Create a repository</h2>
+    <div class="contents">
+      <input type="hidden" name="csrf" value={session.csrf} />
+      <input type="hidden" name="action" value="create" />
+      <div class="flex flex-wrap items-end gap-2">
+        <div class="flex flex-col gap-1">
+          <label class="text-sm font-semibold" for="new-owner">Owner</label>
+          <select id="new-owner" name="owner" class="select">
+            {owners.map((owner) => <option value={owner} selected={owner === selectedOwner}>{owner}</option>)}
+          </select>
+        </div>
+        <span class="pb-2 text-lg" aria-hidden="true">/</span>
+        <div class="flex flex-col gap-1 flex-1 min-w-40">
+          <label class="text-sm font-semibold" for="new-name">Repository name</label>
+          <input id="new-name" name="name" class="input w-full" required maxlength="100" pattern="[A-Za-z0-9][A-Za-z0-9._\-]*" value={importing ? '' : values.name} />
+        </div>
+      </div>
+      <fieldset class="flex flex-wrap gap-4">
+        <legend class="text-sm font-semibold mb-1">Visibility</legend>
+        <label class="flex items-center gap-2">
+          <input type="radio" class="radio radio-sm" name="visibility" value="private" checked={values.visibility !== 'public' || importing} />
+          <span>Private</span>
+        </label>
+        <label class="flex items-center gap-2">
+          <input type="radio" class="radio radio-sm" name="visibility" value="public" checked={values.visibility === 'public' && !importing} />
+          <span>Public</span>
+        </label>
+      </fieldset>
+      <label class="text-sm font-semibold" for="new-branch">Default branch</label>
+      <input id="new-branch" name="defaultBranch" class="input w-full" maxlength="100" value={(!importing && values.defaultBranch) || 'main'} />
+      <button class="btn btn-primary self-start">Create repository</button>
+    </div>
+  </form>
+
+  <section class="panel max-w-2xl" aria-labelledby="import-title">
+    <h2 id="import-title" class="panel-title">Import repository</h2>
+    {
+      importsEnabled ? (
+        <form method="post" class="flex flex-col gap-3" aria-label="Import a repository">
+          <div class="contents">
+            <p class="text-sm text-base-content/70">Copies all branches and tags from any Git server over HTTP(S). The import runs in the background.</p>
+            <input type="hidden" name="csrf" value={session.csrf} />
+            <input type="hidden" name="action" value="import" />
+            <label class="text-sm font-semibold" for="import-url">Clone URL</label>
+            <input id="import-url" name="url" type="url" class="input w-full font-mono" required placeholder="https://github.com/owner/repo.git" value={importing ? values.url : ''} />
+            <label class="text-sm font-semibold" for="import-token">Access token (optional)</label>
+            <input id="import-token" name="token" type="password" class="input w-full" autocomplete="off" />
+            <label class="flex items-center gap-2">
+              <input type="checkbox" class="checkbox checkbox-sm" name="lfs" />
+              <span>Copy Git LFS objects</span>
+            </label>
+            <div class="flex flex-wrap items-end gap-2">
+              <div class="flex flex-col gap-1">
+                <label class="text-sm font-semibold" for="import-owner">Owner</label>
+                <select id="import-owner" name="owner" class="select">
+                  {owners.map((owner) => <option value={owner} selected={owner === selectedOwner}>{owner}</option>)}
+                </select>
+              </div>
+              <span class="pb-2 text-lg" aria-hidden="true">/</span>
+              <div class="flex flex-col gap-1 flex-1 min-w-40">
+                <label class="text-sm font-semibold" for="import-name">Repository name</label>
+                <input id="import-name" name="name" class="input w-full" required maxlength="100" pattern="[A-Za-z0-9][A-Za-z0-9._\-]*" value={importing ? values.name : ''} />
+              </div>
+            </div>
+            <fieldset class="flex flex-wrap gap-4">
+              <legend class="text-sm font-semibold mb-1">Visibility</legend>
+              <label class="flex items-center gap-2">
+                <input type="radio" class="radio radio-sm" name="visibility" value="private" checked={!(importing && values.visibility === 'public')} />
+                <span>Private</span>
+              </label>
+              <label class="flex items-center gap-2">
+                <input type="radio" class="radio radio-sm" name="visibility" value="public" checked={importing && values.visibility === 'public'} />
+                <span>Public</span>
+              </label>
+            </fieldset>
+            <button class="btn self-start">Start import</button>
+          </div>
+        </form>
+      ) : (
+        <p class="text-sm text-base-content/70">Imports are not available on this instance (they need the IMPORTS queue).</p>
+      )
+    }
+  </section>
+
+  <section class="panel max-w-2xl" aria-labelledby="github-title">
+    <h2 id="github-title" class="panel-title">Mirror a GitHub account</h2>
+    <form method="post" class="flex flex-col gap-3" aria-label="Mirror a GitHub account">
+      <div class="contents">
+        <p class="text-sm text-base-content/70">Creates one mirror per repository of a GitHub user or organization. Existing repositories are skipped.</p>
+        <input type="hidden" name="csrf" value={session.csrf} />
+        <input type="hidden" name="action" value="github" />
+        <label class="text-sm font-semibold" for="github-account">GitHub user or organization</label>
+        <input id="github-account" name="account" class="input w-full" required maxlength="100" value={values.action === 'github' ? values.account : ''} />
+        <label class="text-sm font-semibold" for="github-owner">Owner on this forge</label>
+        <select id="github-owner" name="owner" class="select">
+          {owners.map((owner) => <option value={owner} selected={owner === selectedOwner}>{owner}</option>)}
+        </select>
+        <label class="text-sm font-semibold" for="github-token">GitHub token (needed for private repositories and webhooks)</label>
+        <input id="github-token" name="token" type="password" class="input w-full" autocomplete="off" />
+        <label class="flex items-center gap-2"><input type="checkbox" class="checkbox checkbox-sm" name="archived" checked /><span>Include archived repositories</span></label>
+        <label class="flex items-center gap-2"><input type="checkbox" class="checkbox checkbox-sm" name="forks" /><span>Include forks</span></label>
+        <label class="flex items-center gap-2"><input type="checkbox" class="checkbox checkbox-sm" name="webhook" /><span>Register push webhooks (token with admin:repo_hook)</span></label>
+        <button class="btn self-start">Mirror repositories</button>
+      </div>
+    </form>
+  </section>
+</Layout>

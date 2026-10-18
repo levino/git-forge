@@ -1,6 +1,5 @@
 import { fromUtf8, toHex } from './bytes.ts'
 import { type DigestFactory, javascriptDigests } from './digest.ts'
-import { createSha256 } from './hash.ts'
 import type { GitObject } from './objects.ts'
 import { alternateRepositories, repositoryPrefix, type RepositoryName } from './repository.ts'
 import type { Storage } from './storage.ts'
@@ -119,7 +118,11 @@ export const hasLfsObject = async (storage: Storage, repo: RepositoryName, objec
 
 export type LfsLimits = {
   readonly maxObjectBytes?: number
+  readonly oversizeHint?: string
 }
+
+export const oversizeMessage = (maxObjectBytes: number, hint?: string): string =>
+  hint ? `object exceeds ${maxObjectBytes} bytes; ${hint}` : `object exceeds ${maxObjectBytes} bytes`
 
 const describeObject = async (
   storage: Storage,
@@ -140,7 +143,7 @@ const describeObject = async (
   if (stored === object.size) return { ...object, authenticated: true }
   if (stored !== null) return { ...object, error: { code: 422, message: `object size is ${stored}, not ${object.size}` } }
   if (limits.maxObjectBytes !== undefined && object.size > limits.maxObjectBytes) {
-    return { ...object, error: { code: 422, message: `object exceeds ${limits.maxObjectBytes} bytes` } }
+    return { ...object, error: { code: 422, message: oversizeMessage(limits.maxObjectBytes, limits.oversizeHint) } }
   }
   return { ...object, authenticated: true, actions: { upload: await links.upload(object), verify: await links.verify(object) } }
 }
@@ -177,8 +180,11 @@ export const verifyingStream = (expected: LfsObjectSpec, digests: DigestFactory 
   })
 }
 
-export const hashStream = async (stream: ReadableStream<Uint8Array>): Promise<{ readonly oid: string; readonly size: number }> => {
-  const hash = createSha256()
+export const hashStream = async (
+  stream: ReadableStream<Uint8Array>,
+  digests: DigestFactory = javascriptDigests,
+): Promise<{ readonly oid: string; readonly size: number }> => {
+  const hash = digests('SHA-256')
   let size = 0
   const reader = stream.getReader()
   for (;;) {
@@ -187,7 +193,7 @@ export const hashStream = async (stream: ReadableStream<Uint8Array>): Promise<{ 
     size += value.length
     hash.update(value)
   }
-  return { oid: toHex(hash.digest()), size }
+  return { oid: toHex(await hash.digest()), size }
 }
 
 export type StoreResult = { readonly ok: true; readonly created: boolean } | { readonly ok: false; readonly status: number; readonly message: string }
@@ -226,7 +232,7 @@ export const verifyLfsObject = async (
   storage: Storage,
   repo: RepositoryName,
   object: LfsObjectSpec,
-  options: { readonly checkHash: boolean },
+  options: { readonly checkHash: boolean; readonly digests?: DigestFactory },
 ): Promise<VerifyResult> => {
   const invalid = objectError(object)
   if (invalid) return { ok: false, status: 422, message: invalid }
@@ -242,7 +248,7 @@ export const verifyLfsObject = async (
     await stored.body.cancel()
     return { ok: false, status: 422, message: `object size is ${stored.size}, not ${object.size}` }
   }
-  const actual = await hashStream(stored.body)
+  const actual = await hashStream(stored.body, options.digests)
   if (actual.oid !== object.oid || actual.size !== object.size) return { ok: false, status: 422, message: `stored object hashes to ${actual.oid}` }
   return { ok: true }
 }

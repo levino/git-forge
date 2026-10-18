@@ -63,6 +63,10 @@ export const LOGIN_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/
 
 export const TEAM_SLUG_PATTERN = LOGIN_PATTERN
 
+export const RESERVED_LOGINS: ReadonlySet<string> = new Set(['api', 'explore', 'login', 'logout', 'settings', 'notifications', 'organizations', 'orgs', 'new'])
+
+export const isReservedLogin = (login: string): boolean => RESERVED_LOGINS.has(login.toLowerCase())
+
 const requireLogin = (login: string) => {
   if (!LOGIN_PATTERN.test(login)) throw new AccountsError(`invalid login ${login}`)
 }
@@ -333,6 +337,35 @@ export const createAccountsStore = (db: Database, options: AccountsStoreOptions 
       ])
     },
 
+    addInstanceAdminClaim: async (identity: string): Promise<void> => {
+      await db.run(sql('INSERT INTO instance_admin_claims (identity, created_at) VALUES (?, ?) ON CONFLICT (identity) DO NOTHING', identity, now()))
+    },
+
+    hasInstanceAdminClaim: async (identities: readonly string[]): Promise<boolean> => {
+      const wanted = identities.filter((identity) => identity !== '')
+      if (wanted.length === 0) return false
+      const row = await first<{ ok: number }>(db, sql(`SELECT 1 AS ok FROM instance_admin_claims WHERE identity IN (${wanted.map(() => '?').join(', ')})`, ...wanted))
+      return row !== null
+    },
+
+    redeemInstanceAdminClaim: async (userId: string, identities: readonly string[]): Promise<boolean> => {
+      const wanted = identities.filter((identity) => identity !== '')
+      if (wanted.length === 0) return false
+      const at = now()
+      const results = await db.batch([
+        sql(
+          `INSERT INTO instance_admins (user_id, created_at) SELECT ?, ? WHERE EXISTS (SELECT 1 FROM instance_admin_claims WHERE identity IN (${wanted.map(() => '?').join(', ')}))
+           ON CONFLICT (user_id) DO NOTHING`,
+          userId,
+          at,
+          ...wanted,
+        ),
+        sql(`DELETE FROM instance_admin_claims WHERE identity IN (${wanted.map(() => '?').join(', ')})`, ...wanted),
+        auditStatement(SYSTEM, { action: 'instance.admin.claim', subjectKind: 'user', subjectId: userId }, at),
+      ])
+      return results[1]!.changes > 0
+    },
+
     findUserByExternalIdentity: async (issuer: string, subject: string): Promise<{ readonly id: string; readonly login: string } | null> =>
       first<{ id: string; login: string }>(
         db,
@@ -352,8 +385,24 @@ export const createAccountsStore = (db: Database, options: AccountsStoreOptions 
       return row ? { id: row.id, login: row.login, displayName: row.display_name, email: row.email } : null
     },
 
-    findAccount: async (login: string): Promise<{ readonly id: string; readonly kind: OwnerKind; readonly login: string } | null> =>
-      first<{ id: string; kind: OwnerKind; login: string }>(db, sql('SELECT id, kind, login FROM accounts WHERE login = ?', login)),
+    findAccount: async (login: string): Promise<{ readonly id: string; readonly kind: OwnerKind; readonly login: string; readonly displayName?: string | null } | null> =>
+      first<{ id: string; kind: OwnerKind; login: string; displayName: string | null }>(db, sql('SELECT id, kind, login, display_name AS displayName FROM accounts WHERE login = ?', login)),
+
+    isOrganizationOwner: async (organizationId: string, userId: string): Promise<boolean> =>
+      (await first(db, sql("SELECT 1 AS ok FROM organization_members WHERE organization_id = ? AND user_id = ? AND role = 'owner'", organizationId, userId))) !== null,
+
+    ownedOrganizations: async (userId: string): Promise<string[]> =>
+      (
+        await db.all<{ login: string }>(
+          sql(
+            "SELECT a.login FROM organization_members m JOIN accounts a ON a.id = m.organization_id WHERE m.user_id = ? AND m.role = 'owner' AND a.disabled_at IS NULL ORDER BY a.login",
+            userId,
+          ),
+        )
+      ).map((row) => row.login),
+
+    listAccountLogins: async (): Promise<string[]> =>
+      (await db.all<{ login: string }>(sql('SELECT login FROM accounts WHERE disabled_at IS NULL ORDER BY login'))).map((row) => row.login),
 
     setOrganizationMember: async (organizationId: string, userId: string, role: OrganizationRole, actor: AuditActor = SYSTEM): Promise<void> => {
       await requireAccount(organizationId, 'organization')
@@ -402,6 +451,67 @@ export const createAccountsStore = (db: Database, options: AccountsStoreOptions 
           now(),
         ),
       ])
+    },
+
+    organizationRole: async (organizationId: string, userId: string): Promise<OrganizationRole | null> =>
+      (await first<{ role: OrganizationRole }>(db, sql('SELECT role FROM organization_members WHERE organization_id = ? AND user_id = ?', organizationId, userId)))?.role ?? null,
+
+    listOrganizationMembers: async (organizationId: string): Promise<{ readonly id: string; readonly login: string; readonly role: OrganizationRole }[]> =>
+      db.all<{ id: string; login: string; role: OrganizationRole }>(
+        sql('SELECT a.id, a.login, m.role FROM organization_members m JOIN accounts a ON a.id = m.user_id WHERE m.organization_id = ? ORDER BY a.login', organizationId),
+      ),
+
+    organizationsOf: async (userId: string): Promise<{ readonly id: string; readonly login: string; readonly role: OrganizationRole }[]> =>
+      db.all<{ id: string; login: string; role: OrganizationRole }>(
+        sql('SELECT a.id, a.login, m.role FROM organization_members m JOIN accounts a ON a.id = m.organization_id WHERE m.user_id = ? AND a.disabled_at IS NULL ORDER BY a.login', userId),
+      ),
+
+    listTeams: async (organizationId: string): Promise<{ readonly id: string; readonly slug: string; readonly name: string; readonly members: number }[]> =>
+      db.all<{ id: string; slug: string; name: string; members: number }>(
+        sql(
+          'SELECT t.id, t.slug, t.name, (SELECT COUNT(*) FROM team_members m WHERE m.team_id = t.id) AS members FROM teams t WHERE t.organization_id = ? ORDER BY t.slug',
+          organizationId,
+        ),
+      ),
+
+    listTeamMembers: async (teamId: string): Promise<{ readonly id: string; readonly login: string; readonly role: 'member' | 'maintainer' }[]> =>
+      db.all<{ id: string; login: string; role: 'member' | 'maintainer' }>(
+        sql('SELECT a.id, a.login, m.role FROM team_members m JOIN accounts a ON a.id = m.user_id WHERE m.team_id = ? ORDER BY a.login', teamId),
+      ),
+
+    removeTeamMember: async (teamId: string, userId: string, actor: AuditActor = SYSTEM): Promise<void> => {
+      await write(actor, { action: 'team.member.remove', subjectKind: 'user', subjectId: userId, data: { teamId } }, [
+        sql('DELETE FROM team_members WHERE team_id = ? AND user_id = ?', teamId, userId),
+      ])
+    },
+
+    listTeamRepositories: async (teamId: string): Promise<{ readonly id: string; readonly name: string; readonly role: Role }[]> =>
+      (
+        await db.all<{ id: string; name: string; role: string }>(
+          sql('SELECT r.id, r.name, t.role FROM repository_teams t JOIN repositories r ON r.id = t.repository_id WHERE t.team_id = ? ORDER BY r.name', teamId),
+        )
+      ).flatMap((row) => (isRole(row.role) ? [{ id: row.id, name: row.name, role: row.role }] : [])),
+
+    removeTeamRepository: async (repositoryId: string, teamId: string, actor: AuditActor = SYSTEM): Promise<void> => {
+      await write(actor, { action: 'repository.team.remove', subjectKind: 'team', subjectId: teamId, repositoryId }, [
+        sql('DELETE FROM repository_teams WHERE repository_id = ? AND team_id = ?', repositoryId, teamId),
+      ])
+    },
+
+    listExternalIdentities: async (userId: string): Promise<{ readonly issuer: string; readonly subject: string; readonly email: string | null; readonly createdAt: number }[]> =>
+      (
+        await db.all<{ issuer: string; subject: string; email: string | null; created_at: number }>(
+          sql('SELECT issuer, subject, email, created_at FROM external_identities WHERE account_id = ? ORDER BY created_at', userId),
+        )
+      ).map((row) => ({ issuer: row.issuer, subject: row.subject, email: row.email, createdAt: row.created_at })),
+
+    unlinkExternalIdentity: async (userId: string, issuer: string, subject: string, actor: AuditActor = SYSTEM): Promise<boolean> => {
+      const linked = await first(db, sql('SELECT 1 AS ok FROM external_identities WHERE account_id = ? AND issuer = ? AND subject = ?', userId, issuer, subject))
+      if (!linked) return false
+      await write(actor, { action: 'identity.unlink', subjectKind: 'user', subjectId: userId, data: { issuer, subject } }, [
+        sql('DELETE FROM external_identities WHERE account_id = ? AND issuer = ? AND subject = ?', userId, issuer, subject),
+      ])
+      return true
     },
 
     createRepository: async (
@@ -477,9 +587,6 @@ export const createAccountsStore = (db: Database, options: AccountsStoreOptions 
       return row ? toSubject(row) : null
     },
 
-    organizationRole: async (organizationId: string, userId: string): Promise<OrganizationRole | null> =>
-      (await first<{ role: OrganizationRole }>(db, sql('SELECT role FROM organization_members WHERE organization_id = ? AND user_id = ?', organizationId, userId)))?.role ?? null,
-
     setRepositoryVisibility: async (repositoryId: string, visibility: Visibility, actor: AuditActor = SYSTEM): Promise<void> => {
       await write(actor, { action: 'repository.visibility', subjectKind: 'repository', subjectId: repositoryId, repositoryId, data: { visibility } }, [
         sql('UPDATE repositories SET visibility = ? WHERE id = ?', visibility, repositoryId),
@@ -529,6 +636,16 @@ export const createAccountsStore = (db: Database, options: AccountsStoreOptions 
 
     isInstanceAdmin: async (userId: string): Promise<boolean> =>
       (await first(db, sql('SELECT 1 AS ok FROM instance_admins i JOIN accounts a ON a.id = i.user_id WHERE i.user_id = ? AND a.disabled_at IS NULL', userId))) !== null,
+
+    listInstanceAdmins: async (): Promise<{ readonly id: string; readonly login: string }[]> =>
+      db.all<{ id: string; login: string }>(sql('SELECT a.id, a.login FROM instance_admins i JOIN accounts a ON a.id = i.user_id WHERE a.disabled_at IS NULL ORDER BY a.login')),
+
+    listTrustedInstances: async (): Promise<{ readonly issuer: string; readonly pinnedThumbprint: string | null; readonly createdAt: number }[]> =>
+      (
+        await db.all<{ issuer: string; pinned_thumbprint: string | null; created_at: number }>(
+          sql('SELECT issuer, pinned_thumbprint, created_at FROM trusted_instances WHERE disabled_at IS NULL ORDER BY issuer'),
+        )
+      ).map((row) => ({ issuer: row.issuer, pinnedThumbprint: row.pinned_thumbprint, createdAt: row.created_at })),
 
     setCollaborator: async (repositoryId: string, userId: string, role: Role, actor: AuditActor = SYSTEM): Promise<void> => {
       requireRole(role)
@@ -686,6 +803,16 @@ export const createAccountsStore = (db: Database, options: AccountsStoreOptions 
         sql('UPDATE trusted_instances SET disabled_at = ? WHERE issuer = ? AND disabled_at IS NULL', now(), normalized),
       ])
     },
+
+    listCollaborators: async (repositoryId: string): Promise<{ readonly id: string; readonly login: string; readonly role: Role }[]> =>
+      (
+        await db.all<{ id: string; login: string; role: string }>(
+          sql('SELECT a.id, a.login, c.role FROM repository_collaborators c JOIN accounts a ON a.id = c.user_id WHERE c.repository_id = ? ORDER BY a.login', repositoryId),
+        )
+      ).flatMap((row) => (isRole(row.role) ? [{ id: row.id, login: row.login, role: row.role }] : [])),
+
+    listInstanceGrants: async (repositoryId: string): Promise<{ readonly issuer: string; readonly role: string }[]> =>
+      db.all<{ issuer: string; role: string }>(sql('SELECT issuer, role FROM instance_repositories WHERE repository_id = ? ORDER BY issuer', repositoryId)),
 
     grantInstanceRepository: async (issuer: string, repositoryId: string, actor: AuditActor = SYSTEM): Promise<void> => {
       const normalized = normalizeIssuer(issuer)

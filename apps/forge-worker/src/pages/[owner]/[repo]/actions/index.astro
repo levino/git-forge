@@ -1,0 +1,73 @@
+---
+import EmptyState from '../../../../components/EmptyState.astro'
+import NotFound from '../../../../components/NotFound.astro'
+import RepoHeader from '../../../../components/RepoHeader.astro'
+import Layout from '../../../../layouts/Layout.astro'
+import { branchOf, runState } from '../../../../ui/actions.ts'
+import { isoTime, relativeTime, shortId } from '../../../../ui/format.ts'
+import { openRepository, repoUrl } from '../../../../ui/repository.ts'
+
+const { forge, principal } = Astro.locals
+const repo = await openRepository(forge, principal, Astro.params.owner!, Astro.params.repo!)
+const workflows = repo.kind === 'ok' ? await forge.actions.workflows(repo.name) : []
+const requested = Astro.url.searchParams.get('workflow')
+const selected = workflows.find((workflow) => workflow.path === requested) ?? null
+const runs = repo.kind === 'ok' ? await forge.actions.runs(repo.name, 50, selected?.path ?? null) : []
+const now = Math.floor(Date.now() / 1000)
+const seconds = (ms: number) => Math.floor(ms / 1000)
+const actionsHref = repo.kind === 'ok' ? repoUrl(repo.name, 'actions') : '/'
+---
+
+{
+  repo.kind !== 'ok' ? (
+    <NotFound />
+  ) : (
+    <Layout title={`${selected ? `${selected.name} · ` : ''}Actions · ${repo.name.owner}/${repo.name.name}`}>
+      <RepoHeader repo={repo} tab="actions" />
+      <div class="flex flex-col gap-6 md:flex-row">
+        {workflows.length > 0 && (
+          <nav aria-label="Workflows" class="md:w-56 shrink-0">
+            <ul class="menu menu-sm border border-base-300 rounded-box w-full">
+              <li>
+                <a href={actionsHref} class:list={[{ 'menu-active': selected === null }]} aria-current={selected === null ? 'page' : undefined}>All workflows</a>
+              </li>
+              {workflows.map((workflow) => (
+                <li>
+                  <a
+                    href={`${actionsHref}?workflow=${encodeURIComponent(workflow.path)}`}
+                    class:list={['break-all', { 'menu-active': selected?.path === workflow.path }]}
+                    aria-current={selected?.path === workflow.path ? 'page' : undefined}
+                    title={workflow.path}>
+                    {workflow.name}
+                  </a>
+                </li>
+              ))}
+            </ul>
+          </nav>
+        )}
+        <div class="min-w-0 flex-1">
+          {runs.length === 0 ? (
+            <EmptyState icon="actions" title="No workflow runs yet."><p>Push a workflow under <code class="font-mono">.github/workflows/</code> to start one.</p></EmptyState>
+          ) : (
+            <ul class="border border-base-300 rounded-box divide-y divide-base-300" aria-label="Workflow runs">
+              {runs.map((run) => (
+                <li class="flex flex-wrap items-start gap-x-3 gap-y-1 px-4 py-2.5 hover:bg-base-200/50">
+                  <span class:list={['badge badge-sm mt-0.5', runState(run).badge]}>{runState(run).label}</span>
+                  <div class="min-w-0 flex-1">
+                    <a href={repoUrl(repo.name, 'actions', 'runs', String(run.id))} class="font-semibold hover:text-primary hover:underline break-words">
+                      {run.workflow_name}
+                    </a>
+                    <p class="text-xs text-base-content/60 mt-0.5">
+                      #{run.id} · {run.event} on <span class="font-mono">{branchOf(run.ref)}</span> · <span class="font-mono">{shortId(run.sha)}</span> by {run.actor}
+                    </p>
+                  </div>
+                  <time class="text-xs text-base-content/60" datetime={isoTime(seconds(run.created_at))}>{relativeTime(seconds(run.created_at), now)}</time>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </div>
+    </Layout>
+  )
+}

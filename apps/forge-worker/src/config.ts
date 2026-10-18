@@ -1,4 +1,4 @@
-import { importSecretsKey, type SecretsKey } from '@git-forge/actions'
+import { type CacheLimits, DEFAULT_ARTIFACT_RETENTION_DAYS, DEFAULT_CACHE_LIMITS, type Es256PrivateJwk, type IdTokenKey, idTokenKeyFromInstanceKey, importEs256Key, importSecretsKey, type SecretsKey } from '@git-forge/actions'
 import {
   BreakGlassError,
   DEFAULT_OIDC_SCOPES,
@@ -12,6 +12,9 @@ import {
   type PrivateJwk,
   type SigningKey,
 } from '@git-forge/accounts'
+import { PagesConfigError, type PagesHosts, parsePagesHosts } from '@git-forge/pages'
+
+export { generateEs256Key, importEs256Key } from '@git-forge/actions'
 
 export type ForgeVars = {
   readonly PUBLIC_URL?: string
@@ -29,6 +32,12 @@ export type ForgeVars = {
   readonly ACTIONS_SECRETS_KEY?: string
   readonly ACTIONS_REPOSITORIES?: string
   readonly ACTIONS_GITHUB_FALLBACK?: string
+  readonly ACTIONS_OIDC_KEY?: string
+  readonly ACTIONS_ID_TOKENS?: string
+  readonly ACTIONS_ARTIFACT_RETENTION_DAYS?: string
+  readonly ACTIONS_CACHE_LIMIT_BYTES?: string
+  readonly ACTIONS_CACHE_UNUSED_DAYS?: string
+  readonly ACTIONS_CACHE_MAX_DAYS?: string
   readonly MIRROR_DEEP_CHECK_DAYS?: string
   readonly MIRROR_UNIT_BYTES?: string
   readonly UI?: string
@@ -46,13 +55,35 @@ export type ForgeVars = {
   readonly OIDC_NAME?: string
   readonly OIDC_SCOPES?: string
   readonly SELF_SIGNUP?: string
+  readonly PASSKEYS?: string
   readonly BREAK_GLASS_PUBLIC_KEY?: string
+  readonly R2_S3_ENDPOINT?: string
+  readonly R2_BUCKET_NAME?: string
+  readonly R2_ACCESS_KEY_ID?: string
+  readonly R2_SECRET_ACCESS_KEY?: string
+  readonly PAGES_HOST?: string
+  readonly PAGES_DOMAINS?: string
+  readonly PAGES_MAX_AGE?: string
+  readonly LFS_PUBLISH_PREFIX?: string
+}
+
+export type R2SigningSettings = {
+  readonly endpoint: string
+  readonly bucket: string
+  readonly accessKeyId: string
+  readonly secretAccessKey: string
+}
+
+export type PagesSettings = {
+  readonly hosts: PagesHosts | null
+  readonly maxAgeSeconds: number
 }
 
 export type LoginSettings = {
   readonly oidc: OidcClientConfig | undefined
   readonly selfSignup: boolean
   readonly breakGlassKey: OkpPublicJwk | undefined
+  readonly passkeys?: boolean
 }
 
 export type ForgeSettings = {
@@ -69,6 +100,7 @@ export type ForgeSettings = {
   readonly mirrorUnitBytes: number
   readonly allowInsecureWebhooks?: boolean
   readonly login?: LoginSettings
+  readonly pages?: PagesSettings
 }
 
 export type EmailSettings =
@@ -89,6 +121,10 @@ export type ActionsSettings = {
   readonly secretsKey: string | undefined
   readonly repositories: Readonly<Record<string, string>>
   readonly githubFallback: string | null
+  readonly oidcKey: string | undefined
+  readonly idTokens: boolean
+  readonly artifactRetentionDays: number
+  readonly cacheLimits: CacheLimits
 }
 
 export const ACTIONS_CRON = '*/5 * * * *'
@@ -204,7 +240,18 @@ export const parseLoginSettings = (vars: ForgeVars): LoginSettings => {
     if (error instanceof BreakGlassError) throw new ConfigurationError(error.message)
     throw error
   }
-  return { oidc: parseOidcSettings(vars), selfSignup: vars.SELF_SIGNUP === 'true', breakGlassKey }
+  return { oidc: parseOidcSettings(vars), selfSignup: vars.SELF_SIGNUP === 'true', breakGlassKey, passkeys: present(vars.PASSKEYS) !== 'false' }
+}
+
+export const DEFAULT_PAGES_MAX_AGE = 60
+
+export const parsePagesSettings = (vars: ForgeVars): PagesSettings => {
+  try {
+    return { hosts: parsePagesHosts(vars.PAGES_HOST, vars.PAGES_DOMAINS), maxAgeSeconds: positiveInteger(vars.PAGES_MAX_AGE, DEFAULT_PAGES_MAX_AGE, true) }
+  } catch (error) {
+    if (error instanceof PagesConfigError) throw new ConfigurationError(error.message)
+    throw error
+  }
 }
 
 export const parseSettings = async (vars: ForgeVars): Promise<ForgeSettings> => {
@@ -223,7 +270,20 @@ export const parseSettings = async (vars: ForgeVars): Promise<ForgeSettings> => 
     mirrorUnitBytes: positiveInteger(vars.MIRROR_UNIT_BYTES, 0, true),
     allowInsecureWebhooks: vars.ALLOW_INSECURE_WEBHOOKS === 'true',
     login: parseLoginSettings(vars),
+    pages: parsePagesSettings(vars),
   }
+}
+
+export const parseR2Signing = (vars: ForgeVars): R2SigningSettings | undefined => {
+  const endpoint = present(vars.R2_S3_ENDPOINT)
+  const bucket = present(vars.R2_BUCKET_NAME)
+  const accessKeyId = present(vars.R2_ACCESS_KEY_ID)
+  const secretAccessKey = present(vars.R2_SECRET_ACCESS_KEY)
+  if (!endpoint && !bucket && !accessKeyId && !secretAccessKey) return undefined
+  if (!endpoint || !bucket || !accessKeyId || !secretAccessKey) {
+    throw new ConfigurationError('presigned R2 uploads need R2_S3_ENDPOINT, R2_BUCKET_NAME, R2_ACCESS_KEY_ID and R2_SECRET_ACCESS_KEY')
+  }
+  return { endpoint, bucket, accessKeyId, secretAccessKey }
 }
 
 export const parseEmailSettings = (vars: ForgeVars): EmailSettings | undefined => {
@@ -252,13 +312,40 @@ export const parseActionsSettings = (vars: ForgeVars): ActionsSettings | undefin
     secretsKey: present(vars.ACTIONS_SECRETS_KEY),
     repositories: parseActionRepositories(vars.ACTIONS_REPOSITORIES),
     githubFallback: parseGithubFallback(vars.ACTIONS_GITHUB_FALLBACK),
+    oidcKey: present(vars.ACTIONS_OIDC_KEY),
+    idTokens: vars.ACTIONS_ID_TOKENS !== 'false',
+    artifactRetentionDays: positiveInteger(vars.ACTIONS_ARTIFACT_RETENTION_DAYS, DEFAULT_ARTIFACT_RETENTION_DAYS),
+    cacheLimits: {
+      ...DEFAULT_CACHE_LIMITS,
+      repositoryBytes: positiveInteger(vars.ACTIONS_CACHE_LIMIT_BYTES, DEFAULT_CACHE_LIMITS.repositoryBytes),
+      entryBytes: Math.min(DEFAULT_CACHE_LIMITS.entryBytes, positiveInteger(vars.ACTIONS_CACHE_LIMIT_BYTES, DEFAULT_CACHE_LIMITS.repositoryBytes)),
+      unusedDays: positiveInteger(vars.ACTIONS_CACHE_UNUSED_DAYS, DEFAULT_CACHE_LIMITS.unusedDays),
+      maxDays: positiveInteger(vars.ACTIONS_CACHE_MAX_DAYS, DEFAULT_CACHE_LIMITS.maxDays),
+    },
   }
 }
 
-export const loadSecretsKey = async (settings: ActionsSettings | undefined): Promise<SecretsKey | undefined> => {
-  if (!settings?.secretsKey) return undefined
+export const loadIdTokenKeys = async (settings: ActionsSettings | undefined, instanceKey: SigningKey | undefined): Promise<IdTokenKey[]> => {
+  if (!settings?.idTokens) return []
+  if (!settings.oidcKey) return instanceKey ? [idTokenKeyFromInstanceKey(instanceKey)] : []
+  let jwk: Es256PrivateJwk
   try {
-    return await importSecretsKey(settings.secretsKey)
+    jwk = JSON.parse(settings.oidcKey) as Es256PrivateJwk
+  } catch {
+    throw new ConfigurationError('ACTIONS_OIDC_KEY must be a P-256 private JWK in JSON')
+  }
+  try {
+    return [await importEs256Key(jwk), ...(instanceKey ? [idTokenKeyFromInstanceKey(instanceKey)] : [])]
+  } catch (error) {
+    throw new ConfigurationError(`ACTIONS_OIDC_KEY is not a usable P-256 private JWK: ${(error as Error).message}`)
+  }
+}
+
+export const loadSecretsKey = async (settings: ActionsSettings | undefined, vars?: ForgeVars): Promise<SecretsKey | undefined> => {
+  const encoded = settings?.secretsKey ?? present(vars?.ACTIONS_SECRETS_KEY)
+  if (!encoded) return undefined
+  try {
+    return await importSecretsKey(encoded)
   } catch (error) {
     throw new ConfigurationError(`ACTIONS_SECRETS_KEY: ${(error as Error).message}`)
   }

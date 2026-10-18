@@ -1,15 +1,23 @@
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { afterEach, describe, expect, it } from 'vitest'
-import { readAll } from '../src/bytes.ts'
+import { concat, readAll, utf8 } from '../src/bytes.ts'
 import { handleGitRequest } from '../src/http.ts'
 import {
   commitOrder,
   continueImport,
+  importBlobsKey,
+  importLfsObject,
   ingestStreamed,
   type ImportJob,
+  type ImportLfsJob,
+  type ImportState,
+  type ImportStepOptions,
   ImportRunningError,
   importStep,
+  LFS_JOB_ROUNDS,
+  LFS_JOB_TIMEOUT_MS,
+  LFS_POLL_SECONDS,
   planImportRefUpdates,
   readImportState,
   retryDelaySeconds,
@@ -29,6 +37,7 @@ import {
   fakeLfs,
   httpBackendHandler,
   lfsPointer,
+  type MaybeHandler,
   randomBytes,
   requireAuthorization,
   staticDirHandler,
@@ -117,6 +126,79 @@ const expectIdentical = async (storage: Storage, bare: string): Promise<void> =>
   expect(await objectList(clone)).toEqual(await objectList(bare))
 }
 
+const largeSource = async (): Promise<Source> => {
+  const work = initRepo()
+  sampleHistory(work, 6)
+  for (let i = 0; i < 24; i++) writeFile(work, `bulk/${i}.bin`, randomBytes(70_000, 100 + i))
+  commitAll(work, 'bulk')
+  const big = randomBytes(600_000, 7)
+  const copy = big.slice()
+  copy[1000] = ((copy[1000] as number) + 1) % 256
+  writeFile(work, 'media/big.bin', big)
+  writeFile(work, 'media/big-copy.bin', copy)
+  writeFile(work, 'media/small.txt', 'small\n')
+  commitAll(work, 'big')
+  writeFile(work, 'media/big.bin', concat([big, randomBytes(1000, 8)]))
+  commitAll(work, 'big changed')
+  const twin = randomBytes(250_000, 9)
+  for (const name of ['a', 'b', 'c', 'd']) writeFile(work, `twins/${name}.bin`, concat([twin, utf8(`${name}\n`)]))
+  commitAll(work, 'twins')
+  for (let i = 0; i < 4; i++) {
+    writeFile(work, `after/${i}.txt`, `after ${i}\n`)
+    commitAll(work, `after ${i}`)
+  }
+  const root = tempDir('git-forge-import-root-')
+  await git(root, ['clone', '-q', '--bare', work, 'source.git'])
+  const bare = `${root}/source.git`
+  await git(bare, ['config', 'uploadpack.allowFilter', 'true'])
+  await git(bare, ['repack', '-q', '-a', '-d', '-f'])
+  return { work, root, bare }
+}
+
+const stepSplitting = async (options: ImportStepOptions): Promise<{ states: ImportState[]; splits: Set<string> }> => {
+  const splits = new Set<string>()
+  const states: ImportState[] = []
+  for (let i = 0; i < 300; i++) {
+    const state = await importStep({
+      ...options,
+      ingestPack: async (odb, pack, ingest) => {
+        const stored = await ingestStreamed(odb, pack, ingest)
+        if (ingest?.register === false && stored.name) splits.add(stored.name)
+        return stored
+      },
+    })
+    states.push(state)
+    if (state.phase === 'done' || state.phase === 'failed') break
+  }
+  return { states, splits }
+}
+
+const lfsSource = async (assets: readonly Uint8Array[], lfsconfig?: string): Promise<{ root: string; bare: string }> => {
+  const work = initRepo()
+  sampleHistory(work, 2)
+  if (lfsconfig) writeFile(work, '.lfsconfig', lfsconfig)
+  for (const [i, asset] of assets.entries()) {
+    writeFile(work, `media/${i}.bin`, lfsPointer(asset).text)
+    commitAll(work, `media ${i}`)
+  }
+  const root = tempDir('git-forge-import-root-')
+  await git(root, ['clone', '-q', '--bare', work, 'source.git'])
+  await git(`${root}/source.git`, ['config', 'uploadpack.allowFilter', 'true'])
+  return { root, bare: `${root}/source.git` }
+}
+
+const slowDownloads = (handler: MaybeHandler) => {
+  const seen = { active: 0, peak: 0 }
+  const slow: MaybeHandler = async (request) => {
+    if (!new URL(request.url).pathname.includes('/lfs-download/')) return null
+    seen.peak = Math.max(seen.peak, ++seen.active)
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    seen.active--
+    return handler(request)
+  }
+  return { slow, seen }
+}
+
 describe('commit order', () => {
   it('lists parents before children and side branches before their merge', () => {
     const commits = new Map<string, string[]>([
@@ -201,7 +283,41 @@ describe('server-side import', () => {
     const filtered = remote.requests.filter((request) => request.method === 'POST' && request.path.endsWith('/git-upload-pack'))
     expect(filtered.length).toBeGreaterThan(5)
     await expectIdentical(storage, source.bare)
-  })
+  }, 60_000)
+
+  it('splits commits and blobs larger than one step and resumes after crashes in between', async () => {
+    const source = await largeSource()
+    const remote = await serve(httpBackendHandler(source.root))
+    const inner = new MemoryStorage()
+    let packWrites = 0
+    const storage = new FaultyStorage(inner, (key) => key.endsWith('.pack') && [4, 9].includes(++packWrites))
+    await startImport(storage, target, { url: `${remote.url}/source.git`, commitsPerStep: 8 })
+    const { states, splits } = await stepSplitting({ storage, repo: target, maxStepBytes: 400_000, maxObjectBytes: 200_000 })
+    const state = states.at(-1)
+    expect(state?.phase).toBe('done')
+    expect(state?.split).toBeUndefined()
+    expect(states.some((step) => step.error?.includes('simulated crash'))).toBe(true)
+    expect(states.some((step) => step.error?.includes('exceeds'))).toBe(false)
+    expect(splits.size).toBe(4)
+    expect(states.some((step) => step.split?.blobs === 24)).toBe(true)
+    expect(states.some((step) => step.split?.pack && step.split.blobsPerStep < Math.ceil(step.split.blobs / 2))).toBe(true)
+    expect(await inner.get(importBlobsKey(target))).not.toBeNull()
+    await expectIdentical(inner, source.bare)
+  }, 120_000)
+
+  it('splits a commit whose deltas resolve to objects above the memory limit', async () => {
+    const source = await largeSource()
+    const remote = await serve(httpBackendHandler(source.root))
+    const storage = new MemoryStorage()
+    await startImport(storage, target, { url: `${remote.url}/source.git` })
+    const { states, splits } = await stepSplitting({ storage, repo: target, maxObjectBytes: 200_000 })
+    expect(states.at(-1)?.phase).toBe('done')
+    expect(states.every((step) => step.error === undefined)).toBe(true)
+    expect(states.some((step) => step.commitsPerStep === 1)).toBe(true)
+    expect(states.some((step) => step.split?.pack && step.split.blobsPerStep < Math.ceil(step.split.blobs / 2))).toBe(true)
+    expect(splits.size).toBe(1)
+    await expectIdentical(storage, source.bare)
+  }, 120_000)
 
   it('updates an imported repository and archives rewritten history', async () => {
     const source = await sourceRepo(10)
@@ -324,6 +440,155 @@ describe('server-side import', () => {
     expect(state.lfsMissing).toEqual([])
     const stored = await storage.get(lfsObjectKey(target, pointer.oid))
     expect(stored && (await readAll(stored.body))).toEqual(asset)
+  })
+
+  it('takes the LFS endpoint from .lfsconfig, keeps the token away from it and splits LFS steps by size', async () => {
+    const assets = [randomBytes(50_000, 21), randomBytes(150_000, 22), randomBytes(40_000, 23)]
+    const pointers = assets.map((asset) => lfsPointer(asset))
+    const lfs = fakeLfs({ read: async (oid) => assets[pointers.findIndex((pointer) => pointer.oid === oid)] ?? null })
+    const lfsServer = await serve(lfs.handler)
+    const work = initRepo()
+    sampleHistory(work, 2)
+    pointers.forEach((pointer, i) => writeFile(work, `media/${i}.bin`, pointer.text))
+    writeFile(work, '.lfsconfig', `[lfs]\n\turl = ${lfsServer.url}/store/info/lfs/objects/batch\n\tfetchexclude = media/**\n`)
+    commitAll(work, 'media')
+    await git(work, ['checkout', '-q', '-b', 'other'])
+    writeFile(work, '.lfsconfig', '[lfs]\n\turl = https://elsewhere.invalid/lfs\n')
+    commitAll(work, 'other endpoint')
+    await git(work, ['checkout', '-q', 'main'])
+    const root = tempDir('git-forge-import-root-')
+    await git(root, ['clone', '-q', '--bare', work, 'source.git'])
+    await git(`${root}/source.git`, ['config', 'uploadpack.allowFilter', 'true'])
+    const token = basicAuth('git', 'github-token')
+    const remote = await serve(requireAuthorization(token), httpBackendHandler(root))
+    const storage = new MemoryStorage()
+    await startImport(storage, target, { url: `${remote.url}/source.git` })
+    const states: ImportState[] = []
+    for (let i = 0; i < 50; i++) {
+      const state = await importStep({ storage, repo: target, maxLfsStepBytes: 100_000, getAuthorization: async () => token })
+      states.push(state)
+      if (state.phase === 'done' || state.phase === 'failed') break
+    }
+    const state = states.at(-1)
+    expect(state?.phase).toBe('done')
+    expect(state?.lfsMissing).toEqual([])
+    expect(state?.lfsEndpoint).toEqual({ url: `${lfsServer.url}/store/info/lfs`, source: 'lfsconfig', ref: 'refs/heads/main' })
+    expect(states.filter((step) => step.phase === 'lfs' || (step.phase === 'refs' && step.lfsEndpoint)).length).toBeGreaterThanOrEqual(2)
+    const sizeOf = (oid: string) => pointers.find((pointer) => pointer.oid === oid)?.size ?? 0
+    expect(lfs.batches.length).toBeGreaterThanOrEqual(2)
+    expect(lfs.batches.every((batch) => batch.oids.length === 1 || batch.oids.reduce((sum, oid) => sum + sizeOf(oid), 0) <= 100_000)).toBe(true)
+    expect(lfs.batches.every((batch) => batch.authorization === null)).toBe(true)
+    for (const [i, pointer] of pointers.entries()) {
+      const stored = await storage.get(lfsObjectKey(target, pointer.oid))
+      expect(stored && (await readAll(stored.body))).toEqual(assets[i])
+    }
+  })
+
+  it('fetches LFS objects in parallel jobs queued during the fetch and updates refs only once all are stored', async () => {
+    const assets = Array.from({ length: 6 }, (_, i) => randomBytes(20_000 + i * 1000, 40 + i))
+    const pointers = assets.map((asset) => lfsPointer(asset))
+    const source = await lfsSource(assets)
+    const lfs = fakeLfs({ read: async (oid) => assets[pointers.findIndex((pointer) => pointer.oid === oid)] ?? null })
+    const { slow, seen } = slowDownloads(lfs.handler)
+    const token = basicAuth('git', 'parallel-token')
+    const remote = await serve(requireAuthorization(token), slow, lfs.handler, httpBackendHandler(source.root))
+    const storage = new MemoryStorage()
+    await startImport(storage, target, { url: `${remote.url}/source.git`, commitsPerStep: 2 })
+    const imports: ImportJob[] = [{ owner: target.owner, name: target.name, authorization: token }]
+    const lfsJobs: ImportLfsJob[] = []
+    const delays: number[] = []
+    const step = () =>
+      continueImport(imports.shift() as ImportJob, {
+        storage,
+        schedule: async (job, delay) => void (imports.push(job), delays.push(delay)),
+        scheduleLfs: async (job) => void lfsJobs.push(job),
+      })
+    let state = await step()
+    let queuedDuringFetch = 0
+    for (let i = 0; i < 50 && state.phase !== 'lfs'; i++) {
+      state = await step()
+      if (state.phase === 'fetch') queuedDuringFetch = lfsJobs.length
+    }
+    expect(queuedDuringFetch).toBeGreaterThan(0)
+    for (let i = 0; i < 3; i++) state = await step()
+    expect(state.phase).toBe('lfs')
+    expect(delays.at(-1)).toBe(LFS_POLL_SECONDS)
+    expect((await readRefs(storage, target))?.state.refs).toEqual({})
+    expect(new Set(lfsJobs.map((job) => job.oid))).toEqual(new Set(pointers.map((pointer) => pointer.oid)))
+    await Promise.all(lfsJobs.splice(0).map((job) => importLfsObject(job, { storage })))
+    for (let i = 0; i < 20 && state.phase !== 'done'; i++) state = await step()
+    expect(state.phase).toBe('done')
+    expect(state.lfsMissing).toEqual([])
+    expect(state.lfsPending).toEqual([])
+    expect(seen.peak).toBeGreaterThan(1)
+    expect(lfs.batches.every((batch) => batch.oids.length === 1 && batch.authorization === token)).toBe(true)
+    for (const [i, pointer] of pointers.entries()) {
+      const stored = await storage.get(lfsObjectKey(target, pointer.oid))
+      expect(stored && (await readAll(stored.body))).toEqual(assets[i])
+    }
+    await expectIdentical(storage, source.bare)
+  })
+
+  it('re-queues LFS jobs that made no progress and records objects still missing after the last round', async () => {
+    const assets = [randomBytes(10_000, 61), randomBytes(10_000, 62)]
+    const [found, lost] = assets.map((asset) => lfsPointer(asset)) as [ReturnType<typeof lfsPointer>, ReturnType<typeof lfsPointer>]
+    const source = await lfsSource(assets)
+    const lfs = fakeLfs({ read: async (oid) => (oid === found.oid ? (assets[0] as Uint8Array) : null) })
+    const remote = await serve(lfs.handler, httpBackendHandler(source.root))
+    const storage = new MemoryStorage()
+    await startImport(storage, target, { url: `${remote.url}/source.git` })
+    const queued: ImportLfsJob[] = []
+    let clock = Date.parse('2026-01-01T00:00:00Z')
+    const options: ImportStepOptions = {
+      storage,
+      repo: target,
+      now: () => new Date(clock),
+      enqueueLfs: async (pointer, endpoint) => void queued.push({ owner: target.owner, name: target.name, kind: 'import-lfs', oid: pointer.oid, size: pointer.size, endpoint }),
+    }
+    let state = await importStep(options)
+    for (let i = 0; i < 300 && state.phase !== 'done'; i++) {
+      await Promise.all(queued.splice(0).map((job) => importLfsObject(job, { storage })))
+      clock += LFS_JOB_TIMEOUT_MS * 2 ** LFS_JOB_ROUNDS
+      state = await importStep(options)
+    }
+    expect(state.phase).toBe('done')
+    expect(state.lfsRound).toBe(LFS_JOB_ROUNDS - 1)
+    expect(state.lfsMissing).toEqual([{ oid: lost.oid, size: lost.size, reason: '404 Object does not exist' }])
+    expect(lfs.batches.filter((batch) => batch.oids.includes(lost.oid)).length).toBe(LFS_JOB_ROUNDS + 1)
+    expect(await storage.head(lfsObjectKey(target, found.oid))).not.toBeNull()
+  })
+
+  it('moves queued LFS jobs to the .lfsconfig endpoint once it is known and keeps the token from another origin', async () => {
+    const assets = [randomBytes(10_000, 71), randomBytes(10_000, 72), randomBytes(10_000, 73)]
+    const pointers = assets.map((asset) => lfsPointer(asset))
+    const lfs = fakeLfs({ read: async (oid) => assets[pointers.findIndex((pointer) => pointer.oid === oid)] ?? null })
+    const lfsServer = await serve(lfs.handler)
+    const source = await lfsSource(assets, `[lfs]\n\turl = ${lfsServer.url}/store/info/lfs\n`)
+    const token = basicAuth('git', 'other-origin-token')
+    const remote = await serve(requireAuthorization(token), httpBackendHandler(source.root))
+    const storage = new MemoryStorage()
+    await startImport(storage, target, { url: `${remote.url}/source.git`, commitsPerStep: 1 })
+    const queued: ImportLfsJob[] = []
+    const options: ImportStepOptions = {
+      storage,
+      repo: target,
+      getAuthorization: async () => token,
+      enqueueLfs: async (pointer, endpoint) =>
+        void queued.push({ owner: target.owner, name: target.name, kind: 'import-lfs', oid: pointer.oid, size: pointer.size, endpoint, authorization: token }),
+    }
+    let state = await importStep(options)
+    const endpoints = new Set<string>()
+    for (let i = 0; i < 100 && state.phase !== 'done'; i++) {
+      for (const job of queued) endpoints.add(job.endpoint.source)
+      if (state.phase === 'lfs') await Promise.allSettled(queued.splice(0).map((job) => importLfsObject(job, { storage })))
+      state = await importStep(options)
+    }
+    expect(state.phase).toBe('done')
+    expect(state.lfsMissing).toEqual([])
+    expect(state.lfsEndpoint).toEqual({ url: `${lfsServer.url}/store/info/lfs`, source: 'lfsconfig', ref: 'refs/heads/main' })
+    expect(endpoints).toEqual(new Set(['default', 'lfsconfig']))
+    expect(lfs.batches.length).toBeGreaterThanOrEqual(assets.length)
+    expect(lfs.batches.every((batch) => batch.authorization === null)).toBe(true)
   })
 
   it('continues through a scheduler and backs off after failures', async () => {

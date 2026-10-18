@@ -3,7 +3,7 @@ import { ByteCursor } from './cursor.ts'
 import { applyDelta, deltaResultSize } from './delta.ts'
 import { type ObjectId, ZERO_ID } from './hash.ts'
 import { ByteLru } from './lru.ts'
-import { type GitObject, OFS_DELTA, parseTag, REF_DELTA, typeFromCode } from './objects.ts'
+import { type GitObject, OFS_DELTA, type ObjectType, parseTag, REF_DELTA, typeFromCode } from './objects.ts'
 import { readEntryHeader, readOfsDeltaOffset } from './pack.ts'
 import { PackIndex } from './pack-index.ts'
 import { type IndexedPack, indexPack } from './pack-indexer.ts'
@@ -146,6 +146,7 @@ export type IngestOptions = {
   readonly memoryBudget?: number
   readonly chunkSize?: number
   readonly maxObjectBytes?: number
+  readonly onObject?: (id: ObjectId, type: ObjectType, data: Uint8Array) => void
 }
 
 export const stagingPrefix = (repo: RepositoryName, at = new Date()): string =>
@@ -401,15 +402,23 @@ export class ObjectDatabase {
     })
   }
 
+  writePack(pack: IndexedPack): Promise<string | null> {
+    return pack.finalize(this.#storage, (file) => packKey(this.#repo, file))
+  }
+
   async storePack(pack: IndexedPack): Promise<string | null> {
-    const name = await pack.finalize(this.#storage, (file) => packKey(this.#repo, file))
+    const name = await this.writePack(pack)
     if (name) await this.registerPack(name)
     return name
   }
 
-  async ingest(stream: ReadableStream<Uint8Array>, options: IngestOptions = {}): Promise<{ readonly name: string | null; readonly pack: IndexedPack }> {
-    const pack = await this.index(new ByteCursor(stream), options)
-    return { name: await this.storePack(pack), pack }
+  async ingest(
+    stream: ReadableStream<Uint8Array>,
+    options: IngestOptions & { readonly register?: boolean } = {},
+  ): Promise<{ readonly name: string | null; readonly pack: IndexedPack }> {
+    const { register = true, ...rest } = options
+    const pack = await this.index(new ByteCursor(stream), rest)
+    return { name: register ? await this.storePack(pack) : await this.writePack(pack), pack }
   }
 }
 

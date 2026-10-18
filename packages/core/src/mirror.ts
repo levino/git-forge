@@ -91,6 +91,7 @@ export type MirrorStatus = {
   readonly upstreamRefs?: number
   readonly upstreamChecksum?: string
   readonly lfsPending: readonly LfsMissing[]
+  readonly lfsScan?: readonly string[]
   readonly alarms: readonly MirrorAlarm[]
   readonly lastDeepCheck?: DeepCheck
   readonly pendingPacks?: readonly PendingPack[]
@@ -624,13 +625,12 @@ export const syncMirror = async (options: SyncOptions): Promise<SyncResult> => {
     const local = await readRefs(storage, repo)
     if (!local) throw new Error(`repository ${repo.owner}/${repo.name} not found`)
     const odb = new ObjectDatabase(storage, repo)
-    const pending = previous?.lfsPending ?? []
     let upstream: UpstreamRefs
     let protocol: Protocol
     let lfsFound: readonly LfsPointer[]
     const remotePacks = options.strategy === 'copy' || options.strategy === 'auto' ? await listRemotePacks(remote) : null
     if (options.strategy === 'copy' || remotePacks !== null) {
-      const copied = await copyUpstreamPacks(remote, storage, repo, odb, config, remotePacks ?? [], options)
+      const copied = await copyUpstreamPacks(remote, storage, repo, odb, config, remotePacks ?? [], options, remoteName)
       upstream = copied.upstream
       protocol = 'dumb'
       lfsFound = copied.lfs
@@ -645,25 +645,27 @@ export const syncMirror = async (options: SyncOptions): Promise<SyncResult> => {
     }
     const upstreamChecksum = refsChecksum(upstream.refs)
     result = { ...result, upstreamChecksum, ...(upstream.head ? { upstreamHead: upstream.head } : {}) }
-    let lfsPending: readonly LfsMissing[] = pending
     let lfsEndpoint = previous?.lfsEndpoint
-    if (config.lfs && (lfsFound.length > 0 || pending.length > 0)) {
-      lfsEndpoint = await resolveLfsEndpoint(odb, config.url, config.lfsUrl, Object.fromEntries(upstream.refs), upstream.head)
-      if (options.deferLfs) {
-        lfsPending = deferred(pending, lfsFound)
-      } else {
-        if (lfsFound.length > 0) await saveStatus(storage, repo, remoteName, (status) => ({ ...status, lfsPending: deferred(status.lfsPending, lfsFound) }))
-        const lfs = await mirrorLfsObjects({
-          storage,
-          repo,
-          remote,
-          endpoint: lfsEndpoint.url,
-          authorize: mayAuthorizeLfs(config.url, lfsEndpoint),
-          ...(options.digests ? { digests: options.digests } : {}),
-          objects: [...pending, ...lfsFound].map(({ oid, size }) => ({ oid, size })),
-        })
-        lfsPending = lfs.missing
-        result = { ...result, lfs }
+    const attempted = new Set<string>()
+    let lfsMissing: readonly LfsMissing[] = []
+    if (config.lfs) {
+      const queue = await recordLfsPointers(storage, repo, remoteName, odb, result.fetched.packs, lfsFound)
+      if (queue.length > 0) {
+        lfsEndpoint = await resolveLfsEndpoint(odb, config.url, config.lfsUrl, Object.fromEntries(upstream.refs), upstream.head)
+        if (!options.deferLfs) {
+          for (const pointer of queue) attempted.add(pointer.oid)
+          const lfs = await mirrorLfsObjects({
+            storage,
+            repo,
+            remote,
+            endpoint: lfsEndpoint.url,
+            authorize: mayAuthorizeLfs(config.url, lfsEndpoint),
+            ...(options.digests ? { digests: options.digests } : {}),
+            objects: queue.map(({ oid, size }) => ({ oid, size })),
+          })
+          lfsMissing = lfs.missing
+          result = { ...result, lfs }
+        }
       }
     }
     const plan = await updateUpstreamRefs(storage, repo, odb, remoteName, upstream.refs, upstream.head, now())
@@ -677,7 +679,7 @@ export const syncMirror = async (options: SyncOptions): Promise<SyncResult> => {
       ...(upstream.head ? { upstreamHead: upstream.head } : {}),
       upstreamRefs: upstream.refs.size,
       upstreamChecksum,
-      lfsPending,
+      lfsPending: [...status.lfsPending.filter((pointer) => !attempted.has(pointer.oid)), ...lfsMissing],
       ...(lfsEndpoint ? { lfsEndpoint } : {}),
       pendingPacks: [],
       alarms: [...status.alarms, ...plan.alarms].slice(-MAX_STORED_ALARMS),
@@ -691,6 +693,36 @@ export const syncMirror = async (options: SyncOptions): Promise<SyncResult> => {
     }))
     return { ...result, status: 'failed', error: message }
   }
+}
+
+const recordLfsPointers = async (
+  storage: Storage,
+  repo: RepositoryName,
+  remote: string,
+  odb: ObjectDatabase,
+  scanned: readonly string[],
+  found: readonly LfsPointer[],
+): Promise<readonly LfsMissing[]> => {
+  const status = await readMirrorStatus(storage, repo, remote)
+  const local = new Set(await odb.packNames())
+  const unscanned = (status?.lfsScan ?? []).filter((name) => !scanned.includes(name) && local.has(name))
+  const pointers = [...found]
+  for (const name of unscanned) {
+    for (const blob of await odb.smallBlobs(name, LFS_POINTER_MAX_SIZE)) {
+      const pointer = parseLfsPointer(blob.data)
+      if (pointer) pointers.push(pointer)
+    }
+  }
+  if (pointers.length === 0 && (status?.lfsScan ?? []).length === 0) return status?.lfsPending ?? []
+  const done = new Set([...scanned, ...unscanned])
+  let queue: readonly LfsMissing[] = []
+  await saveStatus(storage, repo, remote, (current) => {
+    const { lfsScan, ...rest } = current
+    const left = (lfsScan ?? []).filter((name) => !done.has(name))
+    queue = deferred(current.lfsPending, pointers)
+    return { ...rest, lfsPending: queue, ...(left.length > 0 ? { lfsScan: left } : {}) }
+  })
+  return queue
 }
 
 const nextMirrorView = (current: MirrorView | undefined, remote: string, upstreamHead: string | undefined): MirrorView | undefined => {
@@ -742,6 +774,7 @@ const copyUpstreamPacks = async (
   config: MirrorConfig,
   remotePacks: readonly string[],
   options: Pick<SyncOptions, 'maxPackBytes' | 'digests'>,
+  remoteName: string,
 ): Promise<CopyOutcome> => {
   const { maxPackBytes } = options
   const listing = await lsRefsDumb(remote)
@@ -755,6 +788,7 @@ const copyUpstreamPacks = async (
     )
   }
   const names = copied.map((pack) => pack.name)
+  if (config.lfs && names.length > 0) await saveStatus(storage, repo, remoteName, (status) => ({ ...status, lfsScan: [...new Set([...(status.lfsScan ?? []), ...names])] }))
   if (names.length > 0) await registerPacks(storage, repo, names)
   odb.invalidate()
   const absent: ObjectId[] = []

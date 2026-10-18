@@ -10,6 +10,7 @@ import {
   deepCheckMirror,
   deepCheckRepository,
   mirrorPendingLfsObject,
+  mirrorStatusKey,
   planPackCopy,
   readMirrorStatus,
   syncMirror,
@@ -262,6 +263,32 @@ describe('interrupted LFS copy', () => {
     expect(retry.copied).toEqual({ packs: 0, bytes: 0, reused: 0 })
     expect(retry.lfs?.downloaded.map((pointer) => pointer.oid)).toEqual([lfsPointer(context.asset).oid])
     expect((await readMirrorStatus(context.downstream.storage, backup))?.lfsPending).toEqual([])
+  })
+
+  it('scans packs registered by a sync that ended before recording their LFS pointers', async () => {
+    const context = await setup()
+    const oid = lfsPointer(context.asset).oid
+    const statusKey = mirrorStatusKey(backup, 'origin')
+    let tripped = false
+    const storage = context.downstream.storage
+    const dying: Storage = {
+      get: (key, range) => storage.get(key, range),
+      head: (key) => storage.head(key),
+      list: (prefix) => storage.list(prefix),
+      put: async (key, body, size, options) => {
+        if (!tripped && key === statusKey && body instanceof Uint8Array && new TextDecoder().decode(body).includes(oid)) {
+          tripped = true
+          throw new Error('invocation ended')
+        }
+        return storage.put(key, body, size, options)
+      },
+    }
+    expect((await syncMirror({ storage: dying, repo: backup, strategy: 'copy' })).status).toBe('failed')
+    expect(await storage.head(lfsObjectKey(backup, oid))).toBeNull()
+    const concurrent = await context.sync()
+    expect(concurrent.copied).toEqual({ packs: 0, bytes: 0, reused: 0 })
+    expect(concurrent.lfs?.downloaded.map((pointer) => pointer.oid)).toEqual([oid])
+    expect((await readMirrorStatus(storage, backup))?.lfsScan).toBeUndefined()
   })
 })
 

@@ -158,6 +158,9 @@ export const describeStorageConformance = (
       })
       await expect(storage.put(key, failing, 2000)).rejects.toThrow()
       expect(await storage.head(key)).toBeNull()
+      sent = false
+      await expect(storage.put(key, failing, 2000, { ifNoneMatch: '*' })).rejects.toThrow()
+      expect(await storage.head(key)).toBeNull()
     })
 
     it('reads ranges by offset and length, also past the end', { timeout }, async () => {

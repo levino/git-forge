@@ -55,6 +55,10 @@ describe('LFS pointers', () => {
     expect(parseLfsPointer(utf8(text))).toEqual({ oid, size: 3 })
   })
 
+  it('accepts the legacy hawser version', () => {
+    expect(parseLfsPointer(utf8(`version https://hawser.github.com/spec/v1\noid sha256:${oid}\nsize 17\n`))).toEqual({ oid, size: 17 })
+  })
+
   it('rejects things that only look like pointers', () => {
     expect(parseLfsPointer(utf8(`version https://git-lfs.github.com/spec/v1\noid sha256:${oid}\nsize 17`))).toBeNull()
     expect(parseLfsPointer(utf8(`version https://git-lfs.github.com/spec/v1\nsize 17\noid sha256:${oid}\n`))).toBeNull()

@@ -71,6 +71,7 @@ and stop the compose service alone (port 7070, bucket `git-forge-test`,
 credentials `git-forge` / `git-forge-local-secret`).
 
 To install the binary without Docker: `go install github.com/versity/versitygw/cmd/versitygw@v1.9.0`.
+The `s3` job in `.github/workflows/ci.yml` does exactly that and runs `test:s3`.
 
 Against any other server:
 

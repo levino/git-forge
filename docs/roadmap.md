@@ -45,12 +45,21 @@ discussions.
 
 ## M5 — Deployment and adapters
 
-- [ ] Cloudflare Worker app (in progress)
+- [x] Cloudflare Worker app
 - [x] S3 storage adapter (`@git-forge/s3`, presigned PUTs bound to length and SHA-256)
 - [x] File system storage adapter (`@git-forge/node`)
 - [x] Shared storage conformance suite for all adapters
 - [x] Local S3 test environment (versitygw; Garage, SeaweedFS, RustFS evaluated)
 - [ ] Headless deployment on a Raspberry Pi (Bun/Node + SQLite file + filesystem or S3)
+
+## M5b — CI and self-update
+
+- [ ] Spike: official `actions/runner` registers via JIT config, runs one job in a Cloudflare Container and deploys a hello-world Worker with `wrangler`
+- [ ] Actions service: sessions, jobs, timeline, logs; then cache, artifacts, OIDC
+- [ ] Workflow parsing and job scheduling, secrets
+- [ ] GHES-style `/api/v3` runner API and `workflow_job` webhooks for external providers (WarpBuild, CodeBuild, RunsOn)
+- [ ] "Deploy to Cloudflare" button and three test instances (alpha, beta, gamma)
+- [ ] Self-update: instance mirrors upstream git-forge, release tags trigger a deploy job
 
 ## M6 — Web UI (Astro SSR)
 
@@ -61,6 +70,7 @@ discussions.
 
 ## M7 — Collaboration
 
+- [ ] Branch protection (in progress, v1)
 - [ ] Issues
 - [ ] Pull requests, reviews, conflict-free merge
 - [ ] Discussions
@@ -68,10 +78,9 @@ discussions.
 
 ## Later
 
-- [ ] Branch protection
 - [ ] Notifications, email, webhooks
 - [ ] Releases
 - [ ] Encrypted full backups, partial visibility
 - [ ] External mirror verification
 - [ ] SSH-to-HTTPS gateway
-- [ ] Actions, Pages
+- [ ] Pages

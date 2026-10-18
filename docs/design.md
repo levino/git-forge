@@ -356,3 +356,54 @@ in `packages/s3/README.md`.
 - git-lfs — Batch API specification and integration tests
 - Radicle — signed refs per participant
 - LOCKSS — many copies, verification, repair
+
+## 15. CI, deployment and updates
+
+### CI
+
+CI emulates the GitHub runner stack so the unmodified official
+`actions/runner` and existing per-minute providers work:
+
+- A GHES-style API under `/api/v3`: runner REST (`generate-jitconfig`,
+  registration tokens), GitHub App auth and PATs, signed `workflow_job`
+  webhooks for external providers.
+- The Actions service the runner talks to: connection data and token
+  exchange, sessions and message long-poll (or broker and run service), job
+  acquire/renew/complete, timeline, logs, later cache, artifacts and OIDC.
+- First compute backend: **Cloudflare Containers / Sandbox SDK**. Per job the
+  forge starts a container with the runner and a JIT config and discards it
+  afterwards (billed per 10 ms, scale to zero, up to 4 vCPU / 12 GiB, rootless
+  Docker-in-Docker).
+- External backends later via the same API: WarpBuild Enterprise, AWS
+  CodeBuild, RunsOn (research in issue #7).
+
+### Deployment
+
+Deployments run in our own CI: a job calls `wrangler deploy` with a Cloudflare
+API token stored as an instance secret. No Cloudflare Workers Builds and no
+GitHub mirror are needed.
+
+### New instances and updates
+
+- **First install:** a "Deploy to Cloudflare" button on `apps/forge-worker`.
+  Cloudflare copies the repository into the installer's GitHub/GitLab account,
+  provisions D1 and R2 from `wrangler.jsonc` and deploys. The copy has no link
+  to upstream.
+- **Updates after that:** every instance mirrors the upstream git-forge
+  repository like any other mirrored repo (archive on rewritten history,
+  alarm). New release tags show up as "update available"; an update, manual or
+  automatic, is a CI job on the instance that runs migrations and
+  `wrangler deploy`. The repository copy from the first install becomes
+  irrelevant.
+- To keep upstream merges conflict-free, instance-specific configuration
+  (domain, name, switches) lives in environment variables and D1, not in code;
+  `wrangler.jsonc` only carries binding IDs.
+- npm packages are not the distribution channel; the deployable unit is the
+  repository.
+
+### Test instances
+
+`apps/forge-worker` defines three wrangler environments `alpha`, `beta` and
+`gamma`, each with its own D1 and R2. An E2E test runs all three locally and
+checks mirroring and federation across them (beta mirrors alpha, gamma mirrors
+beta).

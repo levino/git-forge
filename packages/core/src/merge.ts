@@ -1,8 +1,8 @@
 import { concat } from './bytes.ts'
-import { type CommitDetails, type NewCommit, parseCommitDetails, serializeCommit, serializeTree, type Signature, StagedObjects } from './commit.ts'
+import { type CommitDetails, type NewCommit, parseCommitDetails, serializeCommit, serializeTree, StagedObjects } from './commit.ts'
 import { isBinaryContent } from './diff.ts'
 import type { ObjectId } from './hash.ts'
-import { type GitObject, isSubmodule, isTreeMode, parseCommit, parseTree, type TreeEntry } from './objects.ts'
+import { type GitObject, isSubmodule, type Signature, isTreeMode, parseCommit, parseTree, type TreeEntry } from './objects.ts'
 import { MissingObjectError, type ObjectSource } from './walk.ts'
 import { mergeLines, splitLines } from './xdiff.ts'
 

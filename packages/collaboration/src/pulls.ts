@@ -36,6 +36,7 @@ import {
   type ActorRef,
   CollaborationError,
   type CollaborationOptions,
+  emitActivity,
   type EventActor,
   invalid,
   nodeId,
@@ -53,6 +54,7 @@ import {
   closeIssuesByReference,
   crossReferenceStatements,
   DEFAULT_PAGE,
+  emitIssueChanges,
   eventStatement,
   hydrateIssues,
   insertIssueStatements,
@@ -189,7 +191,9 @@ export const createPull = async (scope: Scope, input: PullInput): Promise<PullDe
   const row = (await first<PullRow>(scope.db, sql(`${PULL_SELECT} WHERE i.node_id = ?`, node)))!
   const references = await crossReferenceStatements(scope, { number: row.number, isPull: true }, row.body, author)
   if (references.length > 0) await scope.db.batch(references)
-  return getPull(scope, row.number)
+  const created = await getPull(scope, row.number)
+  await emitActivity(scope, { kind: 'pull_request', action: 'opened', number: created.number, actor: author })
+  return created
 }
 
 export type PullFilters = {
@@ -297,6 +301,8 @@ const protectionProblems = async (scope: Scope, row: PullRow, base: ObjectId, he
 
 const PLACEHOLDER = 'f'.repeat(40)
 
+export const getPullSummary = async (scope: Scope, number: number): Promise<PullRequest> => (await hydratePulls(scope, [await pullRow(scope, number)]))[0]!
+
 export const getPull = async (scope: Scope, number: number): Promise<PullDetails> => {
   const { row, state } = await loadFresh(scope, number)
   const [pull] = await hydratePulls(scope, [row])
@@ -335,6 +341,7 @@ export type PullUpdate = IssueUpdate & { readonly base?: unknown; readonly draft
 
 export const updatePull = async (scope: Scope, number: number, input: PullUpdate): Promise<PullDetails> => {
   const { row, state } = await loadFresh(scope, number)
+  const [before] = await hydratePulls(scope, [row])
   const statements: Statement[] = await updateIssueStatements(scope, row, input)
   const author = refFromColumns(row.author_kind, row.author_id)
   const at = scope.now()
@@ -360,8 +367,14 @@ export const updatePull = async (scope: Scope, number: number, input: PullUpdate
       )
     }
   }
-  if (statements.length > 0) await scope.db.batch(statements)
-  return getPull(scope, number)
+  if (statements.length === 0) return getPull(scope, number)
+  await scope.db.batch(statements)
+  const after = await getPull(scope, number)
+  const actor = scope.actor.ref!
+  await emitIssueChanges(scope, before!, after, actor)
+  if (before!.draft !== after.draft) await emitActivity(scope, { kind: 'pull_request', action: after.draft ? 'converted_to_draft' : 'ready_for_review', number, actor })
+  if (before!.baseRef !== after.baseRef) await emitActivity(scope, { kind: 'pull_request', action: 'edited', number, actor, changes: { base: { ref: { from: before!.baseRef } } } })
+  return after
 }
 
 const METHOD_SETTING: Readonly<Record<MergeMethod, 'allowMergeCommit' | 'allowSquashMerge' | 'allowRebaseMerge'>> = {
@@ -473,6 +486,7 @@ export const mergePull = async (scope: Scope, number: number, input: MergeInput 
       eventStatement(row.id, merger, 'merged', { commit_id: outcome.commit, merge_method: method }, at),
       eventStatement(row.id, merger, 'closed', { commit_id: outcome.commit }, at),
     ])
+    await emitActivity(scope, { kind: 'pull_request', action: 'closed', number: row.number, actor: merger })
     let closedIssues: number[] = []
     if (branchName(row.base_ref) === defaultBranch(state)) {
       const messages = await Promise.all((await commitsBetween(odb, base, head)).slice(0, MAX_PULL_COMMITS).map(async (sha) => (await readCommitDetails(odb, sha)).message))
@@ -495,6 +509,7 @@ export const systemScope = async (options: CollaborationOptions, owner: string, 
     accounts: options.accounts,
     now: options.now ?? Date.now,
     onBranchUpdated: options.onBranchUpdated,
+    onActivity: options.onActivity,
     noreplyDomain: options.noreplyDomain ?? 'users.noreply.invalid',
     repository,
     repo: { owner: repository.owner, name: repository.name },

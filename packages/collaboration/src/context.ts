@@ -41,12 +41,30 @@ export type BranchUpdate = {
   readonly actor: EventActor
 }
 
+export type ActivityKind = 'issues' | 'issue_comment' | 'pull_request' | 'pull_request_review' | 'pull_request_review_comment'
+
+export type Activity = {
+  readonly kind: ActivityKind
+  readonly action: string
+  readonly number: number
+  readonly actor: EventActor
+  readonly commentId?: number
+  readonly reviewId?: number
+  readonly changes?: Record<string, unknown>
+  readonly requestedReviewer?: string
+  readonly before?: string
+  readonly after?: string
+}
+
+export type ActivityHandler = (scope: Scope, activity: Activity) => Promise<void>
+
 export type CollaborationOptions = {
   readonly db: Database
   readonly storage: Storage
   readonly accounts: AccountsDirectory
   readonly now?: () => number
   readonly onBranchUpdated?: (update: BranchUpdate) => Promise<void>
+  readonly onActivity?: ActivityHandler
   readonly noreplyDomain?: string
 }
 
@@ -56,6 +74,7 @@ export type Scope = {
   readonly accounts: AccountsDirectory
   readonly now: () => number
   readonly onBranchUpdated: ((update: BranchUpdate) => Promise<void>) | undefined
+  readonly onActivity: ActivityHandler | undefined
   readonly noreplyDomain: string
   readonly repository: RepositorySubject
   readonly repo: RepositoryName
@@ -129,6 +148,7 @@ export const openRepository = async (options: CollaborationOptions, principal: P
     accounts: options.accounts,
     now: options.now ?? Date.now,
     onBranchUpdated: options.onBranchUpdated,
+    onActivity: options.onActivity,
     noreplyDomain: options.noreplyDomain ?? 'users.noreply.invalid',
     repository,
     repo: { owner: repository.owner, name: repository.name },
@@ -161,3 +181,12 @@ export const sameActor = (a: ActorRef | EventActor | null, b: ActorRef | EventAc
 
 export const refFromColumns = (kind: string | null, id: string | null): ActorRef | null =>
   (kind === 'user' || kind === 'app') && id !== null ? { kind, id } : null
+
+export const emitActivity = async (scope: Scope, activity: Activity): Promise<void> => {
+  if (!scope.onActivity) return
+  try {
+    await scope.onActivity(scope, activity)
+  } catch (error) {
+    console.error(JSON.stringify({ event: 'collaboration-activity-failed', kind: activity.kind, action: activity.action, error: String(error) }))
+  }
+}

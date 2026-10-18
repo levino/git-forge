@@ -36,7 +36,8 @@
     "OIDC_NAME": "",
     "OIDC_SCOPES": "openid profile email",
     "SELF_SIGNUP": "false",
-    "BREAK_GLASS_PUBLIC_KEY": ""
+    "BREAK_GLASS_PUBLIC_KEY": "",
+    "EMAIL_PROVIDER": "none"
   },
   "secrets": { "required": ["BOOTSTRAP_TOKEN"] }
 }

@@ -1,1 +1,3 @@
 BOOTSTRAP_TOKEN=change-me-to-a-long-random-string
+# EMAIL_PROVIDER=console
+# EMAIL_FROM=forge@example.org

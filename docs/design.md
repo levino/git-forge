@@ -80,10 +80,10 @@ issues, pull requests and discussions.
 
 **Should (soon after)**
 
-- Notifications, email, webhooks.
+- Notifications, email, webhooks (§16).
 - Reactions, search in issues and discussions.
 - Edit and upload files in the browser (commit via form).
-- Releases.
+- Releases (§16).
 - `gh auth login`-style device flow for the command line.
 
 **Later / maybe**
@@ -276,11 +276,12 @@ the [accounts README](../packages/accounts/README.md#branch-protection).
     objects/pack/pack-<sha>.pack
     objects/pack/pack-<sha>.idx
   lfs/
-    objects/<oid[0:2]>/<oid[2:4]>/<oid>
+    objects/<oid[0:2]>/<oid[2:4]>/<oid>   # LFS objects and release assets
   import/status.json                # progress of the last import
   import/commits.txt                # commit order of the last import
   README.txt                        # plain text: what this is, how to read it
 tmp/<repo>/<timestamp>-<uuid>/<n>   # staging chunks of a push or fetch, expired by the bucket
+tmp/<repo>/<timestamp>-<uuid>/asset # a release asset upload without a declared SHA-256 (§16)
 ```
 
 - `<sha>` is the pack's trailing SHA-1 checksum, as with `git index-pack`.
@@ -302,6 +303,9 @@ tmp/<repo>/<timestamp>-<uuid>/<n>   # staging chunks of a push or fetch, expired
   are read back once to write the final pack and never again. The `Storage`
   interface has no delete; operators expire `tmp/` with a bucket lifecycle
   rule (e.g. one day). Pushes up to one chunk never touch `tmp/`.
+- **Release assets** are content-addressed like LFS objects
+  (`lfs/objects/…`, §16). Which asset belongs to which release lives only in
+  the database; a deleted asset or release leaves its bytes in place.
 - The bucket layout is a durable format and may only change
   backwards-compatibly.
 
@@ -526,7 +530,7 @@ public CDN bucket on push.
 branch.
 
 **Merge pull request** — merge commit, squash or rebase, computed in core
-without a git binary (§16): the same tree as `git merge`, refused on any
+without a git binary (§17): the same tree as `git merge`, refused on any
 conflict. New objects go into one new pack; the base branch moves with
 compare-and-swap. No in-browser conflict resolution yet.
 
@@ -669,7 +673,7 @@ dev environments) need real machines, started on demand via API.
 | Live updates | Durable Objects with WebSockets, polling as fallback |
 | Search in issues | SQLite FTS5 |
 | Web UI | Astro SSR |
-| Releases, Pages | Bucket + CDN |
+| Releases, Pages | Bucket + CDN (release assets are LFS objects behind the media URL, §16) |
 | CI | Actions service emulating GHES for the official `actions/runner`; compute adapter starts one runner per job (§15) |
 
 Every building block is an interface; Cloudflare is the first implementation.
@@ -691,7 +695,7 @@ database.
 | Database | D1 / SQLite in Durable Objects | libSQL/Turso, SQLite file (Pi) |
 | Per-repository consistency | Durable Object | conditional writes (S3 CAS), single-writer process |
 | Scheduling, jobs | Cron Triggers, Queues (Workflows for long jobs) | `Deno.cron`, systemd timers, job table, in-process queue |
-| Email | Mail service via API | SMTP |
+| Email | Amazon SES v2 HTTP API (`@git-forge/ses`, SigV4 via `aws4fetch`, runs on Workers and Node) | SMTP for the Node deployment (later); a console adapter for development |
 | Compute for CI | Containers | external per-minute providers via the GHES API (WarpBuild, AWS CodeBuild, RunsOn), Fly Machines, a local process |
 
 **Jobs:** the core defines `JobQueue<J>` (`enqueue(job, { delaySeconds })`),
@@ -1211,14 +1215,164 @@ update themselves.
 checks mirroring and federation across them (beta mirrors alpha, gamma mirrors
 beta).
 
-## 16. Collaboration
+## 16. Notifications, webhooks, email and releases
+
+Packages: `@git-forge/notifications` (events, subscriptions, inbox, digests,
+webhooks), `@git-forge/releases`, `@git-forge/ses`; the email interface lives
+in the core (`packages/core/src/email.ts`). Tables come from migration
+`0007_notifications.sql`.
+
+### Events
+
+Every producer describes what happened as a `ForgeEvent` (version `v: 1`):
+the GitHub webhook event name and action, repository, actor, base URL, the
+GitHub-compatible payload *without* `repository`, `organization` and `sender`
+(those are rendered at delivery time), and optionally a notification
+`subject` (key, type, title, URLs) and an `audience` (author, participants,
+mentions, assignees, requested reviewers, CI actor, repository admins, which
+watchers). `emit(event)` appends it to `forge_events` (append-only, enforced
+by triggers like `audit_log`) and enqueues one `notification-event` job; the
+job fans out webhooks and notifications. Jobs carry ids only, so a retry
+re-reads the database.
+
+Builders in `events.ts` produce the events, so payloads look the same
+wherever they come from:
+
+| Producer | Event | Status |
+|---|---|---|
+| `receive-pack` (`onPush`) | `push`, `create`, `delete` | wired; commits are read from the object database (at most 20, oldest first, stopping at the old value or, for new branches, at other branch tips); `added`/`removed`/`modified` stay empty |
+| Mirror sync (`onSynced` in `MirrorContext`) | `mirror_alarm` (custom) on rewritten or deleted upstream refs | wired |
+| Actions (`onJobCompleted`) | `workflow_job` completed, `workflow_run` completed when the last job of the run completes | wired; CI part 2 may refine it |
+| Releases | `release` (`created`, `published`, `released`/`prereleased`, `edited`, `unpublished`, `deleted`) | wired |
+| Collaboration (issues, pull requests, reviews, comments) | `issues`, `issue_comment`, `pull_request`, `pull_request_review`, `pull_request_review_comment` | builders ready, emitted by the collaboration package |
+
+### Notifications
+
+GitHub's model, per user:
+
+- **Watching** a repository (`repository_watches`): `all`, `releases` or
+  `ignore`; without a row the user is only notified when participating.
+- **Participating** (`thread_subscriptions`): author, commenter, mentioned,
+  assigned or requested reviewer of a subject (`issue:12`, `pull:3`, …) are
+  subscribed to it and notified about later events on it. A thread can be
+  ignored.
+- **Fan-out** (`resolveRecipients`, pure): the strongest reason wins
+  (`review_requested` > `assign` > `mention` > … > `subscribed`); ignored
+  threads and ignored repositories receive nothing; the actor gets nothing
+  unless `own_activity` is on; every recipient must still be able to read the
+  repository, checked with the same `checkRepositoryAccess` as Git.
+- **Inbox:** one `notification_threads` row per user and subject, updated in
+  place (unread again, newest reason, `last_event_id`). Mirror alarms go to
+  repository admins with reason `security_alert`, CI results to the
+  triggering user with `ci_activity`.
+- **Settings** (`notification_settings`): email `off`, `instant`, `hourly` or
+  `daily`; email for participating and/or watching notifications; own
+  activity; an optional address overriding the account email.
+
+### Email
+
+`EmailSender.send(message)` is the adapter (`createMemoryEmailSender` for
+tests, `createConsoleEmailSender` for development, `createSesEmailSender` for
+production). SES uses the v2 `SendEmail` API with a simple message (subject,
+text, HTML, `List-Unsubscribe` and auto-reply suppression headers), signed
+with SigV4; `4xx` answers are permanent (`EmailRejectedError`), throttling
+and `5xx` are retried by the job queue. SMTP for the Node deployment is
+another adapter of the same interface, not built yet (Workers cannot open TCP
+connections to arbitrary SMTP servers without `connect()`, and SES covers
+the Cloudflare deployment).
+
+Digests: when a notification should be emailed, the user's
+`digest_due_at` is claimed by compare-and-swap (`… WHERE digest_due_at IS
+NULL`) and one `notification-digest` job is enqueued with the mode's delay
+(0, 1 h, 24 h). The job collects every unread thread updated since it was
+last emailed, sends one message, marks the threads, releases the claim and
+schedules the next digest if something arrived meanwhile. So a burst of
+events makes one email per user and period, and a lost job is picked up by
+the daily cron (`sweep`).
+
+### Webhooks
+
+GitHub-compatible, per repository and per organization (an organization hook
+receives the events of all its repositories):
+
+- REST under `/api/v3`: `…/hooks`, `…/hooks/{id}`, `…/hooks/{id}/config`,
+  `…/hooks/{id}/pings`, `…/hooks/{id}/deliveries[/{id}[/attempts]]`.
+  Managing repository hooks needs repository admin, organization hooks an
+  organization owner (instance admins may do both), with a token that has
+  `repo:admin`.
+- Requests: `POST` with `Content-Type` `application/json` or
+  `application/x-www-form-urlencoded` (`payload=…`), `User-Agent:
+  GitHub-Hookshot/git-forge`, `X-GitHub-Event`, `X-GitHub-Delivery` (a UUID),
+  `X-GitHub-Hook-ID`, `X-GitHub-Hook-Installation-Target-Type`/`-ID` and,
+  with a secret, `X-Hub-Signature-256` (HMAC-SHA256 of the body) and the
+  legacy `X-Hub-Signature` (SHA-1). Creating a hook sends a `ping`.
+- Delivery log (`webhook_deliveries`): the payload is rendered once per event
+  and hook and stored; each attempt records status code, duration, request
+  headers (without signatures) and up to 64 KiB of the response.
+  Redirects are not followed, the timeout is 10 s.
+- Retries: network errors, `408`, `429` and `5xx` are retried up to five
+  attempts with 30 s, 2 min, 8 min, 32 min; other answers fail at once. The
+  retry is a new delayed job, and a lease on the delivery row
+  (`next_attempt_at`) keeps a duplicate job or the cron sweep from sending
+  twice. Redelivery creates a new row with the same delivery id and
+  `redelivery: true`, as on GitHub.
+- URLs must be `https` and must not point to loopback, private, link-local
+  or `.local`/`.internal` hosts; `ALLOW_INSECURE_WEBHOOKS=true` lifts both
+  for tests. DNS is not resolved, so a public name pointing to a private
+  address is not caught (on Workers such requests cannot reach private
+  networks anyway; on a Node deployment, egress filtering is the operator's
+  job). `insecure_ssl` is stored but has no effect: Workers always verify
+  TLS.
+- Secrets are stored in plain text in the database, because signing needs
+  them; the API shows them as `********`.
+- Repository and user ids in payloads are the forge's string ids, not
+  integers.
+
+Without a job queue (a Node deployment without one) fan-out, deliveries and
+instant digests run inline in the request; retries and delayed digests then
+wait for the scheduled handler.
+
+### Releases
+
+- GitHub's REST API under `/api/v3/repos/{owner}/{repo}/releases`: list,
+  create, get, `latest`, `tags/{tag}`, update, delete; assets: list, upload,
+  get, update, delete; uploads also at
+  `/api/uploads/repos/{owner}/{repo}/releases/{id}/assets?name=&label=` (the
+  `upload_url` that `gh` and Octokit use).
+- Reading needs repository read access; drafts and all writes need write
+  access. Instance admins may write everywhere.
+- Publishing a release whose tag does not exist creates a lightweight tag at
+  `target_commitish` (branch or commit, default branch by default) with a
+  compare-and-swap on `refs.json`, then runs the push pipeline (mirror
+  notifications, CI, `create` and `push` events) as if the tag had been
+  pushed. Drafts never create tags.
+- **Assets are LFS objects.** An upload streams into
+  `lfs/objects/<sha256>` and is served by the immutable media URL
+  `/{owner}/{repo}/media/{oid}/{name}` (§7: `Range`, ETag, CDN friendly). The
+  key is the SHA-256 of the content, which is only known at the end of the
+  stream, and `put` needs the key first: a client that sends
+  `X-Content-SHA256` (hex) is stored directly and verified while streaming;
+  otherwise the upload is staged in `tmp/` while hashing (expired by the
+  bucket lifecycle rule like push staging) and then copied, unless the object
+  already exists. Assets are limited to `MAX_LFS_OBJECT_BYTES`, and the API
+  reports `digest: "sha256:…"` like GitHub.
+- `browser_download_url` (`/{owner}/{repo}/releases/download/{tag}/{name}`)
+  and `GET …/releases/assets/{id}` with `Accept: application/octet-stream`
+  answer `302` to the media URL and count the download. A draft's asset is
+  reachable through its media URL by anyone who can read the repository and
+  knows the hash.
+- Not implemented: `tarball_url`/`zipball_url` (no archive endpoint yet),
+  `generate_release_notes`, `make_latest` (the latest release is the newest
+  published non-prerelease).
+
+## 17. Collaboration
 
 Issues, pull requests, reviews, commit statuses, check runs and discussions
 (`@git-forge/collaboration`, API in its
 [README](../packages/collaboration/README.md)). Decisions:
 
 - **Database only, never synced.** All collaboration data lives in the
-  instance's SQLite database (migration `0007_collaboration`). Nothing of it
+  instance's SQLite database (migration `0008_collaboration`). Nothing of it
   is written to the bucket, so a mirror or a plain bucket clone carries no
   issues or reviews (§4). Pull requests keep their head and base shas in the
   database; there are no `refs/pull/*` refs. The only Git writes are merge
@@ -1274,8 +1428,13 @@ Issues, pull requests, reviews, commit statuses, check runs and discussions
   through `recordCommitStatus` / `recordCheckRun`) or by anyone with write
   access through the API.
 - **Hooks.** After a merge the host's `onBranchUpdated` runs the same
-  follow-ups as a push (CI dispatch, mirror notifications).
+  pipeline as a push (CI dispatch, mirror notifications, `push` events).
+  Every mutation reports an activity (`onActivity`) that the Worker turns
+  into notification events (§16: `issues`, `issue_comment`,
+  `pull_request`, `pull_request_review`, `pull_request_review_comment`);
+  the collaboration package itself does not depend on the notifications
+  package.
 - **Limits of v1.** Same-repository pull requests only (forks later),
   computing mergeability and file lists loads the involved objects through
-  the in-memory object database, no reactions, no notifications, no search,
+  the in-memory object database, no reactions, no search,
   no CODEOWNERS parsing, no in-browser conflict resolution.

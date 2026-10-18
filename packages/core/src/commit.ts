@@ -1,16 +1,9 @@
 import { concat, fromHex, fromUtf8, streamOf, utf8 } from './bytes.ts'
 import { hashObject, type ObjectId } from './hash.ts'
-import { type GitObject, isTreeMode, type ObjectType, type TreeEntry } from './objects.ts'
+import { type GitObject, isTreeMode, type ObjectType, parseSignature, type Signature, type TreeEntry } from './objects.ts'
 import { writePack } from './pack.ts'
 import type { ObjectDatabase } from './repository.ts'
 import type { ObjectSource } from './walk.ts'
-
-export type Signature = {
-  readonly name: string
-  readonly email: string
-  readonly timestamp: number
-  readonly timezone: string
-}
 
 export type CommitDetails = {
   readonly tree: ObjectId
@@ -21,13 +14,7 @@ export type CommitDetails = {
   readonly message: string
 }
 
-const SIGNATURE = /^(.*?) ?<([^<>]*)> (-?\d+) ([+-]\d{4})$/
-
-export const parseSignature = (text: string): Signature => {
-  const match = SIGNATURE.exec(text)
-  if (!match) return { name: text, email: '', timestamp: 0, timezone: '+0000' }
-  return { name: match[1]!, email: match[2]!, timestamp: Number(match[3]), timezone: match[4]! }
-}
+const signatureOf = (text: string): Signature => parseSignature(text) ?? { name: text, email: '', timestamp: 0, timezone: '+0000' }
 
 export const formatSignature = (signature: Signature): string =>
   `${signature.name} <${signature.email}> ${signature.timestamp} ${signature.timezone}`
@@ -67,8 +54,8 @@ export const parseCommitDetails = (data: Uint8Array): CommitDetails => {
     const value = space === -1 ? '' : line.slice(space + 1)
     if (key === 'tree') tree = value
     else if (key === 'parent') parents.push(value)
-    else if (key === 'author') author = parseSignature(value)
-    else if (key === 'committer') committer = parseSignature(value)
+    else if (key === 'author') author = signatureOf(value)
+    else if (key === 'committer') committer = signatureOf(value)
     else extraHeaders.push([key, value])
   }
   if (!tree || !author || !committer) throw new Error('invalid commit')

@@ -1,7 +1,7 @@
 import { atLeast, type Database, first, type Principal, resolveAccess, sql, type Statement } from '@git-forge/accounts'
 import { diffFile, diffTrees, type FileDiff, formatHunks, type Hunk, isObjectId, mergeBases, type ObjectId, parseCommit, resolvePath } from '@git-forge/core'
 import { loadUsers, type UserSummary } from './actors.ts'
-import { type ActorRef, invalid, nodeId, notFound, refFromColumns, requirePermission, sameActor, type Scope } from './context.ts'
+import { type ActorRef, emitActivity, invalid, nodeId, notFound, refFromColumns, requirePermission, sameActor, type Scope } from './context.ts'
 import { branchTip, currentRefs, objectDatabase, peelToCommit } from './git.ts'
 import { eventStatement, optionalBody, requireBody } from './issues.ts'
 import { type PullRow, pullRow, refreshPull } from './pull-rows.ts'
@@ -364,6 +364,7 @@ export const createReview = async (scope: Scope, number: number, input: ReviewIn
     ),
     ...(event ? submitStatements(pull, review.id, author, event, at) : []),
   ])
+  if (event) await emitActivity(scope, { kind: 'pull_request_review', action: 'submitted', number, actor: author, reviewId: review.id })
   return getReview(scope, number, review.id)
 }
 
@@ -382,6 +383,7 @@ export const submitReview = async (scope: Scope, number: number, id: number, inp
     sql('UPDATE pull_request_reviews SET state = ?, body = ?, submitted_at = ? WHERE id = ?', EVENT_STATE[event], body, at, id),
     ...submitStatements(pull, id, author, event, at),
   ])
+  await emitActivity(scope, { kind: 'pull_request_review', action: 'submitted', number, actor: author, reviewId: id })
   return getReview(scope, number, id)
 }
 
@@ -421,6 +423,7 @@ export const dismissReview = async (scope: Scope, number: number, id: number, me
     ),
     eventStatement(pull.id, actor, 'review_dismissed', { dismissed_review: { review_id: id, state: row.state.toLowerCase(), dismissal_message: text } }, at),
   ])
+  await emitActivity(scope, { kind: 'pull_request_review', action: 'dismissed', number, actor, reviewId: id })
   return getReview(scope, number, id)
 }
 
@@ -484,13 +487,15 @@ export const createReviewComment = async (scope: Scope, number: number, input: R
     sql('UPDATE issues SET updated_at = ? WHERE id = ?', at, pull.id),
   ])
   const created = (await first<{ id: number }>(scope.db, sql('SELECT id FROM review_comments WHERE node_id = ?', commentNode)))!
+  await emitActivity(scope, { kind: 'pull_request_review_comment', action: 'created', number, actor: author, commentId: created.id })
   return getReviewComment(scope, created.id)
 }
 
 export const updateReviewComment = async (scope: Scope, id: number, body: unknown): Promise<ReviewComment> => {
   const row = await commentRow(scope, id)
-  requirePermission(scope, 'comment:edit', { author: refFromColumns(row.author_kind, row.author_id) })
+  const actor = requirePermission(scope, 'comment:edit', { author: refFromColumns(row.author_kind, row.author_id) })
   await scope.db.run(sql('UPDATE review_comments SET body = ?, updated_at = ? WHERE id = ?', requireBody(body), scope.now(), id))
+  await emitActivity(scope, { kind: 'pull_request_review_comment', action: 'edited', number: row.number, actor, commentId: id, changes: { body: { from: row.body } } })
   return getReviewComment(scope, id)
 }
 
@@ -542,6 +547,7 @@ export const changeRequestedReviewers = async (scope: Scope, number: number, log
     }
   }
   if (statements.length > 0) await scope.db.batch(statements)
+  for (const login of logins) await emitActivity(scope, { kind: 'pull_request', action: mode === 'add' ? 'review_requested' : 'review_request_removed', number, actor, requestedReviewer: login })
   return listRequestedReviewers(scope, number)
 }
 

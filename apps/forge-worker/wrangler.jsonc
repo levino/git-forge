@@ -63,7 +63,9 @@
     "OIDC_CLIENT_ID": "",
     "OIDC_NAME": "",
     "SELF_SIGNUP": "false",
-    "BREAK_GLASS_PUBLIC_KEY": ""
+    "BREAK_GLASS_PUBLIC_KEY": "",
+    "EMAIL_PROVIDER": "console",
+    "EMAIL_FROM": "forge@example.org"
   },
   "secrets": {
     "required": [
@@ -149,7 +151,9 @@
         "OIDC_CLIENT_ID": "",
         "OIDC_NAME": "",
         "SELF_SIGNUP": "false",
-        "BREAK_GLASS_PUBLIC_KEY": ""
+        "BREAK_GLASS_PUBLIC_KEY": "",
+        "EMAIL_PROVIDER": "console",
+        "EMAIL_FROM": "forge@example.org"
       },
       "secrets": {
         "required": [
@@ -232,7 +236,9 @@
         "OIDC_CLIENT_ID": "",
         "OIDC_NAME": "",
         "SELF_SIGNUP": "false",
-        "BREAK_GLASS_PUBLIC_KEY": ""
+        "BREAK_GLASS_PUBLIC_KEY": "",
+        "EMAIL_PROVIDER": "console",
+        "EMAIL_FROM": "forge@example.org"
       },
       "secrets": {
         "required": [
@@ -315,7 +321,9 @@
         "OIDC_CLIENT_ID": "",
         "OIDC_NAME": "",
         "SELF_SIGNUP": "false",
-        "BREAK_GLASS_PUBLIC_KEY": ""
+        "BREAK_GLASS_PUBLIC_KEY": "",
+        "EMAIL_PROVIDER": "console",
+        "EMAIL_FROM": "forge@example.org"
       },
       "secrets": {
         "required": [

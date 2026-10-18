@@ -2,13 +2,14 @@ import { spawnSync } from 'node:child_process'
 import { chmodSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { parseCommitDetails, parseSignature, serializeCommit } from '../src/commit.ts'
+import { parseCommitDetails, serializeCommit } from '../src/commit.ts'
+import { parseSignature } from '../src/objects.ts'
 import { checkMergeability, commitsBetween, mergeBases, mergeBranches, type MergeOutcome } from '../src/merge.ts'
 import { parseCommit } from '../src/objects.ts'
 import { commitAll, git, gitEnv, initRepo, writeFile } from './git-helpers.ts'
 import { loadRepository } from './repo-helpers.ts'
 
-const COMMITTER = parseSignature(`${gitEnv.GIT_COMMITTER_NAME} <${gitEnv.GIT_COMMITTER_EMAIL}> ${Date.parse(gitEnv.GIT_COMMITTER_DATE) / 1000} +0000`)
+const COMMITTER = parseSignature(`${gitEnv.GIT_COMMITTER_NAME} <${gitEnv.GIT_COMMITTER_EMAIL}> ${Date.parse(gitEnv.GIT_COMMITTER_DATE) / 1000} +0000`)!
 
 const rev = (dir: string, ref: string) => git(dir, ['rev-parse', ref]).trim()
 

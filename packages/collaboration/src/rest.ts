@@ -93,6 +93,7 @@ import { timeline } from './timeline.ts'
 
 export type CollaborationApiOptions = CollaborationOptions & {
   readonly verifyInstance?: InstanceVerifier
+  readonly authenticate?: (request: Request) => Promise<Principal | null>
   readonly prefix?: string
   readonly publicUrl?: string
 }
@@ -784,10 +785,12 @@ export const handleCollaborationApi = async (request: Request, options: Collabor
   if (!matched) return null
   if (!matched.route) return errorResponse(405, 'Method Not Allowed', [], { Allow: matched.allowed.join(', ') })
   if (!isValidName(matched.owner) || !isValidName(matched.name)) return errorResponse(404, 'Not Found')
-  const principal: Principal | null = await authenticateRequest(request, {
-    directory: options.accounts as RepositoryDirectory,
-    ...(options.verifyInstance ? { verifyInstance: options.verifyInstance } : {}),
-  })
+  const principal: Principal | null = options.authenticate
+    ? await options.authenticate(request)
+    : await authenticateRequest(request, {
+        directory: options.accounts as RepositoryDirectory,
+        ...(options.verifyInstance ? { verifyInstance: options.verifyInstance } : {}),
+      })
   if (!principal) return errorResponse(401, 'Bad credentials', [], { 'WWW-Authenticate': 'Bearer' })
   try {
     const scope = await openRepository(options, principal, matched.owner, matched.name)

@@ -2,7 +2,7 @@
 
 Issues, pull requests, reviews, commit statuses, check runs and discussions
 for git-forge, plus a GitHub-compatible REST API under `/api/v3`. Design and
-rationale: [docs/design.md §16](../../docs/design.md#16-collaboration).
+rationale: [docs/design.md §17](../../docs/design.md#17-collaboration).
 
 Collaboration data lives only in the instance's SQLite database (D1, libSQL,
 a file). It is never written to the bucket and never synced to mirrors; the
@@ -19,10 +19,17 @@ stores the results.
 ```ts
 import { handleCollaborationApi, handlePushedRefs, openRepository, createIssue, mergePull, systemScope } from '@git-forge/collaboration'
 
-const options = { db, storage, accounts: createAccountsStore(db), onBranchUpdated: async (update) => notifyCiAndMirrors(update) }
+const options = {
+  db,
+  storage,
+  accounts: createAccountsStore(db),
+  onBranchUpdated: async (update) => runPushPipeline(update),
+  onActivity: async (scope, activity) => notifications.emit(toForgeEvent(scope, activity)),
+}
 
-// HTTP: returns null for paths it does not own (e.g. /api/v3/repos/{o}/{r}/actions/…)
-handleCollaborationApi(request, { ...options, verifyInstance, publicUrl })
+// HTTP: returns null for paths it does not own (e.g. /api/v3/repos/{o}/{r}/actions/…);
+// authenticate defaults to token auth, the Worker passes its session-aware apiPrincipal
+handleCollaborationApi(request, { ...options, verifyInstance, publicUrl, authenticate })
 
 // UI or any other caller: the same functions with a principal from a verified token or session
 const scope = await openRepository(options, principal, 'acme', 'site')
@@ -39,6 +46,23 @@ if (system) await handlePushedRefs(system, outcome.results.filter((result) => re
 token ceilings and repository restrictions still apply). Every service
 function checks its permission through `allowed()` before touching the
 database, so the HTTP layer and a UI share one permission implementation.
+
+## Activity
+
+Every service function reports what happened through `onActivity(scope,
+activity)` after its writes: `{ kind, action, number, actor, commentId?,
+reviewId?, changes?, requestedReviewer?, before?, after? }` with `kind`
+`issues`, `issue_comment`, `pull_request`, `pull_request_review` or
+`pull_request_review_comment` and GitHub's webhook action names (`opened`,
+`edited`, `closed`, `reopened`, `labeled`, `assigned`, `locked`,
+`synchronize`, `review_requested`, `ready_for_review`, `submitted`,
+`dismissed`, `created`, …). Edits made through the issue endpoints on a pull
+request are reported as `pull_request`. The package does not depend on
+`@git-forge/notifications`; the Worker maps activities to its events
+(`apps/forge-worker/src/collaboration-events.ts`) and calls
+`notifications.emit`, so webhooks, the inbox and e-mail digests see the same
+activity whether it came from the API or the UI. A failing handler is logged
+and never fails the operation.
 
 ## Permissions
 

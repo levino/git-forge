@@ -1,7 +1,7 @@
 import { selectProtectionRule, sql, type Statement, first } from '@git-forge/accounts'
 import { type ObjectId, type ObjectSource, parseCommit, type RefsState } from '@git-forge/core'
 import { actorColumns } from './actors.ts'
-import { type EventActor, notFound, type Scope } from './context.ts'
+import { emitActivity, type EventActor, notFound, type Scope } from './context.ts'
 import { branchName, branchTip, objectDatabase } from './git.ts'
 import { eventStatement, type IssueRow } from './issues.ts'
 
@@ -65,12 +65,12 @@ export const recentCommits = async (source: ObjectSource, from: ObjectId, stop: 
   return order
 }
 
-export const dismissStatements = async (scope: Scope, row: PullRow, actor: EventActor, message: string, at: number): Promise<Statement[]> => {
+export const dismissStatements = async (scope: Scope, row: PullRow, actor: EventActor, message: string, at: number): Promise<{ statements: Statement[]; reviews: number[] }> => {
   const approvals = await scope.db.all<{ id: number; author_kind: string; author_id: string }>(
     sql("SELECT id, author_kind, author_id FROM pull_request_reviews WHERE issue_id = ? AND state = 'APPROVED'", row.id),
   )
   const [kind, id] = actorColumns(actor)
-  return approvals.flatMap((review) => [
+  const statements = approvals.flatMap((review) => [
     sql(
       "UPDATE pull_request_reviews SET state = 'DISMISSED', dismissed_at = ?, dismissed_by_kind = ?, dismissed_by_id = ?, dismissal_message = ? WHERE id = ?",
       at,
@@ -81,6 +81,7 @@ export const dismissStatements = async (scope: Scope, row: PullRow, actor: Event
     ),
     eventStatement(row.id, actor, 'review_dismissed', { dismissed_review: { review_id: review.id, state: 'approved', dismissal_message: message } }, at),
   ])
+  return { statements, reviews: approvals.map((review) => review.id) }
 }
 
 export const refreshPull = async (scope: Scope, row: PullRow, state: RefsState, pusher: EventActor | null): Promise<PullRow> => {
@@ -91,7 +92,9 @@ export const refreshPull = async (scope: Scope, row: PullRow, state: RefsState, 
   const at = scope.now()
   const actor = pusher ?? { kind: 'system', id: null }
   const statements: Statement[] = []
+  const activities: Parameters<typeof emitActivity>[1][] = []
   if (head !== null && head !== row.head_sha) {
+    activities.push({ kind: 'pull_request', action: 'synchronize', number: row.number, actor, before: row.head_sha, after: head })
     const forced = !(await reachesWithin(odb, head, row.head_sha))
     const [kind, id] = pusher ? actorColumns(pusher) : [null, null]
     statements.push(
@@ -101,7 +104,11 @@ export const refreshPull = async (scope: Scope, row: PullRow, state: RefsState, 
     )
     const rules = await scope.accounts.branchProtectionRules(scope.repository.id)
     const rule = selectProtectionRule(rules, branchName(row.base_ref))
-    if (rule?.requiredPullRequestReviews?.dismissStaleReviews) statements.push(...(await dismissStatements(scope, row, actor, 'New commits were pushed', at)))
+    if (rule?.requiredPullRequestReviews?.dismissStaleReviews) {
+      const dismissed = await dismissStatements(scope, row, actor, 'New commits were pushed', at)
+      statements.push(...dismissed.statements)
+      for (const reviewId of dismissed.reviews) activities.push({ kind: 'pull_request_review', action: 'dismissed', number: row.number, actor, reviewId })
+    }
   }
   const mergedManually = head !== null && base !== null && base !== row.base_sha && (await reachesWithin(odb, base, head))
   if (mergedManually) {
@@ -119,10 +126,12 @@ export const refreshPull = async (scope: Scope, row: PullRow, state: RefsState, 
       eventStatement(row.id, actor, 'merged', { commit_id: base }, at),
       eventStatement(row.id, actor, 'closed', { commit_id: base }, at),
     )
+    activities.push({ kind: 'pull_request', action: 'closed', number: row.number, actor })
   } else if (base !== null && base !== row.base_sha) {
     statements.push(sql('UPDATE pull_requests SET base_sha = ? WHERE issue_id = ?', base, row.id))
   }
   if (statements.length === 0) return row
   await scope.db.batch(statements)
+  for (const activity of activities) await emitActivity(scope, activity)
   return reloadPull(scope, row.id)
 }

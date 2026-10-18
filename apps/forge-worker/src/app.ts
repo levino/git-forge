@@ -7,7 +7,11 @@ import {
   type RunnerLauncher,
   type SecretsProvider,
   GITHUB_TOKEN_PREFIX,
+  getRun,
+  type JobRow,
+  listRunJobs,
   verifyToken,
+  workflowJobPayload,
 } from '@git-forge/actions'
 import {
   type AccountsStore,
@@ -48,6 +52,7 @@ import {
   deepCheckMirror,
   detachMirror,
   type DigestFactory,
+  type EmailSender,
   type FetchFunction,
   handleContentRequest,
   handleGitRequest,
@@ -57,8 +62,10 @@ import {
   isValidImportUrl,
   isValidName,
   listMirrors,
+  type MirrorConfig,
   MirrorExistsError,
   MirrorNotFoundError,
+  ObjectDatabase,
   type PackfileUri,
   publicPackfileUris,
   type PushOutcome,
@@ -66,13 +73,34 @@ import {
   readMirrorConfig,
   readImportState,
   readMirrorStatus,
+  readRefs,
   RepositoryExistsError,
   type RepositoryName,
   SizeLimitError,
   startImport,
   type Storage,
+  type SyncResult,
+  ZERO_ID,
 } from '@git-forge/core'
-import { type BranchUpdate, type CollaborationOptions, handleCollaborationApi, handlePushedRefs, loadUsers, systemScope, actorRefOf } from '@git-forge/collaboration'
+import { type BranchUpdate, type CollaborationOptions, handleCollaborationApi, handlePushedRefs, systemScope, actorRefOf } from '@git-forge/collaboration'
+import {
+  createNotifications,
+  type EventActor,
+  type ForgeEvent,
+  handleNotificationsRequest,
+  isNotificationJob,
+  mirrorAlarmEvent,
+  type NotificationJob,
+  type Notifications,
+  pushEvent,
+  pushInfos,
+  refEvent,
+  SYSTEM_ACTOR,
+  workflowJobEvent,
+  workflowRunEvent,
+} from '@git-forge/notifications'
+import { handleReleasesRequest } from '@git-forge/releases'
+import { activityEvent } from './collaboration-events.ts'
 import type { ForgeSettings } from './config.ts'
 import {
   enqueueDueMirrors,
@@ -98,11 +126,14 @@ export type ForgeOptions = ForgeSettings & {
   readonly fetch?: FetchFunction
   readonly now?: () => Date
   readonly actions?: ActionsOptions
-  readonly jobs?: JobQueue<ForgeJob>
+  readonly jobs?: JobQueue<AppJob>
   readonly digests?: DigestFactory
   readonly scheduleImport?: ImportScheduler
+  readonly email?: EmailSender
   readonly renderLoginPage?: LoginPageRenderer
 }
+
+export type AppJob = ForgeJob | NotificationJob
 
 export type WaitUntil = (promise: Promise<unknown>) => void
 
@@ -111,7 +142,8 @@ export const ACTIONS_SERVICE_PATH = '/_services/actions'
 export type Forge = {
   readonly fetch: (request: Request, waitUntil?: WaitUntil) => Promise<Response>
   readonly scheduled: (at?: Date) => Promise<ScheduledMirrorRun[]>
-  readonly runJob: (job: ForgeJob) => Promise<void>
+  readonly runJob: (job: AppJob) => Promise<void>
+  readonly notifications: Notifications
 }
 
 class HttpError extends Error {
@@ -236,6 +268,15 @@ export const createForge = (options: ForgeOptions): Forge => {
     return principal
   }
 
+  const apiPrincipal = async (request: Request): Promise<Principal | null> => {
+    if (!request.headers.has('Authorization')) {
+      const check = await checkSession(request, loginOptions(request))
+      if (check.kind === 'csrf-failed') return null
+      if (check.kind === 'session') return sessionUserPrincipal(check.active.session)
+    }
+    return authenticateRequest(request, authenticateOptions(request))
+  }
+
   const canManage = (principal: Principal): principal is UserPrincipal =>
     principal.kind === 'user' && (principal.limits === null || principal.limits.ceiling === 'admin')
 
@@ -262,6 +303,49 @@ export const createForge = (options: ForgeOptions): Forge => {
     throw new HttpError(status, message)
   }
 
+  const notifications = createNotifications({
+    db,
+    directory: store,
+    storage,
+    ...(options.jobs ? { jobs: options.jobs } : {}),
+    ...(options.email ? { email: options.email } : {}),
+    ...(options.fetch ? { fetch: options.fetch } : {}),
+    allowInsecureWebhooks: options.allowInsecureWebhooks ?? false,
+    ...(options.publicUrl ? { baseUrl: options.publicUrl } : {}),
+    now: () => now().getTime(),
+  })
+
+  const emit = async (event: ForgeEvent): Promise<void> => {
+    try {
+      await notifications.emit(event)
+    } catch (error) {
+      console.error(JSON.stringify({ event: 'emit-failed', name: event.name, repository: `${event.repository.owner}/${event.repository.name}`, error: String(error) }))
+    }
+  }
+
+  const eventActorOf = (principal: Principal | null): EventActor => {
+    switch (principal?.kind) {
+      case 'user':
+        return { kind: 'user', id: principal.id, login: principal.login }
+      case 'app':
+        return { kind: 'app', id: principal.id, login: `${principal.slug}[bot]` }
+      case 'instance':
+        return { kind: 'instance', id: principal.issuer, login: null }
+      default:
+        return SYSTEM_ACTOR
+    }
+  }
+
+  const emitMirrorAlarms = async (repo: RepositoryName, config: MirrorConfig, result: SyncResult): Promise<void> => {
+    if (result.alarms.length === 0) return
+    await emit(
+      mirrorAlarmEvent(
+        { baseUrl: options.publicUrl ?? 'http://localhost', repository: repo, actor: SYSTEM_ACTOR },
+        { remote: config.remote, upstream: config.url, alarms: result.alarms },
+      ),
+    )
+  }
+
   const mirrorContext = (issuer: string | undefined): MirrorContext => ({
     storage,
     store,
@@ -269,6 +353,7 @@ export const createForge = (options: ForgeOptions): Forge => {
     instanceKey: options.instanceKey,
     ...(options.fetch ? { fetch: options.fetch } : {}),
     ...(options.digests ? { digests: options.digests } : {}),
+    onSynced: emitMirrorAlarms,
   })
 
   const federation: MirrorFederation | null =
@@ -588,6 +673,7 @@ export const createForge = (options: ForgeOptions): Forge => {
         ...(actions.secrets ? { secrets: actions.secrets } : {}),
         onJobCompleted: async (job) => {
           await advanceRun(dispatch, job)
+          await emitRunEvents(dispatch.urls.serverUrl, job)
         },
       })) ?? (await handleGhesApi(request, { db, storage, urls: dispatch.urls, authorize: isRepositoryAdmin, now: () => now().getTime() }))
     )
@@ -606,36 +692,76 @@ export const createForge = (options: ForgeOptions): Forge => {
     }
   }
 
-  const actorOf = async (request: Request): Promise<string> => {
-    const principal = await authenticateRequest(request, authenticateOptions(request))
-    if (principal?.kind === 'user') return principal.login
-    return principal?.kind ?? 'unknown'
+  const emitRunEvents = async (serverUrl: string, job: JobRow): Promise<void> => {
+    const run = await getRun(db, job.run_id)
+    if (!run) return
+    const context = { baseUrl: serverUrl, repository: { owner: run.owner, name: run.repo }, actor: { kind: 'user' as const, id: null, login: run.actor } }
+    await emit(workflowJobEvent(context, workflowJobPayload('completed', job, run, serverUrl, null)))
+    const jobs = await listRunJobs(db, run.id)
+    if (jobs.some((entry) => entry.status !== 'completed')) return
+    const failed = jobs.some((entry) => entry.conclusion !== null && !['success', 'skipped', 'neutral'].includes(entry.conclusion))
+    await emit(
+      workflowRunEvent(context, 'completed', {
+        id: run.id,
+        name: run.workflow_name,
+        path: run.workflow_path,
+        event: run.event,
+        status: 'completed',
+        conclusion: failed ? 'failure' : 'success',
+        headBranch: run.ref.replace(/^refs\/(heads|tags)\//, ''),
+        headSha: run.sha,
+        actor: run.actor,
+        createdAt: run.created_at,
+        updatedAt: now().getTime(),
+      }),
+    )
   }
 
-  const afterRefUpdate = async (request: Request, repo: RepositoryName, outcome: PushOutcome, actor: string): Promise<void> => {
+  const emitPushEvents = async (request: Request, repo: RepositoryName, outcome: PushOutcome, principal: Principal | null): Promise<void> => {
+    const actor = eventActorOf(principal)
+    const context = { baseUrl: issuerFor(request), repository: repo, actor }
+    const odb = new ObjectDatabase(storage, repo)
+    const refs = (await readRefs(storage, repo))?.state.refs ?? {}
+    const pushed = new Set(outcome.results.map((result) => result.name))
+    const otherTips = new Set(Object.entries(refs).flatMap(([name, id]) => (pushed.has(name) || !name.startsWith('refs/heads/') ? [] : [id])))
+    const email = principal?.kind === 'user' ? ((await notifications.store.usersById([principal.id]))[0]?.email ?? null) : null
+    const infos = await pushInfos(outcome, { name: actor.login ?? actor.kind, email }, (id) => odb.read(id), otherTips)
+    for (const info of infos) {
+      if (info.before === ZERO_ID) await emit(refEvent(context, 'create', info.ref))
+      await emit(pushEvent(context, info))
+      if (info.after === ZERO_ID) await emit(refEvent(context, 'delete', info.ref))
+    }
+  }
+
+  const afterPush = async (request: Request, repo: RepositoryName, outcome: PushOutcome, waitUntil: WaitUntil | undefined, principal: Principal | null): Promise<void> => {
     if (federation) await notifyAfterPush(federation)(repo, outcome)
-    if (options.actions) await queueRunsForPush(dispatchOptions(request), { repo, outcome, actor })
+    if (options.actions) await queueRunsForPush(dispatchOptions(request), { repo, outcome, actor: principal?.kind === 'user' ? principal.login : (principal?.kind ?? 'unknown') })
+    if (!outcome.results.some((result) => result.ok)) return
+    const events = emitPushEvents(request, repo, outcome, principal).catch((error: unknown) =>
+      console.error(JSON.stringify({ event: 'push-events-failed', repository: `${repo.owner}/${repo.name}`, error: String(error) })),
+    )
+    if (waitUntil) waitUntil(events)
+    else await events
   }
 
-  const collaborationOptions = (request: Request): CollaborationOptions => ({
+  const collaborationOptions = (request: Request, waitUntil?: WaitUntil): CollaborationOptions => ({
     db,
     storage,
     accounts: store,
     now: () => now().getTime(),
     onBranchUpdated: async (update: BranchUpdate) => {
-      const actor = (await loadUsers(db, [update.actor]))(update.actor).login
       const outcome: PushOutcome = { unpack: 'ok', results: [{ name: update.ref, oldId: update.oldId, newId: update.newId, ok: true }], pack: null, objectCount: 0, archived: [] }
-      await afterRefUpdate(request, update.repo, outcome, actor)
+      await afterPush(request, update.repo, outcome, waitUntil, await apiPrincipal(request))
     },
+    onActivity: async (scope, activity) => emit(await activityEvent(scope, activity, issuerFor(request))),
   })
 
-  const refreshCollaboration = async (request: Request, repo: RepositoryName, outcome: PushOutcome): Promise<void> => {
+  const refreshCollaboration = async (request: Request, repo: RepositoryName, outcome: PushOutcome, principal: Principal | null): Promise<void> => {
     const updates = outcome.results.filter((result) => result.ok)
     if (updates.length === 0) return
     try {
       const scope = await systemScope(collaborationOptions(request), repo.owner, repo.name)
       if (!scope) return
-      const principal = await authenticateRequest(request, authenticateOptions(request))
       await handlePushedRefs(scope, updates, (principal && actorRefOf(principal)) ?? { kind: 'system', id: null })
     } catch (error) {
       console.log(JSON.stringify({ event: 'collaboration-push-failed', repository: `${repo.owner}/${repo.name}`, error: (error as Error).message }))
@@ -704,8 +830,32 @@ export const createForge = (options: ForgeOptions): Forge => {
     const authentication = authenticateOptions(request)
     const protection = await handleBranchProtectionRequest(request, { store, verifyInstance: authentication.verifyInstance })
     if (protection) return protection
+    const notificationsResponse = await handleNotificationsRequest(request, {
+      notifications,
+      directory: store,
+      authenticate: apiPrincipal,
+      isInstanceAdmin: store.isInstanceAdmin,
+      baseUrl: issuerFor,
+      allowInsecureWebhooks: options.allowInsecureWebhooks ?? false,
+    })
+    if (notificationsResponse) return notificationsResponse
+    const releases = await handleReleasesRequest(request, {
+      db,
+      storage,
+      directory: store,
+      authenticate: apiPrincipal,
+      isInstanceAdmin: store.isInstanceAdmin,
+      baseUrl: issuerFor,
+      maxAssetBytes: options.maxLfsObjectBytes,
+      ...(options.digests ? { digests: options.digests } : {}),
+      now: () => now().getTime(),
+      emit,
+      onTagCreated: (repo, outcome, principal) => afterPush(request, repo, outcome, waitUntil, principal),
+    })
+    if (releases) return releases
     const collaboration = await handleCollaborationApi(request, {
-      ...collaborationOptions(request),
+      ...collaborationOptions(request, waitUntil),
+      authenticate: apiPrincipal,
       verifyInstance: authentication.verifyInstance,
       ...(options.publicUrl ? { publicUrl: options.publicUrl } : {}),
     })
@@ -733,8 +883,9 @@ export const createForge = (options: ForgeOptions): Forge => {
       packfileUris: (incoming, repo) => packfileUris(incoming, repo, authorize),
       onPush: async (repo, outcome) => {
         await compactAfterPush(waitUntil)(repo, outcome)
-        await refreshCollaboration(request, repo, outcome)
-        if (options.actions || federation) await afterRefUpdate(request, repo, outcome, await actorOf(request))
+        const principal = await authenticateRequest(request, authentication)
+        await refreshCollaboration(request, repo, outcome, principal)
+        await afterPush(request, repo, outcome, waitUntil, principal)
       },
     })
     return git ?? json(404, { error: 'not found' })
@@ -742,11 +893,16 @@ export const createForge = (options: ForgeOptions): Forge => {
 
   return {
     fetch: handle,
-    scheduled: (at = now()) =>
-      federation ? enqueueDueMirrors(federation, at, options.mirrorIntervalMinutes) : syncDueMirrors(mirrorContext(options.publicUrl), at, options.mirrorIntervalMinutes),
+    scheduled: async (at = now()) => {
+      const sweep = await notifications.sweep().catch((error: unknown) => ({ error: String(error) }))
+      console.log(JSON.stringify({ event: 'notification-sweep', ...sweep }))
+      return federation ? enqueueDueMirrors(federation, at, options.mirrorIntervalMinutes) : syncDueMirrors(mirrorContext(options.publicUrl), at, options.mirrorIntervalMinutes)
+    },
     runJob: async (job) => {
+      if (isNotificationJob(job)) return notifications.runJob(job)
       if (!federation) throw new Error('jobs need PUBLIC_URL, INSTANCE_KEY and a job queue')
       await runJob(federation, job)
     },
+    notifications,
   }
 }

@@ -50,6 +50,40 @@ export const parseCommit = (data: Uint8Array): Commit => {
   return { tree, parents }
 }
 
+export type Signature = {
+  readonly name: string
+  readonly email: string
+  readonly timestamp: number
+  readonly timezone: string
+}
+
+export type CommitMetadata = Commit & {
+  readonly author: Signature | null
+  readonly committer: Signature | null
+  readonly message: string
+}
+
+const SIGNATURE = /^(.*?) <([^>]*)> (-?\d+) ([+-]\d{4})$/
+
+export const parseSignature = (value: string): Signature | null => {
+  const match = SIGNATURE.exec(value)
+  if (!match) return null
+  return { name: match[1]!, email: match[2]!, timestamp: Number(match[3]), timezone: match[4]! }
+}
+
+export const parseCommitMetadata = (data: Uint8Array): CommitMetadata => {
+  const commit = parseCommit(data)
+  const text = fromUtf8(data)
+  const end = text.indexOf('\n\n')
+  let author: Signature | null = null
+  let committer: Signature | null = null
+  for (const line of headerLines(data)) {
+    if (line.startsWith('author ')) author = parseSignature(line.slice(7))
+    else if (line.startsWith('committer ')) committer = parseSignature(line.slice(10))
+  }
+  return { ...commit, author, committer, message: end === -1 ? '' : text.slice(end + 2) }
+}
+
 export type Tag = {
   readonly object: ObjectId
   readonly type: ObjectType

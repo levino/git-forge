@@ -4,6 +4,7 @@ import {
   type ActorRef,
   can,
   CollaborationError,
+  emitActivity,
   type EventActor,
   invalid,
   nodeId,
@@ -461,6 +462,29 @@ export const insertIssueStatements = async (
   ]
 }
 
+export const issueChanges = (before: Issue, after: Issue): { readonly action: string; readonly changes?: Record<string, unknown> }[] => {
+  const out: { action: string; changes?: Record<string, unknown> }[] = []
+  const changes: Record<string, unknown> = {}
+  if (before.title !== after.title) changes.title = { from: before.title }
+  if (before.body !== after.body) changes.body = { from: before.body }
+  if (Object.keys(changes).length > 0) out.push({ action: 'edited', changes })
+  if (before.state !== after.state) out.push({ action: after.state === 'closed' ? 'closed' : 'reopened' })
+  const labels = (issue: Issue) => issue.labels.map((label) => label.name.toLowerCase())
+  const logins = (issue: Issue) => issue.assignees.map((user) => user.login.toLowerCase())
+  if (labels(after).some((name) => !labels(before).includes(name))) out.push({ action: 'labeled' })
+  if (labels(before).some((name) => !labels(after).includes(name))) out.push({ action: 'unlabeled' })
+  if (logins(after).some((login) => !logins(before).includes(login))) out.push({ action: 'assigned' })
+  if (logins(before).some((login) => !logins(after).includes(login))) out.push({ action: 'unassigned' })
+  if (before.locked !== after.locked && !after.isPull) out.push({ action: after.locked ? 'locked' : 'unlocked' })
+  return out
+}
+
+export const emitIssueChanges = async (scope: Scope, before: Issue, after: Issue, actor: EventActor): Promise<void> => {
+  for (const change of issueChanges(before, after)) {
+    await emitActivity(scope, { kind: after.isPull ? 'pull_request' : 'issues', action: change.action, number: after.number, actor, ...(change.changes ? { changes: change.changes } : {}) })
+  }
+}
+
 export const createIssue = async (scope: Scope, input: IssueInput): Promise<Issue> => {
   const author = requirePermission(scope, 'issue:create')
   const node = nodeId('I')
@@ -468,7 +492,9 @@ export const createIssue = async (scope: Scope, input: IssueInput): Promise<Issu
   const row = await issueRowByNode(scope.db, node)
   const references = await crossReferenceStatements(scope, { number: row.number, isPull: false }, row.body, author)
   if (references.length > 0) await scope.db.batch(references)
-  return (await hydrateIssues(scope.db, [row]))[0]!
+  const issue = (await hydrateIssues(scope.db, [row]))[0]!
+  await emitActivity(scope, { kind: 'issues', action: 'opened', number: issue.number, actor: author })
+  return issue
 }
 
 export type IssueUpdate = IssueInput & {
@@ -589,9 +615,13 @@ export const updateIssueStatements = async (scope: Scope, row: IssueRow, input: 
 
 export const updateIssue = async (scope: Scope, number: number, input: IssueUpdate): Promise<Issue> => {
   const row = await issueRow(scope, number)
+  const before = (await hydrateIssues(scope.db, [row]))[0]!
   const statements = await updateIssueStatements(scope, row, input)
-  if (statements.length > 0) await scope.db.batch(statements)
-  return getIssue(scope, number)
+  if (statements.length === 0) return before
+  await scope.db.batch(statements)
+  const after = await getIssue(scope, number)
+  await emitIssueChanges(scope, before, after, scope.actor.ref!)
+  return after
 }
 
 export const LOCK_REASONS = ['off-topic', 'too heated', 'resolved', 'spam'] as const
@@ -606,6 +636,7 @@ export const setLocked = async (scope: Scope, number: number, locked: boolean, r
     sql('UPDATE issues SET locked = ?, lock_reason = ?, updated_at = ? WHERE id = ?', locked ? 1 : 0, locked ? reason : null, at, row.id),
     eventStatement(row.id, actor, locked ? 'locked' : 'unlocked', locked ? { lock_reason: reason } : {}, at),
   ])
+  if (row.is_pull === 0) await emitActivity(scope, { kind: 'issues', action: locked ? 'locked' : 'unlocked', number, actor })
 }
 
 const COMMENT_SELECT = 'SELECT c.id, c.node_id, c.issue_id, i.number, c.author_kind, c.author_id, c.body, c.created_at, c.updated_at FROM issue_comments c JOIN issues i ON i.id = c.issue_id'
@@ -666,7 +697,9 @@ export const createComment = async (scope: Scope, number: number, body: unknown)
   const created = await first<CommentRow>(scope.db, sql(`${COMMENT_SELECT} WHERE c.node_id = ?`, node))
   const references = await crossReferenceStatements(scope, { number, isPull: row.is_pull === 1, commentId: created!.id }, text, author)
   if (references.length > 0) await scope.db.batch(references)
-  return (await hydrateComments(scope.db, [created!]))[0]!
+  const comment = (await hydrateComments(scope.db, [created!]))[0]!
+  await emitActivity(scope, { kind: 'issue_comment', action: 'created', number, actor: author, commentId: comment.id })
+  return comment
 }
 
 export const updateComment = async (scope: Scope, id: number, body: unknown): Promise<IssueComment> => {
@@ -678,6 +711,7 @@ export const updateComment = async (scope: Scope, id: number, body: unknown): Pr
     sql('UPDATE issue_comments SET body = ?, updated_at = ? WHERE id = ?', text, at, id),
     ...(await crossReferenceStatements(scope, { number: row.number, isPull: false, commentId: id }, text, actor)),
   ])
+  await emitActivity(scope, { kind: 'issue_comment', action: 'edited', number: row.number, actor, commentId: id, changes: { body: { from: row.body } } })
   return getComment(scope, id)
 }
 
@@ -762,6 +796,7 @@ export const listIssueLabels = async (scope: Scope, number: number): Promise<Lab
 export const changeIssueLabels = async (scope: Scope, number: number, names: readonly string[], mode: 'add' | 'set' | 'remove'): Promise<Label[]> => {
   const actor = requirePermission(scope, 'issue:triage')
   const row = await issueRow(scope, number)
+  const before = (await hydrateIssues(scope.db, [row]))[0]!
   const current = await currentLabels(scope, row.id)
   let next: LabelRow[]
   if (mode === 'remove') {
@@ -773,7 +808,10 @@ export const changeIssueLabels = async (scope: Scope, number: number, names: rea
     next = mode === 'set' ? wanted : [...current, ...wanted.filter((label) => !current.some((existing) => existing.id === label.id))]
   }
   const statements = labelChangeStatements(row.id, actor, current, next, scope.now())
-  if (statements.length > 0) await scope.db.batch([...statements, sql('UPDATE issues SET updated_at = ? WHERE id = ?', scope.now(), row.id)])
+  if (statements.length > 0) {
+    await scope.db.batch([...statements, sql('UPDATE issues SET updated_at = ? WHERE id = ?', scope.now(), row.id)])
+    await emitIssueChanges(scope, before, await getIssue(scope, number), actor)
+  }
   return listIssueLabels(scope, number)
 }
 
@@ -784,9 +822,13 @@ export const changeAssignees = async (scope: Scope, number: number, logins: read
     mode === 'add'
       ? await assignableUsers(scope, logins)
       : (await Promise.all(logins.map((login) => scope.accounts.findAccount(login)))).flatMap((account) => (account?.kind === 'user' ? [{ id: account.id, login: account.login }] : []))
+  const before = (await hydrateIssues(scope.db, [row]))[0]!
   const statements = await assigneeChangeStatements(scope, row.id, actor, users, mode, scope.now())
-  if (statements.length > 0) await scope.db.batch([...statements, sql('UPDATE issues SET updated_at = ? WHERE id = ?', scope.now(), row.id)])
-  return getIssue(scope, number)
+  if (statements.length === 0) return before
+  await scope.db.batch([...statements, sql('UPDATE issues SET updated_at = ? WHERE id = ?', scope.now(), row.id)])
+  const after = await getIssue(scope, number)
+  await emitIssueChanges(scope, before, after, actor)
+  return after
 }
 
 export const listMilestones = async (
@@ -925,5 +967,6 @@ export const closeIssuesByReference = async (
   const at = scope.now()
   const statements = rows.flatMap((row) => stateChangeStatements(row, actor, 'closed', 'completed', at, data))
   if (statements.length > 0) await scope.db.batch(statements)
+  for (const row of rows) await emitActivity(scope, { kind: 'issues', action: 'closed', number: row.number, actor })
   return rows.map((row) => row.number)
 }

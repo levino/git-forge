@@ -116,6 +116,38 @@ audio and PDFs. Public repositories are visible to everyone, private ones only
 with access. For a headless instance, for example a backup mirror, add
 `"UI": "false"` to `vars`; it then serves Git, LFS and the API only.
 
+## Login
+
+People sign in at `https://<your-instance>/login` with passkeys (built in),
+with an OIDC provider, or, as last resort, with the break-glass key. The
+command line uses `git forge auth login https://<your-instance>`, after which
+plain `git clone` and `git push` work without tokens in URLs. All settings are
+vars in `wrangler.jsonc`; only the OIDC client secret is a secret.
+
+| Var / secret | Value |
+|---|---|
+| `PUBLIC_URL` | `https://<your-instance>`: origin for passkeys, OIDC redirect URI and break-glass tokens. Set it when the instance has a custom domain. |
+| `OIDC_ISSUER`, `OIDC_CLIENT_ID` | Issuer URL and client id of the OIDC application, e.g. `https://dorf-id.example` (ZITADEL) and the app's client id. Empty: no OIDC. |
+| `OIDC_CLIENT_SECRET` (secret) | Only for a confidential client: `npx wrangler@4 secret put OIDC_CLIENT_SECRET`. A ZITADEL app with authentication method "PKCE" needs none. |
+| `OIDC_NAME` | Button label, e.g. `Dorf-ID`. |
+| `SELF_SIGNUP` | `true`: anyone who can sign in at the provider (or register a passkey) gets an account. `false` (default): only invited people. |
+| `BREAK_GLASS_PUBLIC_KEY` | Public half of the offline break-glass key, see the [forge-worker README](https://github.com/levino/git-forge/tree/main/apps/forge-worker#break-glass-key). |
+
+For ZITADEL create a **Web** application in a project with response type
+`code`, grant type authorization code, authentication method `PKCE` (or
+`Basic` with a client secret) and the redirect URI
+`https://<your-instance>/login/oidc/callback`. Then invite the people you
+want, or yourself (the bootstrap admin), with the admin token:
+
+```sh
+curl -X POST https://<your-instance>/api/admin/invites \
+  -H "Authorization: Bearer $TOKEN" -d '{"user":"alice"}'
+# {"code":"gfi_…","url":"https://<your-instance>/login/invite/gfi_…", …}
+```
+
+Opening the invite URL links the OIDC identity or registers a passkey for
+`alice`. `{"login":"bob"}` invites a new account instead.
+
 ## Imports
 
 `POST /api/repos/<owner>/<name>/import` creates or updates a repository by

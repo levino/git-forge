@@ -5,8 +5,10 @@ type Props = { title: string; description?: string; wide?: boolean }
 
 const { title, description, wide = false } = Astro.props
 const principal = Astro.locals.principal
+const session = Astro.locals.session
 const login = principal.kind === 'user' ? principal.login : null
 const host = Astro.url.host
+const returnTo = Astro.url.pathname.startsWith('/-/') ? '/' : Astro.url.pathname
 ---
 
 <!doctype html>
@@ -31,14 +33,34 @@ const host = Astro.url.host
         <div class="flex-none flex items-center gap-2">
           {
             login ? (
-              <a href={`/${login}`} class="btn btn-ghost btn-sm" aria-label={`Your profile (${login})`}>
-                <span class="avatar avatar-placeholder">
-                  <span class="bg-neutral text-neutral-content w-6 rounded-full text-xs">{login.slice(0, 1).toUpperCase()}</span>
-                </span>
-                <span class="hidden sm:inline">{login}</span>
-              </a>
+              <details class="dropdown dropdown-end">
+                <summary class="btn btn-ghost btn-sm" aria-label={`Account menu (${login})`}>
+                  <span class="avatar avatar-placeholder">
+                    <span class="bg-neutral text-neutral-content w-6 rounded-full text-xs">{login.slice(0, 1).toUpperCase()}</span>
+                  </span>
+                  <span class="hidden sm:inline">{login}</span>
+                </summary>
+                <ul class="dropdown-content menu bg-base-100 border border-base-300 rounded-box shadow-lg z-20 w-52 p-2">
+                  <li>
+                    <a href={`/${login}`}>Your profile</a>
+                  </li>
+                  {session && (
+                    <li>
+                      <a href="/settings">Settings</a>
+                    </li>
+                  )}
+                  {session && (
+                    <li>
+                      <form method="post" action="/logout" class="p-0">
+                        <input type="hidden" name="csrf" value={session.csrf} />
+                        <button class="w-full text-left px-3 py-1.5">Sign out</button>
+                      </form>
+                    </li>
+                  )}
+                </ul>
+              </details>
             ) : (
-              <a href={`/login?return_to=${encodeURIComponent(Astro.url.pathname)}`} class="btn btn-sm btn-primary">
+              <a href={`/login?return_to=${encodeURIComponent(returnTo)}`} class="btn btn-sm btn-primary">
                 Sign in
               </a>
             )

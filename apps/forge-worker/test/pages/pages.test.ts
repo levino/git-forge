@@ -13,6 +13,10 @@ import Tree from '../../src/pages/[owner]/[repo]/tree/[...path].astro'
 import Owner from '../../src/pages/[owner]/index.astro'
 import Explore from '../../src/pages/explore.astro'
 import Home from '../../src/pages/index.astro'
+import Login from '../../src/pages/-/login.astro'
+import Settings from '../../src/pages/settings.astro'
+import type { LoginPage, UserPrincipal } from '@git-forge/accounts'
+import type { UiSession } from '../../src/app.ts'
 import { git, tempDir } from '../e2e/history.ts'
 import { bootstrap, call, type NodeForge, nodeForge } from '../support/node-forge.ts'
 
@@ -32,11 +36,13 @@ const write = (root: string, path: string, content: string | Uint8Array) => {
 
 const ANONYMOUS: Principal = { kind: 'anonymous' }
 
-const render = async (page: Parameters<AstroContainer['renderToResponse']>[0], path: string, params: Record<string, string>, principal: Principal = ANONYMOUS) => {
+type Extra = { readonly session?: UiSession | null; readonly loginPage?: LoginPage; readonly request?: Request; readonly services?: Partial<NodeForge['services']> }
+
+const render = async (page: Parameters<AstroContainer['renderToResponse']>[0], path: string, params: Record<string, string>, principal: Principal = ANONYMOUS, extra: Extra = {}) => {
   const response = await container.renderToResponse(page, {
-    request: new Request(`${BASE}${path}`),
+    request: extra.request ?? new Request(`${BASE}${path}`),
     params,
-    locals: { forge: forge.services, principal },
+    locals: { forge: { ...forge.services, ...extra.services }, principal, session: extra.session ?? null, ...(extra.loginPage ? { loginPage: extra.loginPage } : {}) },
     partial: false,
   })
   return { status: response.status, location: response.headers.get('Location'), html: await response.text() }
@@ -181,5 +187,75 @@ describe('instance pages', () => {
     expect(profile.html).toContain('href="/alice/site"')
     expect(profile.html).not.toContain('href="/alice/secret"')
     expect((await render(Owner, '/nobody', { owner: 'nobody' })).status).toBe(404)
+  })
+})
+
+describe('login and account pages', () => {
+  const user = () => admin as UserPrincipal
+  const session = (): UiSession => ({ principal: user(), csrf: 'csrf-token' })
+
+  it('renders the sign-in page model from the login core', async () => {
+    const page = await render(Login, '/login', {}, ANONYMOUS, {
+      loginPage: { kind: 'login', returnTo: '/alice/site', oidcName: 'Example ID', selfSignup: true, breakGlass: true, user: null },
+    })
+    expect(page.status).toBe(200)
+    expect(page.html).toContain('href="/login/oidc?return_to=%2Falice%2Fsite"')
+    expect(page.html).toContain('Sign in with Example ID')
+    expect(page.html).toContain('data-passkey="login"')
+    expect(page.html).toContain('Create with a passkey')
+    expect(page.html).toContain('href="/login/break-glass"')
+    expect(page.html).toContain('"returnTo":"/alice/site"')
+  })
+
+  it('escapes device data, carries the CSRF token and keeps the security headers', async () => {
+    const response = await container.renderToResponse(Login, {
+      request: new Request(`${BASE}/login/device`),
+      locals: {
+        forge: forge.services,
+        principal: user(),
+        session: session(),
+        loginPage: { kind: 'device', userCode: 'BCDF-GHJK', device: { userCode: 'BCDF-GHJK', clientName: '<b>cli</b>', scopes: 'repo:write' }, user: { login: 'alice', csrf: 'csrf-token' } },
+      },
+      partial: false,
+    })
+    const html = await response.text()
+    expect(html).toContain('&lt;b&gt;cli&lt;/b&gt;')
+    expect(html).toContain('name="csrf" value="csrf-token"')
+    expect(html).toContain('value="approve"')
+    expect(response.headers.get('Content-Security-Policy')).toContain("frame-ancestors 'none'")
+    expect(response.headers.get('Cache-Control')).toBe('no-store')
+  })
+
+  it('uses the status of login errors and answers 404 without a page model', async () => {
+    expect((await render(Login, '/login/invite/x', {}, ANONYMOUS, { loginPage: { kind: 'error', status: 404, message: 'This invite is invalid.' } })).status).toBe(404)
+    expect((await render(Login, '/-/login', {})).status).toBe(404)
+  })
+
+  it('sends visitors without a session to the sign-in page', async () => {
+    expect(await render(Settings, '/settings', {})).toMatchObject({ status: 302, location: '/login?return_to=%2Fsettings' })
+  })
+
+  it('creates and revokes personal access tokens', async () => {
+    const post = (fields: Record<string, string | string[]>, verified: UiSession | null = session()) => {
+      const body = new URLSearchParams()
+      for (const [key, value] of Object.entries(fields)) for (const item of [value].flat()) body.append(key, item)
+      return render(Settings, '/settings', {}, user(), {
+        session: session(),
+        request: new Request(`${BASE}/settings`, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body }),
+        services: { verifySessionWrite: async () => verified },
+      })
+    }
+    expect((await post({ action: 'create-token', name: 'laptop', scopes: 'repo:read', expires: '30' }, null)).status).toBe(403)
+    expect((await post({ action: 'create-token', name: 'laptop', scopes: 'repo:root', expires: '30' })).status).toBe(400)
+    const created = await post({ action: 'create-token', name: 'laptop', scopes: ['repo:read', 'repo:write'], expires: '30' })
+    expect(created.status).toBe(200)
+    const token = /value="(gfp_[^"]+)"/.exec(created.html)?.[1]
+    expect(token).toBeDefined()
+    const principal = await forge.services.authenticate(new Request(BASE, { headers: { Authorization: `Bearer ${token}` } }))
+    expect(principal).toMatchObject({ kind: 'user', login: 'alice' })
+    const id = (await forge.services.account.listTokens(user())).find((item) => item.name === 'laptop')!.id
+    expect((await post({ action: 'revoke-token', id })).html).toContain('Token revoked.')
+    expect(await forge.services.authenticate(new Request(BASE, { headers: { Authorization: `Bearer ${token}` } }))).toBeNull()
+    expect((await post({ action: 'revoke-token', id: 'someone-elses' })).status).toBe(400)
   })
 })

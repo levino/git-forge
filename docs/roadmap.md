@@ -30,13 +30,14 @@ discussions.
 - [x] Users, organizations, teams, roles, PATs, apps in SQLite
 - [x] Instance admins, one-time bootstrap of the first admin
 - [x] Private repositories by default, per-repository visibility
-- [ ] Login: OIDC (ZITADEL etc.), passkeys
+- [x] Login: OIDC (authorization code + PKCE, ZITADEL as first target), passkeys (WebAuthn, attestation none, UV required), browser sessions with CSRF protection, invites and optional self-signup
 - [x] Git over HTTPS with PATs and app tokens
 - [x] Git and LFS as separate authorization surfaces (`git:read` / `lfs:read`)
 - [x] Instance keys (Ed25519), `/.well-known/openid-configuration`, `/.well-known/jwks.json`
 - [x] Short-lived instance JWTs, trust table "issuer X may read repo Y", optional pinned thumbprint
-- [ ] Device flow (`gh auth login`-style)
-- [ ] Break-glass key
+- [x] Device flow (`git forge auth login`, RFC 8628) and git credential helper (`git forge auth git-credential`)
+- [x] Break-glass key (offline Ed25519, one-hour admin session)
+- [ ] Login follow-ups: OIDC groups → teams, session list and revocation in the UI, rate limits on login and device endpoints, purging expired challenges and device codes, branch protection API with sessions, device-flow scope choice
 - [ ] SAML, SCIM
 - [x] Branch protection rules (patterns, force push, deletion, push restrictions, admin bypass) enforced in `receive-pack`, API under `/api/repos/{owner}/{repo}/branches/{branch}/protection`
 - [ ] Branch protection API and push policy wired into the Worker app (needs accounts on D1 there)
@@ -106,8 +107,10 @@ Design: [design.md §16](design.md#16-web-ui).
 - [x] File tree, file view with server-side highlighting, sanitized Markdown (README), commits with path history, commit diff, branches, tags
 - [x] LFS previews (images, video, audio, PDF) via the media URLs
 - [x] Dark mode, responsive layout, page rendering tests, Playwright E2E against `wrangler dev`
-- [ ] Login pages (OIDC, passkeys, device code entry) on the login package; session cookies in the middleware
-- [ ] Account settings (tokens, passkeys, linked identities), organizations and teams
+- [x] Login pages (sign-in, invite, device code entry, break-glass) rendered by the UI from the login package's page models; sessions in the middleware; account menu with sign-out
+- [x] Account settings: personal access tokens (create, revoke), passkeys (add, remove), linking an OIDC identity
+- [ ] List and unlink linked OIDC identities, list and end sessions
+- [ ] Organizations and teams
 - [ ] Repository settings (visibility, collaborators, branch protection, federation trust)
 - [ ] Mirror settings, status and alarms
 - [ ] Blame, syntax highlighting in diffs and Markdown code blocks

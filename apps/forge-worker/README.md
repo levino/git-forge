@@ -47,6 +47,12 @@ read functions of `@git-forge/core` and check access with the same
 | `ACTIONS_SECRETS` | secret, optional | JSON object of instance secrets for workflows, e.g. `{"CLOUDFLARE_API_TOKEN":"…"}`. Sent only to the runner of a job, as secret variables. |
 | `ACTIONS_INSTANCE_ID` | var, optional | Stable GUID reported by the Actions location service. |
 | `UI` | var | `false` turns the web UI off: every request goes to the forge and `/` answers the health JSON. For headless instances such as backup mirrors. Default: on. |
+| `OIDC_ISSUER`, `OIDC_CLIENT_ID` | vars, optional | OIDC login (authorization code + PKCE) against this issuer, e.g. a ZITADEL project. Both or neither; `https` only (`http` only on loopback, for tests). Register `<PUBLIC_URL>/login/oidc/callback` as redirect URI at the provider. |
+| `OIDC_CLIENT_SECRET` | secret, optional | Client secret (`client_secret_basic`). Without it the instance is a public client and sends only `client_id` with the PKCE verifier. |
+| `OIDC_NAME` | var, optional | Name of the provider on the login page, e.g. `Dorf-ID`. |
+| `OIDC_SCOPES` | var, optional | Default `openid profile email`. |
+| `SELF_SIGNUP` | var | `true` lets unknown OIDC identities and new passkeys create accounts. Default `false`: an invite (`POST /api/admin/invites`) or an existing link is needed. |
+| `BREAK_GLASS_PUBLIC_KEY` | var, optional | Ed25519 public JWK of the offline break-glass key (see [Login](#login)). Empty: break-glass login is off. |
 | `RUNNER` | Durable Object + Container | `RunnerContainer` (`src/runner-container.ts`, image `runner/Dockerfile`): one container per CI job with the official `actions/runner` and a JIT config. Declared in every environment; without the binding, jobs wait for a runner registered by hand. |
 
 Repositories are **private by default**; visibility is set per repository.
@@ -62,7 +68,12 @@ There is no global "public read" switch any more.
 - **Other instances** present a short-lived EdDSA JWT. The core tells the
   authorizer whether a request is Git or LFS, so the token scopes `git:read`
   and `lfs:read` are checked separately.
-- **The JSON API** needs a token with `repo:admin`.
+- **The JSON API** needs a token with `repo:admin`, or a browser session
+  (cookie) plus the CSRF token from `GET /api/session` in `X-CSRF-Token` for
+  every state-changing request from the same origin.
+- **People** sign in interactively with OIDC, passkeys or the break-glass key;
+  the CLI gets a `repo:write` token through the device flow. See
+  [Login](#login).
 
 ## API
 
@@ -85,6 +96,8 @@ There is no global "public read" switch any more.
 | `POST /api/repos/{owner}/{name}/mirrors/{remote}/detach` | repository admin | Stops syncing. |
 | `POST /api/repos/{owner}/{name}/import` `{url, token?, username?, lfs?, lfsUrl?, commitsPerStep?, visibility?, defaultBranch?}` | repository admin or instance admin; for a new repository the owner or an instance admin | Imports from a Git URL (smart HTTP v2 or dumb HTTP) without a request body limit, creating the repository first if needed (as `POST /api/repos`). `token` is sent as HTTP Basic password with `username` (default `git`), travels only in the queue messages and is never stored. Refs land in `refs/heads/*` and `refs/tags/*`; rewritten refs are archived, local refs missing upstream are kept. `202` with the state and a `Location`, `409` while an import runs; an import without progress for 30 minutes (its worker or process died) is taken over and continues from its last step. |
 | `GET /api/repos/{owner}/{name}/import` | repository admin | Import state: `phase` (`discover`, `graph`, `fetch`, `lfs`, `refs`, `done`, `failed`), progress, ref updates, missing LFS objects, last error. Starting a failed import again with the same URL resumes it. |
+| `POST /api/admin/invites` `{login?, user?, email?, expiresInDays?}` | instance admin | Invite for a new account (`login` fixed or chosen by the invitee) or for an existing `user` (to add a passkey or link OIDC). Returns `{code, url, expiresAt}`; the URL is `/login/invite/{code}`, valid once, 7 days by default. |
+| `GET /api/user` | token or session | The authenticated user: `{id, login, admin, via, ceiling}`. |
 | `GET /api/health` | anyone | `{"ok": true}` |
 
 Instance admins count as admins of every repository.
@@ -93,6 +106,59 @@ Branch protection rules use the GitHub-style API of `@git-forge/accounts`
 (`GET /api/repos/{owner}/{name}/branch-protection`,
 `GET|PUT|DELETE /api/repos/{owner}/{name}/branches/{pattern}/protection`) and
 are enforced on every push.
+
+## Login
+
+Routes of `createLoginHandler` (`@git-forge/accounts`), mounted by
+`createForge` before the JSON API. Pages are minimal server-rendered HTML; the
+web UI (`src/pages/-/login.astro`) replaces them through `createForge({
+renderLoginPage })` and calls the same core functions. Signed-in users manage
+their tokens and passkeys at `/settings`.
+
+| Route | Purpose |
+|---|---|
+| `GET /login?return_to=/path` | Sign-in page: OIDC button, passkey sign-in, passkey sign-up (with `SELF_SIGNUP`), break-glass link. |
+| `GET /login/oidc?return_to=…&invite=…&link=1` | Starts OIDC: PKCE (S256), `state` and `nonce` stored as a one-time challenge, `state` also bound to the browser in a 10-minute cookie. `link=1` links the identity to the signed-in account. |
+| `GET /login/oidc/callback` | Checks the bound `state`, exchanges the code, verifies the ID token (JWKS, `RS256`/`ES256`/`EdDSA`, `iss`, `aud`, `azp`, `exp`, `iat`, `nonce`) and signs in, links, redeems an invite or (with `SELF_SIGNUP`) creates the account. |
+| `POST /login/passkey/options`, `POST /login/passkey` | WebAuthn authentication (discoverable credentials, user verification required). |
+| `POST /login/passkey/register/options` `{invite?, login?}`, `POST /login/passkey/register` `{handle, credential, name?}` | WebAuthn registration, attestation `none`. With a session (and CSRF token) it adds a passkey to that account; with an invite or `SELF_SIGNUP` it creates the account. |
+| `GET /login/invite/{code}` | Invite page (OIDC or passkey). |
+| `POST /login/device/code` `client_id=git-forge-cli&client_name=…` | RFC 8628 device authorization: `device_code`, `user_code` (`BCDF-GHJK`), `verification_uri`, 15 minutes, interval 5 s. |
+| `GET /login/device?user_code=…`, `POST /login/device` | The user-code page: requires a session, shows the client and scope, approve or deny with the CSRF token. |
+| `POST /login/device/token` | Polling: `authorization_pending`, `slow_down` (interval + 5 s), `access_denied`, `expired_token`, or a `repo:write` personal access token valid 90 days (`access_token`, `login`, `expires_in`). Each approval yields exactly one token. |
+| `GET\|POST /login/break-glass` | Paste a token signed with the offline break-glass key; opens a one-hour session for an instance admin. |
+| `POST /logout` | Revokes the session (CSRF token required). |
+| `GET /api/session` | `{login, userId, method, expiresAt, csrfToken, admin}` or `401`. |
+| `GET /api/user/passkeys`, `DELETE /api/user/passkeys/{id}` | The signed-in user's passkeys. |
+
+Session cookies are `HttpOnly`, `SameSite=Lax`, `Path=/`, 30 days (break-glass
+one hour), and on `https` origins `Secure` with the `__Host-` prefix
+(`__Host-gf_session`); on plain `http` (local development) the name is
+`gf_session`. Only the SHA-256 of the session id is stored. Every
+state-changing request under `/login`, `/logout` and the JSON API that relies
+on the cookie must come from the instance's own origin (`Origin` header) and
+carry the CSRF token, which is derived from the session id
+(`SHA-256("git-forge csrf\n" + id)`), so it needs no storage and is useless
+without the cookie.
+
+### Break-glass key
+
+Generate the key pair offline, keep the private key off the instance (e.g. on
+paper or a hardware-encrypted stick) and put only the public key into
+`wrangler.jsonc`:
+
+```sh
+pnpm --filter forge-worker break-glass keygen > break-glass.private.jwk
+# prints BREAK_GLASS_PUBLIC_KEY={"kty":"OKP","crv":"Ed25519","x":"…"} on stderr
+```
+
+When OIDC is down, sign a token for an existing instance admin (valid at most
+10 minutes, default 5, usable once) and paste it at `/login/break-glass`:
+
+```sh
+pnpm --filter forge-worker break-glass sign --key break-glass.private.jwk \
+  --url https://forge.example --login alice
+```
 
 ## Media and raw URLs
 
@@ -337,6 +403,10 @@ argument.
   repositories, light and dark colour schemes and the cached stylesheet. CI
   installs Chromium with `playwright install`; elsewhere the version of
   `@playwright/test` must match the installed browsers.
+- `test/browser/login.spec.ts`: an invited user signs up with a passkey
+  (Chromium's virtual authenticator), creates and revokes a token at
+  `/settings`, signs out and signs in with the passkey again; a cross-site
+  settings form is refused.
 - `test/e2e/headless.e2e.test.ts`: the same bundle with `UI=false` serves only
   the forge; with the UI, pages and the API answer and cross-site form posts
   are refused.
@@ -345,7 +415,23 @@ argument.
   defaults, visibility and collaborators, the LFS size limit, the import
   endpoint's authorization and validation, federation and
   scheduled sync between two in-process instances over real HTTP, and the
-  shape of the wrangler environments.
+  shape of the wrangler environments. `test/unit/login.test.ts` drives every
+  login flow through `createForge` with a software authenticator (ES256
+  passkeys built byte by byte) and the mock OIDC provider of
+  `@git-forge/accounts`: invite and self-signup, phishing origin, missing user
+  verification, replayed counters, CSRF and origin checks, OIDC without
+  invite, unbound and forged callbacks, the device flow (pending, slow_down,
+  approve, deny, one token per approval) and break-glass (replay, non-admin,
+  foreign key).
+- `test/e2e/login.e2e.test.ts` starts `wrangler dev` against a mock OIDC
+  provider (ES256) on a local HTTP server: an unknown identity is refused, an
+  invite links it to the bootstrapped admin, the session creates a
+  repository with its CSRF token; then the real CLI runs
+  `git forge auth login` (device flow, approved through the session), and
+  plain `git push` and `git clone` with an LFS file work through the
+  configured credential helper alone; a passkey-only account is created from
+  an invite and signs in again; the break-glass key opens an admin session
+  once.
 - `test/e2e/forge.e2e.test.ts` starts `wrangler dev` with a fresh local R2
   bucket and D1 database, bootstraps an admin, creates repositories, pushes a
   generated history of 120 commits with the real `git` client, clones it with

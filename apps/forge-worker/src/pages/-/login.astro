@@ -1,0 +1,184 @@
+---
+import { PASSKEY_SCRIPT } from '@git-forge/accounts'
+import NotFound from '../../components/NotFound.astro'
+import Layout from '../../layouts/Layout.astro'
+import { LOGIN_CONTENT_SECURITY_POLICY, loginPageTitle } from '../../ui/login-pages.ts'
+
+const page = Astro.locals.loginPage
+if (page) {
+  Astro.response.status = page.kind === 'error' ? page.status : 200
+  Astro.response.headers.set('Cache-Control', 'no-store')
+  Astro.response.headers.set('X-Frame-Options', 'DENY')
+  Astro.response.headers.set('Referrer-Policy', 'no-referrer')
+  Astro.response.headers.set('Content-Security-Policy', LOGIN_CONTENT_SECURITY_POLICY)
+}
+const config =
+  page?.kind === 'login'
+    ? { returnTo: page.returnTo, csrf: page.user?.csrf ?? null }
+    : page?.kind === 'invite'
+      ? { returnTo: '/', csrf: null, invite: page.code }
+      : null
+const configJson = config ? JSON.stringify(config).replace(/</g, '\\u003c') : null
+---
+
+{
+  !page ? (
+    <NotFound />
+  ) : (
+    <Layout title={loginPageTitle(page)}>
+      <div class="max-w-md mx-auto card bg-base-200">
+        <div class="card-body gap-4">
+          <h1 class="card-title text-2xl">{loginPageTitle(page)}</h1>
+          {page.kind === 'login' && page.message && <div role="alert" class="alert alert-warning">{page.message}</div>}
+          {page.kind === 'login' && page.user && (
+            <>
+              <p>
+                Signed in as <strong>{page.user.login}</strong>.
+              </p>
+              <div class="flex flex-wrap gap-2">
+                <a class="btn btn-primary" href={page.returnTo}>
+                  Continue
+                </a>
+                <button class="btn" type="button" data-passkey="register">
+                  Add a passkey
+                </button>
+                <form method="post" action="/logout">
+                  <input type="hidden" name="csrf" value={page.user.csrf} />
+                  <button class="btn btn-ghost">Sign out</button>
+                </form>
+              </div>
+            </>
+          )}
+          {page.kind === 'login' && !page.user && (
+            <>
+              {page.oidcName && (
+                <a class="btn btn-primary" href={`/login/oidc?return_to=${encodeURIComponent(page.returnTo)}`}>
+                  Sign in with {page.oidcName}
+                </a>
+              )}
+              <button class="btn" type="button" data-passkey="login">
+                Sign in with a passkey
+              </button>
+              {page.selfSignup && (
+                <form class="flex flex-col gap-2" aria-label="Create an account">
+                  <label class="text-sm font-semibold" for="login">
+                    New account
+                  </label>
+                  <div class="join">
+                    <input id="login" name="login" class="input join-item flex-1" autocomplete="username" required />
+                    <button class="btn join-item" data-passkey="register">
+                      Create with a passkey
+                    </button>
+                  </div>
+                </form>
+              )}
+              {page.breakGlass && (
+                <a class="link text-sm" href="/login/break-glass">
+                  Break-glass login
+                </a>
+              )}
+            </>
+          )}
+          {page.kind === 'invite' && (
+            <>
+              <p>
+                You were invited
+                {page.existingUser ? (
+                  <>
+                    {' '}
+                    for <strong>{page.login}</strong>
+                  </>
+                ) : page.login ? (
+                  <>
+                    {' '}
+                    as <strong>{page.login}</strong>
+                  </>
+                ) : (
+                  ''
+                )}
+                .
+              </p>
+              {page.oidcName && (
+                <a class="btn btn-primary" href={`/login/oidc?invite=${encodeURIComponent(page.code)}`}>
+                  Continue with {page.oidcName}
+                </a>
+              )}
+              <form class="flex flex-col gap-2">
+                {!page.existingUser && !page.login && (
+                  <>
+                    <label class="text-sm font-semibold" for="login">
+                      Login
+                    </label>
+                    <input id="login" name="login" class="input w-full" autocomplete="username" required />
+                  </>
+                )}
+                <button class="btn" data-passkey="register">
+                  Use a passkey
+                </button>
+              </form>
+            </>
+          )}
+          {page.kind === 'device' && (
+            <>
+              {page.message && <div role="alert" class="alert alert-warning">{page.message}</div>}
+              {!page.device ? (
+                <form method="get" action="/login/device" class="flex flex-col gap-2">
+                  <label class="text-sm font-semibold" for="user_code">
+                    Code shown on your device
+                  </label>
+                  <input id="user_code" name="user_code" class="input w-full font-mono uppercase tracking-widest" value={page.userCode ?? ''} autocomplete="off" required />
+                  <button class="btn btn-primary">Continue</button>
+                </form>
+              ) : (
+                <>
+                  <p>
+                    <strong>{page.device.clientName}</strong> asks for a token for Git and Git LFS (<code class="font-mono">{page.device.scopes}</code>) on behalf of{' '}
+                    <strong>{page.user.login}</strong>.
+                  </p>
+                  <p>
+                    Code: <code class="font-mono text-xl tracking-widest">{page.device.userCode}</code>. Only continue if your device shows the same code.
+                  </p>
+                  <form method="post" action="/login/device" class="flex gap-2">
+                    <input type="hidden" name="csrf" value={page.user.csrf} />
+                    <input type="hidden" name="user_code" value={page.device.userCode} />
+                    <button class="btn btn-primary" name="decision" value="approve">
+                      Authorize
+                    </button>
+                    <button class="btn" name="decision" value="deny">
+                      Deny
+                    </button>
+                  </form>
+                </>
+              )}
+            </>
+          )}
+          {page.kind === 'device-result' && <p>{page.approved ? 'You can close this window and return to your terminal.' : 'The device received no token.'}</p>}
+          {page.kind === 'break-glass' && (
+            <>
+              {page.message && <div role="alert" class="alert alert-warning">{page.message}</div>}
+              <p>Paste a token signed with the instance's offline break-glass key.</p>
+              <form method="post" action="/login/break-glass" class="flex flex-col gap-2">
+                <label class="sr-only" for="token">
+                  Break-glass token
+                </label>
+                <textarea id="token" name="token" rows="6" class="textarea w-full font-mono" required />
+                <button class="btn btn-primary">Sign in</button>
+              </form>
+            </>
+          )}
+          {page.kind === 'error' && (
+            <>
+              <div role="alert" class="alert alert-error">{page.message}</div>
+              <a class="link" href="/login">
+                Back to sign-in
+              </a>
+            </>
+          )}
+          <p id="message" role="alert" class="text-error empty:hidden" />
+        </div>
+      </div>
+      {configJson && <script type="application/json" id="login-config" set:html={configJson} />}
+      {configJson && <script is:inline set:html={PASSKEY_SCRIPT} />}
+    </Layout>
+  )
+}

@@ -26,6 +26,17 @@
     ]
   },
   "triggers": { "crons": ["17 3 * * *"] },
-  "vars": { "MAX_LFS_OBJECT_BYTES": "104857600", "MIRROR_INTERVAL_MINUTES": "1440", "MIRROR_DEEP_CHECK_DAYS": "30" },
+  "vars": {
+    "MAX_LFS_OBJECT_BYTES": "104857600",
+    "MIRROR_INTERVAL_MINUTES": "1440",
+    "MIRROR_DEEP_CHECK_DAYS": "30",
+    "PUBLIC_URL": "",
+    "OIDC_ISSUER": "",
+    "OIDC_CLIENT_ID": "",
+    "OIDC_NAME": "",
+    "OIDC_SCOPES": "openid profile email",
+    "SELF_SIGNUP": "false",
+    "BREAK_GLASS_PUBLIC_KEY": ""
+  },
   "secrets": { "required": ["BOOTSTRAP_TOKEN"] }
 }

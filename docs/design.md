@@ -538,11 +538,11 @@ SQLite database. A new instance works without an external identity provider.
 
 | Method | When |
 |---|---|
-| Passkeys (WebAuthn) | Default, built in |
-| OIDC (ZITADEL, Keycloak, Authentik, Pocket ID, Google, …) | Connect existing identities; groups → teams optional |
-| Personal access tokens | Git over HTTPS (as HTTP Basic password) |
-| Device flow (`gh auth login`-style) | Later, for the command line |
-| Break-glass key | Later: offline admin key (Ed25519), works without any IdP |
+| Passkeys (WebAuthn) | Default, built in; passkey-only accounts need no IdP |
+| OIDC (ZITADEL, Keycloak, Authentik, Pocket ID, Google, …) | Connect existing identities; one provider per instance; groups → teams later |
+| Personal access tokens | Git over HTTPS (as HTTP Basic password), JSON API |
+| Device flow (`git forge auth login`, like `gh auth login`) | Command line: issues a `repo:write` token, git uses it through the credential helper |
+| Break-glass key | Offline Ed25519 key, opens a short admin session when the IdP is down |
 | SAML, SCIM | Later, for organizations that require them |
 
 Typical setup: people log in via OIDC or passkeys; apps and automations use
@@ -553,8 +553,80 @@ create users and tokens, trust other instances and count as admins of every
 repository. A fresh instance has none: one call of `POST /api/bootstrap`,
 authenticated with the deployment secret `BOOTSTRAP_TOKEN`, creates the first
 admin atomically and returns a personal access token; further calls answer
-`409`. Until login methods exist, the JSON API is used with personal access
-tokens that carry the scope `repo:admin`.
+`409`. The admin then invites themselves (`POST /api/admin/invites` with
+`user`) to link an OIDC identity or register a passkey. The JSON API accepts
+personal access tokens with the scope `repo:admin` and browser sessions.
+
+### Login
+
+All flows are pure functions in `@git-forge/accounts` (`login.ts`) over a
+SQLite store (`login-store.ts`, migration `0006_login`); `createLoginHandler`
+maps them to routes under `/login`, `createForge` mounts it, and the web UI
+calls the same functions. Cryptography is WebCrypto only: JWS `RS256`,
+`ES256`, `EdDSA` for ID tokens, COSE `-7`, `-8`, `-257` for passkeys, a
+minimal CBOR decoder for attestation objects.
+
+**Sessions.** A session is a random 256-bit id (`gfs_…`) in an `HttpOnly`,
+`SameSite=Lax` cookie (`__Host-gf_session`, `Secure`, on https), stored only
+as SHA-256 with user, method, expiry (30 days, break-glass 1 hour) and
+revocation. A session gives the user's full rights, like a password login on
+GitHub; tokens stay the way to narrow rights. State-changing requests that
+rely on the cookie must come from the instance's origin (`Origin`) and carry
+the CSRF token `base64url(SHA-256("git-forge csrf\n" + session id))`, as
+`X-CSRF-Token` or the form field `csrf`. The token needs no storage and is
+worthless without the cookie. `SameSite=Lax` alone is not relied on, because
+it still sends the cookie on top-level `POST` navigations from same-site
+subdomains.
+
+**OIDC.** Authorization code with PKCE (`S256`), configured per instance
+(`OIDC_ISSUER`, `OIDC_CLIENT_ID`, optional secret `OIDC_CLIENT_SECRET`). The
+`state` is a one-time challenge in `login_challenges` that also holds `nonce`,
+code verifier, `return_to` and intent (login, link, invite), and it is bound
+to the browser by a 10-minute cookie, so a callback started elsewhere is
+refused (login CSRF). The ID token is verified against the provider's JWKS
+(cached 10 minutes, refetched at most once a minute for an unknown key):
+signature, `iss`, `aud`/`azp`, `exp`, `iat`, `nbf`, `nonce`. When the ID token
+carries no profile (ZITADEL's default), the profile comes from the userinfo
+endpoint, which must name the same `sub`. The identity is `(issuer, sub)` in
+`external_identities`; emails count only with `email_verified`.
+
+**Who gets an account.** An existing link signs in. Otherwise an invite
+(`invites`, one-time, 7 days) either links the identity or passkey to an
+existing user or creates a new account (fixed login or chosen), and with
+`SELF_SIGNUP=true` any identity or new passkey creates one. Without either,
+the login is refused with a hint to ask for an invite. Logins are derived from
+`preferred_username`, the email's local part or the name, with `-2`, `-3`, …
+when taken.
+
+**Passkeys.** Registration asks for a discoverable credential, user
+verification and attestation `none`; attestation statements are never
+verified, any format counts as `none` (no AAGUID allow-lists). Verification
+checks type, challenge (one-time, 10 minutes), origin (`PUBLIC_URL`), no
+cross-origin, the RP ID hash (the host of `PUBLIC_URL`), UP and UV, and the
+signature; the counter must increase unless both sides are zero (synced
+passkeys report 0), and it is updated with compare-and-swap. The user handle
+is random and shared by all passkeys of a user. Public keys are stored as
+JWKs.
+
+**Device flow.** RFC 8628 with the fixed client id `git-forge-cli`. The user
+code (8 letters without vowels and look-alikes) is entered or confirmed at
+`/login/device` in a signed-in browser, which shows the client name and the
+scope before approval. The first successful poll consumes the authorization
+and issues a personal access token with `repo:write`, 90 days; a poll faster
+than the interval gets `slow_down`. The CLI stores the token per host in
+`~/.config/git-forge/hosts.json` (0600) and configures
+`credential.<host>.helper = !git-forge auth git-credential` (after an empty
+helper, which resets others), so plain `git` and `git-lfs` authenticate
+without tokens in URLs.
+
+**Break-glass.** An Ed25519 key pair generated offline
+(`pnpm --filter forge-worker break-glass keygen`); only the public JWK is
+deployed (`BREAK_GLASS_PUBLIC_KEY`). The operator signs a JWT
+(`purpose: git-forge-break-glass`, `aud` = instance origin, `sub` = login,
+`jti`, at most 10 minutes) on a trusted machine and pastes it at
+`/login/break-glass`. It works once per `jti`, only for an existing, enabled
+instance admin, and opens a one-hour session; every use is in the audit
+log.
 
 **Visibility.** Repositories are private by default; visibility is a
 per-repository setting in the database. There is no instance-wide public read
@@ -570,7 +642,7 @@ Cloudflare's Free and Pro plans), enforced in the batch API and on `PUT`.
 Not supported, by decision. Serverless functions accept only HTTP; SSH would
 need an always-on host or a TCP-capable container platform, and SSH over
 WebSocket needs client-side configuration. Git uses HTTPS with tokens, made
-convenient by `git forge auth login` (credential helper, device flow).
+convenient by `git forge auth login` (credential helper, device flow, §8).
 
 ## 10. Mirror overview and verification
 
@@ -1155,8 +1227,9 @@ bundle.
 - The Astro middleware (`src/middleware.ts`) is the router between the two
   worlds. `isForgePath` (`src/routing.ts`, pure) sends to `createForge`:
   `/api` and everything below (including `/api/v3`), `/_services/`,
-  `/.well-known/`, `/login/device/code` and `/login/oauth/` (device flow
-  endpoints), media and raw URLs (`matchContentRoute`), and Git paths
+  `/.well-known/`, `/login`, everything below `/login/` and `/logout` (the
+  login routes of `@git-forge/accounts`, including the device flow), media
+  and raw URLs (`matchContentRoute`), and Git paths
   (`matchGitRoute` with a `.git` suffix, or one of `HEAD`, `info/refs`,
   `git-upload-pack`, `git-receive-pack`, `objects/…`, `info/lfs/…`). Every
   other path is a page. A catch-all page (`src/pages/[...path].astro`) makes
@@ -1164,6 +1237,14 @@ bundle.
 - `UI=false` (var) skips Astro entirely: `fetch` goes straight to
   `createForge`, as before. This is the headless mode for backup mirrors.
   `createForge` itself knows nothing about the UI and stays usable on Node.
+- Login pages: the login routes stay in `createForge` and keep all logic
+  (OIDC, passkeys, invites, device flow, break-glass, cookies, CSRF). With
+  the UI on, the Worker passes `renderLoginPage` (`src/ui/login-pages.ts`):
+  it records the page model the login handler wants to show for that request
+  and returns a marker response; the middleware then rewrites to the page
+  `/-/login`, which renders the model with the site layout. Without the UI
+  (or on Node) the plain built-in pages are used. The passkey ceremony script
+  is the one exported by `@git-forge/accounts` (`PASSKEY_SCRIPT`).
 - Reserved first path segments: `api`, `explore`, `login`, `settings`, `-`
   (assets) and the other page routes. Account names must not use them.
 
@@ -1172,15 +1253,24 @@ bundle.
 Pages get `Astro.locals.forge` (`ForgeServices`: storage, accounts store,
 `authenticate`, `repositoryAccess`, `isInstanceAdmin`) and
 `Astro.locals.principal`, set by the middleware from the verified credential
-of the request (today the `Authorization` header, as for the API; the session
-cookie once login lands). Repository pages call `repositoryAccess(principal,
+of the request: the session cookie (`readActiveSession`) or, without one,
+the `Authorization` header, as for the API. Repository pages call `repositoryAccess(principal,
 repo, role)`, the same function the JSON API uses for its admin checks, which
 wraps `checkRepositoryAccess` from `@git-forge/accounts` and adds instance
 admins. Private repositories answer 404 to visitors who may not read them,
 like the Git endpoints. Lists (home, explore, profiles) filter with the same
 function.
 
-Writes from pages (settings forms) must come from the same origin:
+Writes from pages (settings forms) need the session and its CSRF token:
+`verifySessionWrite` is `checkSession` of the login package (same origin and
+the token derived from the session id, from the `csrf` form field or the
+`X-CSRF-Token` header). Account operations (`services.account`: list, create
+and revoke own tokens, list and remove own passkeys) take the session's user
+and never a client-supplied account. Media and raw URLs also accept a browser
+session for reads (`GET`/`HEAD`, checked with `repositoryAccess`), so LFS
+previews work in private repositories.
+
+All UI writes must also come from the same origin:
 `isCrossSiteWrite` rejects UI requests whose `Origin` or `Sec-Fetch-Site`
 says otherwise (Astro's own `checkOrigin` is off because it would also apply
 to Git and API paths, which non-browser clients call without an `Origin`).
@@ -1228,7 +1318,9 @@ render.
   (`vitest.pages.config.ts`).
 - `apps/forge-worker/test/browser/`: Playwright (desktop and mobile Chromium)
   against `wrangler dev` running the built bundle, with a repository pushed by
-  the real `git` and `git-lfs` clients.
+  the real `git` and `git-lfs` clients, and a passkey sign-up from an invite
+  with Chromium's virtual WebAuthn authenticator (settings, token create and
+  revoke, sign-out, passkey sign-in).
 - `apps/forge-worker/test/e2e/headless.e2e.test.ts`: the same bundle with
   `UI=false` serves only the forge.
 - The release test requests a page from the template instance.

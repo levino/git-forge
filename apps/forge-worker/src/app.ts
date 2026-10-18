@@ -16,7 +16,11 @@ import {
   AccountsError,
   authenticateRequest,
   checkRepositoryAccess,
+  checkSession,
   createAccountsStore,
+  createLoginHandler,
+  createLoginStore,
+  createOidcProvider,
   createGitAccess,
   createInstanceVerifier,
   createJwksCache,
@@ -27,12 +31,22 @@ import {
   isRole,
   isTokenScope,
   type JwksSource,
+  type LoginContext,
+  type LoginHttpOptions,
+  type LoginPageRenderer,
+  relyingParty,
+  sessionUserPrincipal,
   normalizeIssuer,
   parseAuthorization,
   type Principal,
   type RepositorySubject,
   type Role,
   type UserPrincipal,
+  readActiveSession,
+  isUnsafeMethod,
+  type CreatedToken,
+  type CredentialSummary,
+  type TokenScope,
 } from '@git-forge/accounts'
 import {
   type Authorize,
@@ -94,6 +108,7 @@ export type ForgeOptions = ForgeSettings & {
   readonly jobs?: JobQueue<ForgeJob>
   readonly digests?: DigestFactory
   readonly scheduleImport?: ImportScheduler
+  readonly renderLoginPage?: LoginPageRenderer
 }
 
 export type WaitUntil = (promise: Promise<unknown>) => void
@@ -107,6 +122,20 @@ export type ForgeServices = {
   readonly issuer: (request: Request) => string
   readonly repositoryAccess: (principal: Principal, repo: RepositoryName, required: Role) => Promise<RepositoryAccess>
   readonly isInstanceAdmin: (principal: Principal) => Promise<boolean>
+  readonly session: (request: Request) => Promise<UiSession | null>
+  readonly verifySessionWrite: (request: Request) => Promise<UiSession | null>
+  readonly loginOptions: { readonly oidcName: string | null }
+  readonly account: AccountOperations
+}
+
+export type UiSession = { readonly principal: UserPrincipal; readonly csrf: string }
+
+export type AccountOperations = {
+  readonly listTokens: (user: UserPrincipal) => ReturnType<AccountsStore['listTokens']>
+  readonly createToken: (user: UserPrincipal, input: { readonly name: string; readonly scopes: readonly TokenScope[]; readonly expiresAt: number | null }) => Promise<CreatedToken>
+  readonly revokeToken: (user: UserPrincipal, tokenId: string) => Promise<boolean>
+  readonly listPasskeys: (user: UserPrincipal) => Promise<CredentialSummary[]>
+  readonly revokePasskey: (user: UserPrincipal, id: string) => Promise<boolean>
 }
 
 export type RepositoryAccess = {
@@ -201,8 +230,11 @@ type Route = { readonly pattern: RegExp; readonly method: string; readonly handl
 
 export const createForge = (options: ForgeOptions): Forge => {
   const { storage, db } = options
-  const store: AccountsStore = createAccountsStore(db)
   const now = options.now ?? (() => new Date())
+  const store: AccountsStore = createAccountsStore(db, { now: () => now().getTime() })
+  const logins = createLoginStore(db, { now: () => now().getTime() })
+  const outbound = (input: string, init?: RequestInit) => (options.fetch ? options.fetch(new Request(input, init)) : fetch(input, init))
+  const oidc = options.login?.oidc ? createOidcProvider(options.login.oidc, outbound, () => now().getTime()) : null
   const jwks: JwksSource = createJwksCache({
     allowInsecureHttp: options.allowInsecureFederation,
     ...(options.fetch ? { fetch: (input, init) => options.fetch!(new Request(input, init)) } : {}),
@@ -214,7 +246,28 @@ export const createForge = (options: ForgeOptions): Forge => {
     verifyInstance: createInstanceVerifier({ audience: issuerFor(request), trust: store.lookupTrustedIssuer, jwks }),
   })
 
+  const loginOptions = (request: Request): LoginHttpOptions => {
+    const origin = new URL(issuerFor(request)).origin
+    const context: LoginContext = {
+      store,
+      logins,
+      origin,
+      rp: relyingParty(origin),
+      oidc,
+      selfSignup: options.login?.selfSignup ?? false,
+      breakGlassKey: options.login?.breakGlassKey ?? null,
+      fetch: outbound,
+      now: () => now().getTime(),
+    }
+    return { context, secureCookies: origin.startsWith('https:'), ...(options.renderLoginPage ? { renderPage: options.renderLoginPage } : {}) }
+  }
+
   const principalOf = async (request: Request): Promise<Principal> => {
+    if (!request.headers.has('Authorization')) {
+      const check = await checkSession(request, loginOptions(request))
+      if (check.kind === 'csrf-failed') throw new HttpError(403, 'missing or invalid CSRF token')
+      if (check.kind === 'session') return sessionUserPrincipal(check.active.session)
+    }
     const principal = await authenticateRequest(request, authenticateOptions(request))
     if (!principal) throw new HttpError(401, 'invalid credentials', { 'WWW-Authenticate': 'Bearer' })
     return principal
@@ -324,6 +377,33 @@ export const createForge = (options: ForgeOptions): Forge => {
     if (expiresAt !== null && (typeof expiresAt !== 'number' || !Number.isSafeInteger(expiresAt))) throw new HttpError(400, 'expiresAt must be Unix milliseconds')
     const created = await store.createPersonalAccessToken(account.id, { name: optionalString(body, 'name') ?? 'api', scopes, expiresAt }, { kind: 'user', id: actor.id })
     return json(201, created)
+  }
+
+  const currentUser = async (request: Request): Promise<Response> => {
+    const principal = await principalOf(request)
+    if (principal.kind !== 'user') throw new HttpError(401, 'authentication required', { 'WWW-Authenticate': 'Bearer' })
+    const via = request.headers.has('Authorization') ? 'token' : 'session'
+    return json(200, { id: principal.id, login: principal.login, admin: await store.isInstanceAdmin(principal.id), via, ceiling: principal.limits?.ceiling ?? null })
+  }
+
+  const createInvite = async (request: Request): Promise<Response> => {
+    const actor = await requireInstanceAdmin(request)
+    const body = await readBody(request)
+    const login = optionalString(body, 'login')
+    const existing = optionalString(body, 'user')
+    const email = optionalString(body, 'email')
+    const days = body.expiresInDays ?? 7
+    if (typeof days !== 'number' || !Number.isInteger(days) || days < 1 || days > 90) throw new HttpError(400, 'expiresInDays must be an integer between 1 and 90')
+    if (login !== undefined && existing !== undefined) throw new HttpError(400, 'pass either login (a new account) or user (an existing one)')
+    let userId: string | null = null
+    if (existing !== undefined) {
+      const account = await store.findAccount(existing)
+      if (!account || account.kind !== 'user') throw new HttpError(404, 'user not found')
+      userId = account.id
+    }
+    if (login !== undefined && (await store.findAccount(login))) throw new HttpError(409, `${login} already exists`)
+    const invite = await logins.createInvite({ login: login ?? null, userId, email: email ?? null, ttlMs: days * 24 * 60 * 60 * 1000 }, { kind: 'user', id: actor.id })
+    return json(201, { code: invite.code, url: new URL(`/login/invite/${invite.code}`, issuerFor(request)).toString(), expiresAt: invite.expiresAt })
   }
 
   const trustInstance = async (request: Request): Promise<Response> => {
@@ -574,6 +654,14 @@ export const createForge = (options: ForgeOptions): Forge => {
     }
   }
 
+  const withSessionReads = (authorize: Authorize): Authorize => async (request, repo, access, ...rest) => {
+    if (access === 'read' && !request.headers.has('Authorization') && !isUnsafeMethod(request.method)) {
+      const active = await readActiveSession(request, loginOptions(request))
+      if (active && (await repositoryAccess(sessionUserPrincipal(active.session), repo, 'read')).decision === 'allow') return null
+    }
+    return authorize(request, repo, access, ...rest)
+  }
+
   const actorOf = async (request: Request): Promise<string> => {
     const principal = await authenticateRequest(request, authenticateOptions(request))
     if (principal?.kind === 'user') return principal.login
@@ -591,6 +679,10 @@ export const createForge = (options: ForgeOptions): Forge => {
     { method: 'POST', pattern: /^\/api\/admin\/users$/, handler: createUser },
     { method: 'POST', pattern: new RegExp(`^/api/admin/users/${SEGMENT}/tokens$`), handler: createToken },
     { method: 'POST', pattern: /^\/api\/admin\/instances$/, handler: trustInstance },
+    { method: 'POST', pattern: /^\/api\/admin\/invites$/, handler: createInvite },
+    { method: 'GET', pattern: /^\/api\/user$/, handler: currentUser },
+    { method: 'POST', pattern: /^\/api\/admin\/invites$/, handler: createInvite },
+    { method: 'GET', pattern: /^\/api\/user$/, handler: currentUser },
     { method: 'POST', pattern: /^\/api\/repos$/, handler: createRepositoryRoute },
     { method: 'PATCH', pattern: new RegExp(`^${REPO}$`), handler: updateRepository },
     { method: 'PUT', pattern: new RegExp(`^${REPO}/collaborators/${SEGMENT}$`), handler: setCollaborator },
@@ -633,6 +725,8 @@ export const createForge = (options: ForgeOptions): Forge => {
     if (wellKnown) return wellKnown
     const federated = federation ? await handleFederationRequest(federation, request) : null
     if (federated) return federated
+    const login = await createLoginHandler(loginOptions(request))(request)
+    if (login) return login
     const authentication = authenticateOptions(request)
     const protection = await handleBranchProtectionRequest(request, { store, verifyInstance: authentication.verifyInstance })
     if (protection) return protection
@@ -648,7 +742,7 @@ export const createForge = (options: ForgeOptions): Forge => {
     }
     const access = createGitAccess(authentication)
     const authorize = withJobTokens(access.authorize)
-    const content = await handleContentRequest(request, { storage, authorize })
+    const content = await handleContentRequest(request, { storage, authorize: withSessionReads(authorize) })
     if (content) return content
     const git = await handleGitRequest(request, {
       storage,
@@ -668,9 +762,39 @@ export const createForge = (options: ForgeOptions): Forge => {
 
   return {
     fetch: handle,
-    services: { storage, store, authenticate: (request) => authenticateRequest(request, authenticateOptions(request)), issuer: issuerFor,
+    services: {
+      storage,
+      store,
+      authenticate: async (request) => {
+        if (!request.headers.has('Authorization')) {
+          const active = await readActiveSession(request, loginOptions(request))
+          if (active) return sessionUserPrincipal(active.session)
+        }
+        return authenticateRequest(request, authenticateOptions(request))
+      },
+      issuer: issuerFor,
       repositoryAccess,
       isInstanceAdmin: async (principal) => principal.kind === 'user' && (await store.isInstanceAdmin(principal.id)),
+      session: async (request) => {
+        const active = await readActiveSession(request, loginOptions(request))
+        return active ? { principal: sessionUserPrincipal(active.session), csrf: active.csrf } : null
+      },
+      verifySessionWrite: async (request) => {
+        const check = await checkSession(request, loginOptions(request))
+        return check.kind === 'session' ? { principal: sessionUserPrincipal(check.active.session), csrf: check.active.csrf } : null
+      },
+      loginOptions: { oidcName: oidc?.config.name ?? null },
+      account: {
+        listTokens: (user) => store.listTokens({ accountId: user.id }),
+        createToken: (user, input) => store.createPersonalAccessToken(user.id, input, { kind: 'user', id: user.id }),
+        revokeToken: async (user, tokenId) => {
+          const own = (await store.listTokens({ accountId: user.id })).some((token) => token.id === tokenId)
+          if (own) await store.revokeToken(tokenId, { kind: 'user', id: user.id })
+          return own
+        },
+        listPasskeys: (user) => logins.listCredentials(user.id),
+        revokePasskey: (user, id) => logins.revokeCredential(user.id, id),
+      },
     },
     scheduled: (at = now()) =>
       federation ? enqueueDueMirrors(federation, at, options.mirrorIntervalMinutes) : syncDueMirrors(mirrorContext(options.publicUrl), at, options.mirrorIntervalMinutes),

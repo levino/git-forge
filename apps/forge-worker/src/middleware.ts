@@ -1,16 +1,28 @@
 import { env } from 'cloudflare:workers'
 import { defineMiddleware } from 'astro/middleware'
 import { type Env, forgeFor } from './cloudflare.ts'
-import { isCrossSiteWrite, isForgePath } from './routing.ts'
+import { isCrossSiteWrite, isForgePath, isLoginPath } from './routing.ts'
+import { LOGIN_PAGE_ROUTE, takeLoginPage } from './ui/login-pages.ts'
 
 export const onRequest = defineMiddleware(async (context, next) => {
   const forge = await forgeFor(env as unknown as Env)
+  const signIn = async () => {
+    context.locals.forge = forge.services
+    const session = await forge.services.session(context.request)
+    context.locals.session = session
+    context.locals.principal = session?.principal ?? (await forge.services.authenticate(context.request)) ?? { kind: 'anonymous' }
+  }
   if (isForgePath(context.url.pathname)) {
     const execution = context.locals.cfContext
-    return forge.fetch(context.request, execution ? (promise) => execution.waitUntil(promise) : undefined)
+    const request: Request = isLoginPath(context.url.pathname) ? (context.request.clone() as Request) : context.request
+    const response = await forge.fetch(request, execution ? (promise) => execution.waitUntil(promise) : undefined)
+    const page = takeLoginPage(request, response)
+    if (!page) return response
+    await signIn()
+    context.locals.loginPage = page
+    return next(LOGIN_PAGE_ROUTE)
   }
   if (isCrossSiteWrite(context.request)) return new Response('cross-site request refused\n', { status: 403, headers: { 'Content-Type': 'text/plain; charset=utf-8' } })
-  context.locals.forge = forge.services
-  context.locals.principal = (await forge.services.authenticate(context.request)) ?? { kind: 'anonymous' }
+  await signIn()
   return next()
 })

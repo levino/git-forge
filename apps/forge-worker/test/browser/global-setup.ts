@@ -62,6 +62,7 @@ export default async function setup(): Promise<() => Promise<void>> {
   await git(dir, ['lfs', 'push', '--all', 'origin'])
   await git(dir, ['push', '-q', 'origin', 'main'])
   process.env.FORGE_URL = dev.url
+  process.env.FORGE_ADMIN_TOKEN = token
   return async () => {
     await dev.stop()
   }

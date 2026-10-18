@@ -1,8 +1,8 @@
 import { matchContentRoute, matchGitRoute } from '@git-forge/core'
 
-const FORGE_PREFIXES = ['/api/', '/_services/', '/.well-known/', '/login/oauth/']
+const FORGE_PREFIXES = ['/api/', '/_services/', '/.well-known/', '/login/']
 
-const FORGE_PATHS = new Set(['/api', '/login/device/code'])
+const FORGE_PATHS = new Set(['/api', '/login', '/logout'])
 
 const GIT_SUBPATH = /^\/(HEAD|info\/refs|git-upload-pack|git-receive-pack|objects\/.+|info\/lfs(\/.*)?)$/
 
@@ -26,3 +26,5 @@ export const isCrossSiteWrite = (request: Request): boolean => {
   const type = (request.headers.get('Content-Type') ?? '').split(';', 1)[0]!.trim().toLowerCase()
   return FORM_TYPES.includes(type)
 }
+
+export const isLoginPath = (pathname: string): boolean => pathname === '/login' || pathname === '/logout' || pathname.startsWith('/login/')

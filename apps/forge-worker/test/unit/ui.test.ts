@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { uiEnabled } from '../../src/config.ts'
-import { isCrossSiteWrite, isForgePath } from '../../src/routing.ts'
+import { isCrossSiteWrite, isForgePath, isLoginPath } from '../../src/routing.ts'
 import { previewKind } from '../../src/ui/browse.ts'
 import { formatBytes, relativeTime } from '../../src/ui/format.ts'
 import { highlightLines, languageFor } from '../../src/ui/highlight.ts'
@@ -14,8 +14,13 @@ describe('routing between the UI and the forge', () => {
     '/api/v3/repos/a/b/actions/runs',
     '/_services/actions/_apis/connectionData',
     '/.well-known/jwks.json',
+    '/login',
+    '/login/device',
     '/login/device/code',
-    '/login/oauth/access_token',
+    '/login/oidc/callback',
+    '/login/passkey/options',
+    '/logout',
+    '/api/session',
     '/acme/site.git/info/refs',
     '/acme/site/info/refs',
     '/acme/site/HEAD',
@@ -29,7 +34,7 @@ describe('routing between the UI and the forge', () => {
     expect(isForgePath(path)).toBe(true)
   })
 
-  it.each(['/', '/explore', '/login', '/acme/site.git', '/login/device', '/acme', '/acme/site', '/acme/site/tree/main/src', '/acme/site/blob/main/info/refs', '/acme/site/commits', '/-/style.css'])(
+  it.each(['/', '/explore', '/settings', '/acme/site.git', '/acme', '/acme/site', '/acme/site/tree/main/src', '/acme/site/blob/main/info/refs', '/acme/site/commits', '/-/style.css'])(
     'renders %s in the UI',
     (path) => {
       expect(isForgePath(path)).toBe(false)
@@ -44,6 +49,11 @@ describe('routing between the UI and the forge', () => {
     expect(isCrossSiteWrite(post({ 'Content-Type': 'application/x-www-form-urlencoded' }))).toBe(true)
     expect(isCrossSiteWrite(post({ 'Content-Type': 'application/json' }))).toBe(false)
     expect(isCrossSiteWrite(new Request('https://forge.example/', { headers: { Origin: 'https://evil.example' } }))).toBe(false)
+  })
+
+  it('recognizes the login routes whose requests may be rendered as pages', () => {
+    expect(['/login', '/logout', '/login/device', '/login/break-glass'].every(isLoginPath)).toBe(true)
+    expect(['/loginx', '/api/session', '/acme/site.git/info/refs'].some(isLoginPath)).toBe(false)
   })
 
   it('turns the UI off only when asked', () => {

@@ -330,19 +330,13 @@ Notifications (`/api/v3/notifications`), webhooks
 (`/api/v3/repos/<owner>/<name>/releases`) work without further setup; their
 jobs run on the jobs queue (its name must end in `-jobs`).
 
-Emails (notification digests, mentions, review requests, invites) are off
-until you add an email binding. To send through Cloudflare Email Service,
-onboard the sender domain (it must use Cloudflare DNS) once:
+Emails (notification digests, mentions, review requests, invites) go
+through Cloudflare Email Service (`[[send_email]]` binding `EMAIL`). Until the
+sender domain is onboarded, deploys work and sends are rejected and logged.
+Onboard it (the domain must use Cloudflare DNS) once:
 
 ```sh
 npx wrangler@4 email sending enable git.example.com
-```
-
-then add to `wrangler.toml` and deploy:
-
-```toml
-[[send_email]]
-name = "EMAIL"
 ```
 
 Mail goes out from `EMAIL_FROM` or `Forge <forge@<PUBLIC_URL host>>`; test

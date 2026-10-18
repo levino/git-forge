@@ -46,3 +46,6 @@ max_retries = 10
 
 [triggers]
 crons = ["17 3 * * *"]
+
+[[send_email]]
+name = "EMAIL"

@@ -253,7 +253,7 @@ describe('login and account pages', () => {
     expect(enabled.html).toContain('data-passkey="register"')
     const settings = await render(Settings, '/settings', {}, user(), {
       session: session(),
-      services: { loginOptions: { ...forge.services.loginOptions, passkeys: false } },
+      services: { loginMethods: async () => ({ oidcName: null, passkeys: false }) },
     })
     expect(settings.status).toBe(200)
     expect(settings.html).not.toContain('data-passkey')

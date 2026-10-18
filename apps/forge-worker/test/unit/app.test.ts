@@ -5,7 +5,7 @@ import { S3Storage } from '@git-forge/s3'
 import { commitAll, gitBytes, initRepo, sampleHistory, tempDir, writeFile } from '@git-forge/core/test/git-helpers.ts'
 import { type RunningServer, startServer } from '@git-forge/core/test/http-server.ts'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { basicAuthorization, PRESIGN_HINT, RAISE_LIMIT_HINT, secretMatches } from '../../src/app.ts'
+import { basicAuthorization, PRESIGN_HINT, RAISE_LIMIT_HINT } from '../../src/app.ts'
 import { git, gitFails } from '../e2e/history.ts'
 import { DEFAULT_COMPACT_MAX_BYTES, DEFAULT_MAX_LFS_OBJECT_BYTES, loadSecretsKey, parseActionsSettings, parseR2Signing, parseSettings } from '../../src/config.ts'
 import { upstreamRepository } from '../../src/mirrors.ts'
@@ -78,12 +78,6 @@ describe('settings', () => {
       accessKeyId: 'k',
       secretAccessKey: 's',
     })
-  })
-
-  it('compares secrets without accepting missing or different values', async () => {
-    expect(await secretMatches('secret', 'secret')).toBe(true)
-    expect(await secretMatches('secret', 'secreT')).toBe(false)
-    expect(await secretMatches('', undefined)).toBe(false)
   })
 
   it('derives the upstream repository from a clone URL', () => {

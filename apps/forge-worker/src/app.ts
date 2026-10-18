@@ -75,6 +75,8 @@ import {
   InstanceAdministrationError,
   isReservedLogin,
   type LoginStore,
+  type OidcProvider,
+  sql,
   type BranchProtectionRule,
   type NamedAllowances,
   validateBranchPattern,
@@ -169,6 +171,11 @@ import {
 } from '@git-forge/notifications'
 import { type ArtifactSource, createPages, isPagesJob, type PagesJob } from '@git-forge/pages'
 import { type AssetRow, createReleaseStore, handleReleasesRequest, type ReleaseRow } from '@git-forge/releases'
+import { AdminError, type AdminOperations, createAdminOperations, readOidcSettings } from './admin/operations.ts'
+import { createJobFailures } from './admin/jobs.ts'
+import { createInstanceSettings, deriveSettingsKey } from './admin/settings.ts'
+import type { Location } from './admin/setup.ts'
+import { createUsageMeter, type UsageScanJob } from './admin/usage.ts'
 import { activityEvent } from './collaboration-events.ts'
 import { mirrorOverview, recordChecksums, signOverview } from './mirror-verification.ts'
 import type { ForgeSettings } from './config.ts'
@@ -208,13 +215,17 @@ export type ForgeOptions = ForgeSettings & {
   readonly clientAddress?: (request: Request) => string | null
   readonly artifacts?: ArtifactSource
   readonly lfsPublisher?: LfsPublisher
+  readonly version?: string
+  readonly location?: (request: Request) => Promise<Location>
 }
 
 export type LfsPublishJob = { readonly kind: 'lfs-publish'; readonly owner: string; readonly name: string; readonly oids: readonly string[] | null }
 
-export type AppJob = ForgeJob | NotificationJob | PagesJob | LfsPublishJob | ImportLfsJob
+export type AppJob = ForgeJob | NotificationJob | PagesJob | LfsPublishJob | ImportLfsJob | UsageScanJob
 
 export const LFS_PUBLISH_BATCH = 100
+
+export const OIDC_SETTINGS_TTL_MS = 30_000
 
 export type WaitUntil = (promise: Promise<unknown>) => void
 
@@ -234,7 +245,8 @@ export type ForgeServices = {
   readonly isInstanceAdmin: (principal: Principal) => Promise<boolean>
   readonly session: (request: Request) => Promise<UiSession | null>
   readonly verifySessionWrite: (request: Request) => Promise<UiSession | null>
-  readonly loginOptions: { readonly oidcName: string | null; readonly passkeys: boolean }
+  readonly loginMethods: () => Promise<{ readonly oidcName: string | null; readonly passkeys: boolean }>
+  readonly observe: (waitUntil?: WaitUntil) => Promise<void>
   readonly account: AccountOperations
   readonly repositories: RepositoryOperations
   readonly inbox: InboxOperations
@@ -248,9 +260,10 @@ export type ForgeServices = {
 
 export type MirrorOverviewEntry = { readonly repository: RepositoryName; readonly config: MirrorConfig; readonly status: MirrorStatus | null }
 
-export type InstanceOperations = InstanceAdministration & {
-  readonly mirrors: (principal: Principal) => Promise<MirrorOverviewEntry[]>
-}
+export type InstanceOperations = InstanceAdministration &
+  AdminOperations & {
+    readonly mirrors: (principal: Principal) => Promise<MirrorOverviewEntry[]>
+  }
 
 export type InboxOperations = {
   readonly threads: (user: UserPrincipal, filter: { readonly all: boolean; readonly limit: number; readonly offset: number }) => Promise<ThreadRow[]>
@@ -359,7 +372,7 @@ export type Forge = {
   readonly services: ForgeServices
   readonly scheduled: (at?: Date) => Promise<ScheduledMirrorRun[]>
   readonly actionsTick: () => Promise<ActionsTick | null>
-  readonly runJob: (job: AppJob) => Promise<void>
+  readonly runJob: (job: AppJob, attempt?: number) => Promise<void>
   readonly notifications: Notifications
 }
 
@@ -367,16 +380,6 @@ export const HttpError = ForgeError
 
 const json = (status: number, body: unknown, headers: Record<string, string> = {}) =>
   new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', ...headers } })
-
-const digest = async (value: string): Promise<Uint8Array> => new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value)))
-
-export const secretMatches = async (presented: string, expected: string | undefined): Promise<boolean> => {
-  if (!expected) return false
-  const [a, b] = await Promise.all([digest(presented), digest(expected)])
-  let difference = 0
-  for (let i = 0; i < a.length; i++) difference |= a[i]! ^ b[i]!
-  return difference === 0
-}
 
 const bearer = (request: Request): string | null => {
   const match = /^\s*Bearer\s+(\S+)\s*$/i.exec(request.headers.get('Authorization') ?? '')
@@ -433,14 +436,28 @@ export const basicAuthorization = (username: string, password: string): string =
 type Route = { readonly pattern: RegExp; readonly method: string; readonly handler: (request: Request, params: string[]) => Promise<Response> }
 
 export const createForge = (options: ForgeOptions): Forge => {
-  const { storage, db } = options
-  const presigningStorage = options.presigner ? withPresigner(storage, options.presigner) : storage
   const now = options.now ?? (() => new Date())
+  const nowMs = () => now().getTime()
+  const meter = createUsageMeter(options.db, nowMs)
+  const storage = meter.storage(options.storage)
+  const db = meter.database(options.db)
+  const presigningStorage = options.presigner ? withPresigner(storage, options.presigner) : storage
   const store: AccountsStore = createAccountsStore(db, { now: () => now().getTime() })
   const verification = createMirrorVerificationStore(db, { now: () => now().getTime() })
   const logins = createLoginStore(db, { now: () => now().getTime() })
   const outbound = (input: string, init?: RequestInit) => (options.fetch ? options.fetch(new Request(input, init)) : fetch(input, init))
-  const oidc = options.login?.oidc ? createOidcProvider(options.login.oidc, outbound, () => now().getTime()) : null
+  let settingsKey: Promise<SecretsKey | null> | undefined
+  const instanceSettings = createInstanceSettings(db, () => (settingsKey ??= options.bootstrapToken ? deriveSettingsKey(options.bootstrapToken) : Promise.resolve(options.actions?.secretsKey ?? null)), nowMs)
+  const failures = createJobFailures(db, instanceSettings, nowMs)
+  let oidcCache: { readonly at: number; readonly key: string; readonly provider: OidcProvider | null } | null = null
+  const oidcProvider = async (): Promise<OidcProvider | null> => {
+    if (oidcCache && nowMs() - oidcCache.at < OIDC_SETTINGS_TTL_MS) return oidcCache.provider
+    const config = options.login?.oidc ?? (await readOidcSettings(instanceSettings))
+    const key = JSON.stringify(config)
+    const provider = oidcCache?.key === key ? oidcCache.provider : config ? createOidcProvider(config, outbound, nowMs) : null
+    oidcCache = { at: nowMs(), key, provider }
+    return provider
+  }
   const jwks: JwksSource = createJwksCache({
     allowInsecureHttp: options.allowInsecureFederation,
     ...(options.fetch ? { fetch: (input, init) => options.fetch!(new Request(input, init)) } : {}),
@@ -452,14 +469,14 @@ export const createForge = (options: ForgeOptions): Forge => {
     verifyInstance: createInstanceVerifier({ audience: issuerFor(request), trust: store.lookupTrustedIssuer, jwks }),
   })
 
-  const loginOptions = (request: Request): LoginHttpOptions => {
+  const loginOptions = async (request: Request): Promise<LoginHttpOptions> => {
     const origin = new URL(issuerFor(request)).origin
     const context: LoginContext = {
       store,
       logins,
       origin,
       rp: relyingParty(origin),
-      oidc,
+      oidc: await oidcProvider(),
       selfSignup: options.login?.selfSignup ?? false,
       breakGlassKey: options.login?.breakGlassKey ?? null,
       passkeys: options.login?.passkeys ?? true,
@@ -476,7 +493,7 @@ export const createForge = (options: ForgeOptions): Forge => {
 
   const principalOf = async (request: Request): Promise<Principal> => {
     if (!request.headers.has('Authorization')) {
-      const check = await checkSession(request, loginOptions(request))
+      const check = await checkSession(request, (await loginOptions(request)))
       if (check.kind === 'csrf-failed') throw new HttpError(403, 'missing or invalid CSRF token')
       if (check.kind === 'session') return sessionUserPrincipal(check.active.session)
     }
@@ -487,7 +504,7 @@ export const createForge = (options: ForgeOptions): Forge => {
 
   const apiPrincipal = async (request: Request): Promise<Principal | null> => {
     if (!request.headers.has('Authorization')) {
-      const check = await checkSession(request, loginOptions(request))
+      const check = await checkSession(request, (await loginOptions(request)))
       if (check.kind === 'csrf-failed') return null
       if (check.kind === 'session') return sessionUserPrincipal(check.active.session)
     }
@@ -563,7 +580,7 @@ export const createForge = (options: ForgeOptions): Forge => {
     authenticate: apiPrincipal,
     authenticateToken: (request) => authenticateRequest(request, authenticateOptions(request)),
     sessionUser: async (request) => {
-      const active = await readActiveSession(request, loginOptions(request))
+      const active = await readActiveSession(request, (await loginOptions(request)))
       return active ? sessionUserPrincipal(active.session) : null
     },
     isInstanceAdmin: store.isInstanceAdmin,
@@ -695,16 +712,11 @@ export const createForge = (options: ForgeOptions): Forge => {
   const bootstrap = async (request: Request): Promise<Response> => {
     if (!options.bootstrapToken) throw new HttpError(503, 'BOOTSTRAP_TOKEN is not configured')
     const presented = bearer(request)
-    if (presented === null || !(await secretMatches(presented, options.bootstrapToken))) {
-      throw new HttpError(401, 'invalid bootstrap token', { 'WWW-Authenticate': 'Bearer' })
-    }
+    if (presented === null) throw new HttpError(401, 'invalid bootstrap token', { 'WWW-Authenticate': 'Bearer' })
     const body = await readBody(request)
-    const login = requiredString(body, 'login')
     const email = optionalString(body, 'email')
-    const admin = await store.bootstrapInstanceAdmin({ login, ...(email ? { email } : {}) })
-    if (!admin) throw new HttpError(409, 'this instance already has an admin')
-    const token = await store.createPersonalAccessToken(admin.id, { name: 'bootstrap', scopes: ['repo:admin'], expiresAt: null }, { kind: 'system' })
-    return json(201, { login, token: token.token })
+    const claim = await instance.claim(presented, { login: requiredString(body, 'login'), ...(email ? { email } : {}) }, 'token')
+    return json(201, { login: claim.login, token: claim.token })
   }
 
   const createUser = async (request: Request): Promise<Response> => {
@@ -761,8 +773,38 @@ export const createForge = (options: ForgeOptions): Forge => {
 
   const instanceAdministration = createInstanceAdministration(store)
 
+  const admin = createAdminOperations({
+    store,
+    logins,
+    storage,
+    settings: instanceSettings,
+    failures,
+    meter,
+    fetch: outbound,
+    now: nowMs,
+    version: options.version ?? 'dev',
+    bootstrapToken: options.bootstrapToken,
+    varsOidc: options.login?.oidc ?? null,
+    facts: {
+      presigned: options.presigner !== undefined,
+      maxLfsObjectBytes: options.maxLfsObjectBytes,
+      imports: options.scheduleImport !== undefined,
+      jobs: options.jobs !== undefined,
+      actions: options.actions !== undefined,
+      runners: options.actions?.launcher !== undefined,
+      publicUrl: options.publicUrl ?? null,
+    },
+    location: options.location ?? (async () => ({ colo: null, databaseRegion: null })),
+    pingDatabase: () => options.db.all(sql('SELECT 1 AS ok')),
+    enqueue: async (job) => (options.jobs ? options.jobs.enqueue(job as AppJob) : runAppJob(job as AppJob)),
+    onOidcChanged: () => {
+      oidcCache = null
+    },
+  })
+
   const instance: InstanceOperations = {
     ...instanceAdministration,
+    ...admin,
     mirrors: async (principal) => {
       await instanceAdministration.view(principal)
       const overview: MirrorOverviewEntry[] = []
@@ -795,6 +837,45 @@ export const createForge = (options: ForgeOptions): Forge => {
   }
 
   const adminMirrorsRoute = async (request: Request): Promise<Response> => json(200, await instance.mirrors(await principalOf(request)))
+
+  const adminOverviewRoute = async (request: Request): Promise<Response> => json(200, await instance.overview(await principalOf(request)))
+
+  const adminSetupRoute = async (request: Request): Promise<Response> => json(200, await instance.setup(await principalOf(request), request))
+
+  const adminOidcRoute = async (request: Request): Promise<Response> => {
+    const principal = await principalOf(request)
+    const body = await readBody(request)
+    const clientSecret = optionalString(body, 'clientSecret')
+    const name = optionalString(body, 'name')
+    return json(200, await instance.saveOidc(principal, { issuer: requiredString(body, 'issuer'), clientId: requiredString(body, 'clientId'), ...(clientSecret ? { clientSecret } : {}), ...(name ? { name } : {}) }))
+  }
+
+  const adminClearOidcRoute = async (request: Request): Promise<Response> => {
+    await instance.clearOidc(await principalOf(request))
+    return new Response(null, { status: 204 })
+  }
+
+  const adminUpdateRoute = async (request: Request): Promise<Response> => json(200, await instance.checkUpdate(await principalOf(request)))
+
+  const adminApplyUpdateRoute = async (request: Request): Promise<Response> => json(200, await instance.update(await principalOf(request)))
+
+  const adminUpdateRepositoryRoute = async (request: Request): Promise<Response> => {
+    const principal = await principalOf(request)
+    const body = await readBody(request)
+    return json(200, { repository: await instance.setUpdateRepository(principal, { repository: requiredString(body, 'repository'), token: requiredString(body, 'token') }) })
+  }
+
+  const adminClearUpdateRepositoryRoute = async (request: Request): Promise<Response> => {
+    await instance.clearUpdateRepository(await principalOf(request))
+    return new Response(null, { status: 204 })
+  }
+
+  const adminRetryJobRoute = async (request: Request, params: string[]): Promise<Response> => {
+    await instance.retryJob(await principalOf(request), params[0]!)
+    return json(202, { queued: true })
+  }
+
+  const adminRecountRoute = async (request: Request): Promise<Response> => json(202, { repositories: await instance.recountUsage(await principalOf(request)) })
 
   const organizations = createOrganizationOperations(store)
 
@@ -1321,7 +1402,7 @@ export const createForge = (options: ForgeOptions): Forge => {
 
   const withSessionReads = (authorize: Authorize): Authorize => async (request, repo, access, ...rest) => {
     if (access === 'read' && !request.headers.has('Authorization') && !isUnsafeMethod(request.method)) {
-      const active = await readActiveSession(request, loginOptions(request))
+      const active = await readActiveSession(request, (await loginOptions(request)))
       if (active && (await repositoryAccess(sessionUserPrincipal(active.session), repo, 'read')).decision === 'allow') return null
     }
     return authorize(request, repo, access, ...rest)
@@ -1450,6 +1531,16 @@ export const createForge = (options: ForgeOptions): Forge => {
     { method: 'PUT', pattern: new RegExp(`^/api/admin/admins/${SEGMENT}$`), handler: setInstanceAdmin(true) },
     { method: 'DELETE', pattern: new RegExp(`^/api/admin/admins/${SEGMENT}$`), handler: setInstanceAdmin(false) },
     { method: 'GET', pattern: /^\/api\/admin\/mirrors$/, handler: adminMirrorsRoute },
+    { method: 'GET', pattern: /^\/api\/admin\/overview$/, handler: adminOverviewRoute },
+    { method: 'GET', pattern: /^\/api\/admin\/setup$/, handler: adminSetupRoute },
+    { method: 'PUT', pattern: /^\/api\/admin\/oidc$/, handler: adminOidcRoute },
+    { method: 'DELETE', pattern: /^\/api\/admin\/oidc$/, handler: adminClearOidcRoute },
+    { method: 'GET', pattern: /^\/api\/admin\/update$/, handler: adminUpdateRoute },
+    { method: 'POST', pattern: /^\/api\/admin\/update$/, handler: adminApplyUpdateRoute },
+    { method: 'PUT', pattern: /^\/api\/admin\/update\/repository$/, handler: adminUpdateRepositoryRoute },
+    { method: 'DELETE', pattern: /^\/api\/admin\/update\/repository$/, handler: adminClearUpdateRepositoryRoute },
+    { method: 'POST', pattern: new RegExp(`^/api/admin/jobs/${SEGMENT}/retry$`), handler: adminRetryJobRoute },
+    { method: 'POST', pattern: /^\/api\/admin\/usage\/recount$/, handler: adminRecountRoute },
     { method: 'POST', pattern: /^\/api\/admin\/invites$/, handler: createInvite },
     { method: 'GET', pattern: /^\/api\/user$/, handler: currentUser },
     { method: 'POST', pattern: /^\/api\/orgs$/, handler: createOrganizationRoute },
@@ -1508,7 +1599,7 @@ export const createForge = (options: ForgeOptions): Forge => {
     if (wellKnown) return wellKnown
     const federated = federation ? await handleFederationRequest(federation, request) : null
     if (federated) return federated
-    const login = await createLoginHandler(loginOptions(request))(request)
+    const login = await createLoginHandler((await loginOptions(request)))(request)
     if (login) return login
     const authentication = authenticateOptions(request)
     const protection = await handleBranchProtectionRequest(request, { store, authenticate: apiPrincipal })
@@ -1552,7 +1643,7 @@ export const createForge = (options: ForgeOptions): Forge => {
       if (api) return api
     } catch (error) {
       if (error instanceof HttpError) return json(error.status, { error: error.message }, error.headers)
-      if (error instanceof OrganizationError || error instanceof InstanceAdministrationError) return json(error.status, { error: error.message })
+      if (error instanceof OrganizationError || error instanceof InstanceAdministrationError || error instanceof AdminError) return json(error.status, { error: error.message })
       if (error instanceof AccountsError) return json(400, { error: error.message })
       throw error
     }
@@ -1565,7 +1656,12 @@ export const createForge = (options: ForgeOptions): Forge => {
       authorize,
       pushPolicy: access.pushPolicy,
       ...(options.maxPushBytes !== undefined ? { maxPushBytes: options.maxPushBytes } : {}),
-      lfs: { maxObjectBytes: options.maxLfsObjectBytes, oversizeHint: options.presigner ? RAISE_LIMIT_HINT : PRESIGN_HINT, ...(options.digests ? { digests: options.digests } : {}) },
+      lfs: {
+        maxObjectBytes: options.maxLfsObjectBytes,
+        oversizeHint: options.presigner ? RAISE_LIMIT_HINT : PRESIGN_HINT,
+        onVerified: (key, size) => meter.record([{ key, size }]),
+        ...(options.digests ? { digests: options.digests } : {}),
+      },
       ...(options.presigner ? { uploads: { presignPut: options.presigner.presignPut.bind(options.presigner) } } : {}),
       packfileUris: (incoming, repo) => packfileUris(incoming, repo, authorize),
       onPush: async (repo, outcome) => {
@@ -1578,15 +1674,38 @@ export const createForge = (options: ForgeOptions): Forge => {
     return git ?? json(404, { error: 'not found' })
   }
 
+  const observe = async (waitUntil?: WaitUntil): Promise<void> => {
+    meter.count('requests')
+    const flushed = meter.flush().catch((error: unknown) => console.error(JSON.stringify({ event: 'usage-flush-failed', error: String(error) })))
+    if (waitUntil) waitUntil(flushed)
+    else await flushed
+  }
+
+  const runAppJob = async (job: AppJob): Promise<void> => {
+    if (isNotificationJob(job)) return notifications.runJob(job)
+    if (isPagesJob(job)) return pages.runJob(job)
+    if (job.kind === 'lfs-publish') return publishLfs(job)
+    if (job.kind === 'usage-scan') return void (await meter.scan(options.storage, job))
+    if (job.kind === 'import-lfs') return void (await importLfsObject(job, { storage, ...(options.fetch ? { fetch: options.fetch } : {}), ...(options.digests ? { digests: options.digests } : {}) }))
+    if (!federation) throw new Error('jobs need PUBLIC_URL, INSTANCE_KEY and a job queue')
+    await runJob(federation, job)
+  }
+
   return {
-    fetch: handle,
+    fetch: async (request, waitUntil) => {
+      try {
+        return await handle(request, waitUntil)
+      } finally {
+        await observe(waitUntil)
+      }
+    },
     isPagesRequest: pages.isPagesRequest,
     services: {
       storage,
       store,
       authenticate: async (request) => {
         if (!request.headers.has('Authorization')) {
-          const active = await readActiveSession(request, loginOptions(request))
+          const active = await readActiveSession(request, (await loginOptions(request)))
           if (active) return sessionUserPrincipal(active.session)
         }
         return authenticateRequest(request, authenticateOptions(request))
@@ -1595,14 +1714,15 @@ export const createForge = (options: ForgeOptions): Forge => {
       repositoryAccess,
       isInstanceAdmin: async (principal) => principal.kind === 'user' && (await store.isInstanceAdmin(principal.id)),
       session: async (request) => {
-        const active = await readActiveSession(request, loginOptions(request))
+        const active = await readActiveSession(request, (await loginOptions(request)))
         return active ? { principal: sessionUserPrincipal(active.session), csrf: active.csrf, sessionId: active.session.id } : null
       },
       verifySessionWrite: async (request) => {
-        const check = await checkSession(request, loginOptions(request))
+        const check = await checkSession(request, (await loginOptions(request)))
         return check.kind === 'session' ? { principal: sessionUserPrincipal(check.active.session), csrf: check.active.csrf, sessionId: check.active.session.id } : null
       },
-      loginOptions: { oidcName: oidc?.config.name ?? null, passkeys: options.login?.passkeys ?? true },
+      loginMethods: async () => ({ oidcName: (await oidcProvider())?.config.name ?? null, passkeys: options.login?.passkeys ?? true }),
+      observe,
       account: {
         listTokens: (user) => store.listTokens({ accountId: user.id }),
         createToken: (user, input) => store.createPersonalAccessToken(user.id, input, { kind: 'user', id: user.id }),
@@ -1677,13 +1797,16 @@ export const createForge = (options: ForgeOptions): Forge => {
         log: (event) => console.log(JSON.stringify(event)),
       })
     },
-    runJob: async (job) => {
-      if (isNotificationJob(job)) return notifications.runJob(job)
-      if (isPagesJob(job)) return pages.runJob(job)
-      if (job.kind === 'lfs-publish') return publishLfs(job)
-      if (job.kind === 'import-lfs') return void (await importLfsObject(job, { storage, ...(options.fetch ? { fetch: options.fetch } : {}), ...(options.digests ? { digests: options.digests } : {}) }))
-      if (!federation) throw new Error('jobs need PUBLIC_URL, INSTANCE_KEY and a job queue')
-      await runJob(federation, job)
+    runJob: async (job, attempt = 1) => {
+      try {
+        await runAppJob(job)
+      } catch (error) {
+        await failures.recorded(job, attempt, error).catch(() => undefined)
+        throw error
+      } finally {
+        await meter.flush().catch(() => undefined)
+      }
+      await failures.succeeded(job).catch(() => undefined)
     },
     notifications,
   }

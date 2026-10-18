@@ -129,6 +129,8 @@ Design: [design.md §18](design.md#18-web-ui).
 - [x] JSON API for organizations and teams on the same operations (`/api/orgs/…`)
 - [x] Instance admin page and API (admins, trusted instances, list of this instance's mirrors with their sync state and alarms, `GET /api/admin/mirrors`)
 - [ ] Mirror overview UI on top of the attestation API of design §10 (lag, ref checksum history, spot checks)
+- [x] Setup wizard `/-/setup`: claim the first admin with `BOOTSTRAP_TOKEN` (invite for a passkey or OIDC), OIDC in the database (secret sealed, vars win), deployment checks (D1/R2 latency, presigned LFS, queues, Actions)
+- [x] Admin overview: running version and latest release, one-click update through the instance repository's GitHub contents API, template workflow that opens the pin as a pull request; imports, failed jobs with retry; storage per repository counted on write; rough Cloudflare cost estimate
 - [x] Repository settings (visibility, collaborators, branch protection, federation trust)
 - [x] Mirror settings, status and alarms (add, sync, deep check, detach)
 - [ ] Blame, syntax highlighting in diffs and Markdown code blocks

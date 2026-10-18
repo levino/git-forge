@@ -1,0 +1,129 @@
+---
+import { InstanceAdministrationError } from '@git-forge/accounts'
+import CopyField from '../../components/CopyField.astro'
+import Icon from '../../components/Icon.astro'
+import NotFound from '../../components/NotFound.astro'
+import Layout from '../../layouts/Layout.astro'
+import type { SetupView } from '../../admin/operations.ts'
+import { type AdminOutcome, type ClaimOutcome, handleAdminPost, handleClaim } from '../../ui/admin.ts'
+
+const { forge, session } = Astro.locals
+Astro.response.headers.set('Cache-Control', 'no-store')
+const claimable = await forge.instance.claimable()
+let claim: ClaimOutcome | null = null
+let outcome: AdminOutcome | null = null
+if (Astro.request.method === 'POST') {
+  if (claimable) claim = await handleClaim(forge, Astro.request)
+  else outcome = await handleAdminPost(forge, Astro.request)
+  const failed = claim?.kind === 'error' ? claim : outcome?.kind === 'error' ? outcome : null
+  if (failed) Astro.response.status = failed.status
+}
+let setup: SetupView | null = null
+if (!claimable && session) {
+  try {
+    setup = await forge.instance.setup(session.principal, Astro.request)
+  } catch (error) {
+    if (!(error instanceof InstanceAdministrationError)) throw error
+  }
+}
+const claimed = claim?.kind === 'claimed' ? claim : null
+if (!claimable && !claimed && !session) return Astro.redirect(`/login?return_to=${encodeURIComponent('/-/setup')}`)
+if (!claimable && !claimed && !setup) Astro.response.status = 404
+const callback = new URL('/login/oidc/callback', forge.issuer(Astro.request)).toString()
+const BADGE = { ok: 'badge-success', warn: 'badge-warning', info: 'badge-ghost' } as const
+const step = claimable ? 0 : claimed ? 1 : 2
+---
+
+{
+  !claimable && !claimed && !setup ? (
+    <NotFound />
+  ) : (
+    <Layout title="Set up this instance" narrow>
+      <h1 class="text-xl font-semibold mb-4">Set up this instance</h1>
+      <ul class="steps w-full mb-6 text-sm">
+        <li class:list={['step', step >= 0 && 'step-primary']}>Claim admin</li>
+        <li class:list={['step', step >= 1 && 'step-primary']}>Sign in</li>
+        <li class:list={['step', step >= 2 && 'step-primary']}>Configure</li>
+      </ul>
+      {claim?.kind === 'error' && <div role="alert" class="alert alert-error mb-6">{claim.message}</div>}
+      {outcome && <div role={outcome.kind === 'error' ? 'alert' : 'status'} class:list={['alert mb-6 break-words', outcome.kind === 'error' ? 'alert-error' : 'alert-success']}>{outcome.message}</div>}
+      {claimable && (
+        <section class="panel" aria-labelledby="claim">
+          <h2 id="claim" class="panel-title">Claim the first admin</h2>
+          <p class="text-sm text-base-content/70">This instance has no admin yet. Enter the BOOTSTRAP_TOKEN you set when deploying; it works once.</p>
+          <form method="post" class="flex flex-col gap-3 max-w-md">
+            <label class="field">BOOTSTRAP_TOKEN<input name="token" type="password" class="input input-sm font-mono" required autocomplete="off" /></label>
+            <label class="field">Your login<input name="login" class="input input-sm" required autocomplete="username" pattern="[A-Za-z0-9][A-Za-z0-9._-]*" /></label>
+            <label class="field">Email (optional)<input name="email" type="email" class="input input-sm" autocomplete="email" /></label>
+            <button class="btn btn-primary btn-sm self-start"><Icon name="shield" />Claim admin</button>
+          </form>
+          <p class="text-xs text-base-content/60">No token set? Cloudflare dashboard → Workers &amp; Pages → this Worker → Settings → Variables and Secrets → add the secret BOOTSTRAP_TOKEN, then reload.</p>
+        </section>
+      )}
+      {claimed && (
+        <section class="panel" aria-labelledby="signin">
+          <h2 id="signin" class="panel-title">Sign in as {claimed.login}</h2>
+          <p>{claimed.login} is the instance admin. Open your invite to register a passkey or link your OIDC account, then come back to this page.</p>
+          <a class="btn btn-primary btn-sm self-start" href={claimed.invitePath}><Icon name="key" />Open invite</a>
+          <CopyField id="invite-url" label="Invite link (valid for 7 days, works once)" value={new URL(claimed.invitePath, forge.issuer(Astro.request)).toString()} />
+        </section>
+      )}
+      {setup && session && (
+        <>
+          <section class="panel" aria-labelledby="oidc">
+            <h2 id="oidc" class="panel-title">Single sign-on (OIDC)</h2>
+            {setup.oidc.source === 'vars' ? (
+              <p class="text-sm">Configured by vars in wrangler.toml, which win over this page: <span class="font-mono break-all">{setup.oidc.issuer}</span>, client <span class="font-mono">{setup.oidc.clientId}</span>.</p>
+            ) : (
+              <>
+                <p class="text-sm text-base-content/70">Register a web application at your provider with authorization code and PKCE and this redirect URI:</p>
+                <div><CopyField id="oidc-callback" label="Redirect URI" value={callback} /></div>
+                <form method="post" class="flex flex-col gap-3 max-w-md" aria-label="OIDC provider">
+                  <input type="hidden" name="csrf" value={session.csrf} />
+                  <input type="hidden" name="action" value="save-oidc" />
+                  <label class="field">Issuer<input name="issuer" type="url" class="input input-sm font-mono" required value={setup.oidc.issuer ?? ''} placeholder="https://id.example.com" /></label>
+                  <label class="field">Client id<input name="client-id" class="input input-sm font-mono" required value={setup.oidc.clientId ?? ''} autocomplete="off" /></label>
+                  <label class="field">
+                    Client secret (only for confidential clients{setup.oidc.hasSecret ? ', empty keeps the stored one' : ''})
+                    <input name="client-secret" type="password" class="input input-sm font-mono" autocomplete="off" disabled={!setup.canSeal} />
+                  </label>
+                  <label class="field">Button label<input name="name" class="input input-sm" value={setup.oidc.name ?? ''} placeholder="Example ID" /></label>
+                  <button class="btn btn-sm btn-primary self-start">Save</button>
+                </form>
+                {setup.oidc.source === 'settings' && (
+                  <form method="post">
+                    <input type="hidden" name="csrf" value={session.csrf} />
+                    <input type="hidden" name="action" value="clear-oidc" />
+                    <button class="btn btn-xs btn-error btn-outline">Remove OIDC</button>
+                  </form>
+                )}
+                <p class="text-xs text-base-content/60">The secret is stored encrypted. After saving, link your account under Settings → Linked accounts.</p>
+              </>
+            )}
+          </section>
+          <section class="panel" aria-labelledby="checks">
+            <h2 id="checks" class="panel-title">Checks</h2>
+            <ul class="flex flex-col divide-y divide-base-300">
+              {setup.checks.map((check) => (
+                <li class="py-2 flex flex-col gap-1" data-check={check.id}>
+                  <div class="flex flex-wrap items-center gap-2">
+                    <span class:list={['badge badge-sm', BADGE[check.status]]}>{check.status === 'ok' ? 'OK' : check.status === 'warn' ? 'Warning' : 'Optional'}</span>
+                    <span class="font-semibold">{check.title}</span>
+                    <span class="text-sm text-base-content/70 break-words">{check.detail}</span>
+                  </div>
+                  {check.steps && (
+                    <ol class="list-decimal ml-6 text-sm text-base-content/80 break-words">
+                      {check.steps.map((text) => <li>{text}</li>)}
+                    </ol>
+                  )}
+                  {check.link && <a class="link text-sm self-start" href={check.link}>Docs</a>}
+                </li>
+              ))}
+            </ul>
+          </section>
+          <a class="btn btn-sm self-start" href="/-/admin"><Icon name="shield" />Instance administration</a>
+        </>
+      )}
+    </Layout>
+  )
+}

@@ -643,8 +643,11 @@ create users and tokens, trust other instances and count as admins of every
 repository. A fresh instance has none: one call of `POST /api/bootstrap`,
 authenticated with the deployment secret `BOOTSTRAP_TOKEN`, creates the first
 admin atomically and returns a personal access token; further calls answer
-`409`. The admin then invites themselves (`POST /api/admin/invites` with
-`user`) to link an OIDC identity or register a passkey. The JSON API accepts
+`409`. The setup page `/-/setup` (linked from the home page while there is
+no admin) calls the same operation (`services.instance.claim`) with the token
+from a form and issues a one-time invite for the new admin instead of a
+token, so the deployer registers a passkey or links an OIDC identity without
+a shell. The JSON API accepts
 personal access tokens with the scope `repo:admin` and browser sessions.
 
 ### Login
@@ -669,7 +672,10 @@ it still sends the cookie on top-level `POST` navigations from same-site
 subdomains.
 
 **OIDC.** Authorization code with PKCE (`S256`), configured per instance
-(`OIDC_ISSUER`, `OIDC_CLIENT_ID`, optional secret `OIDC_CLIENT_SECRET`). The
+(`OIDC_ISSUER`, `OIDC_CLIENT_ID`, optional secret `OIDC_CLIENT_SECRET`), or,
+when those vars are not set, on `/-/setup` (`instance_settings`, the secret
+sealed as in §18; discovery must succeed before it is saved). The provider is
+re-read at most every 30 seconds per isolate. The
 `state` is a one-time challenge in `login_challenges` that also holds `nonce`,
 code verifier, `return_to` and intent (login, link, invite), and it is bound
 to the browser by a 10-minute cookie, so a callback started elsewhere is
@@ -690,7 +696,7 @@ when taken.
 With an identity provider the first admin comes from a one-time claim instead
 of the bootstrap token: the operator inserts a verified email address or
 OIDC subject into `instance_admin_claims` (migration 0010) with
-`wrangler d1 execute` (the command is in the instance template's README); the first matching OIDC sign-in creates the account
+`wrangler d1 execute`; the first matching OIDC sign-in creates the account
 (even without self-signup), makes it an instance admin and deletes the claim.
 
 **Passkeys.** Registration asks for a discoverable credential, user
@@ -1547,7 +1553,17 @@ update themselves.
   `POST /api/bootstrap` with the token creates the first instance admin (§8);
   with OIDC a one-time `instance_admin_claims` row inserted with
   `wrangler d1 execute` does.
-- **Update:** change `V` and `S` and push. There is no Renovate integration:
+- **Update:** change `V` and `S` and push. `/-/admin` shows the running
+  version (`release/VERSION`, or `GIT_FORGE_VERSION` at build time, compiled
+  into the bundle) and the latest release (the redirect of
+  `github.com/levino/git-forge/releases/latest`, no API rate limit, cached six
+  hours in `instance_settings`) with its pin, `S` computed by hashing the
+  release's `SHA256SUMS`. With a fine-grained GitHub token for the instance
+  repository (contents read/write, stored sealed) **Update** commits the new
+  pin to its `wrangler.toml` through the contents API, which triggers Workers
+  Builds. Without a token, the template's
+  `.github/workflows/update-git-forge.yml` opens the same change as a pull
+  request daily. There is no Renovate integration:
   Renovate could bump `V` but cannot compute `S` (the `github-releases`
   datasource's digest is the tag's commit, not a file hash), and a
   half-updated pin only fails the build.
@@ -1977,6 +1993,52 @@ ceiling below `admin` who is an instance admin) and `services.instance.mirrors`
 in `createForge`, which runs the same check before reading the mirror configs
 and statuses from storage. The mirror overview reads one config and one status
 object per mirror; it is meant for the admin page, not for public listings.
+
+The same page shows updates (§15), jobs and storage, and links to
+`/-/setup` (OIDC and deployment checks). Page and API (`GET
+/api/admin/overview`, `GET /api/admin/setup`, `PUT|DELETE /api/admin/oidc`,
+`GET|POST /api/admin/update`, `PUT|DELETE /api/admin/update/repository`,
+`POST /api/admin/jobs/{id}/retry`, `POST /api/admin/usage/recount`) call
+`createAdminOperations` (`src/admin/operations.ts`), each starting with
+`canAdministerInstance`. Tables from migration 0025:
+
+- `instance_settings`: JSON values by name. Secrets (OIDC client secret,
+  GitHub token, job credentials) are sealed with `sealSecret` of
+  `@git-forge/actions` under a key derived by HKDF from `BOOTSTRAP_TOKEN`,
+  or `ACTIONS_SECRETS_KEY` without one; a changed key makes them unreadable,
+  never wrong.
+- `job_failures`: `runJob` records a failed job keyed by the hash of its
+  payload (credentials stripped and sealed), `retrying` until the last
+  attempt, then `failed`; a later success deletes the row. *Retry* takes the
+  row and queues the payload again. Queues cannot be listed through the
+  binding, so in-flight jobs are not shown; imports are (phase and progress
+  from each repository's `import/status.json`, running or finished within
+  seven days).
+- `storage_objects`, `repository_usage`: the storage passed to the forge is
+  wrapped once; every successful `put` of a pack file or LFS object, and
+  every LFS verify after a presigned upload, inserts its key (`INSERT OR
+  IGNORE`), and a trigger adds its size to the repository's git or LFS
+  bytes. Page views read one row per repository, never the bucket.
+  *Recount* queues one `usage-scan` job per repository that lists its packs
+  and LFS objects, for data stored before the counter existed.
+- `usage_counters`: requests, R2 class A (`put`, `list`) and class B
+  (`get`, `head`) operations and D1 statements, counted in memory per
+  isolate and added per month every 1000 events or 60 seconds; lost counts
+  of an evicted isolate make the estimate rough.
+
+**Setup checks** (`src/admin/setup.ts`, pure over measured facts): D1 and R2
+latency (median of three requests; warning above 50 and 100 ms, with the
+Worker's colo and D1's `served_by_region` and links to the location-hint
+docs), presigned LFS (the exact dashboard steps), both queues, Actions and
+runner containers, `PUBLIC_URL`, OIDC source.
+
+**Cost estimate** (`estimateMonthlyCost` in `src/admin/costs.ts`, the only
+place with prices): this month's counters extrapolated to 30 days plus the
+stored bytes, at Cloudflare list prices: Workers Paid $5 with 10 M requests
+included, then $0.30/M; R2 $0.015/GB-month above 10 GB, class A $4.50/M
+above 1 M, class B $0.36/M above 10 M; D1 rows read $0.001/M above 25 B and
+rows written $1.00/M above 50 M, assuming 20 rows read per query and 2 rows
+written per write statement.
 
 ### Actions pages
 

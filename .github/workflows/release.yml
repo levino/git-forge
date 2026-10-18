@@ -62,7 +62,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm run typecheck
       - id: build
-        run: echo "sha256=$(sh release/build-release.sh "$RUNNER_TEMP/release")" >> "$GITHUB_OUTPUT"
+        run: echo "sha256=$(GIT_FORGE_VERSION=${TAG#v} sh release/build-release.sh "$RUNNER_TEMP/release")" >> "$GITHUB_OUTPUT"
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.4.2

@@ -24,5 +24,8 @@ export const onRequest = defineMiddleware(async (context, next) => {
   }
   if (isCrossSiteWrite(context.request)) return new Response('cross-site request refused\n', { status: 403, headers: { 'Content-Type': 'text/plain; charset=utf-8' } })
   await signIn()
-  return next()
+  const response = await next()
+  const execution = context.locals.cfContext
+  await forge.services.observe(execution ? (promise) => execution.waitUntil(promise) : undefined)
+  return response
 })

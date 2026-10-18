@@ -1,0 +1,76 @@
+---
+import type { ImportEntry } from '../admin/operations.ts'
+import type { JobFailure } from '../admin/jobs.ts'
+import { importProgress } from '../ui/admin.ts'
+import { relativeTime } from '../ui/format.ts'
+import { IMPORT_PHASES } from '../ui/new-repository.ts'
+
+type Props = { imports: readonly ImportEntry[]; failures: readonly JobFailure[]; csrf: string }
+
+const { imports, failures, csrf } = Astro.props
+const now = Math.floor(Date.now() / 1000)
+---
+
+<section class="panel" aria-labelledby="jobs">
+  <h2 id="jobs" class="panel-title">Jobs and queues</h2>
+  {imports.length === 0 && failures.length === 0 && <p class="text-base-content/70">No recent imports and no failed jobs.</p>}
+  {
+    imports.length > 0 && (
+      <div class="overflow-x-auto border border-base-300 rounded-box">
+        <table class="table table-sm" aria-label="Imports">
+          <thead>
+            <tr><th>Import</th><th>Phase</th><th>Progress</th><th>Updated</th></tr>
+          </thead>
+          <tbody>
+            {imports.map(({ repository, state }) => (
+              <tr>
+                <td><a class="link link-hover font-semibold" href={`/${repository}/import`}>{repository}</a></td>
+                <td>
+                  <span class:list={['badge badge-sm whitespace-nowrap', state.phase === 'done' ? 'badge-success' : state.phase === 'failed' ? 'badge-error' : 'badge-info']}>{IMPORT_PHASES[state.phase]}</span>
+                  {state.error && <p class="text-xs text-error mt-1 break-words">{state.error}</p>}
+                </td>
+                <td class="text-xs">{importProgress(state)}</td>
+                <td class="whitespace-nowrap">{relativeTime(Math.floor(Date.parse(state.updatedAt) / 1000), now)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    )
+  }
+  {
+    failures.length > 0 && (
+      <div class="overflow-x-auto border border-base-300 rounded-box">
+        <table class="table table-sm" aria-label="Failed jobs">
+          <thead>
+            <tr><th>Job</th><th>Error</th><th>Attempts</th><th /></tr>
+          </thead>
+          <tbody>
+            {failures.map((failure) => (
+              <tr>
+                <td>
+                  <span class="font-mono text-xs">{failure.kind}</span>
+                  {failure.label && <div class="text-xs text-base-content/70">{failure.label}</div>}
+                </td>
+                <td class="text-xs text-error break-words max-w-md">{failure.error}</td>
+                <td class="whitespace-nowrap">
+                  {failure.attempts} <span class:list={['badge badge-sm', failure.final ? 'badge-error' : 'badge-warning']}>{failure.final ? 'failed' : 'retrying'}</span>
+                  <div class="text-xs text-base-content/60">{relativeTime(Math.floor(failure.updatedAt / 1000), now)}</div>
+                </td>
+                <td>
+                  <form method="post">
+                    <input type="hidden" name="csrf" value={csrf} />
+                    <input type="hidden" name="action" value="retry-job" />
+                    <input type="hidden" name="id" value={failure.id} />
+                    <button class="btn btn-xs" aria-label={`Retry ${failure.kind} ${failure.label}`.trim()}>Retry</button>
+                  </form>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    )
+  }
+  <p class="text-xs text-base-content/60">Mirror syncs are listed under Mirrors.</p>
+</section>

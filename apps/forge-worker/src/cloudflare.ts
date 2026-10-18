@@ -29,6 +29,8 @@ const emailSender = (settings: EmailSettings | undefined): EmailSender | undefin
   return createSesEmailSender(settings)
 }
 
+declare const GIT_FORGE_VERSION: string | undefined
+
 let forge: Promise<Forge> | undefined
 
 export const forgeFor = (env: Env): Promise<Forge> => {
@@ -44,6 +46,11 @@ export const forgeFor = (env: Env): Promise<Forge> => {
         storage: new R2Storage(env.BUCKET),
         db: d1Database(env.DB),
         digests: digestStreams,
+        version: typeof GIT_FORGE_VERSION === 'string' ? GIT_FORGE_VERSION : 'dev',
+        location: async (request) => {
+          const { meta } = await env.DB.prepare('SELECT 1').run()
+          return { colo: (request as { cf?: { colo?: string } }).cf?.colo ?? null, databaseRegion: (meta as { served_by_region?: string }).served_by_region ?? null }
+        },
         clientAddress: (request) => request.headers.get('CF-Connecting-IP'),
         ...(uiEnabled(env) ? { renderLoginPage: captureLoginPage } : {}),
         ...(env.IMPORTS ? { scheduleImport: importScheduler(env.IMPORTS) } : {}),
@@ -87,7 +94,7 @@ export const backgroundHandlers = {
   async queue(batch, env): Promise<void> {
     if (isJobQueue(batch.queue)) {
       const instance = await forgeFor(env)
-      const outcomes = await consumeJobs(batch as MessageBatch<AppJob>, (job) => instance.runJob(job))
+      const outcomes = await consumeJobs(batch as MessageBatch<AppJob>, (job, attempt) => instance.runJob(job, attempt))
       console.log(JSON.stringify({ event: 'jobs', outcomes }))
       return
     }

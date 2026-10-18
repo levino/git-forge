@@ -1,7 +1,12 @@
 ---
 import { InstanceAdministrationError, type InstanceView } from '@git-forge/accounts'
+import AdminJobs from '../../components/AdminJobs.astro'
+import AdminStorage from '../../components/AdminStorage.astro'
+import AdminUpdates from '../../components/AdminUpdates.astro'
+import Icon from '../../components/Icon.astro'
 import NotFound from '../../components/NotFound.astro'
 import Layout from '../../layouts/Layout.astro'
+import type { AdminOverview } from '../../admin/operations.ts'
 import type { MirrorOverviewEntry } from '../../app.ts'
 import { type AdminOutcome, handleAdminPost, mirrorHealth } from '../../ui/admin.ts'
 import { relativeTime } from '../../ui/format.ts'
@@ -16,9 +21,11 @@ if (Astro.request.method === 'POST') {
 }
 let view: InstanceView | null = null
 let mirrors: MirrorOverviewEntry[] = []
+let overview: AdminOverview | null = null
 try {
   view = await forge.instance.view(session.principal)
   mirrors = await forge.instance.mirrors(session.principal)
+  overview = await forge.instance.overview(session.principal)
 } catch (error) {
   if (!(error instanceof InstanceAdministrationError)) throw error
 }
@@ -29,12 +36,18 @@ const ago = (iso: string | undefined) => (iso ? relativeTime(Math.floor(Date.par
 ---
 
 {
-  !view ? (
+  !view || !overview ? (
     <NotFound />
   ) : (
     <Layout title="Instance administration" narrow>
-      <h1 class="text-xl font-semibold mb-5">Instance administration</h1>
-      {outcome && <div role={outcome.kind === 'error' ? 'alert' : 'status'} class:list={['alert mb-6', outcome.kind === 'error' ? 'alert-error' : 'alert-success']}>{outcome.message}</div>}
+      <div class="flex flex-wrap items-center justify-between gap-2 mb-5">
+        <h1 class="text-xl font-semibold">Instance administration</h1>
+        <a href="/-/setup" class="btn btn-sm"><Icon name="settings" />Setup and checks</a>
+      </div>
+      {outcome && <div role={outcome.kind === 'error' ? 'alert' : 'status'} class:list={['alert mb-6 break-words', outcome.kind === 'error' ? 'alert-error' : 'alert-success']}>{outcome.message}</div>}
+      <AdminUpdates update={overview.update} csrf={session.csrf} />
+      <AdminJobs imports={overview.imports} failures={overview.failures} csrf={session.csrf} />
+      <AdminStorage usage={overview.usage} cost={overview.cost} csrf={session.csrf} />
       <div class="grid gap-x-6 md:grid-cols-2 items-start">
         <section class="panel" aria-labelledby="admins">
           <h2 id="admins" class="panel-title">Admins</h2>

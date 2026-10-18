@@ -1,0 +1,39 @@
+name: Update git-forge
+
+on:
+  schedule:
+    - cron: '23 4 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  pin:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - id: pin
+        run: |
+          V=$(curl -fsSI https://github.com/levino/git-forge/releases/latest | tr -d '\r' | sed -n -E 's#^location: .*/releases/tag/v([0-9]+\.[0-9]+\.[0-9]+)$#\1#ip')
+          current=$(grep -oE 'V=[0-9A-Za-z.+-]+ S=[0-9a-f]{64}' wrangler.toml | sed -E 's/^V=([^ ]+) .*/\1/')
+          if [ -z "$V" ] || [ "$V" = "$current" ] || [ "$(printf '%s\n%s\n' "$current" "$V" | sort -V | tail -n1)" != "$V" ]; then
+            echo "Nothing to update (pinned $current, latest ${V:-unknown})"
+            exit 0
+          fi
+          S=$(curl -fsSL "https://github.com/levino/git-forge/releases/download/v$V/SHA256SUMS" | sha256sum | cut -d' ' -f1)
+          sed -i -E "s/V=[0-9A-Za-z.+-]+ S=[0-9a-f]{64}/V=$V S=$S/" wrangler.toml
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+      - if: steps.pin.outputs.version != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          V: ${{ steps.pin.outputs.version }}
+        run: |
+          branch="git-forge-$V"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git switch -c "$branch"
+          git commit -am "Update git-forge to $V"
+          git push --force origin "$branch"
+          gh pr view "$branch" >/dev/null 2>&1 || gh pr create --head "$branch" --title "Update git-forge to $V" --body "Pins git-forge $V (https://github.com/levino/git-forge/releases/tag/v$V). Merging deploys it."

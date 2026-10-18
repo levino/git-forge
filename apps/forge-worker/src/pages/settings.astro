@@ -22,9 +22,10 @@ if (Astro.request.method === 'POST') {
 }
 Astro.response.headers.set('Cache-Control', 'no-store')
 const user = session.principal
-const passkeysEnabled = forge.loginOptions.passkeys
+const methods = await forge.loginMethods()
+const passkeysEnabled = methods.passkeys
 const [tokens, passkeys, identities, sessions] = await Promise.all([forge.account.listTokens(user), passkeysEnabled ? forge.account.listPasskeys(user) : [], forge.account.listIdentities(user), forge.account.listSessions(user)])
-const oidcName = forge.loginOptions.oidcName
+const oidcName = methods.oidcName
 const day = (ms: number | null) => (ms === null ? 'never' : isoTime(Math.floor(ms / 1000)).slice(0, 10))
 const configJson = JSON.stringify({ returnTo: '/settings', csrf: session.csrf }).replace(/</g, '\\u003c')
 ---

@@ -1,0 +1,57 @@
+---
+import type { CostEstimate } from '../admin/costs.ts'
+import type { RepositoryUsage } from '../admin/usage.ts'
+import { usd } from '../ui/admin.ts'
+import { formatBytes } from '../ui/format.ts'
+
+type Props = { usage: readonly RepositoryUsage[]; cost: CostEstimate; csrf: string }
+
+const { usage, cost, csrf } = Astro.props
+const git = usage.reduce((sum, entry) => sum + entry.gitBytes, 0)
+const lfs = usage.reduce((sum, entry) => sum + entry.lfsBytes, 0)
+---
+
+<section class="panel" aria-labelledby="storage">
+  <h2 id="storage" class="panel-title">Storage and cost</h2>
+  <div class="flex flex-wrap items-center gap-2 text-sm">
+    <span>Git {formatBytes(git)} · LFS {formatBytes(lfs)} · total {formatBytes(git + lfs)}</span>
+    <form method="post" class="ml-auto">
+      <input type="hidden" name="csrf" value={csrf} />
+      <input type="hidden" name="action" value="recount-usage" />
+      <button class="btn btn-xs">Recount</button>
+    </form>
+  </div>
+  {
+    usage.length > 0 && (
+      <div class="overflow-x-auto border border-base-300 rounded-box">
+        <table class="table table-sm" aria-label="Storage per repository">
+          <thead>
+            <tr><th>Repository</th><th class="text-right">Git</th><th class="text-right">LFS</th><th class="text-right">Total</th></tr>
+          </thead>
+          <tbody>
+            {usage.map((entry) => (
+              <tr>
+                <td><a class="link link-hover" href={`/${entry.repository}`}>{entry.repository}</a></td>
+                <td class="text-right whitespace-nowrap">{formatBytes(entry.gitBytes)}</td>
+                <td class="text-right whitespace-nowrap">{formatBytes(entry.lfsBytes)}</td>
+                <td class="text-right whitespace-nowrap">{formatBytes(entry.gitBytes + entry.lfsBytes)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    )
+  }
+  <div class="overflow-x-auto border border-base-300 rounded-box">
+    <table class="table table-sm" aria-label="Monthly cost estimate">
+      <thead>
+        <tr><th>Cloudflare per month (estimate)</th><th class="text-right">Usage</th><th class="text-right">Cost</th></tr>
+      </thead>
+      <tbody>
+        {cost.lines.map((line) => <tr><td>{line.item}</td><td class="text-right whitespace-nowrap">{line.quantity}</td><td class="text-right">{usd(line.usd)}</td></tr>)}
+        <tr class="font-semibold"><td>Total</td><td /><td class="text-right">{usd(cost.totalUsd)}</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="text-xs text-base-content/60">Rough: requests and operations counted by this instance, extrapolated to the month, at list prices.</p>
+</section>

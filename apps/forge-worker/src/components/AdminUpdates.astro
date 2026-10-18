@@ -1,0 +1,91 @@
+---
+import type { UpdateView } from '../admin/operations.ts'
+import { relativeTime } from '../ui/format.ts'
+import CopyField from './CopyField.astro'
+import Icon from './Icon.astro'
+
+type Props = { update: UpdateView; csrf: string }
+
+const { update, csrf } = Astro.props
+const latest = update.release?.latest ?? null
+const ago = (ms: number) => relativeTime(Math.floor(ms / 1000), Math.floor(Date.now() / 1000))
+---
+
+<section class="panel" aria-labelledby="updates">
+  <h2 id="updates" class="panel-title">Updates</h2>
+  <div class="flex flex-wrap items-center gap-2">
+    <span>Running <strong class="font-mono">{update.running}</strong></span>
+    {latest && <span class:list={['badge badge-sm', update.newer ? 'badge-warning' : 'badge-success']}>{update.newer ? `${latest.version} available` : 'Up to date'}</span>}
+    {update.release && <span class="text-xs text-base-content/60">checked {ago(update.release.checkedAt)}</span>}
+    <form method="post" class="ml-auto">
+      <input type="hidden" name="csrf" value={csrf} />
+      <input type="hidden" name="action" value="check-update" />
+      <button class="btn btn-xs">Check now</button>
+    </form>
+  </div>
+  {update.release?.error && <p class="text-sm text-warning break-words">Last check failed: {update.release.error}</p>}
+  {
+    update.newer && latest && (
+      <div class="flex flex-col gap-3">
+        {update.repository ? (
+          <form method="post" class="flex flex-wrap items-center gap-2">
+            <input type="hidden" name="csrf" value={csrf} />
+            <input type="hidden" name="action" value="update" />
+            <button class="btn btn-sm btn-primary">
+              <Icon name="download" />
+              Update to {latest.version}
+            </button>
+            <span class="text-sm text-base-content/70">
+              Commits the new pin to <span class="font-mono">{update.repository}</span>; Workers Builds deploys it.
+            </span>
+          </form>
+        ) : (
+          <p class="text-sm text-base-content/70">
+            Connect the instance repository below for one-click updates, or set this pin at the start of the <code>[build]</code> command in <code>wrangler.toml</code>.
+          </p>
+        )}
+        <div><CopyField id="release-pin" label="Pin" value={update.pin ?? ''} /></div>
+        {latest.url && <a class="link link-hover text-sm self-start" href={latest.url}>Release notes</a>}
+      </div>
+    )
+  }
+  {
+    update.last && (
+      <p class="text-sm">
+        Last update: {update.last.version}, {ago(update.last.at)}
+        {update.last.commitUrl && (
+          <>
+            {' · '}
+            <a class="link" href={update.last.commitUrl}>commit</a>
+          </>
+        )}
+      </p>
+    )
+  }
+  {
+    update.repository ? (
+      <form method="post" class="flex flex-wrap items-center gap-2 text-sm">
+        <input type="hidden" name="csrf" value={csrf} />
+        <input type="hidden" name="action" value="disconnect-repository" />
+        <span>
+          Instance repository: <span class="font-mono">{update.repository}</span>
+        </span>
+        <button class="btn btn-xs btn-error btn-outline">Disconnect</button>
+      </form>
+    ) : (
+      <form method="post" class="flex flex-wrap items-end gap-2" aria-label="Connect the instance repository">
+        <input type="hidden" name="csrf" value={csrf} />
+        <input type="hidden" name="action" value="connect-repository" />
+        <label class="field">
+          GitHub repository
+          <input name="repository" class="input input-sm font-mono" required placeholder="you/your-instance" autocomplete="off" />
+        </label>
+        <label class="field">
+          Fine-grained token, Contents read and write
+          <input name="token" type="password" class="input input-sm font-mono" required autocomplete="off" />
+        </label>
+        <button class="btn btn-sm">Connect</button>
+      </form>
+    )
+  }
+</section>

@@ -11,6 +11,11 @@ import {
   type RepositoryName,
   listMirrors,
   type MirrorConfig,
+  commitReach,
+  type ObjectId,
+  type PathReach,
+  type ReadView,
+  visibleRefs,
 } from '@git-forge/core'
 import type { ForgeServices } from '../app.ts'
 import { encodePath } from './format.ts'
@@ -28,17 +33,19 @@ export type OpenRepository = {
   readonly mirrors: readonly MirrorConfig[]
   readonly canAdmin: boolean
   readonly canWrite: boolean
+  readonly view: ReadView | null
 }
 
 export type RepositoryResult = OpenRepository | { readonly kind: 'denied'; readonly decision: Exclude<Decision, 'allow'> }
 
-export const openRepository = async (forge: ForgeServices, principal: Principal, owner: string, name: string): Promise<RepositoryResult> => {
+export const openRepository = async (forge: ForgeServices, principal: Principal, owner: string, name: string, partial = false): Promise<RepositoryResult> => {
   if (!isValidName(owner) || !isValidName(name)) return { kind: 'denied', decision: 'not-found' }
   const check = await forge.repositoryAccess(principal, { owner, name }, 'read')
-  if (check.decision !== 'allow' || !check.repository) return { kind: 'denied', decision: check.decision === 'allow' ? 'not-found' : check.decision }
+  const view = check.decision !== 'allow' && partial ? (check.view ?? null) : null
+  if ((check.decision !== 'allow' && !view) || !check.repository) return { kind: 'denied', decision: check.decision === 'allow' ? 'not-found' : check.decision }
   const repo = { owner: check.repository.owner, name: check.repository.name }
-  const stored = await readRefs(forge.storage, repo)
-  const refs: RefsState = stored?.state ?? { head: 'refs/heads/main', refs: {} }
+  const stored = (await readRefs(forge.storage, repo))?.state ?? { head: 'refs/heads/main', refs: {} }
+  const refs: RefsState = view ? visibleRefs(stored, view) : stored
   const named = namedRefs(refs)
   return {
     kind: 'ok',
@@ -50,11 +57,15 @@ export const openRepository = async (forge: ForgeServices, principal: Principal,
     branches: named.branches,
     tags: named.tags,
     defaultBranch: defaultBranch(refs),
-    mirrors: await listMirrors(forge.storage, repo),
+    mirrors: view ? [] : await listMirrors(forge.storage, repo),
     canAdmin: atLeast(check.access, 'admin'),
     canWrite: atLeast(check.access, 'write'),
+    view,
   }
 }
+
+export const reachOf = async (repo: OpenRepository, commit: ObjectId): Promise<PathReach> =>
+  repo.view ? ((await commitReach(repo.odb, repo.refs, repo.view, commit)) ?? (() => 'none')) : () => 'inside'
 
 export const repoUrl = (repo: RepositoryName, ...rest: readonly string[]): string =>
   `/${encodeURIComponent(repo.owner)}/${encodeURIComponent(repo.name)}${rest.length > 0 ? `/${rest.join('/')}` : ''}`

@@ -1,4 +1,4 @@
-import type { Authorize, RepositoryName, Surface } from '@git-forge/core'
+import type { Authorize, ReadView, RepositoryName, Surface } from '@git-forge/core'
 import { fromUtf8, base64UrlDecode } from './encoding.ts'
 import { looksLikeJwt } from './jwt.ts'
 import {
@@ -14,6 +14,7 @@ import {
   resolveAccess,
 } from './permissions.ts'
 import { type Access, atLeast, type Role } from './roles.ts'
+import { compileView, type VisibilityRule } from './visibility.ts'
 
 export const REALM = 'git-forge'
 
@@ -47,6 +48,7 @@ export type RepositoryDirectory = {
   readonly authenticateToken: (token: string) => Promise<Principal | null>
   readonly findRepository: (owner: string, name: string) => Promise<RepositorySubject | null>
   readonly grantsFor: (principal: Principal, repo: RepositorySubject) => Promise<Grants>
+  readonly visibilityRules?: (principal: Principal, repo: RepositorySubject, surface: Surface) => Promise<readonly VisibilityRule[]>
 }
 
 export type InstanceVerifier = (token: string) => Promise<InstancePrincipal | null>
@@ -68,6 +70,7 @@ export type AccessCheck = {
   readonly decision: Decision
   readonly access: Access
   readonly repository: RepositorySubject | null
+  readonly view?: ReadView | null
 }
 
 export const checkRepositoryAccess = async (
@@ -82,8 +85,13 @@ export const checkRepositoryAccess = async (
   const usable = principal.kind !== 'instance' || principal.scopes.includes(`${surface}:read`)
   const grants = usable ? await directory.grantsFor(principal, repository) : NO_GRANTS
   const access = resolveAccess(principal, repository, grants)
-  return { decision: archivedBlocks(repository, required) && atLeast(access, required) ? 'forbidden' : decide(principal, access, required), access, repository }
+  const decision = archivedBlocks(repository, required) && atLeast(access, required) ? 'forbidden' : decide(principal, access, required)
+  const partial = decision !== 'allow' && required === 'read' && directory.visibilityRules
+  return { decision, access, repository, view: partial ? compileView(await directory.visibilityRules!(principal, repository, surface)) : null }
 }
+
+export const grantedView = (check: AccessCheck, principal: Principal): Response | ReadView | null =>
+  check.view ?? decisionResponse(check.decision, principal, check.repository)
 
 const plain = (status: number, body: string, headers: Record<string, string> = {}) =>
   new Response(body, { status, headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store', ...headers } })
@@ -108,5 +116,5 @@ export const createGitAuthorizer = (options: AuthenticateOptions): Authorize => 
   const principal = await authenticateRequest(request, options)
   if (!principal) return challenge('invalid credentials\n')
   const check = await checkRepositoryAccess(options.directory, principal, repo, access === 'write' ? 'write' : 'read', surface)
-  return decisionResponse(check.decision, principal, check.repository)
+  return grantedView(check, principal)
 }

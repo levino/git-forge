@@ -4,7 +4,7 @@ import {
   authenticateRequest,
   challenge,
   checkRepositoryAccess,
-  decisionResponse,
+  grantedView,
   REALM,
   type RepositoryDirectory,
 } from './authorize.ts'
@@ -81,7 +81,7 @@ export const createGitAccess = (options: AuthenticateOptions & { readonly direct
       const principal = await principalOf(request)
       if (!principal) return challenge('invalid credentials\n')
       const check = await checkRepositoryAccess(options.directory, principal, repo, access === 'write' ? 'write' : 'read', surface)
-      return decisionResponse(check.decision, principal, check.repository)
+      return grantedView(check, principal)
     },
     pushPolicy: async (request, repo) => {
       const principal = await principalOf(request)

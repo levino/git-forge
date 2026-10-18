@@ -37,8 +37,9 @@ import {
   selectUpstreamRefs,
   SizeLimitError,
   type SyncResult,
+  visibleRefs,
 } from '@git-forge/core'
-import { handleAttestation, recordChecksums, runSpotCheck, sendAttestation } from './mirror-verification.ts'
+import { handleAttestation, type InstanceRead, recordChecksums, runSpotCheck, sendAttestation } from './mirror-verification.ts'
 import { type MirrorContext, mirrorUnitOptions, runMirrorSync, type ScheduledMirrorRun } from './mirrors.ts'
 
 export type ForgeJob =
@@ -57,7 +58,7 @@ export type MirrorFederation = MirrorContext & {
   readonly jwks: JwksSource
   readonly jobs: JobQueue<ForgeJob>
   readonly verification: MirrorVerificationStore
-  readonly canRead: (principal: InstancePrincipal, repo: RepositoryName) => Promise<boolean>
+  readonly canRead: (principal: InstancePrincipal, repo: RepositoryName) => Promise<InstanceRead>
   readonly deepCheckDays: number
   readonly unitBytes: number
   readonly now?: () => Date
@@ -107,14 +108,17 @@ export const notifyAfterPush =
 const deliverNotification = async (federation: MirrorFederation, job: Extract<ForgeJob, { kind: 'mirror-notify' }>): Promise<void> => {
   const subscriptions = await federation.store.mirrorSubscriptions(job.repository)
   if (!subscriptions.some((subscription) => subscription.issuer === job.issuer && subscription.callback === job.callback)) return
-  const refs = await readRefs(federation.storage, repositoryOf(job.repository))
+  const repo = repositoryOf(job.repository)
+  const refs = await readRefs(federation.storage, repo)
   if (!refs) throw new PermanentJobError(`repository ${job.repository} not found`)
+  const read = await federation.canRead({ kind: 'instance', issuer: job.issuer, repositories: [job.repository], scopes: ['git:read'], tokenId: '' }, repo)
+  if (!read) throw new PermanentJobError(`${job.issuer} may no longer read ${job.repository}`)
   const token = await mintMirrorNotification({
     key: federation.instanceKey,
     issuer: federation.issuer,
     audience: job.issuer,
     repository: job.repository,
-    refs: advertisedRefs(refs.state).refs,
+    refs: (read === 'full' ? advertisedRefs(refs.state) : visibleRefs(refs.state, read, true)).refs,
   })
   const response = await send(federation, new Request(job.callback, { method: 'POST', headers: { 'Content-Type': NOTIFICATION_MEDIA_TYPE }, body: token }))
   await response.body?.cancel()

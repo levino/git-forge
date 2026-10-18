@@ -1,5 +1,6 @@
 import { fromUtf8, readAll, SizeLimitError } from './bytes.ts'
-import type { Access, Surface } from './http.ts'
+import type { Authorize } from './http.ts'
+import { refusal } from './visibility.ts'
 import {
   createUploadSession,
   DEFAULT_UPLOAD_LIMITS,
@@ -30,7 +31,7 @@ export type UploadHttpOptions = Partial<UploadLimits> & {
 
 export type UploadContext = {
   readonly storage: Storage
-  readonly authorize?: (request: Request, repo: RepositoryName, access: Access, surface: Surface) => Promise<Response | null>
+  readonly authorize?: Authorize
   readonly limits: UploadLimits
   readonly presignExpiresInSeconds: number
   readonly presignPut?: PresignPut
@@ -107,7 +108,7 @@ export const handleUploadRequest = async (request: Request, repo: RepositoryName
   const url = new URL(request.url)
   const base = `${url.origin}${url.pathname.slice(0, url.pathname.length - path.length)}/forge/uploads`
   try {
-    const denied = await context.authorize?.(request, repo, 'write', 'git')
+    const denied = refusal(await context.authorize?.(request, repo, 'write', 'git'))
     if (denied) return denied
     if (!(await readRefs(storage, repo))) return failure(404, 'repository not found')
     if (id === undefined) {

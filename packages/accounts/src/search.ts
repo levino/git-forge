@@ -1,5 +1,5 @@
 import { type Database, sql, type SqlValue, type Statement } from './database.ts'
-import { type ListingRow, type Page, type PageRequest, pageWindow, readableRepositories, REPOSITORY_COLUMNS, type RepositoryListing, toListing } from './listing.ts'
+import { type ListingRow, listableRepositories, type Page, type PageRequest, pageWindow, readableRepositories, REPOSITORY_COLUMNS, type RepositoryListing, toListing } from './listing.ts'
 import type { OwnerKind, Principal } from './permissions.ts'
 
 export const SEARCH_TYPES = ['repositories', 'issues', 'discussions', 'users'] as const
@@ -149,13 +149,14 @@ export const search = async (db: Database, principal: Principal, type: SearchTyp
   switch (type) {
     case 'repositories': {
       const filter = filters(query)
+      const listable = listableRepositories(principal)
       const rows = await db.all<ListingRow>(
         sql(
           `SELECT ${REPOSITORY_COLUMNS}, count(*) OVER () AS total FROM (SELECT repository_id, bm25(search_repositories) AS score FROM search_repositories WHERE search_repositories MATCH ?) s
            JOIN repositories r ON r.id = s.repository_id JOIN accounts a ON a.id = r.owner_id
-           WHERE (${readable.sql})${filter.where} ORDER BY s.score, r.last_commit_at DESC LIMIT ? OFFSET ?`,
+           WHERE (${listable.sql})${filter.where} ORDER BY s.score, r.last_commit_at DESC LIMIT ? OFFSET ?`,
           query.match,
-          ...readable.params,
+          ...listable.params,
           ...filter.params,
           perPage,
           offset,

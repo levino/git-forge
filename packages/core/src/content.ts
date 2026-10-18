@@ -93,9 +93,15 @@ export type RawTarget =
   | { readonly kind: 'lfs'; readonly pointer: LfsObjectSpec; readonly name: string; readonly immutable: boolean }
   | { readonly kind: 'not-found'; readonly message: string }
 
-export const resolveRaw = async (odb: ObjectDatabase, refs: RefsState, segments: readonly string[]): Promise<RawTarget> => {
+export const resolveRaw = async (
+  odb: ObjectDatabase,
+  refs: RefsState,
+  segments: readonly string[],
+  allowed?: (commit: ObjectId, path: readonly string[]) => Promise<boolean>,
+): Promise<RawTarget> => {
   const revision = await resolveRevision(odb, refs, segments)
   if (!revision) return { kind: 'not-found', message: 'unknown ref' }
+  if (allowed && !(await allowed(revision.commit, revision.path))) return { kind: 'not-found', message: 'path not found' }
   const entry = await resolvePath(odb, revision.commit, revision.path)
   if (!entry) return { kind: 'not-found', message: 'path not found' }
   const blob = await odb.read(entry.id)

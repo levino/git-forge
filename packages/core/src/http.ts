@@ -7,12 +7,13 @@ import { handleUploadRequest, type UploadHttpOptions, uploadLimits } from './pac
 import { gitPrefix, isValidName, readRefs, type RepositoryName } from './repository.ts'
 import type { Storage } from './storage.ts'
 import { advertiseUploadPackV2, type PackfileUri, uploadPackV2 } from './upload-pack.ts'
+import { type ReadView, refusal } from './visibility.ts'
 
 export type Access = 'read' | 'write'
 
 export type Surface = 'git' | 'lfs'
 
-export type Authorize = (request: Request, repo: RepositoryName, access: Access, surface: Surface) => Promise<Response | null>
+export type Authorize = (request: Request, repo: RepositoryName, access: Access, surface: Surface) => Promise<Response | ReadView | null>
 
 export type PushPolicy = (request: Request, repo: RepositoryName) => Promise<RefPolicy | null>
 
@@ -185,8 +186,10 @@ export const handleGitRequest = async (request: Request, options: GitHttpOptions
   const isReceive = service === 'git-receive-pack' || path === '/git-receive-pack'
   const isGitPath = path === '/git-upload-pack' || path === '/git-receive-pack' || DUMB_PATHS.some((pattern) => pattern.test(path))
   if (!isGitPath) return null
-  const denied = await options.authorize?.(request, repo, isReceive ? 'write' : 'read', 'git')
-  if (denied) return denied
+  const granted = await options.authorize?.(request, repo, isReceive ? 'write' : 'read', 'git')
+  if (granted instanceof Response || (isReceive && granted)) return refusal(granted)!
+  const view = granted ?? null
+  if (view && path !== '/git-upload-pack' && !(path === '/info/refs' && service === 'git-upload-pack' && isProtocolV2(request))) return text(404, 'not found\n')
   const refs = await readRefs(storage, repo)
   if (!refs) return text(404, 'repository not found\n')
 
@@ -196,6 +199,7 @@ export const handleGitRequest = async (request: Request, options: GitHttpOptions
     })
   }
   const uploadOptions = async () => {
+    if (view) return { view }
     const packfileUri = await options.packfileUris?.(request, repo)
     return packfileUri ? { packfileUri } : {}
   }

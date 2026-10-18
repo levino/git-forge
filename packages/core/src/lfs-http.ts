@@ -17,6 +17,7 @@ import {
 import type { DigestFactory } from './digest.ts'
 import { readRefs, type RepositoryName } from './repository.ts'
 import type { Storage } from './storage.ts'
+import { readableLfsObjects, refusal } from './visibility.ts'
 
 export type LfsHttpOptions = {
   readonly expiresInSeconds?: number
@@ -96,18 +97,22 @@ export const handleLfsRequest = async (request: Request, repo: RepositoryName, p
     if (path === '/info/lfs/objects/batch') {
       if (request.method !== 'POST') return failure(405, 'method not allowed')
       const batch = parseBatchRequest(await readJson(request, context.lfs?.maxJsonBytes ?? 1024 * 1024))
-      const denied = await context.authorize?.(request, repo, batch.operation === 'upload' ? 'write' : 'read', 'lfs')
-      if (denied) return denied
+      const granted = await context.authorize?.(request, repo, batch.operation === 'upload' ? 'write' : 'read', 'lfs')
+      if (granted instanceof Response || (granted && batch.operation === 'upload')) return refusal(granted)!
       if (!(await readRefs(storage, repo))) return failure(404, 'repository not found')
       const limits = {
         ...(context.lfs?.maxObjectBytes !== undefined ? { maxObjectBytes: context.lfs.maxObjectBytes } : {}),
         ...(context.lfs?.oversizeHint ? { oversizeHint: context.lfs.oversizeHint } : {}),
       }
-      return json(200, await lfsBatch(storage, repo, batch, selfLinks(request, base, storage, repo, expiresIn), limits))
+      const visible = granted ? await readableLfsObjects(storage, repo, granted, batch.objects.map((object) => String(object.oid))) : null
+      const shown = visible ? batch.objects.filter((object) => visible.has(String(object.oid))) : batch.objects
+      const result = await lfsBatch(storage, repo, { ...batch, objects: shown }, selfLinks(request, base, storage, repo, expiresIn), limits)
+      const hidden = batch.objects.filter((object) => !shown.includes(object)).map((object) => ({ ...object, error: { code: 404, message: 'object does not exist' } }))
+      return json(200, { ...result, objects: [...result.objects, ...hidden] })
     }
     if (path === '/info/lfs/objects/verify') {
       if (request.method !== 'POST') return failure(405, 'method not allowed')
-      const denied = await context.authorize?.(request, repo, 'write', 'lfs')
+      const denied = refusal(await context.authorize?.(request, repo, 'write', 'lfs'))
       if (denied) return denied
       const spec = parseSpec(await readJson(request, 64 * 1024))
       const result = await verifyLfsObject(storage, repo, spec, {
@@ -120,7 +125,7 @@ export const handleLfsRequest = async (request: Request, repo: RepositoryName, p
     if (oid === undefined) return failure(404, 'not found')
     if (!isLfsOid(oid)) return failure(422, 'invalid oid')
     if (request.method === 'PUT') {
-      const denied = await context.authorize?.(request, repo, 'write', 'lfs')
+      const denied = refusal(await context.authorize?.(request, repo, 'write', 'lfs'))
       if (denied) return denied
       const size = declaredLength(request)
       if (size === null) return failure(411, 'Content-Length required')
@@ -134,8 +139,9 @@ export const handleLfsRequest = async (request: Request, repo: RepositoryName, p
       return result.ok ? new Response(null, { status: 200, headers: noCache }) : failure(result.status, result.message)
     }
     if (request.method === 'GET' || request.method === 'HEAD') {
-      const denied = await context.authorize?.(request, repo, 'read', 'lfs')
-      if (denied) return denied
+      const granted = await context.authorize?.(request, repo, 'read', 'lfs')
+      if (granted instanceof Response) return granted
+      if (granted && !(await readableLfsObjects(storage, repo, granted, [oid])).has(oid)) return failure(404, 'object does not exist')
       const key = lfsObjectKey(repo, oid)
       const stored = request.method === 'GET' ? await storage.get(key) : await storage.head(key)
       if (!stored) return failure(404, 'object does not exist')

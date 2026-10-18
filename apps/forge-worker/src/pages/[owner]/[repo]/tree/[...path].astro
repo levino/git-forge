@@ -6,7 +6,7 @@ import Layout from '../../../../layouts/Layout.astro'
 import { browse } from '../../../../ui/browse.ts'
 import { openRepository } from '../../../../ui/repository.ts'
 
-const repo = await openRepository(Astro.locals.forge, Astro.locals.principal, Astro.params.owner!, Astro.params.repo!)
+const repo = await openRepository(Astro.locals.forge, Astro.locals.principal, Astro.params.owner!, Astro.params.repo!, true)
 const segments = (Astro.params.path ?? '').split('/').filter((segment) => segment !== '')
 const view = repo.kind === 'ok' ? await browse(repo, segments, 'tree') : null
 ---

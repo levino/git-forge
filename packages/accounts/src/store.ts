@@ -1,4 +1,4 @@
-import { isValidName, LOCATION_CACHE_MS, type RepositoryLocation, type RepositoryName } from '@git-forge/core'
+import { isValidName, LOCATION_CACHE_MS, type RepositoryLocation, type RepositoryName, type Surface } from '@git-forge/core'
 import { type Database, first, sql, type Statement } from './database.ts'
 import { randomId } from './encoding.ts'
 import { normalizeIssuer, type TrustedIssuer } from './federation.ts'
@@ -12,6 +12,7 @@ import {
   validateBranchPattern,
 } from './protection.ts'
 import { isRole, type Role } from './roles.ts'
+import { matchingVisibilityRules, repositoryVisibilityRules, VISIBILITY_AUDIENCES, type VisibilityRule, visibilityProblem } from './visibility.ts'
 import {
   formatScopes,
   generateToken,
@@ -1072,6 +1073,38 @@ export const createAccountsStore = (db: Database, options: AccountsStoreOptions 
           sql('SELECT t.id FROM teams t JOIN team_members tm ON tm.team_id = t.id WHERE t.organization_id = ? AND tm.user_id = ? ORDER BY t.id', organizationId, userId),
         )
       ).map((row) => row.id),
+
+    visibilityRules: (principal: Principal, repo: RepositorySubject, surface: Surface): Promise<VisibilityRule[]> => matchingVisibilityRules(db, principal, repo.id, surface),
+
+    listVisibilityRules: (repositoryId: string): Promise<VisibilityRule[]> => repositoryVisibilityRules(db, repositoryId),
+
+    addVisibilityRule: async (repositoryId: string, input: Omit<VisibilityRule, 'id' | 'createdAt'>, actor: AuditActor = SYSTEM): Promise<VisibilityRule> => {
+      const problem = visibilityProblem(input.refs, input.path)
+      if (problem) throw new AccountsError(problem)
+      if (!VISIBILITY_AUDIENCES.includes(input.audience) || (input.audience === 'public') !== (input.subject === null)) throw new AccountsError('audience needs a subject unless it is public')
+      const rule = { id: randomId(), ...input, createdAt: now() }
+      await write(actor, { action: 'repository.visibility.add', subjectKind: 'visibility_rule', subjectId: rule.id, repositoryId, data: { ...input } }, [
+        sql(
+          'INSERT INTO visibility_rules (id, repository_id, refs, path, audience, subject, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+          rule.id,
+          repositoryId,
+          rule.refs,
+          rule.path,
+          rule.audience,
+          rule.subject,
+          rule.createdAt,
+        ),
+      ])
+      return rule
+    },
+
+    removeVisibilityRule: async (repositoryId: string, id: string, actor: AuditActor = SYSTEM): Promise<boolean> => {
+      if (!(await repositoryVisibilityRules(db, repositoryId)).some((rule) => rule.id === id)) return false
+      await write(actor, { action: 'repository.visibility.remove', subjectKind: 'visibility_rule', subjectId: id, repositoryId }, [
+        sql('DELETE FROM visibility_rules WHERE id = ? AND repository_id = ?', id, repositoryId),
+      ])
+      return true
+    },
 
     branchProtectionRules: async (repositoryId: string): Promise<BranchProtectionRule[]> => {
       const rows = await db.all<ProtectionRow>(sql('SELECT * FROM branch_protection_rules WHERE repository_id = ? ORDER BY created_at, rowid', repositoryId))

@@ -12,7 +12,7 @@ const { repo, tab } = Astro.props
 const { name, subject } = repo
 const active = tab === 'commits' || tab === 'branches' || tab === 'tags' ? 'code' : tab
 const mirror = repo.mirrors.find((config) => !config.detachedAt)
-const scope = await scopeFor(Astro.locals.forge, Astro.request, Astro.locals.principal, repo)
+const scope = repo.view ? null : await scopeFor(Astro.locals.forge, Astro.request, Astro.locals.principal, repo)
 const [issues, pulls] = scope
   ? await Promise.all((['issue', 'pull'] as const).map((kind) => listIssues(scope, { state: 'open', kind }, { page: 1, perPage: 1 }).then((list) => list.total)))
   : [undefined, undefined]
@@ -76,7 +76,7 @@ const clone = cloneUrl(Astro.url.origin, name)
   }
   <nav class="tabs tabs-border mt-3 -mb-px overflow-x-auto flex-nowrap" aria-label="Repository">
     {
-      tabs.map((item) => (
+      (repo.view ? tabs.slice(0, 1) : tabs).map((item) => (
         <a href={item.href} class:list={['tab whitespace-nowrap px-3', { 'tab-active font-semibold': item.id === active }]} aria-current={item.id === active ? 'page' : undefined}>
           <Icon name={item.icon} class="size-4 opacity-70" />
           {item.label}

@@ -178,7 +178,7 @@ Design: [design.md §17](design.md#17-collaboration).
 - [x] Releases: GitHub-compatible REST API, tags created on publish, assets stored as LFS objects behind the media URL, download redirects
 - [ ] Releases: source archives (`tarball_url`, `zipball_url`), generated release notes, web UI
 - [x] Built-in backups (design §19): scheduled bounded `backup` jobs copy a database dump and every object into a write-once `BACKUP` target (R2 bucket lock, S3 Object Lock) with SHA-256 verification; admin panel and API (status, run now, verify); `git-forge-node restore`, `restore-sql`, `backup-verify` (migration `0029_backups`)
-- [ ] Partial visibility
+- [x] Partial visibility: refs (Git, LFS, raw, UI, mirrors) and paths (UI, raw, media, LFS) for a public, user, team or instance audience, respected by listing and search (design §8, migration `0017_partial_visibility`)
 - [x] External mirror verification: ref checksums, signed attestations, byte-range spot checks of packs and LFS objects, signed overview (design §10)
 - [x] Pages (design §20): branch source (`/` or `/docs`, redeploy on push), tar upload deployments, GitHub's Pages REST API, `PAGES_HOST` pattern and `PAGES_DOMAINS` from config, immutable content-addressed deployments with atomic switch, LFS files via media URLs, content types, `404.html`, CDN cache headers, private sites via a session handoff to a host-only cookie
 - [x] Pages: deployments from stored workflow artifacts, so `actions/deploy-pages` works unchanged

@@ -10,7 +10,7 @@ import {
 } from '@git-forge/core'
 import { highlightLines, type HighlightedLine } from './highlight.ts'
 import { renderMarkdown } from './markdown.ts'
-import { blobUrl, type OpenRepository, rawUrl } from './repository.ts'
+import { blobUrl, type OpenRepository, rawUrl, reachOf } from './repository.ts'
 
 export type Readme = { readonly name: string; readonly html: string | null; readonly text: string }
 
@@ -98,15 +98,18 @@ export const browse = async (repo: OpenRepository, segments: readonly string[], 
   }
   const target = await resolveRefAndPath(repo.odb, repo.refs, segments)
   if (!target) return { kind: 'not-found' }
-  const resolved = await resolveTarget(repo.odb, target.commit, target.path)
+  const reach = await reachOf(repo, target.commit)
+  const here = reach(target.path.join('/'))
+  const resolved = here === 'none' ? null : await resolveTarget(repo.odb, target.commit, target.path)
   if (!resolved || resolved.kind === 'submodule') return { kind: 'not-found' }
-  const latest = await lastCommitFor(repo.odb, target.commit, target.path)
+  const latest = here === 'inside' ? await lastCommitFor(repo.odb, target.commit, target.path) : null
   if (resolved.kind === 'tree') {
     if (expect === 'blob') return { kind: 'not-found' }
-    const [readme, lfs] = await Promise.all([readmeFor(repo, target, resolved.entries), lfsEntries(repo, target, resolved.entries)])
-    return { kind: 'tree', target, entries: resolved.entries, latest, readme, lfs }
+    const entries = resolved.entries.filter((entry) => reach([...target.path, entry.name].join('/')) !== 'none')
+    const [readme, lfs] = await Promise.all([readmeFor(repo, target, entries), lfsEntries(repo, target, entries)])
+    return { kind: 'tree', target, entries, latest, readme, lfs }
   }
-  if (expect === 'tree') return { kind: 'not-found' }
+  if (expect === 'tree' || here !== 'inside') return { kind: 'not-found' }
   const content = await readBlobContent(repo.odb, resolved.entry)
   if (!content) return { kind: 'not-found' }
   const markdown =

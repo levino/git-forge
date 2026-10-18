@@ -72,6 +72,7 @@ import {
   handleGitRequest,
   type JobQueue,
   type ImportScheduler,
+  type PresignPut,
   ImportRunningError,
   isValidImportUrl,
   isValidName,
@@ -160,6 +161,7 @@ export type ForgeOptions = ForgeSettings & {
   readonly jobs?: JobQueue<AppJob>
   readonly digests?: DigestFactory
   readonly scheduleImport?: ImportScheduler
+  readonly presignUploads?: PresignPut
   readonly email?: EmailSender
   readonly renderLoginPage?: LoginPageRenderer
 }
@@ -1057,6 +1059,7 @@ export const createForge = (options: ForgeOptions): Forge => {
       pushPolicy: access.pushPolicy,
       ...(options.maxPushBytes !== undefined ? { maxPushBytes: options.maxPushBytes } : {}),
       lfs: { maxObjectBytes: options.maxLfsObjectBytes },
+      ...(options.presignUploads ? { uploads: { presignPut: options.presignUploads } } : {}),
       packfileUris: (incoming, repo) => packfileUris(incoming, repo, authorize),
       onPush: async (repo, outcome) => {
         await compactAfterPush(waitUntil)(repo, outcome)

@@ -47,6 +47,17 @@ export type ForgeVars = {
   readonly OIDC_SCOPES?: string
   readonly SELF_SIGNUP?: string
   readonly BREAK_GLASS_PUBLIC_KEY?: string
+  readonly R2_S3_ENDPOINT?: string
+  readonly R2_BUCKET_NAME?: string
+  readonly R2_ACCESS_KEY_ID?: string
+  readonly R2_SECRET_ACCESS_KEY?: string
+}
+
+export type R2SigningSettings = {
+  readonly endpoint: string
+  readonly bucket: string
+  readonly accessKeyId: string
+  readonly secretAccessKey: string
 }
 
 export type LoginSettings = {
@@ -224,6 +235,19 @@ export const parseSettings = async (vars: ForgeVars): Promise<ForgeSettings> => 
     allowInsecureWebhooks: vars.ALLOW_INSECURE_WEBHOOKS === 'true',
     login: parseLoginSettings(vars),
   }
+}
+
+export const parseR2Signing = (vars: ForgeVars): R2SigningSettings | undefined => {
+  const endpoint = present(vars.R2_S3_ENDPOINT)
+  const bucket = present(vars.R2_BUCKET_NAME)
+  const accessKeyId = present(vars.R2_ACCESS_KEY_ID)
+  const secretAccessKey = present(vars.R2_SECRET_ACCESS_KEY)
+  if (!endpoint && !bucket && !accessKeyId && !secretAccessKey) return undefined
+  if (!endpoint || !bucket || !accessKeyId || !secretAccessKey) {
+    throw new ConfigurationError('presigned R2 uploads need R2_S3_ENDPOINT, R2_BUCKET_NAME, R2_ACCESS_KEY_ID and R2_SECRET_ACCESS_KEY')
+  }
+  if (!endpoint.startsWith('https://')) throw new ConfigurationError('R2_S3_ENDPOINT must be an https URL')
+  return { endpoint, bucket, accessKeyId, secretAccessKey }
 }
 
 export const parseEmailSettings = (vars: ForgeVars): EmailSettings | undefined => {

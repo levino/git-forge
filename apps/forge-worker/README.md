@@ -36,6 +36,7 @@ read functions of `@git-forge/core` and check access with the same
 | `INSTANCE_KEY` | secret, optional | Ed25519 private JWK of this instance. Needed to mirror private repositories from other instances; also publishes `/.well-known/openid-configuration` and `/.well-known/jwks.json`. Generate with `pnpm --filter forge-worker instance-key`. |
 | `PUBLIC_URL` | var, optional | Base URL of the instance, used as its issuer (when minting) and audience (when verifying instance tokens). Defaults to the origin of the request; scheduled sync with instance tokens needs it set. |
 | `MAX_PUSH_BYTES` | var, optional | Largest accepted push request. Unset by default: pushes are streamed, so only Cloudflare's request body limit applies (see Large pushes). |
+| `R2_S3_ENDPOINT`, `R2_BUCKET_NAME` | vars, optional | S3 endpoint of the account (`https://<account-id>.r2.cloudflarestorage.com`) and the name of the `BUCKET` bucket. With `R2_ACCESS_KEY_ID` and `R2_SECRET_ACCESS_KEY` (secrets, an R2 API token with write access to that bucket) the upload sessions of `git-remote-forge` hand out presigned part URLs, so pushed packs go directly to R2; without them parts are uploaded through the Worker, each below the request body limit. All four or none. |
 | `PACKFILE_URI_BASE` | var, optional | Base URL for `packfile-uris` (e.g. a CDN in front of the forge). Defaults to the origin of the request. Pack URIs are only offered for repositories anyone may read. |
 | `COMPACT_MAX_BYTES` | var, optional | Largest pack compaction run after a push through `waitUntil`, default 128 MiB; `0` disables it. |
 | `MAX_LFS_OBJECT_BYTES` | var | Largest accepted LFS object, default 100 MiB (Cloudflare's request body limit on the Free and Pro plans). Larger objects get a per-object error in the batch API and `413` on `PUT`. |
@@ -409,6 +410,14 @@ reaches the Worker. Ways around it:
 
 - **Git LFS for large files.** LFS objects go straight to the bucket through
   presigned URLs and never pass through the Worker.
+- **The remote helper.** `git push forge::https://forge.example/acme/site main`
+  with `git-remote-forge` from `packages/cli` uploads the pack in parts of at
+  most 64 MiB (`/{owner}/{repo}.git/forge/uploads`), directly to R2 when the
+  `R2_*` signing settings are set, and resumes an interrupted upload on the
+  next `git push`. The finalize request indexes the whole pack in one
+  invocation, so its size is bounded by `limits.cpu_ms` (60 s, roughly
+  800 MiB of pack by the table in CPU time and memory) rather than by the
+  body limit.
 - **Chunked pushes.** `git forge push` from `packages/cli` splits a push into
   several pushes below a budget: `git forge push --max-bytes 90MiB <url> main`.
   Each push only carries the objects the forge does not have yet.

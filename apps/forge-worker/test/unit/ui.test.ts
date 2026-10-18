@@ -28,6 +28,8 @@ describe('routing between the UI and the forge', () => {
     '/acme/site/git-receive-pack',
     '/acme/site/objects/info/packs',
     '/acme/site/info/lfs/objects/batch',
+    '/acme/site/forge/uploads',
+    '/acme/site/forge/uploads/2026-10-18T12-00-00-000Z-0b5b7c38-8a43-4a52-9c1e-6a3d9b0f1e2d/finalize',
     `/acme/site/media/${'a'.repeat(64)}`,
     '/acme/site/raw/main/README.md',
     '/acme/site/releases/download/v1.0/app.tar.gz',

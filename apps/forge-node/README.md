@@ -121,10 +121,14 @@ notifications; without that it still catches up on the schedule.
 
    With S3 the Pi only holds the SQLite file; repository data and LFS objects
    live in the bucket, and LFS clients upload and download directly from it
-   through presigned URLs. The bucket must honour `If-None-Match: *` and
+   through presigned URLs; so do the pack parts of `git push forge::…`
+   (`git-remote-forge`, `packages/cli`). The bucket must honour `If-None-Match: *` and
    `If-Match` on `PutObject`, since refs are updated by compare-and-swap. Run
    the conformance suite against it once (`packages/s3/README.md`) before
-   relying on a provider.
+   relying on a provider. Keep a lifecycle rule that expires `tmp/` after a
+   day or more: staging chunks and unfinished uploads are never deleted by
+   the forge. With `STORAGE=fs`, pushes through the remote helper upload
+   their parts through the forge instead.
 
 4. Install the units [deploy/git-forge-node.service](deploy/git-forge-node.service)
    and [deploy/git-forge-node-migrate.service](deploy/git-forge-node-migrate.service)

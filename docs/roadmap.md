@@ -72,7 +72,10 @@ discussions.
 - [x] Server-side import: create or update a repository by pulling from a URL (no request body limit), in resumable steps driven by a queue
 - [x] Chunked push helper: `git forge push` splits history into pushes below the platform body limit, using the unmodified git client; single executables per platform from the release workflow
 - [x] Import and mirror sync: stream fetched packs into the streaming indexer (via `ingestPack`)
-- [ ] Remote helper `git-remote-forge`: resumable multipart pack upload directly to object storage via presigned URLs, then a finalize call that indexes the pack and updates refs
+- [x] Remote helper `git-remote-forge` (same single executable as `git forge`): fetches through `git remote-https` (protocol v2, `packfile-uris`); pushes upload the pack in parts, directly to object storage via presigned PUTs bound to size and SHA-256 or through the function, resumable from `.git/forge-upload/`; a finalize call runs receive-pack's indexing and policy checks and reports ok/ng per ref
+- [x] Upload session API in core (`/{owner}/{repo}.git/forge/uploads`: create, status with fresh part URLs, part upload, finalize), served by the Worker and `apps/forge-node`; optional presigned R2 parts in the Worker (`R2_S3_ENDPOINT`, `R2_BUCKET_NAME`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`)
+- [ ] Finalize larger than one invocation's CPU budget: index the uploaded parts as a queue job (or in resumable steps) and let the helper poll
+- [ ] Index directly from the uploaded parts instead of staging the pack a second time
 
 ## M5b — CI and distribution
 

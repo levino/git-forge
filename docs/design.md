@@ -282,6 +282,8 @@ the [accounts README](../packages/accounts/README.md#branch-protection).
   README.txt                        # plain text: what this is, how to read it
 tmp/<repo>/<timestamp>-<uuid>/<n>   # staging chunks of a push or fetch, expired by the bucket
 tmp/<repo>/<timestamp>-<uuid>/asset # a release asset upload without a declared SHA-256 (§16)
+tmp/<repo>/<timestamp>-<uuid>/upload.json   # an upload session of git-remote-forge (§7)
+tmp/<repo>/<timestamp>-<uuid>/part/<nnnnn>  # its parts, 1-based, five digits
 ```
 
 - `<sha>` is the pack's trailing SHA-1 checksum, as with `git index-pack`.
@@ -303,6 +305,12 @@ tmp/<repo>/<timestamp>-<uuid>/asset # a release asset upload without a declared 
   are read back once to write the final pack and never again. The `Storage`
   interface has no delete; operators expire `tmp/` with a bucket lifecycle
   rule (e.g. one day). Pushes up to one chunk never touch `tmp/`.
+- **Upload sessions** (§7, Large pushes) live entirely under `tmp/`: the
+  session record is written once and never changed, each part is one object.
+  Nothing is aborted or deleted; an unfinished upload expires with the same
+  lifecycle rule, which must therefore keep `tmp/` objects longer than an
+  upload session lives (12 hours by default, so the one-day rule above is
+  enough).
 - **Release assets** are content-addressed like LFS objects
   (`lfs/objects/…`, §16). Which asset belongs to which release lives only in
   the database; a deleted asset or release leaves its bytes in place.
@@ -345,6 +353,10 @@ large files belong in LFS. The Worker sets no push size limit of its own
 **Large pushes** — a push is one HTTP request, and Cloudflare caps request
 bodies at 100 MB (Free/Pro), 200 MB (Business) and 500 MB (Enterprise). Three ways around it, none of which changes git:
 
+- *Remote helper* `git-remote-forge` (below): `git push forge::https://…`
+  uploads the pack in parts, directly to object storage where it can sign
+  URLs, and resumes after an interruption.
+
 - *Chunked push helper* `git forge push` (`packages/cli`, a single executable
   built with `bun build --compile`): splits the history not yet on the remote
   into pushes below a byte budget (default 80 MB, measured with
@@ -356,8 +368,78 @@ bodies at 100 MB (Free/Pro), 200 MB (Business) and 500 MB (Enterprise). Three wa
   a rerun: what landed is on the remote. Details in `packages/cli/README.md`.
 - *Server-side import* (below): the forge pulls from a URL, so no request
   body is involved at all.
-- Later: a remote helper uploading packs directly to object storage
-  (roadmap M5a).
+
+**Remote helper and upload sessions** — `git-remote-forge` is the same
+single executable as `git forge` (`packages/cli`), started by git for remotes
+`forge::https://host/owner/repo` (or `forge://host/owner/repo`) through a link
+named `git-remote-forge`.
+
+- *Fetch* is not reimplemented: the helper starts `git remote-https` for the
+  same URL and relays `stateless-connect`, `list`, `fetch` and `option`, so
+  fetches and clones are ordinary smart HTTP with protocol v2 and
+  `packfile-uris`, with git's own credential handling.
+- *Push* builds the pack locally (`git pack-objects --revs --thin
+  --delta-base-offset` from the new tips minus the remote tips that exist
+  locally), stores it in `.git/forge-upload/<key>/pack` with its part list in
+  `state.json` (the key hashes URL, tips and negatives), and then:
+  1. `GET /{owner}/{repo}.git/forge/uploads` — limits (`maxPartBytes`,
+     `maxParts`, `maxUploadBytes`, `lifetimeSeconds`) and whether parts go
+     directly to storage. A `404` means the server has no upload API; the
+     helper then hands the push to `git remote-https` (plain receive-pack).
+  2. `POST …/forge/uploads` with `{ parts: [{ size, sha256 }] }` — creates
+     the session `tmp/<repo>/<id>/upload.json` and answers, per part, an
+     upload action: a presigned `PUT` bound to the part's length and SHA-256
+     (`Storage.presignPut`, `x-amz-checksum-sha256`), or, where the storage
+     cannot sign, `PUT …/forge/uploads/{id}/parts/{n}` through the function,
+     which streams the body into storage through the same verifying stream as
+     LFS uploads, so the `put` fails unless length and SHA-256 match.
+     Parts are at most `maxPartBytes` (64 MiB, and never more than the
+     request limit), so every request stays below the platform limit.
+  3. `PUT` each part (three at a time, two retries).
+  4. `POST …/forge/uploads/{id}/finalize` with `{ commands: [{ name, oldId,
+     newId }], atomic }` — checks that every part is present with its size,
+     then runs `receivePack` on a stream made of the pkt-line commands
+     (`report-status`, `atomic` if asked) followed by the parts read back in
+     order. Indexing, thin-pack completion, connectivity, the LFS pointer
+     check, branch protection, fast-forward or archive, CAS on the refs and
+     `onPush` (compaction, CI, mirror notifications, events) are therefore
+     exactly those of `git-receive-pack`, with the policy taken from the
+     finalize request's own token. The answer is `{ unpack, results: [{ name,
+     ok, reason? }] }`, which the helper reports to git as `ok <ref>` /
+     `error <ref> <reason>` (git prints `[remote rejected]`).
+  5. `GET …/forge/uploads/{id}` — the session with `uploaded` per part and
+     fresh upload actions for the missing ones.
+- *Resuming:* the helper keeps `.git/forge-upload/<key>/` until every ref was
+  accepted. Running the same `git push` again finds it, asks the session which
+  parts landed and uploads only the rest; an expired session (`410`) is
+  recreated from the same local pack. A finalize whose answer was lost can be
+  repeated: the session stays valid, and a ref that already moved shows up as
+  up to date in git's next `list for-push`. State directories older than seven
+  days are pruned.
+- *Permissions:* every call needs `write` on the repository through the same
+  `Authorize` callback as Git (`git` surface); the session id is random and
+  scoped to the repository's key prefix. The helper authenticates like git:
+  first without credentials, then with `git credential fill` (so `git forge
+  auth login` tokens are used through the credential helper), `approve` on
+  success and `reject` on `401`.
+- *Why separate part objects and not an S3 multipart upload:* the indexer has
+  to read every byte once anyway to hash, index and write the final pack under
+  its checksum name, so assembling the parts into one object first would buy
+  nothing. Separate objects reuse `presignPut` with its length and SHA-256
+  binding, need no `CreateMultipartUpload`/`CompleteMultipartUpload`/
+  `AbortMultipartUpload` (an abort would be a delete), have no 5 MiB minimum
+  part size and work with every adapter, including the file system and R2
+  bindings without S3 credentials (parts then go through the function).
+- *Git LFS* reads the LFS endpoint from the remote URL and does not understand
+  `forge::`; for a named remote the helper sets `remote.<name>.lfsurl` to
+  `<url>/info/lfs` unless it or `lfs.url` is set, so `git lfs` pre-push and
+  smudge work.
+- *Limits:* finalize indexes the whole pack in one request, so CPU time grows
+  with its size (about 70 ms per MiB, see the Worker README); the Worker's
+  `cpu_ms` of 60 s covers packs of several hundred MiB, larger ones need a
+  higher limit (up to 5 minutes), `git forge push` or an import. The parts are
+  read back once more than in a direct push (the indexer stages its own
+  chunks).
 
 **Import** — create or update a repository by pulling from any Git URL
 (smart HTTP v2 or dumb HTTP, optional token). It reuses the mirror client

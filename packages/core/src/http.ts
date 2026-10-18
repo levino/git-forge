@@ -1,9 +1,10 @@
 import { readAll, SizeLimitError } from './bytes.ts'
 import { parseRange } from './content.ts'
 import { advertiseReceivePack, type PushOutcome, receivePack, type ReceiveOptions, type RefPolicy } from './receive-pack.ts'
-import { handleLfsRequest, type LfsHttpOptions } from './lfs-http.ts'
+import { handleLfsRequest, type LfsHttpOptions, type ObjectAccess } from './lfs-http.ts'
 import { lfsPushCheck } from './lfs.ts'
 import { gitPrefix, isValidName, readRefs, type RepositoryName } from './repository.ts'
+import type { ContentPolicy } from './restricted.ts'
 import type { Storage } from './storage.ts'
 import { advertiseUploadPackV2, type PackfileUri, uploadPackV2 } from './upload-pack.ts'
 
@@ -25,6 +26,8 @@ export type GitHttpOptions = {
   readonly onPush?: (repo: RepositoryName, outcome: PushOutcome) => Promise<void>
   readonly lfs?: LfsHttpOptions | false
   readonly packfileUris?: (request: Request, repo: RepositoryName) => PackfileUri | undefined | Promise<PackfileUri | undefined>
+  readonly contentPolicy?: (request: Request, repo: RepositoryName) => Promise<ContentPolicy | null>
+  readonly objectAccess?: ObjectAccess
 }
 
 export const publicPackfileUris =
@@ -156,6 +159,7 @@ export const handleGitRequest = async (request: Request, options: GitHttpOptions
       storage,
       ...(options.authorize ? { authorize: options.authorize } : {}),
       ...(options.lfs ? { lfs: options.lfs } : {}),
+      ...(options.objectAccess ? { objectAccess: options.objectAccess } : {}),
     })
     if (lfs) return lfs
   }
@@ -203,10 +207,11 @@ export const handleGitRequest = async (request: Request, options: GitHttpOptions
   if (request.method === 'POST' && path === '/git-receive-pack') {
     const pushLimit = options.maxPushBytes ?? options.maxRequestBytes ?? Number.POSITIVE_INFINITY
     const policy = combinePolicies(options.receive?.policy, await options.pushPolicy?.(request, repo))
+    const contentPolicy = (await options.contentPolicy?.(request, repo)) ?? options.receive?.contentPolicy
     let received: Awaited<ReturnType<typeof receivePack>>
     try {
       received = await receivePack(
-        { ...options.receive, storage, repo, policy, beforeUpdate: withLfsCheck(options, repo) },
+        { ...options.receive, storage, repo, policy, beforeUpdate: withLfsCheck(options, repo), ...(contentPolicy ? { contentPolicy } : {}) },
         limited(bodyStream(request), pushLimit),
       )
     } catch (error) {

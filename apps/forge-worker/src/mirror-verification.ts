@@ -77,7 +77,7 @@ export const sendAttestation = async (federation: MirrorFederation, repository: 
       namespace: config.namespace,
       syncedAt: status.lastSuccessAt,
       alarms: status.alarms.length,
-      pending: status.lfsPending.length + (status.pendingPacks?.length ?? 0),
+      pending: status.lfsPending.filter((pointer) => !pointer.reason.startsWith('403 ')).length + (status.pendingPacks?.length ?? 0),
       ...(status.lastDeepCheck ? { deepCheck: { at: status.lastDeepCheck.at, ok: status.lastDeepCheck.ok } } : {}),
       url: mirrorGitUrl(federation.issuer, repo),
     },

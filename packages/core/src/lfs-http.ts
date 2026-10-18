@@ -22,10 +22,20 @@ export type LfsHttpOptions = {
   readonly maxObjectBytes?: number
 }
 
+export type ObjectAccessResult = {
+  readonly denied: ReadonlySet<string>
+  readonly restricted: ReadonlySet<string>
+}
+
+export type ObjectAccess = (request: Request, repo: RepositoryName, oids: readonly string[]) => Promise<ObjectAccessResult>
+
+export const RESTRICTED_CACHE = 'private, no-store'
+
 export type LfsContext = {
   readonly storage: Storage
   readonly authorize?: Authorize
   readonly lfs?: LfsHttpOptions
+  readonly objectAccess?: ObjectAccess
 }
 
 const LFS_PATH = /^\/info\/lfs(\/.*)?$/
@@ -96,7 +106,13 @@ export const handleLfsRequest = async (request: Request, repo: RepositoryName, p
       if (denied) return denied
       if (!(await readRefs(storage, repo))) return failure(404, 'repository not found')
       const limits = context.lfs?.maxObjectBytes !== undefined ? { maxObjectBytes: context.lfs.maxObjectBytes } : {}
-      return json(200, await lfsBatch(storage, repo, batch, selfLinks(request, base, storage, repo, expiresIn), limits))
+      const answer = await lfsBatch(storage, repo, batch, selfLinks(request, base, storage, repo, expiresIn), limits)
+      if (batch.operation !== 'download' || !context.objectAccess) return json(200, answer)
+      const { denied: restricted } = await context.objectAccess(request, repo, answer.objects.map((object) => object.oid))
+      return json(200, {
+        ...answer,
+        objects: answer.objects.map((object) => (restricted.has(object.oid) ? { oid: object.oid, size: object.size, error: { code: 403, message: 'object is restricted' } } : object)),
+      })
     }
     if (path === '/info/lfs/objects/verify') {
       if (request.method !== 'POST') return failure(405, 'method not allowed')
@@ -126,6 +142,8 @@ export const handleLfsRequest = async (request: Request, repo: RepositoryName, p
     if (request.method === 'GET' || request.method === 'HEAD') {
       const denied = await context.authorize?.(request, repo, 'read', 'lfs')
       if (denied) return denied
+      const access = await context.objectAccess?.(request, repo, [oid])
+      if (access?.denied.has(oid)) return failure(403, 'object is restricted')
       const key = lfsObjectKey(repo, oid)
       const stored = request.method === 'GET' ? await storage.get(key) : await storage.head(key)
       if (!stored) return failure(404, 'object does not exist')
@@ -134,7 +152,7 @@ export const handleLfsRequest = async (request: Request, repo: RepositoryName, p
         headers: {
           'Content-Type': 'application/octet-stream',
           'Content-Length': String(stored.size),
-          'Cache-Control': 'private, max-age=31536000, immutable',
+          'Cache-Control': access?.restricted.has(oid) ? RESTRICTED_CACHE : 'private, max-age=31536000, immutable',
         },
       })
     }

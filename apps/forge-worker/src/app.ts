@@ -29,6 +29,9 @@ import {
   checkSession,
   createAccountsStore,
   createMirrorVerificationStore,
+  createRestrictionStore,
+  isRestrictionRole,
+  ANONYMOUS,
   createLoginHandler,
   createLoginStore,
   createOidcProvider,
@@ -96,6 +99,13 @@ import {
   type Storage,
   type SyncResult,
   ZERO_ID,
+  type ContentPolicy,
+  isLfsOid,
+  isValidPathPattern,
+  type ObjectAccess,
+  pathMatcher,
+  restrictedContentPolicy,
+  scanTree,
 } from '@git-forge/core'
 import {
   type BranchUpdate,
@@ -307,6 +317,7 @@ export const createForge = (options: ForgeOptions): Forge => {
   const now = options.now ?? (() => new Date())
   const store: AccountsStore = createAccountsStore(db, { now: () => now().getTime() })
   const verification = createMirrorVerificationStore(db, { now: () => now().getTime() })
+  const restrictions = createRestrictionStore(db, { now: () => now().getTime() })
   const logins = createLoginStore(db, { now: () => now().getTime() })
   const outbound = (input: string, init?: RequestInit) => (options.fetch ? options.fetch(new Request(input, init)) : fetch(input, init))
   const oidc = options.login?.oidc ? createOidcProvider(options.login.oidc, outbound, () => now().getTime()) : null
@@ -680,6 +691,76 @@ export const createForge = (options: ForgeOptions): Forge => {
     return json(200, { ...overview, ...(signed ? { signed } : {}) })
   }
 
+  const requestPrincipal = async (request: Request): Promise<Principal> => {
+    if (!request.headers.has('Authorization') && !isUnsafeMethod(request.method)) {
+      const active = await readActiveSession(request, loginOptions(request))
+      if (active) return sessionUserPrincipal(active.session)
+    }
+    return (await authenticateRequest(request, authenticateOptions(request))) ?? ANONYMOUS
+  }
+
+  const objectAccess: ObjectAccess = async (request, repo, oids) => {
+    const none = { denied: new Set<string>(), restricted: new Set<string>() }
+    const subject = await store.findRepository(repo.owner, repo.name)
+    if (!subject) return none
+    const required = await restrictions.requiredRoles(subject.id, oids)
+    if (required.size === 0) return none
+    const { access } = await repositoryAccess(await requestPrincipal(request), repo, 'read')
+    const denied = new Set([...required].filter(([, role]) => !atLeast(access, role)).map(([oid]) => oid))
+    return { denied, restricted: new Set(required.keys()) }
+  }
+
+  const contentPolicy = async (_request: Request, repo: RepositoryName): Promise<ContentPolicy | null> => {
+    const subject = await store.findRepository(repo.owner, repo.name)
+    if (!subject) return null
+    const rules = (await restrictions.rules(subject.id)).filter((rule) => rule.pattern !== null)
+    if (rules.length === 0) return null
+    return restrictedContentPolicy(pathMatcher(rules.map((rule) => ({ id: rule.id, pattern: rule.pattern! }))), (pointers) =>
+      restrictions.recordObjects(subject.id, pointers.map((pointer) => ({ oid: pointer.oid, rule: pointer.rule, path: pointer.path }))),
+    )
+  }
+
+  const listRestrictions = async (request: Request, params: string[]): Promise<Response> => {
+    const { repository } = await requireRepositoryAdmin(request, repoName(params))
+    return json(200, await restrictions.rules(repository.id))
+  }
+
+  const addRestriction = async (request: Request, params: string[]): Promise<Response> => {
+    const repo = repoName(params)
+    const { repository } = await requireRepositoryAdmin(request, repo)
+    const body = await readBody(request)
+    const pattern = optionalString(body, 'pattern')
+    const oid = optionalString(body, 'oid')
+    const note = optionalString(body, 'note')
+    const role = body.role ?? 'write'
+    if ((pattern === undefined) === (oid === undefined)) throw new HttpError(400, 'exactly one of pattern and oid is required')
+    if (pattern !== undefined && !isValidPathPattern(pattern.replace(/\/$/, ''))) throw new HttpError(400, 'invalid path pattern')
+    if (oid !== undefined && !isLfsOid(oid)) throw new HttpError(400, 'oid must be a SHA-256 LFS oid')
+    if (!isRestrictionRole(role)) throw new HttpError(400, 'role must be triage, write, maintain or admin')
+    const rule = await restrictions.createRule(repository.id, { ...(pattern !== undefined ? { pattern } : {}), ...(oid !== undefined ? { oid } : {}), role, ...(note !== undefined ? { note } : {}) })
+    const violations: { ref: string; path: string; reason: string }[] = []
+    let objects = 0
+    if (pattern !== undefined) {
+      const refs = await readRefs(storage, repo)
+      const odb = new ObjectDatabase(storage, repo)
+      const match = pathMatcher([{ id: rule.id, pattern }])
+      for (const [ref, id] of Object.entries(refs?.state.refs ?? {})) {
+        if (!ref.startsWith('refs/heads/') && !ref.startsWith('refs/tags/')) continue
+        const scan = await scanTree(odb, id, match)
+        await restrictions.recordObjects(repository.id, scan.pointers.map((pointer) => ({ oid: pointer.oid, rule: rule.id, path: pointer.path })))
+        objects += scan.pointers.length
+        violations.push(...scan.violations.map((violation) => ({ ref, path: violation.path, reason: violation.reason })))
+      }
+    }
+    return json(201, { ...rule, objects, violations })
+  }
+
+  const deleteRestriction = async (request: Request, params: string[]): Promise<Response> => {
+    const { repository } = await requireRepositoryAdmin(request, repoName(params))
+    if (!(await restrictions.deleteRule(repository.id, params[2]!))) throw new HttpError(404, 'no such restriction')
+    return new Response(null, { status: 204 })
+  }
+
   const addMirror = async (request: Request, params: string[]): Promise<Response> => {
     const repo = repoName(params)
     const { repository } = await requireRepositoryAdmin(request, repo)
@@ -992,6 +1073,9 @@ export const createForge = (options: ForgeOptions): Forge => {
     { method: 'GET', pattern: new RegExp(`^${REPO}/import$`), handler: importStatus },
     { method: 'GET', pattern: new RegExp(`^${REPO}/mirrors$`), handler: listMirrorsRoute },
     { method: 'GET', pattern: new RegExp(`^${REPO}/mirrors/overview$`), handler: mirrorOverviewRoute },
+    { method: 'GET', pattern: new RegExp(`^${REPO}/restrictions$`), handler: listRestrictions },
+    { method: 'POST', pattern: new RegExp(`^${REPO}/restrictions$`), handler: addRestriction },
+    { method: 'DELETE', pattern: new RegExp(`^${REPO}/restrictions/${SEGMENT}$`), handler: deleteRestriction },
     { method: 'POST', pattern: new RegExp(`^${REPO}/mirrors$`), handler: addMirror },
     { method: 'POST', pattern: new RegExp(`^${REPO}/mirrors/${SEGMENT}/sync$`), handler: syncMirrorRoute },
     { method: 'POST', pattern: new RegExp(`^${REPO}/mirrors/${SEGMENT}/detach$`), handler: detachMirrorRoute },
@@ -1074,7 +1158,7 @@ export const createForge = (options: ForgeOptions): Forge => {
     }
     const access = createGitAccess(authentication)
     const authorize = withJobTokens(access.authorize)
-    const content = await handleContentRequest(request, { storage, authorize: withSessionReads(authorize) })
+    const content = await handleContentRequest(request, { storage, authorize: withSessionReads(authorize), objectAccess })
     if (content) return content
     const git = await handleGitRequest(request, {
       storage,
@@ -1083,6 +1167,8 @@ export const createForge = (options: ForgeOptions): Forge => {
       ...(options.maxPushBytes !== undefined ? { maxPushBytes: options.maxPushBytes } : {}),
       lfs: { maxObjectBytes: options.maxLfsObjectBytes },
       packfileUris: (incoming, repo) => packfileUris(incoming, repo, authorize),
+      contentPolicy,
+      objectAccess,
       onPush: async (repo, outcome) => {
         await compactAfterPush(waitUntil)(repo, outcome)
         const principal = await authenticateRequest(request, authentication)

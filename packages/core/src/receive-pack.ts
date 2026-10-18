@@ -3,6 +3,7 @@ import { ByteCursor } from './cursor.ts'
 import { isObjectId, type ObjectId, ZERO_ID } from './hash.ts'
 import type { LfsObjectSpec } from './lfs.ts'
 import { PackError } from './pack.ts'
+import type { ContentPolicy } from './restricted.ts'
 import type { IndexedPack } from './pack-indexer.ts'
 import { FLUSH, pkt, sideband, SIDEBAND_DATA } from './pktline.ts'
 import {
@@ -68,6 +69,7 @@ export type ReceiveOptions = {
   readonly now?: () => Date
   readonly policy?: RefPolicy
   readonly beforeUpdate?: (pushed: PushedPack, commands: readonly RefCommand[]) => Promise<string | null>
+  readonly contentPolicy?: ContentPolicy
   readonly pack?: IngestOptions
 }
 
@@ -178,6 +180,11 @@ export const receivePack = async (
     if (!type) checks.set(command.name, 'missing object')
     else if (command.name.startsWith('refs/heads/') && type !== 'commit') checks.set(command.name, 'not a commit')
     else checks.set(command.name, null)
+  }
+  if (options.contentPolicy) {
+    const pending = commands.filter((command) => checks.get(command.name) === null && command.newId !== ZERO_ID)
+    const rejections = pending.length > 0 ? await options.contentPolicy({ source, isNew: (id) => (pack?.typeOf(id) ?? null) !== null, commands: pending }) : new Map<string, string>()
+    for (const [name, reason] of rejections) checks.set(name, reason)
   }
   if (options.beforeUpdate) {
     const rejection = await options.beforeUpdate({ objectCount, lfsPointers: pack?.lfsPointers ?? [] }, commands)

@@ -16,6 +16,7 @@ import {
   sniffContentType,
 } from './content.ts'
 import type { Authorize } from './http.ts'
+import { type ObjectAccess, RESTRICTED_CACHE } from './lfs-http.ts'
 import { lfsObjectKey } from './lfs.ts'
 import { advertisedRefs, ObjectDatabase, readRefs, type RepositoryName } from './repository.ts'
 import type { ByteRange, Storage } from './storage.ts'
@@ -23,6 +24,7 @@ import type { ByteRange, Storage } from './storage.ts'
 export type ContentHttpOptions = {
   readonly storage: Storage
   readonly authorize?: Authorize
+  readonly objectAccess?: ObjectAccess
   readonly refMaxAgeSeconds?: number
 }
 
@@ -114,7 +116,11 @@ export const handleContentRequest = async (request: Request, options: ContentHtt
   if (denied) return denied
   const refs = await readRefs(storage, route.repo)
   if (!refs) return text(404, 'repository not found\n')
-  if (route.kind === 'media') return serveLfs(request, storage, route.repo, route.oid, route.filename, IMMUTABLE_CACHE)
+  if (route.kind === 'media') {
+    const access = await options.objectAccess?.(request, route.repo, [route.oid])
+    if (access?.denied.has(route.oid)) return text(403, 'object is restricted\n')
+    return serveLfs(request, storage, route.repo, route.oid, route.filename, access?.restricted.has(route.oid) ? RESTRICTED_CACHE : IMMUTABLE_CACHE)
+  }
   const target = await resolveRaw(new ObjectDatabase(storage, route.repo), advertisedRefs(refs.state), route.segments)
   if (target.kind === 'not-found') return text(404, `${target.message}\n`)
   const cacheControl = refCacheControl(target.immutable, options.refMaxAgeSeconds ?? 60)

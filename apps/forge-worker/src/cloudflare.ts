@@ -36,7 +36,7 @@ export const forgeFor = (env: Env): Promise<Forge> => {
     .then(async (settings) => {
       await migrateOnStart(d1Database(env.DB), MIGRATIONS)
       const actions = parseActionsSettings(env)
-      const secretsKey = await loadSecretsKey(actions)
+      const secretsKey = await loadSecretsKey(actions, env)
       const email = emailSender(parseEmailSettings(env))
       const signing = parseR2Signing(env)
       return createForge({
@@ -44,6 +44,7 @@ export const forgeFor = (env: Env): Promise<Forge> => {
         storage: new R2Storage(env.BUCKET),
         db: d1Database(env.DB),
         digests: digestStreams,
+        ...(secretsKey ? { secretsKey } : {}),
         clientAddress: (request) => request.headers.get('CF-Connecting-IP'),
         ...(uiEnabled(env) ? { renderLoginPage: captureLoginPage } : {}),
         ...(env.IMPORTS ? { scheduleImport: importScheduler(env.IMPORTS) } : {}),

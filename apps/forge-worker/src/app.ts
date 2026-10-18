@@ -8,6 +8,7 @@ import {
   queueRunsForPullRequest,
   type DispatchOptions,
   handleActionsService,
+  type SealedSecret,
   type SecretsKey,
   handleGhesApi,
   queueRunsForPush,
@@ -102,6 +103,7 @@ import {
   type DigestFactory,
   type EmailSender,
   type FetchFunction,
+  GitHubApiError,
   handleContentRequest,
   handleGitRequest,
   type JobQueue,
@@ -112,10 +114,12 @@ import {
   ImportRunningError,
   isValidImportUrl,
   isValidName,
+  listGitHubRepositories,
   listLfsOids,
   listMirrors,
   type LfsPublisher,
   type MirrorConfig,
+  type MirrorMode,
   type MirrorSettings,
   type MirrorStatus,
   type DeepCheck,
@@ -123,6 +127,7 @@ import {
   MirrorNotFoundError,
   ObjectDatabase,
   type PackfileUri,
+  PermanentJobError,
   type Presigner,
   publicPackfileUris,
   publishLfsObjects,
@@ -193,6 +198,8 @@ import {
   syncAndNotify,
 } from './mirror-federation.ts'
 import { MirrorAuthError, type MirrorContext, runMirrorSync, type ScheduledMirrorRun, syncDueMirrors } from './mirrors.ts'
+import { receiveGitHubWebhook, setUpGitHubWebhook } from './github-mirrors.ts'
+import { createMirrorSecrets, MirrorSecretsUnavailableError } from './mirror-secrets.ts'
 
 export type ActionsOptions = {
   readonly instanceId: string
@@ -211,6 +218,7 @@ export type ForgeOptions = ForgeSettings & {
   readonly actions?: ActionsOptions
   readonly jobs?: JobQueue<AppJob>
   readonly digests?: DigestFactory
+  readonly secretsKey?: SecretsKey
   readonly presigner?: Presigner
   readonly scheduleImport?: ImportScheduler
   readonly email?: EmailSender
@@ -222,7 +230,22 @@ export type ForgeOptions = ForgeSettings & {
 
 export type LfsPublishJob = { readonly kind: 'lfs-publish'; readonly owner: string; readonly name: string; readonly oids: readonly string[] | null }
 
-export type AppJob = ForgeJob | NotificationJob | PagesJob | LfsPublishJob | ImportLfsJob
+export type GitHubMirrorJob = {
+  readonly kind: 'mirror-github'
+  readonly owner: string
+  readonly name: string
+  readonly url: string
+  readonly visibility: 'private' | 'public'
+  readonly defaultBranch: string
+  readonly actor: { readonly id: string; readonly login: string }
+  readonly mode: MirrorMode
+  readonly lfs: boolean
+  readonly private: boolean
+  readonly webhook: boolean
+  readonly sealedToken?: SealedSecret
+}
+
+export type AppJob = ForgeJob | NotificationJob | PagesJob | LfsPublishJob | ImportLfsJob | GitHubMirrorJob
 
 export const LFS_PUBLISH_BATCH = 100
 
@@ -285,7 +308,7 @@ export type RepositorySettingsOperations = {
   readonly removeCollaborator: (principal: Principal, repo: RepositoryName, login: string) => Promise<void>
   readonly grantInstance: (principal: Principal, repo: RepositoryName, issuer: string) => Promise<{ readonly issuer: string; readonly role: string }>
   readonly revokeInstance: (principal: Principal, repo: RepositoryName, issuer: string) => Promise<void>
-  readonly addMirror: (principal: Principal, repo: RepositoryName, input: MirrorSettings) => Promise<MirrorConfig>
+  readonly addMirror: (principal: Principal, repo: RepositoryName, input: MirrorSettings, token?: string) => Promise<MirrorConfig>
   readonly syncMirror: (principal: Principal, repo: RepositoryName, remote: string, issuer: string | undefined) => Promise<SyncResult>
   readonly verifyMirror: (principal: Principal, repo: RepositoryName, remote: string) => Promise<DeepCheck>
   readonly detachMirror: (principal: Principal, repo: RepositoryName, remote: string) => Promise<MirrorConfig>
@@ -337,12 +360,32 @@ export type NewImport = NewRepository & {
 
 export type StartedImport = RepositoryName & { readonly state: ImportState }
 
+export type GitHubBackup = {
+  readonly account: string
+  readonly owner: string
+  readonly token?: string
+  readonly visibility?: string
+  readonly mode?: string
+  readonly forks?: boolean
+  readonly archived?: boolean
+  readonly webhook?: boolean
+  readonly lfs?: boolean
+}
+
+export type GitHubBackupResult = {
+  readonly owner: string
+  readonly account: string
+  readonly queued: readonly { readonly github: string; readonly repository: string }[]
+  readonly skipped: readonly { readonly github: string; readonly repository: string; readonly reason: string }[]
+}
+
 export type RepositoryOperations = {
   readonly owners: (user: UserPrincipal) => Promise<string[]>
   readonly create: (user: UserPrincipal, input: NewRepository) => Promise<CreatedRepository>
   readonly importsEnabled: boolean
   readonly startImport: (user: UserPrincipal, input: NewImport) => Promise<StartedImport>
   readonly importStatus: (user: UserPrincipal, repo: RepositoryName) => Promise<ImportState | null>
+  readonly mirrorGitHub: (user: UserPrincipal, input: GitHubBackup) => Promise<GitHubBackupResult>
 }
 
 export type UiSession = { readonly principal: UserPrincipal; readonly csrf: string; readonly sessionId: string }
@@ -451,6 +494,7 @@ export const createForge = (options: ForgeOptions): Forge => {
   const now = options.now ?? (() => new Date())
   const store: AccountsStore = createAccountsStore(db, { now: () => now().getTime() })
   const verification = createMirrorVerificationStore(db, { now: () => now().getTime() })
+  const mirrorSecrets = createMirrorSecrets(db, options.secretsKey ?? options.actions?.secretsKey, () => now().getTime())
   const logins = createLoginStore(db, { now: () => now().getTime() })
   const outbound = (input: string, init?: RequestInit) => (options.fetch ? options.fetch(new Request(input, init)) : fetch(input, init))
   const oidc = options.login?.oidc ? createOidcProvider(options.login.oidc, outbound, () => now().getTime()) : null
@@ -702,6 +746,7 @@ export const createForge = (options: ForgeOptions): Forge => {
     instanceKey: options.instanceKey,
     ...(options.fetch ? { fetch: options.fetch } : {}),
     ...(options.digests ? { digests: options.digests } : {}),
+    secrets: mirrorSecrets,
     onSynced: async (repo, config, result) => {
       await emitMirrorAlarms(repo, config, result)
       if (result.updates.length > 0) await refreshRepository(repo)
@@ -909,6 +954,14 @@ export const createForge = (options: ForgeOptions): Forge => {
     return [actor.login, ...(await store.ownedOrganizations(actor.id)).filter((login) => login.toLowerCase() !== actor.login.toLowerCase())]
   }
 
+  const creatableOwner = async (actor: UserPrincipal, owner: string) => {
+    const account = await store.findAccount(owner)
+    if (!account) throw new HttpError(404, `no account ${owner}`)
+    const own = account.kind === 'user' ? account.id === actor.id : await store.isOrganizationOwner(account.id, actor.id)
+    if (!own && !(await store.isInstanceAdmin(actor.id))) throw new HttpError(403, `you cannot create repositories for ${owner}`)
+    return account
+  }
+
   const createRepositoryFor = async (actor: UserPrincipal, input: NewRepository): Promise<CreatedRepository> => {
     const { owner, name } = input
     const visibility = input.visibility ?? 'private'
@@ -916,10 +969,7 @@ export const createForge = (options: ForgeOptions): Forge => {
     if (!isValidName(owner) || !isValidName(name)) throw new HttpError(400, 'owner and name must match [A-Za-z0-9][A-Za-z0-9._-]* and must not end in .git')
     if (visibility !== 'private' && visibility !== 'public') throw new HttpError(400, 'visibility must be private or public')
     if (!BRANCH.test(defaultBranch) || defaultBranch.includes('..')) throw new HttpError(400, 'invalid defaultBranch')
-    const account = await store.findAccount(owner)
-    if (!account) throw new HttpError(404, `no account ${owner}`)
-    const own = account.kind === 'user' ? account.id === actor.id : await store.isOrganizationOwner(account.id, actor.id)
-    if (!own && !(await store.isInstanceAdmin(actor.id))) throw new HttpError(403, `you cannot create repositories for ${owner}`)
+    const account = await creatableOwner(actor, owner)
     if (await store.findRepository(owner, name)) throw new HttpError(409, `${owner}/${name} already exists`)
     try {
       await createRepository(storage, { owner: account.login, name }, defaultBranch)
@@ -1049,10 +1099,11 @@ export const createForge = (options: ForgeOptions): Forge => {
       const admin = await adminOf(principal, repo)
       await store.revokeInstanceRepository(normalizeIssuer(issuerInput), admin.repository.id, { kind: 'user', id: admin.principal.id })
     },
-    addMirror: async (principal, repo, input) => {
+    addMirror: async (principal, repo, input, token) => {
       const { repository } = await adminOf(principal, repo)
       const name = { owner: repository.owner, name: repository.name }
       try {
+        if (token) await mirrorSecrets.put(name, input.remote ?? 'origin', 'token', token)
         const config = await configureMirror(storage, name, input)
         if (federation) await enqueueMirrorSetup(federation, name, config)
         return config
@@ -1161,7 +1212,10 @@ export const createForge = (options: ForgeOptions): Forge => {
     const mode = optionalString(body, 'mode')
     const auth = optionalString(body, 'auth')
     if (mode !== undefined && mode !== 'auto' && mode !== 'manual') throw new HttpError(400, 'mode must be auto or manual')
-    if (auth !== undefined && auth !== 'none' && auth !== 'instance') throw new HttpError(400, 'auth must be none or instance')
+    if (auth !== undefined && auth !== 'none' && auth !== 'instance' && auth !== 'token') throw new HttpError(400, 'auth must be none, instance or token')
+    const token = optionalString(body, 'token')
+    if ((auth === 'token') !== (token !== undefined && token !== '')) throw new HttpError(400, 'auth token needs a token and a token needs auth token')
+    if (token && !mirrorSecrets.available) throw new HttpError(503, new MirrorSecretsUnavailableError().message)
     if (body.lfs !== undefined && typeof body.lfs !== 'boolean') throw new HttpError(400, 'lfs must be a boolean')
     const remote = optionalString(body, 'remote')
     const namespace = optionalString(body, 'namespace')
@@ -1174,7 +1228,7 @@ export const createForge = (options: ForgeOptions): Forge => {
       ...(body.lfs !== undefined ? { lfs: body.lfs as boolean } : {}),
       ...(lfsUrl !== undefined ? { lfsUrl } : {}),
       ...(auth !== undefined ? { auth } : {}),
-    })
+    }, token)
     return json(201, config)
   }
 
@@ -1188,6 +1242,131 @@ export const createForge = (options: ForgeOptions): Forge => {
 
   const detachMirrorRoute = async (request: Request, params: string[]): Promise<Response> =>
     json(200, await settings.detachMirror(await principalOf(request), repoName(params), params[2]!))
+
+  const optionalBoolean = (body: Body, key: string, fallback: boolean): boolean => {
+    const value = body[key]
+    if (value === undefined || value === null) return fallback
+    if (typeof value !== 'boolean') throw new HttpError(400, `${key} must be a boolean`)
+    return value
+  }
+
+  const githubFetch = options.fetch ? { fetch: options.fetch } : {}
+
+  const mirrorWebhookRoute = async (request: Request, params: string[]): Promise<Response> => {
+    const repository = await store.findRepository(...(params as [string, string]))
+    if (!repository || !isValidName(params[2]!)) throw new HttpError(404, 'mirror not configured')
+    return receiveGitHubWebhook({ storage, secrets: mirrorSecrets, federation }, request, { owner: repository.owner, name: repository.name }, params[2]!)
+  }
+
+  const webhookFor = async (repo: RepositoryName, remote: string, base: string, githubToken: string | undefined) => {
+    try {
+      return await setUpGitHubWebhook({ storage, secrets: mirrorSecrets, ...githubFetch }, repo, remote, base, githubToken)
+    } catch (error) {
+      if (error instanceof MirrorSecretsUnavailableError) throw new HttpError(503, error.message)
+      if (error instanceof GitHubApiError) throw new HttpError(502, error.message)
+      throw error
+    }
+  }
+
+  const setUpMirrorWebhookRoute = async (request: Request, params: string[]): Promise<Response> => {
+    const { repository } = await requireRepositoryAdmin(request, repoName(params))
+    const repo = { owner: repository.owner, name: repository.name }
+    if (!(await readMirrorConfig(storage, repo, params[2]!))) throw new HttpError(404, 'mirror not configured')
+    const githubToken = optionalString(await readBody(request), 'githubToken')
+    return json(200, await webhookFor(repo, params[2]!, issuerFor(request), githubToken || undefined))
+  }
+
+  const githubJobContext = (job: Pick<GitHubMirrorJob, 'owner' | 'name'>) => ['git-forge-mirror-github-job', job.owner.toLowerCase(), job.name.toLowerCase()]
+
+  const mirrorGitHubFor = async (actor: UserPrincipal, input: GitHubBackup): Promise<GitHubBackupResult> => {
+    const owner = (await creatableOwner(actor, input.owner)).login
+    const { account, token } = input
+    const visibility = input.visibility ?? 'private'
+    const mode = input.mode ?? 'auto'
+    const webhook = input.webhook ?? false
+    if (!account) throw new HttpError(400, 'account is required')
+    if (visibility !== 'private' && visibility !== 'public' && visibility !== 'upstream') throw new HttpError(400, 'visibility must be private, public or upstream')
+    if (mode !== 'auto' && mode !== 'manual') throw new HttpError(400, 'mode must be auto or manual')
+    if (webhook && !token) throw new HttpError(400, 'webhook needs a token with admin:repo_hook')
+    if (!options.jobs) throw new HttpError(503, 'bulk mirroring needs a job queue')
+    if (token && !mirrorSecrets.available) throw new HttpError(503, new MirrorSecretsUnavailableError().message)
+    let listed
+    try {
+      listed = await listGitHubRepositories({ account, ...(token ? { token } : {}), ...githubFetch, forks: input.forks ?? false, archived: input.archived ?? true })
+    } catch (error) {
+      if (error instanceof GitHubApiError) throw new HttpError(502, error.message)
+      throw error
+    }
+    const queued: GitHubBackupResult['queued'][number][] = []
+    const skipped: GitHubBackupResult['skipped'][number][] = []
+    for (const upstream of listed) {
+      const repository = `${owner}/${upstream.name}`
+      if (!isValidName(upstream.name)) skipped.push({ github: upstream.fullName, repository, reason: 'invalid name' })
+      else if (upstream.private && !token) skipped.push({ github: upstream.fullName, repository, reason: 'private' })
+      else if (await store.findRepository(owner, upstream.name)) skipped.push({ github: upstream.fullName, repository, reason: 'exists' })
+      else {
+        const target = { owner, name: upstream.name }
+        await options.jobs.enqueue({
+          kind: 'mirror-github',
+          ...target,
+          url: upstream.cloneUrl,
+          visibility: visibility === 'upstream' ? (upstream.private ? 'private' : 'public') : visibility,
+          defaultBranch: upstream.defaultBranch,
+          actor: { id: actor.id, login: actor.login },
+          mode,
+          lfs: input.lfs ?? true,
+          private: upstream.private,
+          webhook,
+          ...(token && (upstream.private || webhook) ? { sealedToken: await mirrorSecrets.seal(githubJobContext(target), token) } : {}),
+        })
+        queued.push({ github: upstream.fullName, repository })
+      }
+    }
+    return { owner, account, queued, skipped }
+  }
+
+  const mirrorGitHubRoute = async (request: Request): Promise<Response> => {
+    const actor = await requireManager(request)
+    const body = await readBody(request)
+    const optional = (key: string) => {
+      const value = optionalString(body, key)
+      return value ? { [key]: value } : {}
+    }
+    const flags = Object.fromEntries(['forks', 'archived', 'webhook', 'lfs'].filter((key) => body[key] !== undefined && body[key] !== null).map((key) => [key, optionalBoolean(body, key, false)]))
+    const result = await mirrorGitHubFor(actor, { account: requiredString(body, 'account'), owner: requiredString(body, 'owner'), ...optional('token'), ...optional('visibility'), ...optional('mode'), ...flags })
+    return json(202, result)
+  }
+
+  const adoptGitHubRepository = async (job: GitHubMirrorJob): Promise<void> => {
+    const actor: UserPrincipal = { kind: 'user', id: job.actor.id, login: job.actor.login, limits: null, tokenId: null }
+    const token = job.sealedToken ? await mirrorSecrets.open(githubJobContext(job), job.sealedToken) : undefined
+    let existing = await store.findRepository(job.owner, job.name)
+    if (!existing) {
+      try {
+        await createRepositoryFor(actor, { owner: job.owner, name: job.name, visibility: job.visibility, defaultBranch: job.defaultBranch })
+      } catch (error) {
+        if (!(error instanceof HttpError) || error.status !== 409) throw error instanceof HttpError ? new PermanentJobError(error.message) : error
+      }
+      existing = await store.findRepository(job.owner, job.name)
+      if (!existing) throw new Error(`${job.owner}/${job.name} was not created`)
+    }
+    const repo = { owner: existing.owner, name: existing.name }
+    let config = await readMirrorConfig(storage, repo, 'origin')
+    if (!config) {
+      const refs = await readRefs(storage, repo)
+      if (refs && Object.keys(refs.state.refs).length > 0) return
+      if (job.private && token) await mirrorSecrets.put(repo, 'origin', 'token', token)
+      try {
+        config = await configureMirror(storage, repo, { url: job.url, mode: job.mode, lfs: job.lfs, ...(job.private && token ? { auth: 'token' as const } : {}) }, now())
+      } catch (error) {
+        if (!(error instanceof MirrorExistsError)) throw error
+        config = await readMirrorConfig(storage, repo, 'origin')
+      }
+    }
+    if (!config || config.url !== job.url) return
+    if (job.webhook && token && options.publicUrl) await setUpGitHubWebhook({ storage, secrets: mirrorSecrets, ...githubFetch }, repo, 'origin', options.publicUrl, token)
+    if (federation) await enqueueMirrorSetup(federation, repo, config)
+  }
 
   const checkRunInput = (check: CheckRunReport): CheckRunInput => ({
     name: check.name,
@@ -1546,6 +1725,9 @@ export const createForge = (options: ForgeOptions): Forge => {
     { method: 'POST', pattern: new RegExp(`^${REPO}/mirrors/${SEGMENT}/sync$`), handler: syncMirrorRoute },
     { method: 'POST', pattern: new RegExp(`^${REPO}/mirrors/${SEGMENT}/detach$`), handler: detachMirrorRoute },
     { method: 'POST', pattern: new RegExp(`^${REPO}/mirrors/${SEGMENT}/verify$`), handler: verifyMirrorRoute },
+    { method: 'POST', pattern: new RegExp(`^${REPO}/mirrors/${SEGMENT}/webhook$`), handler: mirrorWebhookRoute },
+    { method: 'PUT', pattern: new RegExp(`^${REPO}/mirrors/${SEGMENT}/webhook$`), handler: setUpMirrorWebhookRoute },
+    { method: 'POST', pattern: /^\/api\/mirrors\/github$/, handler: mirrorGitHubRoute },
     { method: 'POST', pattern: new RegExp(`^${REPO}/lfs/publish$`), handler: publishRepositoryLfs },
   ]
 
@@ -1705,6 +1887,7 @@ export const createForge = (options: ForgeOptions): Forge => {
         importsEnabled: options.scheduleImport !== undefined,
         startImport: importRepositoryFor,
         importStatus: importStatusFor,
+        mirrorGitHub: mirrorGitHubFor,
       },
       inbox: {
         threads: (user, filter) => notifications.store.threads(user.id, { ...filter, participating: false }),
@@ -1755,6 +1938,7 @@ export const createForge = (options: ForgeOptions): Forge => {
       if (isNotificationJob(job)) return notifications.runJob(job)
       if (isPagesJob(job)) return pages.runJob(job)
       if (job.kind === 'lfs-publish') return publishLfs(job)
+      if (job.kind === 'mirror-github') return adoptGitHubRepository(job)
       if (job.kind === 'import-lfs') return void (await importLfsObject(job, { storage, ...(options.fetch ? { fetch: options.fetch } : {}), ...(options.digests ? { digests: options.digests } : {}) }))
       if (!federation) throw new Error('jobs need PUBLIC_URL, INSTANCE_KEY and a job queue')
       await runJob(federation, job)

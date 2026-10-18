@@ -303,10 +303,11 @@ export const parseActionsSettings = (vars: ForgeVars): ActionsSettings | undefin
   }
 }
 
-export const loadSecretsKey = async (settings: ActionsSettings | undefined): Promise<SecretsKey | undefined> => {
-  if (!settings?.secretsKey) return undefined
+export const loadSecretsKey = async (settings: ActionsSettings | undefined, vars?: ForgeVars): Promise<SecretsKey | undefined> => {
+  const encoded = settings?.secretsKey ?? present(vars?.ACTIONS_SECRETS_KEY)
+  if (!encoded) return undefined
   try {
-    return await importSecretsKey(settings.secretsKey)
+    return await importSecretsKey(encoded)
   } catch (error) {
     throw new ConfigurationError(`ACTIONS_SECRETS_KEY: ${(error as Error).message}`)
   }

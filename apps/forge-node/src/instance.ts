@@ -83,7 +83,7 @@ export const createInstance = async (vars: NodeVars, overrides: InstanceOverride
   const config = parseNodeConfig(vars)
   const settings = await parseSettings(vars)
   const actions = parseActionsSettings(vars)
-  const secretsKey = await loadSecretsKey(actions)
+  const secretsKey = await loadSecretsKey(actions, vars)
   const { db, handle } = await openDatabase(config.databasePath)
   try {
     const pending = await pendingMigrations(db, MIGRATIONS)
@@ -126,6 +126,7 @@ export const createInstance = async (vars: NodeVars, overrides: InstanceOverride
     storage,
     db,
     digests: nodeDigests,
+    ...(secretsKey ? { secretsKey } : {}),
     clientAddress: (request) => request.headers.get(CLIENT_ADDRESS_HEADER),
     jobs,
     scheduleImport: (job, delaySeconds) => imports.enqueue(job, { delaySeconds }),

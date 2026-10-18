@@ -649,10 +649,8 @@ switch.
 **Size limits.** Git pushes are only limited by the platform's request body
 limit unless `MAX_PUSH_BYTES` is set; single LFS
 objects by `MAX_LFS_OBJECT_BYTES` (default 100 MiB, the request body limit of
-Cloudflare's Free and Pro plans), enforced in the batch API and on `PUT`. With
-presigned R2 URLs (§11) uploads never reach the Worker, so the limit can be
-raised up to R2's single-`PUT` limit (about 5 GiB); the presigned URL is
-signed for the announced size, so the batch API's check is binding.
+Cloudflare's Free and Pro plans), enforced in the batch API and on `PUT`;
+with presigned R2 URLs (§11) it can be raised to about 5 GiB.
 
 ## 9. Git over SSH
 
@@ -830,44 +828,16 @@ plain directory per key, lock files for conditional writes), `R2Storage`
 uploads bind `Content-Length` and `x-amz-checksum-sha256` into the signature,
 so the bucket rejects any other content.
 
-**Presigning on top of a binding.** `withPresigner(storage, presigner)` (core)
-takes `get`, `head`, `put` and `list` from one storage and `presignGet` /
-`presignPut` from another. The Worker uses it when the R2 S3 credentials are
-configured (`R2_ACCOUNT_ID` or `R2_S3_ENDPOINT`, `R2_BUCKET`,
-`R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`): everything still goes through the
-`BUCKET` binding (`R2Storage`), and an `S3Storage` on R2's S3 endpoint
-(`https://<account>.r2.cloudflarestorage.com`, region `auto`, path style,
-same bucket, no prefix) only signs URLs, so the key layout is the same on both
-paths. Only the Git/LFS handler gets the composed storage, so only LFS hands
-out presigned URLs (pack URIs stay public dumb-HTTP URLs). R2 checks
-`x-amz-checksum-sha256` on `PutObject` (since June 2023); independent of
-that, a storage that presigns makes the verify step re-hash the stored object
-through the binding before it counts as present, with the platform's
-streaming digest (`DigestFactory`; `crypto.DigestStream` on Workers, about 2 s
-CPU time for 600 MB against a `cpu_ms` budget of 60 s, the JavaScript
-fallback about 7 s). Without the credentials, LFS objects are proxied through
-the Worker as before, and an object above `MAX_LFS_OBJECT_BYTES` is refused
-with a message that tells the admin how to enable presigning (with
-presigning: how to raise the limit). The core takes that text as
-`oversizeHint`, so it stays free of provider details.
-
-**The R2 key.** One bucket-scoped key per instance, created scriptably with
-the Cloudflare API (`templates/instance/README.md`, "Large LFS objects"):
-`POST /accounts/{account_id}/tokens` with an account-owned token whose policy
-allows the permission groups "Workers R2 Storage Bucket Item Read"
-(`6a018a9f2fc74eb6b293b0c548f38b39`) and "Workers R2 Storage Bucket Item
-Write" (`2efd5506f9c8494dacb1fa10a3e7d5b6`) on the single resource
-`com.cloudflare.edge.r2.bucket.<account_id>_default_<bucket>` (`default` is
-the jurisdiction). R2 derives the S3 credentials from it: the access key id is
-the token id, the secret access key is the hex SHA-256 of the token value.
-Both go into Worker secrets (`wrangler secret put R2_ACCESS_KEY_ID`,
-`R2_SECRET_ACCESS_KEY`); the dashboard alternative is an R2 "Account API
-token" with "Object Read & Write" on that bucket. The key can read and write
-objects of this bucket only, which is what the Worker's binding can do anyway,
-and it never leaves the Worker; clients only get URLs signed for one key, one
-length and one SHA-256, valid for an hour. A keyless mode (the CLI as a
-git-lfs custom transfer agent uploading parts through the Worker into an R2
-multipart upload via the binding) is planned as a follow-up (roadmap M2).
+**Presigned R2.** With `R2_ACCOUNT_ID` (or `R2_S3_ENDPOINT`), `R2_BUCKET`,
+`R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` the Worker wraps the binding with
+`withPresigner(R2Storage, S3Storage)`: the binding does all I/O, the S3
+adapter only signs LFS URLs on the same keys. Verify re-hashes through the
+binding (`crypto.DigestStream`, ~2 s CPU for 600 MB). Without the key LFS is
+proxied, and the size error carries `oversizeHint`. The key is an account API
+token with "Workers R2 Storage Bucket Item Read/Write"
+(`6a018a9f2fc74eb6b293b0c548f38b39`, `2efd5506f9c8494dacb1fa10a3e7d5b6`) on
+`com.cloudflare.edge.r2.bucket.<account_id>_default_<bucket>`; access key id =
+token id, secret = hex SHA-256 of the token value.
 
 **Local S3 test environment:** MinIO is discontinued. versitygw (posix
 backend) is used; it passed the full suite, as did RustFS. SeaweedFS lists in

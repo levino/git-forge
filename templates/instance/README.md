@@ -181,63 +181,28 @@ with access.
 
 ## Large LFS objects
 
-By default LFS uploads pass through the Worker, so a single object is limited
-to Cloudflare's request body limit (100 MB on Free and Pro) and
-`MAX_LFS_OBJECT_BYTES` defaults to 100 MiB. For larger objects, let clients
-upload straight to R2 through presigned URLs. This needs an R2 S3 key that
-can only read and write objects in the instance's bucket.
+Without an R2 key, LFS uploads are proxied and limited by the request body
+limit (100 MB on Free/Pro). With a bucket-scoped key, clients upload straight
+to R2 via presigned URLs. Create it (`CF_API_TOKEN` needs "Account API
+Tokens: Edit"):
 
-1. Create the key with the Cloudflare API (scriptable). `CF_API_TOKEN` is a
-   token that may create account API tokens ("Account API Tokens: Edit");
-   it is only needed for this step.
+```sh
+ACCOUNT_ID=<account id>; BUCKET=<bucket_name of BUCKET>
+RESPONSE=$(curl -fsS "https://api.cloudflare.com/client/v4/accounts/$ACCOUNT_ID/tokens" \
+  -H "Authorization: Bearer $CF_API_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"name":"git-forge LFS '"$BUCKET"'","policies":[{"effect":"allow",
+    "permission_groups":[{"id":"6a018a9f2fc74eb6b293b0c548f38b39"},{"id":"2efd5506f9c8494dacb1fa10a3e7d5b6"}],
+    "resources":{"com.cloudflare.edge.r2.bucket.'"$ACCOUNT_ID"'_default_'"$BUCKET"'":"*"}}]}')
+echo "$RESPONSE" | jq -r .result.id | npx wrangler@4 secret put R2_ACCESS_KEY_ID
+echo "$RESPONSE" | jq -r .result.value | tr -d '\n' | sha256sum | cut -d' ' -f1 | npx wrangler@4 secret put R2_SECRET_ACCESS_KEY
+```
 
-   ```sh
-   ACCOUNT_ID=<your account id>
-   BUCKET=<bucket_name of the BUCKET binding>
-   RESPONSE=$(curl -fsS "https://api.cloudflare.com/client/v4/accounts/$ACCOUNT_ID/tokens" \
-     -H "Authorization: Bearer $CF_API_TOKEN" -H 'Content-Type: application/json' \
-     -d '{
-       "name": "git-forge LFS '"$BUCKET"'",
-       "policies": [{
-         "effect": "allow",
-         "permission_groups": [
-           { "id": "6a018a9f2fc74eb6b293b0c548f38b39" },
-           { "id": "2efd5506f9c8494dacb1fa10a3e7d5b6" }
-         ],
-         "resources": { "com.cloudflare.edge.r2.bucket.'"$ACCOUNT_ID"'_default_'"$BUCKET"'": "*" }
-       }]
-     }')
-   echo "$RESPONSE" | jq -r .result.id | npx wrangler@4 secret put R2_ACCESS_KEY_ID
-   echo "$RESPONSE" | jq -r .result.value | tr -d '\n' | sha256sum | cut -d' ' -f1 | npx wrangler@4 secret put R2_SECRET_ACCESS_KEY
-   ```
-
-   The two permission groups are "Workers R2 Storage Bucket Item Read" and
-   "Workers R2 Storage Bucket Item Write"; the resource limits them to this
-   bucket (for a bucket in a jurisdiction, replace `default` by the
-   jurisdiction, e.g. `eu`). R2's S3 access key id is the token's `id`, the
-   secret access key is the SHA-256 (hex) of the token's `value`. The value is
-   shown only in this response.
-
-   In the dashboard instead: **R2 → Manage API tokens → Create Account API
-   token**, permission "Object Read & Write", apply to the instance's bucket
-   only, then put the shown access key id and secret access key with
-   `npx wrangler@4 secret put R2_ACCESS_KEY_ID` and
-   `npx wrangler@4 secret put R2_SECRET_ACCESS_KEY`.
-2. Set the vars in `[vars]` of `wrangler.toml` (or as plain variables in the
-   dashboard):
-
-   | Name | Value |
-   |---|---|
-   | `R2_ACCOUNT_ID` | Your Cloudflare account id (32 hex characters). |
-   | `R2_BUCKET` | The `bucket_name` of the `BUCKET` binding. |
-   | `R2_S3_ENDPOINT` | Optional, only for a bucket in a jurisdiction, e.g. `https://<account>.eu.r2.cloudflarestorage.com`. |
-   | `MAX_LFS_OBJECT_BYTES` | Raise as needed, up to R2's single-upload limit of about 5 GiB, e.g. `1073741824` for 1 GiB. |
-
-The batch API then hands out URLs signed for exactly the announced size and
-SHA-256, and the forge re-hashes every uploaded object before it counts as
-present. Setting only some of the four values stops the Worker with a
-configuration error. Without the key, an object above the limit is refused
-with a message that points the admin to this section.
+Dashboard alternative: **R2 → Manage API tokens → Create Account API token**,
+"Object Read & Write" on this bucket only, then put the shown access key id
+and secret with the same two `wrangler secret put` commands. Then set the
+vars `R2_ACCOUNT_ID`, `R2_BUCKET` and raise `MAX_LFS_OBJECT_BYTES` (up to
+about 5 GiB). For a jurisdiction bucket replace `default` by it and set
+`R2_S3_ENDPOINT`.
 
 ## Imports
 

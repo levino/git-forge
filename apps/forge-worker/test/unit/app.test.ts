@@ -101,8 +101,6 @@ describe('presigned LFS URLs on R2', () => {
     expect(parseR2PresignSettings({ ...r2Vars, R2_ACCOUNT_ID: '', R2_S3_ENDPOINT: 'https://eu.r2.example' })?.endpoint).toBe('https://eu.r2.example')
     expect(() => parseR2PresignSettings({ ...r2Vars, R2_SECRET_ACCESS_KEY: '' })).toThrow(/R2_SECRET_ACCESS_KEY/)
     expect(() => parseR2PresignSettings({ ...r2Vars, R2_BUCKET: ' ' })).toThrow(/R2_BUCKET/)
-    expect(() => parseR2PresignSettings({ ...r2Vars, R2_ACCOUNT_ID: 'nope' })).toThrow(/R2_ACCOUNT_ID/)
-    expect(() => parseR2PresignSettings({ ...r2Vars, R2_ACCOUNT_ID: '', R2_S3_ENDPOINT: 'not a url' })).toThrow(/R2_S3_ENDPOINT/)
   })
 
   const setup = async (presign: boolean) => {

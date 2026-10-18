@@ -472,20 +472,69 @@ GitHub mirror are needed.
 ### Distribution, new instances and updates
 
 An instance is a stateless deployment; its operators choose the version. The
-deployable unit is a release artifact, not an npm package:
+deployable unit is a release artifact, not an npm package, and instances never
+update themselves.
 
-- **Release artifact:** on every release tag, CI builds the worker as a single
-  bundled ES module file plus the D1 migrations and publishes them with
-  SHA-256 checksums as release assets.
-- **Instance template** (`templates/instance`, later its own repository
-  `git-forge-instance`): only `wrangler.jsonc` (own bindings, domain, vars) and
-  `git-forge.json` (`version`, `sha256`). No `package.json`, no lockfile.
-- **Build:** the Cloudflare build step downloads the pinned bundle, verifies the
-  checksum, applies D1 migrations and runs `wrangler deploy`.
-- **First install:** fork/use the template or click "Deploy to Cloudflare",
-  connect the repository to Cloudflare.
+- **Release artifact** (`release/build-release.sh`, run by
+  `.github/workflows/release.yml` on every `v*` tag with `GITHUB_TOKEN` only):
+  - `git-forge-worker.mjs`: `apps/forge-worker` bundled by
+    `wrangler deploy --dry-run` into one ES module without imports, uploaded by
+    instances with `no_bundle: true`, so workerd runs exactly the released
+    bytes.
+  - `migrations.tar.gz`: the D1 migrations (`migrations/*.sql`, currently from
+    `packages/accounts`), built reproducibly.
+  - `SHA256SUMS`: `sha256sum` output for both files.
+  - The release notes contain the `git-forge.json` to pin. Tags with a `-` are
+    pre-releases.
+- **One pin covers everything:** `git-forge.json` holds `version` and the
+  SHA-256 of `SHA256SUMS`. The build script checks `SHA256SUMS` against the
+  pin and then every asset against `SHA256SUMS`; any mismatch fails the build
+  before anything is deployed. Asset names and the archive layout are a durable
+  format: later releases may add assets, never rename or remove these.
+- **Instance template** (`templates/instance`, synced to its own repository
+  `levino/git-forge-instance`): `wrangler.jsonc` (own bindings, vars, domain,
+  `main: dist/git-forge-worker.mjs`, `build.command: sh build.sh`,
+  `migrations_dir: dist/migrations`), `git-forge.json`, `build.sh` (POSIX sh,
+  `curl`, `sha256sum`, `tar`), `deploy.sh`, `renovate.json`, a checksum
+  workflow and a README. No `package.json`, no lockfile, nothing from npm in the Worker.
+  `GIT_FORGE_RELEASE_URL` overrides the download base for mirrors and tests.
+- **Resources only from config:** every Cloudflare resource is declared in
+  `wrangler.jsonc` and created by Wrangler, never by hand. D1 and R2 have a
+  name and no id, so the first `wrangler deploy` provisions them (automatic
+  resource provisioning) and later commands find them by name. Cron, vars,
+  routes (custom domains) and the required `ADMIN_TOKEN` secret
+  (`secrets.required`) are declared there as well; only the secret's value is
+  set outside the repository.
+- **Build on Cloudflare (Workers Builds):** build command `sh build.sh`,
+  deploy command `sh deploy.sh`. `deploy.sh` applies the D1 migrations before
+  the upload so new code never sees an old schema; migrations are therefore
+  additive and compatible with the previous release, which keeps a rollback
+  (reverting the pin) safe. When the database does not exist yet (first
+  deploy), it deploys first, which provisions the database, and migrates right
+  after. `build.sh` is idempotent, so the second run through `build.command` is
+  a no-op.
+- **First install:** "Deploy to Cloudflare" button (copies the template and
+  connects Workers Builds) or "Use this template" plus importing the
+  repository in the dashboard. The first admin is the `ADMIN_TOKEN` secret
+  until accounts are wired up.
 - **Update:** bump `version` and `sha256` in `git-forge.json` and push.
-  Renovate can propose the bump via a regex manager on releases.
+  Renovate proposes the version via a regex manager on the GitHub releases of
+  `levino/git-forge`. It cannot compute the checksum (the `github-releases`
+  datasource's digest is the tag's commit, not a file hash, and
+  `postUpgradeTasks` exist only for self-hosted Renovate), so the template's
+  `Pin checksum` workflow fills in `sha256` on Renovate's pull requests from
+  the new `SHA256SUMS` and runs `build.sh`; a human reviews and merges.
+- **Template sync:** `.github/workflows/sync-instance-template.yml` copies
+  `templates/instance` to `levino/git-forge-instance` with `git-forge.json`
+  pinned to the latest release, after every release and on template changes on
+  `main`. It pushes with the deploy key `INSTANCE_TEMPLATE_DEPLOY_KEY` and is
+  skipped while that secret is missing. The copy in this repository carries an
+  all-zero placeholder pin that fails the build on purpose.
+- **Test:** `release/test/instance.test.ts` builds a release, runs the
+  template's `build.sh` against it via `file://`, checks that wrong pins and
+  tampered assets are refused, checks the order of `deploy.sh` with a stub
+  Wrangler, applies the migrations and does a push/clone
+  smoke test against `wrangler dev` running the template.
 - The same bundle may additionally be published to npm later; the template
   never depends on it.
 

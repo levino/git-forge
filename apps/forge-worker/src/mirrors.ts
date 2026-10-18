@@ -48,6 +48,7 @@ export const runMirrorSync = async (context: MirrorContext, repo: RepositoryName
     storage: context.storage,
     repo,
     remote: config.remote,
+    strategy: 'auto',
     ...(context.fetch ? { fetch: context.fetch } : {}),
     ...(getAuthorization ? { getAuthorization } : {}),
   })
@@ -56,7 +57,7 @@ export const runMirrorSync = async (context: MirrorContext, repo: RepositoryName
 export type ScheduledMirrorRun = {
   readonly repository: string
   readonly remote: string
-  readonly status: SyncResult['status']
+  readonly status: SyncResult['status'] | 'queued'
   readonly updates: number
   readonly alarms: number
   readonly error?: string

@@ -67,6 +67,9 @@ const mirrorStatus = async (instance: Instance, remote = 'origin') => {
 }
 
 const syncedByCron = async (instance: Instance) => {
+  await expect
+    .poll(async () => (await mirrorStatus(instance))?.lastRun, { timeout: 30_000, interval: 250 })
+    .toSatisfy((run: { finishedAt?: string } | undefined) => run === undefined || run.finishedAt !== undefined)
   const before = (await mirrorStatus(instance))?.lastRun?.startedAt
   await cron(instance)
   await expect
@@ -219,5 +222,23 @@ describe('three federated instances on wrangler dev', () => {
       expect(status?.alarms).toContainEqual(expect.objectContaining({ kind: 'history-rewritten', ref: 'refs/heads/main', archivedAs: archived![0] }))
       expect(sha256((await lfsObject(instance, sha256(secondBlob)))!)).toBe(sha256(secondBlob))
     }
+  })
+
+  it('propagates a push from alpha through beta to gamma by notifications alone', async () => {
+    const { alpha, beta, gamma } = instances
+    const cronTicks = () => Object.values(instances).map((instance) => instance.dev.output().split('"event":"scheduled"').length).join()
+    await expectStatus(api(beta, 'POST', '/api/admin/instances', { issuer: alpha.url }), 200)
+    await expectStatus(api(gamma, 'POST', '/api/admin/instances', { issuer: beta.url }), 200)
+    const ticks = cronTicks()
+    writeFileSync(join(source, 'notified.md'), 'arrives without cron\n')
+    await lfsGit(source, ['add', '-A'])
+    await lfsGit(source, ['commit', '-q', '-m', 'notified'])
+    await lfsGit(source, ['push', '-q', withToken(alpha), 'main'])
+    const tip = (await git(source, ['rev-parse', 'main'])).trim()
+    for (const instance of [beta, gamma]) {
+      await expect.poll(async () => (await lsRemote(instance)).get('refs/upstream/origin/heads/main'), { timeout: 45_000, interval: 500 }).toBe(tip)
+    }
+    expect(cronTicks()).toBe(ticks)
+    expect(alpha.dev.output()).toContain('POST /api/federation/subscriptions')
   })
 })

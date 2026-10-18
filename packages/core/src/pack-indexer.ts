@@ -108,6 +108,7 @@ export type IndexedPack = {
   readonly lfsPointers: readonly LfsObjectSpec[]
   readonly thinBases: number
   readonly deferred: number
+  indexBytes(): Uint8Array
   typeOf(id: ObjectId): ObjectType | null
   read(id: ObjectId): Promise<GitObject | null>
   finalize(storage: Storage, packKey: (name: string) => string): Promise<string | null>
@@ -399,6 +400,7 @@ export const indexPack = async (cursor: ByteCursor, options: IndexPackOptions): 
     lfsPointers: [...lfs.values()],
     thinBases: discovered.filter((id) => idIndex.getBytes(id) === -1).length,
     deferred,
+    indexBytes: () => writeIndexColumns({ count: entries.count, ids: entries.ids, offsets: entries.offsets, crcs: entries.crcs }, checksum),
     typeOf: (id) => {
       const index = idIndex.get(id)
       return index === -1 ? null : typeFromCode(entries.types[index] as number)

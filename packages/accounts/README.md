@@ -89,6 +89,7 @@ triggers with `RAISE`), all of which D1, Durable Objects and libSQL support.
 | `apps`, `app_repositories` | machine accounts with explicit per-repository roles |
 | `tokens` | personal and app tokens: SHA-256 hash only, display prefix, scopes, optional repository restriction, expiry, last use, revocation |
 | `trusted_instances`, `instance_repositories` | federation trust: issuer (+ optional pinned key thumbprint) may read specific repositories |
+| `mirror_subscriptions` | upstream side: which trusted instance wants a notification for which repository at which callback URL (migration `0004`) |
 | `audit_log` | append-only; `UPDATE` and `DELETE` are rejected by triggers |
 | `branch_protection_rules` | one rule per `(repository, pattern)`: force push, deletion, admin enforcement, push restriction, pull request reviews, status checks (migration `0002`) |
 | `branch_protection_push_allowances` | who may push when a rule restricts pushes: `user`, `team`, `app` (by ID) or `role` (minimum role) |
@@ -353,3 +354,38 @@ to 64 KiB, and refetches at most every 30 s on unknown key ids.
 Trust is managed with `store.trustInstance({ issuer, pinnedThumbprint? })`,
 `store.grantInstanceRepository(issuer, repositoryId)`,
 `store.revokeInstanceRepository`, and `store.distrustInstance`.
+
+`verifyFederationToken(token, options, subject, validate)` holds the checks
+above for any federation JWT; instance tokens and mirror notifications only
+differ in `sub` and in their claim validation.
+
+## Mirror notifications
+
+A mirror learns about new upstream data through a signed notification
+instead of polling. Design and flow: `docs/design.md` §4.
+
+- **Subscribing:** the mirror sends `POST /api/federation/subscriptions`
+  with an instance token (`Authorization: Bearer`, audience = upstream) and
+  `{ "repository": "owner/name", "callback": "<url>" }`.
+  `authorizeSubscription(principal, repository, callback)` requires the
+  scope `git:read`, the repository in the token's `repositories` claim and a
+  callback below the subscriber's own issuer URL (`validateCallback`), so an
+  upstream can never be made to POST to third-party hosts. Only trusted
+  issuers can present a valid token at all. `DELETE` on the same path with
+  the same body unsubscribes. Stored with `store.subscribeMirror`,
+  `store.unsubscribeMirror`, read with `store.mirrorSubscriptions(repository)`,
+  which skips distrusted issuers.
+- **Notifying:** `mintMirrorNotification({ key, issuer, audience, repository, refs })`
+  signs an EdDSA JWT with `sub: "mirror-notification"`, at most 300 s
+  lifetime, the repository and its ref state (`refs/heads/*`, `refs/tags/*`,
+  `refs/upstream/*`; omitted above `MAX_NOTIFIED_REFS` = 1000 refs). It
+  carries no content. It is POSTed as `application/jwt` to the callback.
+- **Verifying:** `verifyMirrorNotification(token, { audience, trust, jwks })`
+  runs the same checks as instance tokens (trusted issuer before any network
+  access, audience, lifetime, key, pinned thumbprint, signature). Because
+  the subjects differ, a notification is never accepted as an access token
+  and an access token never as a notification.
+- **Matching:** `isMirrorOf(mirrorUrl, issuer, repository)` decides whether a
+  local mirror follows the notifying repository;
+  `parseUpstreamUrl(url, issuer?)` splits a mirror URL into issuer and
+  `owner/name` (an issuer with a path, e.g. `https://host/forge`, works).

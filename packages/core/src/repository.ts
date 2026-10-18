@@ -1,6 +1,6 @@
 import { fromHex, fromUtf8, readAll, toHex, utf8 } from './bytes.ts'
 import { ByteCursor } from './cursor.ts'
-import { applyDelta } from './delta.ts'
+import { applyDelta, deltaResultSize } from './delta.ts'
 import { type ObjectId, ZERO_ID } from './hash.ts'
 import { ByteLru } from './lru.ts'
 import { type GitObject, OFS_DELTA, parseTag, REF_DELTA, typeFromCode } from './objects.ts'
@@ -88,6 +88,8 @@ export const writeServerInfo = async (storage: Storage, repo: RepositoryName, st
   await putText(storage, headKey(repo), `ref: ${state.head}\n`)
 }
 
+const BLOB_CODE = 3
+
 export type LoadedPack = {
   readonly name: string
   readonly key: string
@@ -164,6 +166,27 @@ export class ObjectDatabase {
     for (const name of await this.packNames()) packs.push({ name, key: packKey(this.#repo, name), index: await this.#loadIndex(name) })
     this.#packs = packs
     return packs
+  }
+
+  async smallBlobs(name: string, maxSize: number): Promise<{ readonly id: ObjectId; readonly data: Uint8Array }[]> {
+    const pack = (await this.packs()).find((candidate) => candidate.name === name)
+    if (!pack) throw new Error(`pack ${name} is not registered`)
+    const blobs: { id: ObjectId; data: Uint8Array }[] = []
+    for (const position of pack.index.positionsByOffset) {
+      const offset = pack.index.offsetAt(position)
+      const head = await this.#range(pack, offset, 32)
+      const header = readEntryHeader(head, 0)
+      let candidate = header.typeCode === BLOB_CODE && header.size <= maxSize
+      if ((header.typeCode === OFS_DELTA || header.typeCode === REF_DELTA) && header.size <= 2 * maxSize + 64) {
+        const raw = await this.readRaw(pack, offset)
+        const start = header.headerLength + (header.typeCode === OFS_DELTA ? readOfsDeltaOffset(raw, header.headerLength).length : 20)
+        candidate = deltaResultSize(inflateExact(raw.subarray(start), header.size)) <= maxSize
+      }
+      if (!candidate) continue
+      const object = await this.#readAt(pack, offset)
+      if (object.type === 'blob') blobs.push({ id: pack.index.idAt(position), data: object.data })
+    }
+    return blobs
   }
 
   invalidate(): void {
@@ -298,6 +321,10 @@ export class ObjectDatabase {
     const pack = await this.index(new ByteCursor(stream), options)
     return { name: await this.storePack(pack), pack }
   }
+}
+
+export const registerPacks = async (storage: Storage, repo: RepositoryName, added: readonly string[]): Promise<void> => {
+  await new ObjectDatabase(storage, repo).updatePackList((names) => [...names, ...added.filter((name) => !names.includes(name))])
 }
 
 export const isZero = (id: ObjectId): boolean => id === ZERO_ID

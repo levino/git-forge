@@ -24,6 +24,7 @@ export const nodeForge = async (overrides: Partial<ForgeOptions> = {}): Promise<
     maxLfsObjectBytes: DEFAULT_MAX_LFS_OBJECT_BYTES,
     mirrorIntervalMinutes: 30,
     allowInsecureFederation: false,
+    deepCheckDays: 0,
     ...overrides,
   })
   return { ...forge, storage }

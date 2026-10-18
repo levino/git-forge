@@ -1,18 +1,25 @@
-import { fromUtf8, readAll, toHex, utf8 } from './bytes.ts'
+import { equalBytes, fromUtf8, readAll, toHex, utf8 } from './bytes.ts'
+import { fetchDumb, lsRefsDumb } from './dumb-client.ts'
 import { type ObjectId, sha1 } from './hash.ts'
 import { connectRemote, type Protocol, type ProtocolPreference } from './fetch-client.ts'
 import { LFS_POINTER_MAX_SIZE, parseLfsPointer } from './lfs.ts'
 import { type LfsMissing, type LfsMirrorResult, type LfsPointer, mirrorLfsObjects } from './lfs-mirror.ts'
+import { copyPack, listRemotePacks } from './pack-copy.ts'
+import { ByteCursor } from './cursor.ts'
+import { indexPack } from './pack-indexer.ts'
 import { isSubmodule, isTreeMode, parseCommit, parseTag, parseTree, references } from './objects.ts'
 import { archiveName, UPSTREAM_PREFIX, validRefName } from './receive-pack.ts'
-import type { AuthorizationSupplier, FetchFunction, RemoteRef } from './remote.ts'
+import type { AuthorizationSupplier, FetchFunction, Remote, RemoteRef } from './remote.ts'
 import {
   isValidName,
   ObjectDatabase,
+  packKey,
   readRefs,
   type RefsState,
+  registerPacks,
   type RepositoryName,
   repositoryPrefix,
+  stagingPrefix,
   writeRefs,
   writeServerInfo,
 } from './repository.ts'
@@ -53,6 +60,14 @@ export type MirrorRun = {
   readonly error?: string
 }
 
+export type DeepCheck = {
+  readonly at: string
+  readonly ok: boolean
+  readonly packs: number
+  readonly objects: number
+  readonly problems: readonly string[]
+}
+
 export type MirrorStatus = {
   readonly version: 1
   readonly remote: string
@@ -64,6 +79,7 @@ export type MirrorStatus = {
   readonly upstreamChecksum?: string
   readonly lfsPending: readonly LfsMissing[]
   readonly alarms: readonly MirrorAlarm[]
+  readonly lastDeepCheck?: DeepCheck
 }
 
 export type RefUpdate = {
@@ -389,8 +405,11 @@ const isComplete = async (odb: ObjectDatabase, tips: readonly ObjectId[], connec
   }
 }
 
+export type SyncStrategy = 'fetch' | 'copy' | 'auto'
+
 export type SyncOptions = {
   readonly storage: Storage
+  readonly strategy?: SyncStrategy
   readonly repo: RepositoryName
   readonly remote?: string
   readonly fetch?: FetchFunction
@@ -402,7 +421,9 @@ export type SyncOptions = {
 
 export type SyncResult = {
   readonly status: 'ok' | 'detached' | 'failed'
+  readonly strategy?: Exclude<SyncStrategy, 'auto'>
   readonly protocol?: Protocol
+  readonly copied?: { readonly packs: number; readonly bytes: number; readonly reused: number }
   readonly fetched: { readonly objects: number; readonly packs: readonly string[]; readonly rounds: number }
   readonly scanned: { readonly objects: number; readonly commits: number }
   readonly updates: readonly RefUpdate[]
@@ -444,44 +465,58 @@ export const syncMirror = async (options: SyncOptions): Promise<SyncResult> => {
   const previous = await readMirrorStatus(storage, repo, remoteName)
   let result = emptyResult('failed')
   try {
-    const remote = {
+    const remote: Remote = {
       url: config.url,
       ...(options.fetch ? { fetch: options.fetch } : {}),
       ...(options.getAuthorization ? { getAuthorization: options.getAuthorization } : {}),
     }
-    const connection = await connectRemote(remote, options.protocol ?? 'auto')
-    result = { ...result, protocol: connection.protocol }
-    const source = `refs/${config.namespace}`
-    const listing = await connection.listRefs([`${source}heads/`, `${source}tags/`])
-    const upstream = selectUpstreamRefs(listing.refs, config.namespace, listing.head)
-    const upstreamChecksum = refsChecksum(upstream.refs)
-    result = { ...result, upstreamChecksum, ...(upstream.head ? { upstreamHead: upstream.head } : {}) }
     const local = await readRefs(storage, repo)
     if (!local) throw new Error(`repository ${repo.owner}/${repo.name} not found`)
     const odb = new ObjectDatabase(storage, repo)
-    const localTips = [...new Set(Object.values(local.state.refs))]
-    const connected = await commitClosure(odb, localTips)
-    const newTips = [...new Set(upstream.refs.values())].filter((id) => !connected.has(id))
     const pending = previous?.lfsPending ?? []
-    if (newTips.length > 0 && !(await isComplete(odb, newTips, connected))) {
-      const fetched = await connection.fetchObjects(odb, {
-        wants: newTips,
-        haveTips: localTips,
-        isConnected: (id) => connected.has(id),
-        ...(options.maxPackBytes !== undefined ? { maxPackBytes: options.maxPackBytes } : {}),
-      })
-      result = { ...result, fetched }
+    let upstream: UpstreamRefs
+    let protocol: Protocol
+    let lfsFound: readonly LfsPointer[]
+    const remotePacks = options.strategy === 'copy' || options.strategy === 'auto' ? await listRemotePacks(remote) : null
+    if (options.strategy === 'copy' || remotePacks !== null) {
+      const copied = await copyUpstreamPacks(remote, storage, repo, odb, config, remotePacks ?? [], options.maxPackBytes)
+      upstream = copied.upstream
+      protocol = 'dumb'
+      lfsFound = copied.lfs
+      result = { ...result, strategy: 'copy', protocol, fetched: copied.fetched, copied: copied.copied }
+    } else {
+      const connection = await connectRemote(remote, options.protocol ?? 'auto')
+      protocol = connection.protocol
+      result = { ...result, strategy: 'fetch', protocol }
+      const source = `refs/${config.namespace}`
+      const listing = await connection.listRefs([`${source}heads/`, `${source}tags/`])
+      upstream = selectUpstreamRefs(listing.refs, config.namespace, listing.head)
+      const localTips = [...new Set(Object.values(local.state.refs))]
+      const connected = await commitClosure(odb, localTips)
+      const newTips = [...new Set(upstream.refs.values())].filter((id) => !connected.has(id))
+      if (newTips.length > 0 && !(await isComplete(odb, newTips, connected))) {
+        const fetched = await connection.fetchObjects(odb, {
+          wants: newTips,
+          haveTips: localTips,
+          isConnected: (id) => connected.has(id),
+          ...(options.maxPackBytes !== undefined ? { maxPackBytes: options.maxPackBytes } : {}),
+        })
+        result = { ...result, fetched }
+      }
+      const scan = await scanNewObjects(odb, newTips, connected, config.lfs)
+      result = { ...result, scanned: { objects: scan.objects, commits: scan.commits } }
+      lfsFound = scan.lfs
     }
-    const scan = await scanNewObjects(odb, newTips, connected, config.lfs)
-    result = { ...result, scanned: { objects: scan.objects, commits: scan.commits } }
+    const upstreamChecksum = refsChecksum(upstream.refs)
+    result = { ...result, upstreamChecksum, ...(upstream.head ? { upstreamHead: upstream.head } : {}) }
     let lfsPending: readonly LfsMissing[] = pending
-    if (config.lfs && (scan.lfs.length > 0 || pending.length > 0)) {
+    if (config.lfs && (lfsFound.length > 0 || pending.length > 0)) {
       const lfs = await mirrorLfsObjects({
         storage,
         repo,
         remote,
         ...(config.lfsUrl ? { endpoint: config.lfsUrl } : {}),
-        objects: [...pending, ...scan.lfs].map(({ oid, size }) => ({ oid, size })),
+        objects: [...pending, ...lfsFound].map(({ oid, size }) => ({ oid, size })),
       })
       lfsPending = lfs.missing
       result = { ...result, lfs }
@@ -493,7 +528,7 @@ export const syncMirror = async (options: SyncOptions): Promise<SyncResult> => {
       ...status,
       lastRun: { startedAt, finishedAt, ok: true },
       lastSuccessAt: finishedAt,
-      protocol: connection.protocol,
+      protocol,
       ...(upstream.head ? { upstreamHead: upstream.head } : {}),
       upstreamRefs: upstream.refs.size,
       upstreamChecksum,
@@ -534,4 +569,90 @@ const updateUpstreamRefs = async (
     }
   }
   throw new Error('could not update refs')
+}
+
+type CopyOutcome = {
+  readonly upstream: UpstreamRefs
+  readonly fetched: SyncResult['fetched']
+  readonly copied: NonNullable<SyncResult['copied']>
+  readonly lfs: readonly LfsPointer[]
+}
+
+const copyUpstreamPacks = async (
+  remote: Remote,
+  storage: Storage,
+  repo: RepositoryName,
+  odb: ObjectDatabase,
+  config: MirrorConfig,
+  remotePacks: readonly string[],
+  maxPackBytes: number | undefined,
+): Promise<CopyOutcome> => {
+  const listing = await lsRefsDumb(remote)
+  const upstream = selectUpstreamRefs(listing.refs, config.namespace, listing.head)
+  const local = new Set(await odb.packNames())
+  const missing = remotePacks.filter((name) => !local.has(name))
+  const copied = []
+  for (const name of missing) {
+    copied.push(await copyPack({ remote, storage, repo, name, ...(maxPackBytes !== undefined ? { maxPackBytes } : {}) }))
+  }
+  const names = copied.map((pack) => pack.name)
+  if (names.length > 0) await registerPacks(storage, repo, names)
+  odb.invalidate()
+  const absent: ObjectId[] = []
+  for (const tip of new Set(upstream.refs.values())) if (!(await odb.has(tip))) absent.push(tip)
+  const packs = [...names]
+  let objects = copied.reduce((sum, pack) => sum + pack.objects, 0)
+  if (absent.length > 0) {
+    const fallback = await fetchDumb(remote, odb, { wants: absent, isConnected: () => false, ...(maxPackBytes !== undefined ? { maxPackBytes } : {}) })
+    packs.push(...fallback.packs)
+    objects += fallback.objects
+  }
+  const lfs: LfsPointer[] = []
+  if (config.lfs) {
+    for (const name of packs) {
+      for (const blob of await odb.smallBlobs(name, LFS_POINTER_MAX_SIZE)) {
+        const pointer = parseLfsPointer(blob.data)
+        if (pointer) lfs.push(pointer)
+      }
+    }
+  }
+  return {
+    upstream,
+    fetched: { objects, packs, rounds: 0 },
+    copied: { packs: copied.filter((pack) => !pack.reused).length, bytes: copied.reduce((sum, pack) => sum + (pack.reused ? 0 : pack.bytes), 0), reused: copied.filter((pack) => pack.reused).length },
+    lfs,
+  }
+}
+
+export const deepCheckRepository = async (storage: Storage, repo: RepositoryName, at = new Date()): Promise<DeepCheck> => {
+  const odb = new ObjectDatabase(storage, repo)
+  const problems: string[] = []
+  const names = await odb.packNames()
+  let objects = 0
+  for (const name of names) {
+    try {
+      const index = await storage.get(packKey(repo, name.replace(/\.pack$/, '.idx')))
+      const pack = await storage.get(packKey(repo, name))
+      if (!index || !pack) throw new Error('pack or index is missing')
+      const indexed = await indexPack(new ByteCursor(pack.body), { storage, stagingPrefix: stagingPrefix(repo), objects: odb, checkReferences: false })
+      if (!equalBytes(indexed.indexBytes(), await readAll(index.body))) problems.push(`${name}: index differs from the recomputed index`)
+      objects += indexed.objectCount
+    } catch (error) {
+      problems.push(`${name}: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+  const refs = await readRefs(storage, repo)
+  try {
+    await scanNewObjects(odb, [...new Set(Object.values(refs?.state.refs ?? {}))], new Set(), false)
+  } catch (error) {
+    if (!(error instanceof MissingObjectError)) throw error
+    problems.push(error.message)
+  }
+  return { at: at.toISOString(), ok: problems.length === 0, packs: names.length, objects, problems }
+}
+
+export const deepCheckMirror = async (storage: Storage, repo: RepositoryName, remote = DEFAULT_REMOTE, now = new Date()): Promise<DeepCheck> => {
+  const check = await deepCheckRepository(storage, repo, now)
+  await saveStatus(storage, repo, remote, (status) => ({ ...status, lastDeepCheck: check }))
+  return check
 }

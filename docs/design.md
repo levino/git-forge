@@ -106,8 +106,9 @@ example on a Raspberry Pi.
   live read-only under `refs/upstream/{remote}/heads/*` and
   `refs/upstream/{remote}/tags/*`. The repository's own branches are
   independent of them.
-- **Sync per repository:** `auto` (scheduled) or `manual`. **Detach** stops
-  syncing; the repository and its `refs/upstream/*` stay as they are.
+- **Sync per repository:** `auto` (push-notified, with a daily safety net)
+  or `manual`. **Detach** stops syncing; the repository and its
+  `refs/upstream/*` stay as they are.
 - **Only Git content and LFS objects are synced.** Issues, pull requests,
   discussions and reviews live in the instance database only and are never
   synced between instances.
@@ -121,6 +122,49 @@ example on a Raspberry Pi.
   detached and continue as the primary.
 - **Mirror overview:** each instance shows for its repositories which mirrors
   it knows of (§10).
+
+### Push notifications
+
+Typical instances see new data once a month or every half year; it must
+reach every mirror quickly, and an idle instance must cost nothing but
+storage. Mirrors therefore do not poll; the upstream tells them.
+
+- **Subscription:** when a mirror with `auth: instance` is configured, the
+  mirror registers with the upstream through an authenticated federation call
+  (`POST /api/federation/subscriptions`, instance JWT, body `repository` and
+  `callback`). The upstream stores it in `mirror_subscriptions` only for
+  issuers in its trust table, only for repositories named in the token and
+  only for callbacks below the subscriber's own issuer URL, and only if the
+  subscriber may read the repository (instance grant or public). Trust is
+  mutual: the mirror needs the upstream in its own trust table to verify
+  notifications. The daily safety
+  net renews the subscription (idempotent), so a lost one heals itself.
+- **Notification:** after a push that updated at least one ref, the upstream
+  enqueues one job per subscriber. The job signs a JWT with the instance key
+  (`sub: mirror-notification`, ≤ 300 s, `aud` = mirror) carrying the
+  repository and its current ref state, no content, and POSTs it to the
+  callback. Nothing is sent inline in the push request. Failed deliveries
+  are retried with exponential backoff (10 s, 20 s, … capped at 1 h); a
+  `404`/`410` ends them. A retry signs the state at send time, so it never
+  delivers stale refs.
+- **Receiving:** the mirror verifies the JWT against the upstream's JWKS
+  (trust table, optional pinned thumbprint), checks that the addressed local
+  mirror follows exactly that upstream repository, and answers `202` after
+  enqueueing a sync job — the sync never runs inside the webhook request.
+  Notifications are hints, not data: the mirror still fetches refs and packs
+  itself and verifies them. They are idempotent: if the announced refs
+  (mapped through the mirror's namespace) have the checksum of the last
+  successful sync, the answer is `200 up-to-date` and nothing is enqueued;
+  a duplicate that slips through runs a sync that changes nothing.
+- **Chains:** a sync that moved refs notifies the mirror's own subscribers,
+  so a mirror of a mirror (gamma ← beta ← alpha) follows without any cron.
+- **Safety net:** the scheduled handler runs once a day (cron `17 3 * * *`,
+  `MIRROR_INTERVAL_MINUTES` = 1440 in `wrangler.jsonc`) and enqueues a sync
+  and a subscription renewal for every auto mirror whose last run is older
+  than the interval. Without a job queue (e.g. a Node deployment without
+  one) there are no notifications and the scheduled handler syncs inline, so
+  a shorter interval is the right choice there. The rare deep check (§7) is enqueued every
+  `MIRROR_DEEP_CHECK_DAYS` (default 30, 0 = off).
 
 ### Instance-to-instance access (federation)
 
@@ -361,9 +405,41 @@ and SHA-256). Reject pushes that reference missing LFS objects. LFS bytes never
 pass through the function on upload.
 
 **Mirror sync** — per run (stateless, may abort at any time): obtain a JWT
-(§4), fetch upstream refs, fetch missing objects via `upload-pack`, update
+(§4), read the upstream's refs, bring in the missing objects, update
 `refs/upstream/{remote}/*` (archive and alarm on rewrites), fetch missing LFS
-objects via the Batch API and verify their hashes.
+objects via the Batch API and verify their hashes. Two strategies:
+
+- **Copy-only** (default between instances, `strategy: 'copy'`): upstream
+  packs are already indexed and immutable, so the mirror reads the dumb-HTTP
+  files (`info/refs`, `HEAD`, `objects/info/packs`) and copies every pack it
+  lacks, with its `.idx`, as is under the same name. Checks per pack, all
+  cheap: the index's own SHA-1 trailer, its size against the object count,
+  fan-out, strictly sorted ids and offsets inside the pack; while streaming
+  the pack, the `PACK` header, version, object count equal to the index and
+  the trailer SHA-1 over the whole pack equal to the index's pack checksum.
+  The last 20 bytes are held back until the trailer is verified, so a
+  tampered or truncated pack makes the storage `put` fail and nothing is
+  stored. Then every upstream tip must be found in an index (otherwise the
+  missing objects are fetched object by object as with any dumb remote).
+  LFS pointers are found among the small blobs of the copied packs (entry
+  headers and delta result sizes, inflating only candidates ≤ 1 KiB). No
+  object is re-hashed and no index is recomputed, so the mirror's packs are
+  byte-identical to the upstream's, down the whole chain. Copy-only trusts
+  the upstream for connectivity; integrity of the bytes is verified.
+- **Fetch** (any Git server, `strategy: 'fetch'`): negotiate with protocol v2
+  `upload-pack` (or walk dumb HTTP), parse and index the received pack, check
+  connectivity from the new tips. Used for non-forge upstreams such as
+  GitHub.
+- **Deep check** (`deepCheckRepository`, on demand via
+  `POST /api/repos/{owner}/{repo}/mirrors/{remote}/verify` or scheduled
+  rarely): inflate and hash every object of every pack, recompute every
+  index and compare it byte for byte, and walk every ref to its last object.
+  The result is stored in the mirror status (`lastDeepCheck`). It costs
+  roughly a full re-index (§12), which is why it is not part of every sync.
+
+Force pushes and deletions upstream are archived under `refs/archive/*` and
+raise alarms with either strategy; storage stays append-only (packs are only
+added, `objects/info/packs` only grows).
 
 **Media URLs (LFS onto a CDN without CI)** — two read-only endpoints that a
 pull-zone CDN (e.g. Bunny) can sit in front of. The CDN pulls on a cache miss;
@@ -512,9 +588,17 @@ database.
 | Object storage | R2 | any S3 with conditional writes: Hetzner, B2, OVH, IONOS, self-hosted (versitygw, RustFS); a local directory |
 | Database | D1 / SQLite in Durable Objects | libSQL/Turso, SQLite file (Pi) |
 | Per-repository consistency | Durable Object | conditional writes (S3 CAS), single-writer process |
-| Scheduling, jobs | Cron Triggers, Queues | `Deno.cron`, systemd timers, job table |
+| Scheduling, jobs | Cron Triggers, Queues (Workflows for long jobs) | `Deno.cron`, systemd timers, job table, in-process queue |
 | Email | Mail service via API | SMTP |
 | Compute for CI (later) | Containers | Fly Machines, Hetzner Cloud, … |
+
+**Jobs:** the core defines `JobQueue<J>` (`enqueue(job, { delaySeconds })`),
+`jobRetryDelaySeconds` (10 s doubling, capped at 1 h) and `PermanentJobError`.
+`@git-forge/cloudflare` implements it on Queues (`QueueJobs`, `consumeJobs`
+with `max_batch_size: 1`, so every job is its own invocation with its own
+CPU budget); `createMemoryJobQueue` runs jobs in process (Node, tests). Jobs
+are plain JSON (repository, remote, callback), so a retry re-reads current
+state instead of replaying old data.
 
 **SQLite as the common dialect:** the database layer writes SQLite SQL only,
 so it runs on D1, Durable Objects, libSQL and a file on a Pi.
@@ -561,9 +645,87 @@ in `packages/s3/README.md`.
 | Mirror: Backblaze B2 | $0.70 |
 | Mirror: Hetzner Object Storage | €4.99 |
 | CDN: Bunny | ~$1 |
-| Mirror compute (free tiers) | €0 |
+| Mirror compute (Workers Free, see below) | €0 |
 | Pi with 1 TB SSD | one-off ~€150 |
 | **Total** | **~€13–15** |
+
+### Idle cost and a mirror on the Workers Free plan
+
+An idle instance runs nothing: no polling, one cron invocation per day, and
+otherwise only storage is billed. A pure mirror (no own pushes, no web
+traffic) does per upstream push: one notification request, one sync job and
+one delivery job per own subscriber. Measured with
+`pnpm --filter forge-worker bench:mirror` (details and full table in
+`apps/forge-worker/README.md`), median of three runs, Node 22 on the
+development container:
+
+| per invocation (CPU ms) | small repo (0.9 MiB pack) | medium repo (14.1 MiB pack) |
+|---|---|---|
+| notification request, in-process replay | 1.4–2.1 | 1.3–1.5 |
+| copy-only sync of a 1-commit push, replay | 4.6–5.4 | 4.1–5.6 |
+| delivering a notification, replay | 0.6–0.7 | 0.6–3.1 |
+| same three through Node's HTTP stack | 4.5, 8.7–14.0, 1.7–2.0 | 6.4–10.0, 8.9–13.3, — |
+| copy-only sync of the initial push, replay | 21.8 | 157 |
+| re-indexing sync (fetch strategy) for comparison | 195 | 858 |
+| deep check | 606 | 2 624 |
+
+The replay rows run the same code in process against a storage snapshot and
+recorded upstream responses; they exclude Node's JavaScript HTTP client and
+server (workerd's `fetch` is native) and SQLite (D1 is remote I/O, not CPU).
+The "Node's HTTP stack" rows are upper bounds.
+
+Cloudflare limits that matter (as published on 18 Oct 2026):
+Workers Free allows 10 ms CPU per invocation, 100 000 requests per day and
+50 subrequests per invocation, where calls to R2, KV and D1 count as
+subrequests ([limits](https://developers.cloudflare.com/workers/platform/limits/),
+[pricing](https://developers.cloudflare.com/workers/platform/pricing/));
+`limits.cpu_ms` cannot be raised. Cron Triggers are available (5 per
+account). Queues are available on Free with 10 000 operations per day and a
+fixed 24 h retention ([Queues pricing](https://developers.cloudflare.com/queues/platform/pricing/),
+[limits](https://developers.cloudflare.com/queues/platform/limits/)); a
+message costs about three operations (write, read, delete), so ~3 000 jobs a
+day. Workflows are available on Free with 10 ms CPU per step, 3 000 steps
+per day and 100 concurrent instances
+([Workflows limits](https://developers.cloudflare.com/workflows/reference/limits/)).
+D1 Free: 5 M rows read and 100 000 written per day; R2: 10 GB-month,
+1 M Class A and 10 M Class B operations per month free.
+
+Result:
+
+- **Steady state fits.** The typical case — a small push once a month —
+  costs a mirror about 1.5 ms (notification) + 5 ms (sync) + under 1 ms per
+  downstream subscriber, each in its own invocation, i.e. at roughly half the
+  10 ms budget, with ~30 subrequests (≈ 25 storage operations + 5 fetches)
+  per sync. Queues, Cron and D1 stay far below their free allowances.
+- **Bulk data does not fit.** Verifying bytes in JavaScript costs 6.3 ms per
+  MiB of pack (SHA-1) and 7.7 ms per MiB of LFS object (SHA-256), so the
+  initial copy of a repository, any push with more than about 0.8 MiB of new
+  pack data and any LFS object above about 1 MiB exceed 10 ms. The deep
+  check and the re-indexing sync never fit.
+
+Changes that would make a pure mirror fit more often (proposed, not built):
+
+1. **Native streaming hashes.** Pass a hash factory to `verifyingPackStream`
+   and the LFS verification; on Workers back it with `crypto.DigestStream`
+   (non-standard, native, [docs](https://developers.cloudflare.com/workers/runtime-apis/web-crypto/)),
+   elsewhere with the JavaScript implementation. Native SHA-1/SHA-256 cost
+   1.8/1.3 ms per MiB in the same measurement, so packs of ~3 MiB and LFS
+   objects of ~5 MiB would fit.
+2. **One unit of bytes per invocation.** Enqueue one job per pack and per
+   LFS object and update the refs in a final job once all packs are
+   present, so the budget applies per pack instead of per push. Anything
+   larger than the budget stays pending (like `lfsPending`) for a paid
+   instance or a Node/Pi mirror to fetch; the mirror on Free then only
+   follows.
+3. **Ranged object reads.** `ObjectDatabase` loads a whole pack to read one
+   object (fast-forward check, peeling refs). Reading single entries by range
+   keeps a sync cheap when a ref moves onto an object inside a large old
+   pack (e.g. a tag on an old commit).
+4. **Seed on a larger runtime.** The initial copy (and the deep check) runs
+   once on Workers Paid, a Node instance or a Pi; afterwards the same bucket
+   is served by a Free-plan worker. The bucket layout is the same everywhere.
+5. Deploy a Free-plan instance without `limits.cpu_ms` in `wrangler.jsonc`
+   (the key is rejected there).
 
 ## 13. Open questions
 

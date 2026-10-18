@@ -45,8 +45,11 @@ discussions.
 
 - [x] Sync Git content into `refs/upstream/{remote}/heads|tags/*`
 - [x] Sync LFS objects
-- [x] Per-repository auto/manual sync, detach; auto sync from the Cron Trigger
+- [x] Per-repository auto/manual sync, detach
 - [x] Archive and alarm on rewritten upstream history (tested across three instances)
+- [x] Push-notified sync: signed notifications (EdDSA JWT, ref state only) to subscribed mirrors, subscriptions via authenticated federation call, job queue with exponential backoff, idempotent duplicates, chains of mirrors; the Cron Trigger is only a daily safety net
+- [x] Copy-only sync: copy upstream packs and indexes as stored (byte-identical), verify index consistency and pack trailer while streaming; deep check (re-hash everything, recompute indexes, walk refs) on demand or every 30 days
+- [ ] Native streaming hashes (`crypto.DigestStream`) and one job per pack / LFS object, so a mirror fits the Workers Free plan beyond small pushes (see design §12)
 - [ ] Mirror overview
 
 ## M5 — Deployment and adapters

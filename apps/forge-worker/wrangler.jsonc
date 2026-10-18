@@ -11,12 +11,34 @@
   },
   "triggers": {
     "crons": [
-      "*/30 * * * *"
+      "17 3 * * *"
     ]
   },
   "queues": {
-    "producers": [{ "binding": "IMPORTS", "queue": "git-forge-imports" }],
-    "consumers": [{ "queue": "git-forge-imports", "max_batch_size": 1, "max_batch_timeout": 1, "max_retries": 3 }]
+    "producers": [
+      {
+        "binding": "IMPORTS",
+        "queue": "git-forge-imports"
+      },
+      {
+        "binding": "JOBS",
+        "queue": "git-forge-jobs"
+      }
+    ],
+    "consumers": [
+      {
+        "queue": "git-forge-imports",
+        "max_batch_size": 1,
+        "max_batch_timeout": 1,
+        "max_retries": 3
+      },
+      {
+        "queue": "git-forge-jobs",
+        "max_batch_size": 1,
+        "max_batch_timeout": 1,
+        "max_retries": 10
+      }
+    ]
   },
   "r2_buckets": [
     {
@@ -33,7 +55,8 @@
   ],
   "vars": {
     "MAX_LFS_OBJECT_BYTES": "104857600",
-    "MIRROR_INTERVAL_MINUTES": "30"
+    "MIRROR_INTERVAL_MINUTES": "1440",
+    "MIRROR_DEEP_CHECK_DAYS": "30"
   },
   "secrets": {
     "required": [
@@ -44,8 +67,30 @@
     "alpha": {
       "name": "git-forge-alpha",
       "queues": {
-        "producers": [{ "binding": "IMPORTS", "queue": "git-forge-alpha-imports" }],
-        "consumers": [{ "queue": "git-forge-alpha-imports", "max_batch_size": 1, "max_batch_timeout": 1, "max_retries": 3 }]
+        "producers": [
+          {
+            "binding": "IMPORTS",
+            "queue": "git-forge-alpha-imports"
+          },
+          {
+            "binding": "JOBS",
+            "queue": "git-forge-alpha-jobs"
+          }
+        ],
+        "consumers": [
+          {
+            "queue": "git-forge-alpha-imports",
+            "max_batch_size": 1,
+            "max_batch_timeout": 1,
+            "max_retries": 3
+          },
+          {
+            "queue": "git-forge-alpha-jobs",
+            "max_batch_size": 1,
+            "max_batch_timeout": 1,
+            "max_retries": 10
+          }
+        ]
       },
       "r2_buckets": [
         {
@@ -62,7 +107,8 @@
       ],
       "vars": {
         "MAX_LFS_OBJECT_BYTES": "104857600",
-        "MIRROR_INTERVAL_MINUTES": "30"
+        "MIRROR_INTERVAL_MINUTES": "1440",
+        "MIRROR_DEEP_CHECK_DAYS": "30"
       },
       "secrets": {
         "required": [
@@ -73,8 +119,30 @@
     "beta": {
       "name": "git-forge-beta",
       "queues": {
-        "producers": [{ "binding": "IMPORTS", "queue": "git-forge-beta-imports" }],
-        "consumers": [{ "queue": "git-forge-beta-imports", "max_batch_size": 1, "max_batch_timeout": 1, "max_retries": 3 }]
+        "producers": [
+          {
+            "binding": "IMPORTS",
+            "queue": "git-forge-beta-imports"
+          },
+          {
+            "binding": "JOBS",
+            "queue": "git-forge-beta-jobs"
+          }
+        ],
+        "consumers": [
+          {
+            "queue": "git-forge-beta-imports",
+            "max_batch_size": 1,
+            "max_batch_timeout": 1,
+            "max_retries": 3
+          },
+          {
+            "queue": "git-forge-beta-jobs",
+            "max_batch_size": 1,
+            "max_batch_timeout": 1,
+            "max_retries": 10
+          }
+        ]
       },
       "r2_buckets": [
         {
@@ -91,7 +159,8 @@
       ],
       "vars": {
         "MAX_LFS_OBJECT_BYTES": "104857600",
-        "MIRROR_INTERVAL_MINUTES": "30"
+        "MIRROR_INTERVAL_MINUTES": "1440",
+        "MIRROR_DEEP_CHECK_DAYS": "30"
       },
       "secrets": {
         "required": [
@@ -102,8 +171,30 @@
     "gamma": {
       "name": "git-forge-gamma",
       "queues": {
-        "producers": [{ "binding": "IMPORTS", "queue": "git-forge-gamma-imports" }],
-        "consumers": [{ "queue": "git-forge-gamma-imports", "max_batch_size": 1, "max_batch_timeout": 1, "max_retries": 3 }]
+        "producers": [
+          {
+            "binding": "IMPORTS",
+            "queue": "git-forge-gamma-imports"
+          },
+          {
+            "binding": "JOBS",
+            "queue": "git-forge-gamma-jobs"
+          }
+        ],
+        "consumers": [
+          {
+            "queue": "git-forge-gamma-imports",
+            "max_batch_size": 1,
+            "max_batch_timeout": 1,
+            "max_retries": 3
+          },
+          {
+            "queue": "git-forge-gamma-jobs",
+            "max_batch_size": 1,
+            "max_batch_timeout": 1,
+            "max_retries": 10
+          }
+        ]
       },
       "r2_buckets": [
         {
@@ -120,7 +211,8 @@
       ],
       "vars": {
         "MAX_LFS_OBJECT_BYTES": "104857600",
-        "MIRROR_INTERVAL_MINUTES": "30"
+        "MIRROR_INTERVAL_MINUTES": "1440",
+        "MIRROR_DEEP_CHECK_DAYS": "30"
       },
       "secrets": {
         "required": [

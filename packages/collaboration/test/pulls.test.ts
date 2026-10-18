@@ -18,6 +18,7 @@ import {
   listReviewComments,
   listReviews,
   mergePull,
+  pullCodeOwners,
   pullCommits,
   pullDiff,
   pullFiles,
@@ -175,6 +176,50 @@ describe('pull requests', () => {
     await createStatus(bob, fixture.rev('feature'), { state: 'success', context: 'ci' })
     expect(await getPull(bob, 1)).toMatchObject({ mergeableState: 'clean', blockers: [] })
     expect((await mergePull(bob, 1)).merged).toBe(true)
+  })
+
+  it('requires approvals from code owners of every owned file and requests reviews from them', async () => {
+    const fixture = await createFixture({
+      history: (dir) => {
+        writeFile(dir, 'README.md', lines(20))
+        writeFile(dir, '.github/CODEOWNERS', '*.md @alice\n/docs/ @acme/writers\nsrc/ bob@example.org\n')
+        commitAll(dir, 'initial')
+        git(dir, ['checkout', '-q', '-b', 'feature'])
+        writeFile(dir, 'README.md', lines(20).replace('line 15\n', 'feature line\n'))
+        writeFile(dir, 'docs/guide/new.txt', 'new docs\n')
+        commitAll(dir, 'feature: docs')
+        git(dir, ['checkout', '-q', 'main'])
+      },
+    })
+    const { store } = fixture
+    const organization = await store.createOrganization({ login: 'acme' })
+    await store.setOrganizationMember(organization.id, fixture.users.bob.id, 'member')
+    const team = await store.createTeam(organization.id, { slug: 'writers', name: 'Writers' })
+    await store.setTeamMember(team.id, fixture.users.bob.id)
+    const repository = (await store.findRepository('alice', 'site'))!
+    await store.setBranchProtection(repository.id, 'main', {
+      ...DEFAULT_PROTECTION,
+      requiredPullRequestReviews: { requiredApprovingReviewCount: 1, dismissStaleReviews: false, requireCodeOwnerReviews: true, requireLastPushApproval: false },
+    })
+    const carol = await fixture.scope('carol')
+    const bob = await fixture.scope('bob')
+    const created = await createPull(carol, { title: 'Docs', head: 'feature', base: 'main' })
+    expect(created.requestedReviewers.map((user) => user.login)).toEqual(['alice'])
+    expect((await listEvents(bob, 1)).map((event) => event.event)).toEqual(['review_requested'])
+    expect(await getPull(bob, 1)).toMatchObject({ mergeableState: 'blocked', blockers: ['1 approving review is required', 'review from a code owner is required'] })
+    await createReview(bob, 1, { event: 'APPROVE' })
+    expect(await pullCodeOwners(bob, 1)).toEqual({
+      file: '.github/CODEOWNERS',
+      errors: [],
+      approved: false,
+      files: [
+        { path: 'README.md', owners: ['@alice'], approvedBy: [] },
+        { path: 'docs/guide/new.txt', owners: ['@acme/writers'], approvedBy: ['bob'] },
+      ],
+    })
+    expect((await getPull(bob, 1)).blockers).toEqual(['review from a code owner is required'])
+    await createReview(await fixture.scope('alice'), 1, { event: 'APPROVE' })
+    expect(await getPull(bob, 1)).toMatchObject({ mergeableState: 'clean', blockers: [] })
   })
 
   it('anchors line comments to commit, path and line and validates them against the diff', async () => {

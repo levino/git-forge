@@ -30,7 +30,7 @@ export type Actor = {
 
 export type AccountsDirectory = Pick<
   AccountsStore,
-  'grantsFor' | 'isInstanceAdmin' | 'teamIdsFor' | 'branchProtectionRules' | 'findAccount' | 'findRepository' | 'authenticateToken'
+  'grantsFor' | 'isInstanceAdmin' | 'teamIdsFor' | 'findTeam' | 'branchProtectionRules' | 'findAccount' | 'findRepository' | 'authenticateToken'
 >
 
 export type BranchUpdate = {

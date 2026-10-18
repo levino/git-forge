@@ -505,7 +505,7 @@ export const deleteReviewComment = async (scope: Scope, id: number): Promise<voi
   await scope.db.run(sql('UPDATE review_comments SET deleted_at = ?, updated_at = ? WHERE id = ?', scope.now(), scope.now(), id))
 }
 
-const accessOf = async (scope: Scope, ref: ActorRef): Promise<ReturnType<typeof resolveAccess>> => {
+export const accessOf = async (scope: Scope, ref: ActorRef): Promise<ReturnType<typeof resolveAccess>> => {
   if (ref.kind === 'app') {
     const principal: Principal = { kind: 'app', id: ref.id, slug: '', limits: { ceiling: 'admin', repositoryIds: null }, tokenId: '' }
     return resolveAccess(principal, scope.repository, await scope.accounts.grantsFor(principal, scope.repository))

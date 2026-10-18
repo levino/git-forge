@@ -1,4 +1,5 @@
 import {
+  atLeast,
   evaluateBranchUpdate,
   first,
   protectionActor,
@@ -24,7 +25,6 @@ import {
   parseCommit,
   readCommitDetails,
   type RefsState,
-  resolvePath,
   type Signature,
   signatureAt,
   storeObjects,
@@ -68,7 +68,8 @@ import {
   updateIssueStatements,
 } from './issues.ts'
 import { PULL_SELECT, type PullRow, pullRow, recentCommits, refreshPull } from './pull-rows.ts'
-import { listRequestedReviewers, reviewEvidence } from './reviews.ts'
+import { type CodeOwnerReview, evaluateCodeOwners, requestCodeOwners } from './owners.ts'
+import { accessOf, reviewEvidence } from './reviews.ts'
 import { checkStates } from './statuses.ts'
 
 export type PullRequest = Issue & {
@@ -191,6 +192,7 @@ export const createPull = async (scope: Scope, input: PullInput): Promise<PullDe
   const row = (await first<PullRow>(scope.db, sql(`${PULL_SELECT} WHERE i.node_id = ?`, node)))!
   const references = await crossReferenceStatements(scope, { number: row.number, isPull: true }, row.body, author)
   if (references.length > 0) await scope.db.batch(references)
+  await requestPullCodeOwners(scope, row)
   const created = await getPull(scope, row.number)
   await emitActivity(scope, { kind: 'pull_request', action: 'opened', number: created.number, actor: author })
   return created
@@ -273,30 +275,43 @@ const mergeability = async (scope: Scope, row: PullRow, base: ObjectId, head: Ob
   return result
 }
 
-const CODEOWNERS_PATHS = [['.github', 'CODEOWNERS'], ['CODEOWNERS'], ['docs', 'CODEOWNERS']]
-
-const hasCodeOwners = async (scope: Scope, commit: ObjectId): Promise<boolean> => {
-  const odb = objectDatabase(scope)
-  for (const path of CODEOWNERS_PATHS) if (await resolvePath(odb, commit, path)) return true
-  return false
-}
-
 const protectionProblems = async (scope: Scope, row: PullRow, base: ObjectId, head: ObjectId, upToDate: boolean, newId: ObjectId): Promise<readonly string[]> => {
   const rules = await scope.accounts.branchProtectionRules(scope.repository.id)
   const rule = selectProtectionRule(rules, branchName(row.base_ref))
   if (!rule) return []
   const reviews = await reviewEvidence(scope, row)
+  const odb = objectDatabase(scope)
+  const codeOwners = rule.requiredPullRequestReviews?.requireCodeOwnerReviews
+    ? (await evaluateCodeOwners(scope, odb, base, (await mergeBases(odb, base, head))[0] ?? null, head, reviews.approvers)).approved
+    : true
   const evidence: UpdateEvidence = {
     via: 'pull-request',
     approvals: reviews.approvals,
     changesRequested: reviews.changesRequested,
-    codeOwnerApproved: !(await hasCodeOwners(scope, base)),
+    codeOwnerApproved: codeOwners,
     lastPushApproved: reviews.lastPushApproved,
     upToDate,
     statuses: await checkStates(scope.db, scope.repository.id, head),
   }
   const actor = await protectionActor(scope.accounts, scope.actor.principal, scope.repository, scope.actor.access)
   return evaluateBranchUpdate(rule, actor, { ref: row.base_ref, oldId: base, newId, fastForward: true }, evidence)
+}
+
+const mayReview = async (scope: Scope, ref: ActorRef): Promise<boolean> => atLeast(await accessOf(scope, ref), 'write')
+
+export const requestPullCodeOwners = async (scope: Scope, row: PullRow): Promise<string[]> => {
+  if (row.draft === 1 || row.state !== 'open' || row.merged_at !== null) return []
+  const odb = objectDatabase(scope)
+  const mergeBase = (await mergeBases(odb, row.base_sha, row.head_sha))[0] ?? null
+  return requestCodeOwners(scope, row, odb, row.base_sha, mergeBase, row.head_sha, mayReview)
+}
+
+export const pullCodeOwners = async (scope: Scope, number: number): Promise<CodeOwnerReview> => {
+  const { row, state } = await loadFresh(scope, number)
+  const odb = objectDatabase(scope)
+  const base = row.merged_at === null && row.state === 'open' ? (branchTip(state, row.base_ref) ?? row.base_sha) : row.base_sha
+  const reviews = await reviewEvidence(scope, row)
+  return evaluateCodeOwners(scope, odb, base, (await mergeBases(odb, base, row.head_sha))[0] ?? null, row.head_sha, reviews.approvers)
 }
 
 const PLACEHOLDER = 'f'.repeat(40)
@@ -373,6 +388,10 @@ export const updatePull = async (scope: Scope, number: number, input: PullUpdate
   const actor = scope.actor.ref!
   await emitIssueChanges(scope, before!, after, actor)
   if (before!.draft !== after.draft) await emitActivity(scope, { kind: 'pull_request', action: after.draft ? 'converted_to_draft' : 'ready_for_review', number, actor })
+  if (before!.draft && !after.draft) {
+    await requestPullCodeOwners(scope, await pullRow(scope, number))
+    return getPull(scope, number)
+  }
   if (before!.baseRef !== after.baseRef) await emitActivity(scope, { kind: 'pull_request', action: 'edited', number, actor, changes: { base: { ref: { from: before!.baseRef } } } })
   return after
 }
@@ -531,7 +550,10 @@ export const handlePushedRefs = async (scope: Scope, updates: readonly PushedRef
       )),
     )
   }
-  for (const row of affected) await refreshPull(scope, row, state, pusher)
+  for (const row of affected) {
+    const refreshed = await refreshPull(scope, row, state, pusher)
+    if (refreshed.head_sha !== row.head_sha) await requestPullCodeOwners(scope, refreshed)
+  }
   const main = `refs/heads/${defaultBranch(state)}`
   const odb = objectDatabase(scope)
   for (const update of branches) {

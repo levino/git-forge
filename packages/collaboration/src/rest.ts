@@ -19,7 +19,8 @@ import {
   updateDiscussion,
   updateDiscussionComment,
 } from './discussions.ts'
-import { currentRefs, defaultBranch } from './git.ts'
+import { currentRefs, defaultBranch, objectDatabase, resolveCommitish } from './git.ts'
+import { loadCodeOwners } from './owners.ts'
 import {
   changeAssignees,
   changeIssueLabels,
@@ -49,7 +50,7 @@ import {
   updateLabel,
   updateMilestone,
 } from './issues.ts'
-import { createPull, getPull, listPulls, mergePull, pullCommits, pullDiff, pullFiles, updatePull } from './pulls.ts'
+import { createPull, getPull, listPulls, mergePull, pullCodeOwners, pullCommits, pullDiff, pullFiles, updatePull } from './pulls.ts'
 import {
   categoryJson,
   checkRunJson,
@@ -484,6 +485,27 @@ const routes: readonly Route[] = [
         ...(context.body.draft !== undefined ? { draft: context.body.draft } : {}),
       })
       return pullResponse(context, int(context.params[0]!))
+    },
+  },
+  {
+    method: 'GET',
+    pattern: /^\/pulls\/(\d+)\/codeowners$/,
+    handler: async (context) => {
+      const review = await pullCodeOwners(context.scope, int(context.params[0]!))
+      return json(200, { path: review.file, approved: review.approved, files: review.files.map((file) => ({ filename: file.path, owners: file.owners, approved_by: file.approvedBy })) })
+    },
+  },
+  {
+    method: 'GET',
+    pattern: /^\/codeowners\/errors$/,
+    handler: async (context) => {
+      const ref = context.url.searchParams.get('ref') ?? 'HEAD'
+      const commit = await resolveCommitish(context.scope, ref)
+      if (!commit) throw new CollaborationError(404, `No commit found for the ref ${ref}`)
+      const codeowners = await loadCodeOwners(objectDatabase(context.scope), commit)
+      if (!codeowners) throw new CollaborationError(404, 'Not Found')
+      const lines = codeowners.errors.map((error) => ({ line: error.line, column: 1, kind: 'Invalid pattern or owner', message: error.message, path: codeowners.path }))
+      return json(200, { errors: lines })
     },
   },
   { method: 'GET', pattern: /^\/pulls\/(\d+)\/commits$/, handler: async (context) => sliced(context, await pullCommits(context.scope, int(context.params[0]!)), (commit) => commitJson(context.urls, context.scope.repository, commit)) },

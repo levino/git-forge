@@ -134,7 +134,7 @@ Design: [design.md §17](design.md#17-collaboration).
 - [x] Discussions: categories, threads, answers
 - [x] REST API under `/api/v3` with GitHub-compatible shapes, wired into the Worker
 - [ ] Pull requests from forks
-- [ ] CODEOWNERS parsing for `require_code_owner_reviews`
+- [x] CODEOWNERS parsing for `require_code_owner_reviews` (owners of every changed file must approve, user owners are requested as reviewers)
 - [ ] Rename detection in merges (renames are reported as conflicts today)
 - [ ] In-browser conflict resolution
 - [ ] Reactions, search (FTS5), notifications

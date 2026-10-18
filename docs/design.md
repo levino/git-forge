@@ -1564,8 +1564,12 @@ Issues, pull requests, reviews, commit statuses, check runs and discussions
   receive-pack, with approvals from reviewers with write access (the
   author's own reviews never count), requested changes, the last-push
   approval, the strict up-to-date flag and the latest statuses and check
-  runs of the head. `require_code_owner_reviews` is only satisfiable while
-  the base has no `CODEOWNERS` file. Required status checks on direct pushes
+  runs of the head. `require_code_owner_reviews` reads `CODEOWNERS` from
+  the base branch (GitHub's locations and syntax; patterns are gitignore
+  patterns, checked against `git check-ignore`, except that a final `/*`
+  does not reach into subdirectories, as GitHub documents) and needs an
+  approval from an owner of every changed owned file; user owners are
+  requested as reviewers automatically. Required status checks on direct pushes
   still see no statuses (the push policy is synchronous); the pull request
   is the path that satisfies them.
 - **Statuses and check runs** are stored here and written by CI (directly
@@ -1582,7 +1586,7 @@ Issues, pull requests, reviews, commit statuses, check runs and discussions
 - **Limits of v1.** Same-repository pull requests only (forks later),
   computing mergeability and file lists loads the involved objects through
   the in-memory object database, no reactions, no search,
-  no CODEOWNERS parsing, no in-browser conflict resolution.
+  no in-browser conflict resolution.
 
 ## 18. Web UI
 

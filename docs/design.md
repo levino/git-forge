@@ -1220,25 +1220,40 @@ adapter. The dispatcher creates one ephemeral JIT runner per queued job, binds
 the job to it and calls the launcher; if the launch fails, the job is unbound
 and stays queued for any registered runner with matching labels.
 
-- **Cloudflare Containers (first backend):** billed per 10 ms, scale to
-  zero, up to 4 vCPU / 12 GiB, rootless Docker-in-Docker (needed later for
+- **Cloudflare Containers (first backend):** billed per 10 ms while
+  running, scale to zero, from `lite` (1/16 vCPU, 256 MiB) up to
+  `standard-4` (4 vCPU, 12 GiB), rootless Docker-in-Docker (needed later for
   `container:` and `services:`). `RunnerContainer` is a Durable Object
   container class, one instance per job (`env.RUNNER.idFromName(jobId)`),
-  that starts its container with the entrypoint `run.sh --jitconfig <config>`
-  and keeps the object alive until the container exits. The image
-  (`runner/Dockerfile`, in the app and in the instance template) is the
-  official `ghcr.io/actions/actions-runner` image plus Git and Node.js. Like
-  every other resource it comes from the wrangler config (`containers`, the
-  `RUNNER` Durable Object binding and its migration, in every environment of
-  `apps/forge-worker`; in the instance template it is a documented opt-in and
-  `ACTIONS` is off by default until image builds in Workers Builds are
-  verified): `wrangler deploy` builds the image and pushes it to the
-  Cloudflare registry, so the deploy environment needs Docker. Durable Object
-  containers cannot pull external images by reference, only digest-pinned
-  images from the Cloudflare registry or a local Dockerfile. The release
-  bundle is built with `wrangler deploy --dry-run --containers-rollout=none`,
-  which skips the image. The runner is ephemeral: it exits after one job, the
-  container stops and is discarded. Deployment is untested so far.
+  that starts its container with the entrypoint `run.sh --jitconfig <config>`.
+  A pending `monitor()` keeps the object in memory for at most 15 minutes, so
+  it also sets the container's inactivity timeout to 6 hours (GitHub's job
+  limit, the platform maximum) and watches the container again when the
+  object is recreated (after a deploy or an eviction); the runner exits after
+  its one job and the container stops then. The image (`runner/Dockerfile`,
+  in the app and in the instance template, 2.4 GB unpacked) is the official
+  `ghcr.io/actions/actions-runner` image plus Git and Node.js. Like every other
+  resource it comes from the wrangler config (`containers`, the `RUNNER`
+  Durable Object binding and its migration, in every environment of
+  `apps/forge-worker`; in the instance template a documented opt-in, because
+  every deploy then builds the image). The default instance type is `basic`
+  (1/4 vCPU, 1 GiB, 4 GB disk): the smallest one whose disk holds the image,
+  enough for the runner and small jobs; an instance picks a bigger one in its
+  `wrangler.toml`.
+  **Image source (decision, 18 Oct 2026):** the instance repository carries
+  the Dockerfile and `wrangler deploy` builds it and pushes it to the account's
+  Cloudflare registry; Workers Builds has Docker, so this works with the
+  Deploy button and without a shell (verified on the production instance).
+  Pre-built images are no alternative today: a `containers` entry with a
+  single `image` accepts the Cloudflare registry, Docker Hub (public images
+  without setup), Amazon ECR and Google Artifact Registry, not `ghcr.io`, so
+  an image published with the release on GHCR cannot be referenced, and
+  publishing to Docker Hub would need a Docker Hub account and credentials in
+  the release workflow. If that becomes worth it (faster deploys), the
+  release publishes `docker.io/<namespace>/git-forge-runner:<version>` and the
+  template references it by tag. The release bundle is built with
+  `wrangler deploy --dry-run --containers-rollout=none`, which skips the
+  image.
 - **Local process:** the integration test copies the downloaded runner into a
   temporary directory per job and starts it with `--jitconfig`. The same works
   on a Pi or against `wrangler dev`.
@@ -1300,7 +1315,9 @@ same functions (`reviewDeployment`).
   `actions/checkout@v4` from a mirror of `github.com/actions/checkout` on
   the forge, a matrix with job outputs through `needs`, a masked secret,
   `wrangler deploy --dry-run`, and the cancellation of a running job.
-- Not deployed on Cloudflare Containers yet.
+- Deployed on Cloudflare Containers on the production instance (image
+  built by Workers Builds, `basic` instances, `ACTIONS_GITHUB_FALLBACK` for
+  `actions/checkout`).
 - Not supported yet: `container:`, `services:`, reusable workflows,
   job-level `concurrency`, `paths` filters, `vars` (configuration
   variables, the context is empty), `hashFiles` server-side, wait timers and

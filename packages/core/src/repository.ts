@@ -118,6 +118,34 @@ export class ObjectDatabase {
     return packs
   }
 
+  async packFiles(name: string): Promise<{ readonly bytes: Uint8Array; readonly index: Uint8Array }> {
+    const index = await this.#storage.get(packKey(this.#repo, name.replace(/\.pack$/, '.idx')))
+    if (!index) throw new Error(`missing index for ${name}`)
+    const pack = (await this.#loadPacks()).find((candidate) => candidate.name === name)
+    if (!pack) throw new Error(`pack ${name} is not registered`)
+    return { bytes: await this.#packBytes(pack), index: await readAll(index.body) }
+  }
+
+  async smallBlobs(name: string, maxSize: number): Promise<{ readonly id: ObjectId; readonly data: Uint8Array }[]> {
+    const pack = (await this.#loadPacks()).find((candidate) => candidate.name === name)
+    if (!pack) throw new Error(`pack ${name} is not registered`)
+    const bytes = await this.#packBytes(pack)
+    const blobs: { id: ObjectId; data: Uint8Array }[] = []
+    for (const { id, offset } of pack.index.entries()) {
+      const header = readEntryHeader(bytes, offset)
+      let candidate = header.typeCode === BLOB_CODE && header.size <= maxSize
+      if (header.typeCode === OFS_DELTA || header.typeCode === REF_DELTA) {
+        const start = offset + header.headerLength
+        const position = header.typeCode === OFS_DELTA ? start + readOfsDeltaOffset(bytes, start).length : start + 20
+        candidate = deltaResultSize(inflateAt(bytes, position).data) <= maxSize
+      }
+      if (!candidate) continue
+      const object = await this.read(id)
+      if (object?.type === 'blob') blobs.push({ id, data: object.data })
+    }
+    return blobs
+  }
+
   invalidate(): void {
     this.#packs = undefined
   }
@@ -187,22 +215,45 @@ export class ObjectDatabase {
     await this.#storage.put(packKey(this.#repo, name.replace(/\.pack$/, '.idx')), index, index.length, {
       contentType: 'application/x-git-packed-objects-toc',
     })
-    for (let attempt = 0; attempt < 20; attempt++) {
-      const stored = await getText(this.#storage, packsKey(this.#repo))
-      const names = (stored?.text ?? '').split('\n').filter((line) => line.startsWith('P '))
-      if (names.includes(`P ${name}`)) break
-      const next = utf8(`${[...names, `P ${name}`].join('\n')}\n\n`)
-      const result = await this.#storage.put(packsKey(this.#repo), next, next.length, {
-        contentType: 'text/plain',
-        ...(stored ? { ifMatch: stored.etag } : { ifNoneMatch: '*' as const }),
-      })
-      if (result.ok) break
-      if (attempt === 19) throw new Error('could not register pack')
-    }
+    await registerPacks(this.#storage, this.#repo, [name])
     for (const object of objects) this.#cache.set(object.id, { type: object.type, data: object.data })
     this.invalidate()
     return name
   }
+}
+
+const BLOB_CODE = 3
+
+const deltaResultSize = (delta: Uint8Array): number => {
+  let position = 0
+  for (let skip = 0; skip < 2; skip++) {
+    let size = 0
+    let shift = 0
+    let byte: number
+    do {
+      byte = delta[position++] ?? 0
+      size += (byte & 0x7f) * 2 ** shift
+      shift += 7
+    } while (byte & 0x80 && position < delta.length)
+    if (skip === 1) return size
+  }
+  return Number.POSITIVE_INFINITY
+}
+
+export const registerPacks = async (storage: Storage, repo: RepositoryName, added: readonly string[]): Promise<void> => {
+  for (let attempt = 0; attempt < 20; attempt++) {
+    const stored = await getText(storage, packsKey(repo))
+    const names = (stored?.text ?? '').split('\n').filter((line) => line.startsWith('P '))
+    const missing = added.filter((name) => !names.includes(`P ${name}`))
+    if (missing.length === 0) return
+    const next = utf8(`${[...names, ...missing.map((name) => `P ${name}`)].join('\n')}\n\n`)
+    const result = await storage.put(packsKey(repo), next, next.length, {
+      contentType: 'text/plain',
+      ...(stored ? { ifMatch: stored.etag } : { ifNoneMatch: '*' as const }),
+    })
+    if (result.ok) return
+  }
+  throw new Error('could not register pack')
 }
 
 export const isZero = (id: ObjectId): boolean => id === ZERO_ID

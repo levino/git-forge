@@ -22,10 +22,12 @@ import {
 import {
   configureMirror,
   createRepository,
+  deepCheckMirror,
   detachMirror,
   type FetchFunction,
   handleContentRequest,
   handleGitRequest,
+  type JobQueue,
   type ImportScheduler,
   ImportRunningError,
   isValidImportUrl,
@@ -44,6 +46,16 @@ import {
   type Storage,
 } from '@git-forge/core'
 import type { ForgeSettings } from './config.ts'
+import {
+  enqueueDueMirrors,
+  enqueueMirrorSetup,
+  type ForgeJob,
+  handleFederationRequest,
+  type MirrorFederation,
+  notifyAfterPush,
+  runJob,
+  syncAndNotify,
+} from './mirror-federation.ts'
 import { MirrorAuthError, type MirrorContext, runMirrorSync, type ScheduledMirrorRun, syncDueMirrors } from './mirrors.ts'
 
 export type ForgeOptions = ForgeSettings & {
@@ -51,12 +63,14 @@ export type ForgeOptions = ForgeSettings & {
   readonly db: Database
   readonly fetch?: FetchFunction
   readonly now?: () => Date
+  readonly jobs?: JobQueue<ForgeJob>
   readonly scheduleImport?: ImportScheduler
 }
 
 export type Forge = {
   readonly fetch: (request: Request) => Promise<Response>
   readonly scheduled: (at?: Date) => Promise<ScheduledMirrorRun[]>
+  readonly runJob: (job: ForgeJob) => Promise<void>
 }
 
 class HttpError extends Error {
@@ -190,6 +204,20 @@ export const createForge = (options: ForgeOptions): Forge => {
     instanceKey: options.instanceKey,
     ...(options.fetch ? { fetch: options.fetch } : {}),
   })
+
+  const federation: MirrorFederation | null =
+    options.publicUrl && options.instanceKey && options.jobs
+      ? {
+          ...mirrorContext(options.publicUrl),
+          issuer: options.publicUrl,
+          instanceKey: options.instanceKey,
+          jwks,
+          jobs: options.jobs,
+          canRead: async (principal, repo) => (await checkRepositoryAccess(store, principal, repo, 'read')).decision === 'allow',
+          deepCheckDays: options.deepCheckDays,
+          now,
+        }
+      : null
 
   const repoName = (params: string[]): RepositoryName => {
     const [owner, name] = params as [string, string]
@@ -387,6 +415,7 @@ export const createForge = (options: ForgeOptions): Forge => {
         ...(lfsUrl !== undefined ? { lfsUrl } : {}),
         ...(auth !== undefined ? { auth } : {}),
       })
+      if (federation) await enqueueMirrorSetup(federation, { owner: repository.owner, name: repository.name }, config)
       return json(201, config)
     } catch (error) {
       if (error instanceof MirrorExistsError) throw new HttpError(409, error.message)
@@ -401,12 +430,19 @@ export const createForge = (options: ForgeOptions): Forge => {
     const config = await readMirrorConfig(storage, repo, params[2]!)
     if (!config) throw new HttpError(404, 'mirror not configured')
     try {
-      const result = await runMirrorSync(mirrorContext(issuerFor(request)), repo, config)
+      const result = federation ? await syncAndNotify(federation, repo, config) : await runMirrorSync(mirrorContext(issuerFor(request)), repo, config)
       return json(result.status === 'failed' ? 502 : 200, result)
     } catch (error) {
       if (error instanceof MirrorAuthError) throw new HttpError(409, error.message)
       throw error
     }
+  }
+
+  const verifyMirrorRoute = async (request: Request, params: string[]): Promise<Response> => {
+    const { repository } = await requireRepositoryAdmin(request, repoName(params))
+    const repo = { owner: repository.owner, name: repository.name }
+    if (!(await readMirrorConfig(storage, repo, params[2]!))) throw new HttpError(404, 'mirror not configured')
+    return json(200, await deepCheckMirror(storage, repo, params[2]!, now()))
   }
 
   const detachMirrorRoute = async (request: Request, params: string[]): Promise<Response> => {
@@ -440,6 +476,7 @@ export const createForge = (options: ForgeOptions): Forge => {
     { method: 'POST', pattern: new RegExp(`^${REPO}/mirrors$`), handler: addMirror },
     { method: 'POST', pattern: new RegExp(`^${REPO}/mirrors/${SEGMENT}/sync$`), handler: syncMirrorRoute },
     { method: 'POST', pattern: new RegExp(`^${REPO}/mirrors/${SEGMENT}/detach$`), handler: detachMirrorRoute },
+    { method: 'POST', pattern: new RegExp(`^${REPO}/mirrors/${SEGMENT}/verify$`), handler: verifyMirrorRoute },
   ]
 
   const route = async (request: Request): Promise<Response | null> => {
@@ -455,6 +492,8 @@ export const createForge = (options: ForgeOptions): Forge => {
   const handle = async (request: Request): Promise<Response> => {
     const wellKnown = options.instanceKey ? handleWellKnownRequest(request, { issuer: issuerFor(request), keys: [options.instanceKey.publicJwk] }) : null
     if (wellKnown) return wellKnown
+    const federated = federation ? await handleFederationRequest(federation, request) : null
+    if (federated) return federated
     const authentication = authenticateOptions(request)
     const protection = await handleBranchProtectionRequest(request, { store, verifyInstance: authentication.verifyInstance })
     if (protection) return protection
@@ -475,12 +514,18 @@ export const createForge = (options: ForgeOptions): Forge => {
       pushPolicy: access.pushPolicy,
       maxRequestBytes: options.maxPushBytes,
       lfs: { maxObjectBytes: options.maxLfsObjectBytes },
+      ...(federation ? { onPush: notifyAfterPush(federation) } : {}),
     })
     return git ?? json(404, { error: 'not found' })
   }
 
   return {
     fetch: handle,
-    scheduled: (at = now()) => syncDueMirrors(mirrorContext(options.publicUrl), at, options.mirrorIntervalMinutes),
+    scheduled: (at = now()) =>
+      federation ? enqueueDueMirrors(federation, at, options.mirrorIntervalMinutes) : syncDueMirrors(mirrorContext(options.publicUrl), at, options.mirrorIntervalMinutes),
+    runJob: async (job) => {
+      if (!federation) throw new Error('jobs need PUBLIC_URL, INSTANCE_KEY and a job queue')
+      await runJob(federation, job)
+    },
   }
 }

@@ -16,7 +16,7 @@ export const OPENID_CONFIGURATION_PATH = '/.well-known/openid-configuration'
 
 export const JWKS_PATH = '/.well-known/jwks.json'
 
-const REPOSITORY_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}\/[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/
+export const REPOSITORY_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}\/[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/
 
 export class FederationError extends Error {}
 
@@ -279,38 +279,58 @@ const verifySignature = async (jwk: PublicJwk, jwt: NonNullable<ReturnType<typeo
   }
 }
 
-export const verifyInstanceToken = async (token: string, options: VerifyInstanceTokenOptions): Promise<VerifyResult> => {
+export type VerifiedFederationToken = {
+  readonly issuer: string
+  readonly payload: Record<string, unknown>
+  readonly iat: number
+  readonly nbf: number
+  readonly exp: number
+  readonly jti: string
+  readonly keyThumbprint: string
+}
+
+export type FederationTokenCheck =
+  | { readonly ok: true; readonly token: VerifiedFederationToken }
+  | { readonly ok: false; readonly reason: VerifyFailure; readonly detail?: string }
+
+const failed = (reason: VerifyFailure, detail?: string): FederationTokenCheck => (detail === undefined ? { ok: false, reason } : { ok: false, reason, detail })
+
+export const verifyFederationToken = async (
+  token: string,
+  options: VerifyInstanceTokenOptions,
+  subject: string,
+  validate: (payload: Record<string, unknown>) => string | null,
+): Promise<FederationTokenCheck> => {
   const jwt = decodeJwt(token)
-  if (!jwt) return fail('malformed')
-  if (jwt.header.alg !== 'EdDSA') return fail('unsupported-algorithm', jwt.header.alg)
-  if (jwt.header.typ !== undefined && jwt.header.typ !== 'JWT') return fail('malformed', 'typ')
+  if (!jwt) return failed('malformed')
+  if (jwt.header.alg !== 'EdDSA') return failed('unsupported-algorithm', jwt.header.alg)
+  if (jwt.header.typ !== undefined && jwt.header.typ !== 'JWT') return failed('malformed', 'typ')
   const kid = jwt.header.kid
-  if (typeof kid !== 'string') return fail('malformed', 'kid')
+  if (typeof kid !== 'string') return failed('malformed', 'kid')
   const claims = jwt.payload
-  if (typeof claims.iss !== 'string') return fail('malformed', 'iss')
+  if (typeof claims.iss !== 'string') return failed('malformed', 'iss')
   let issuer: string
   try {
     issuer = normalizeIssuer(claims.iss)
   } catch {
-    return fail('unknown-issuer', claims.iss)
+    return failed('unknown-issuer', claims.iss)
   }
-  if (issuer !== claims.iss) return fail('unknown-issuer', claims.iss)
+  if (issuer !== claims.iss) return failed('unknown-issuer', claims.iss)
   const trusted = await options.trust(issuer)
-  if (!trusted) return fail('unknown-issuer', issuer)
-  if (!audienceMatches(claims.aud, normalizeIssuer(options.audience))) return fail('wrong-audience')
-  if (claims.sub !== INSTANCE_SUBJECT) return fail('invalid-subject')
-  const { iat, nbf, exp, jti, repositories, scope } = claims
-  if (!isNumericDate(iat) || !isNumericDate(exp) || (nbf !== undefined && !isNumericDate(nbf))) return fail('invalid-claims', 'time')
-  if (typeof jti !== 'string' || typeof scope !== 'string') return fail('invalid-claims', 'jti/scope')
-  if (!Array.isArray(repositories) || !repositories.every((name) => typeof name === 'string' && REPOSITORY_NAME.test(name))) {
-    return fail('invalid-claims', 'repositories')
-  }
+  if (!trusted) return failed('unknown-issuer', issuer)
+  if (!audienceMatches(claims.aud, normalizeIssuer(options.audience))) return failed('wrong-audience')
+  if (claims.sub !== subject) return failed('invalid-subject')
+  const { iat, nbf, exp, jti } = claims
+  if (!isNumericDate(iat) || !isNumericDate(exp) || (nbf !== undefined && !isNumericDate(nbf))) return failed('invalid-claims', 'time')
+  if (typeof jti !== 'string') return failed('invalid-claims', 'jti')
+  const invalid = validate(claims)
+  if (invalid !== null) return failed('invalid-claims', invalid)
   const now = (options.now ?? Date.now()) / 1000
   const skew = options.clockSkewSeconds ?? DEFAULT_CLOCK_SKEW_SECONDS
   const notBefore = nbf ?? iat
-  if (now >= exp + skew) return fail('expired')
-  if (notBefore > now + skew || iat > now + skew) return fail('not-yet-valid')
-  if (exp - Math.min(notBefore, iat) > MAX_INSTANCE_TOKEN_SECONDS) return fail('lifetime-too-long')
+  if (now >= exp + skew) return failed('expired')
+  if (notBefore > now + skew || iat > now + skew) return failed('not-yet-valid')
+  if (exp - Math.min(notBefore, iat) > MAX_INSTANCE_TOKEN_SECONDS) return failed('lifetime-too-long')
   let keys: readonly PublicJwk[]
   let jwk: PublicJwk | undefined
   try {
@@ -321,21 +341,36 @@ export const verifyInstanceToken = async (token: string, options: VerifyInstance
       jwk = keys.find((key) => key.kid === kid)
     }
   } catch (error) {
-    return fail('jwks-unavailable', String((error as Error)?.message ?? error))
+    return failed('jwks-unavailable', String((error as Error)?.message ?? error))
   }
-  if (!jwk) return fail('unknown-key', kid)
+  if (!jwk) return failed('unknown-key', kid)
   const keyThumbprint = await jwkThumbprint(jwk)
-  if (trusted.pinnedThumbprint !== null && trusted.pinnedThumbprint !== keyThumbprint) return fail('pinned-key-mismatch')
-  if (!(await verifySignature(jwk, jwt))) return fail('bad-signature')
+  if (trusted.pinnedThumbprint !== null && trusted.pinnedThumbprint !== keyThumbprint) return failed('pinned-key-mismatch')
+  if (!(await verifySignature(jwk, jwt))) return failed('bad-signature')
+  return { ok: true, token: { issuer, payload: claims, iat, nbf: notBefore as number, exp, jti, keyThumbprint } }
+}
+
+const validateInstanceClaims = (claims: Record<string, unknown>): string | null => {
+  if (typeof claims.scope !== 'string') return 'jti/scope'
+  const { repositories } = claims
+  if (!Array.isArray(repositories) || !repositories.every((name) => typeof name === 'string' && REPOSITORY_NAME.test(name))) return 'repositories'
+  return null
+}
+
+export const verifyInstanceToken = async (token: string, options: VerifyInstanceTokenOptions): Promise<VerifyResult> => {
+  const checked = await verifyFederationToken(token, options, INSTANCE_SUBJECT, validateInstanceClaims)
+  if (!checked.ok) return fail(checked.reason, checked.detail)
+  const { issuer, payload, iat, nbf, exp, jti, keyThumbprint } = checked.token
+  const scope = payload.scope as string
   const verified: InstanceTokenClaims = {
     iss: issuer,
     aud: normalizeIssuer(options.audience),
     sub: INSTANCE_SUBJECT,
     iat,
-    nbf: notBefore,
+    nbf,
     exp,
     jti,
-    repositories: repositories.map((name: string) => name.toLowerCase()),
+    repositories: (payload.repositories as string[]).map((name) => name.toLowerCase()),
     scope,
   }
   return {

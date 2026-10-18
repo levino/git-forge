@@ -95,7 +95,7 @@ Design: [design.md §15](design.md#ci).
 - [ ] Broker and run service (v2 flow), results service, message encryption; then cache, artifacts, OIDC id tokens
 - [ ] External providers: signed `workflow_job` webhook delivery, GitHub App auth (JWT → installation token, manifest flow) and PATs on `/api/v3`, org-level runners; try WarpBuild Enterprise, AWS CodeBuild, RunsOn
 - [ ] `container:` and `services:` (Docker-in-Docker in the runner container)
-- [ ] Web UI for runs and live logs
+- [x] Web UI for runs and live logs (runs, jobs, log polling)
 - [x] "Deploy to Cloudflare" button in the README pointing at the instance template; template wired to accounts (`BOOTSTRAP_TOKEN`)
 - [x] Release artifact (bundled worker + migrations + checksums) and instance template with pinned version
 - [ ] Create `levino/git-forge-instance`, add the deploy key secret `INSTANCE_TEMPLATE_DEPLOY_KEY`, cut the first release

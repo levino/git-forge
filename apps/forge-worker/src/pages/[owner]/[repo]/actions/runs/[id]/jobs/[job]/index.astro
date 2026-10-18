@@ -1,0 +1,63 @@
+---
+import NotFound from '../../../../../../../../components/NotFound.astro'
+import RepoHeader from '../../../../../../../../components/RepoHeader.astro'
+import Layout from '../../../../../../../../layouts/Layout.astro'
+import { durationText, jobState, logText } from '../../../../../../../../ui/actions.ts'
+import { parseNumber } from '../../../../../../../../ui/collaboration.ts'
+import { openRepository, repoUrl } from '../../../../../../../../ui/repository.ts'
+
+const { forge, principal } = Astro.locals
+const repo = await openRepository(forge, principal, Astro.params.owner!, Astro.params.repo!)
+const runId = parseNumber(Astro.params.id)
+const found = repo.kind === 'ok' && runId !== null && Astro.params.job ? await forge.actions.log(repo.name, runId, Astro.params.job) : null
+const state = found ? jobState(found.job) : null
+const log = found ? logText(found.log) : null
+const runHref = repo.kind === 'ok' && runId !== null ? repoUrl(repo.name, 'actions', 'runs', String(runId)) : '/'
+const logHref = found ? `${runHref}/jobs/${encodeURIComponent(found.job.id)}/log.txt` : ''
+---
+
+{
+  repo.kind !== 'ok' || !found || !state || !log ? (
+    <NotFound />
+  ) : (
+    <Layout title={`${found.job.display_name} · ${repo.name.owner}/${repo.name.name}`} wide>
+      <RepoHeader repo={repo} tab="actions" />
+      <p class="mb-2 text-sm">
+        <a class="link" href={runHref}>← Run #{runId}</a>
+      </p>
+      <header class="mb-4 flex flex-wrap items-center gap-3">
+        <h2 class="text-2xl break-words">{found.job.display_name}</h2>
+        <span class:list={['badge', state.badge]} data-job-state>{state.label}</span>
+        <span class="text-sm text-base-content/70">{durationText(found.job.started_at, found.job.completed_at)}</span>
+        <a class="btn btn-xs ml-auto" href={logHref}>Raw log</a>
+      </header>
+      {log.truncated && <p class="text-sm mb-2">Showing the last 2 MiB of the log.</p>}
+      <pre
+        id="job-log"
+        class="bg-base-200 rounded-box p-4 text-xs leading-5 overflow-x-auto whitespace-pre min-h-24"
+        aria-label="Job log"
+        aria-live={state.done ? 'off' : 'polite'}
+        data-log-url={state.done ? undefined : logHref}>{log.text || 'Waiting for the runner…'}</pre>
+      {
+        !state.done && (
+          <script is:inline>
+            const view = document.getElementById('job-log')
+            const url = view?.dataset.logUrl
+            const poll = async () => {
+              if (!view || !url) return
+              const response = await fetch(url, { cache: 'no-store' })
+              if (response.ok) {
+                const atBottom = window.innerHeight + window.scrollY >= document.body.scrollHeight - 40
+                view.textContent = (await response.text()) || 'Waiting for the runner…'
+                if (atBottom) window.scrollTo(0, document.body.scrollHeight)
+                if (response.headers.get('X-Job-Done') === '1') return location.reload()
+              }
+              setTimeout(poll, 3000)
+            }
+            setTimeout(poll, 3000)
+          </script>
+        )
+      }
+    </Layout>
+  )
+}

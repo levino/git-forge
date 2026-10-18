@@ -469,6 +469,9 @@ argument.
 - `test/pages/collaboration.test.ts`: issue, pull request and discussion pages
   against the real collaboration backend (create, comment, close, permission
   refusals, review, line comment, merge, answers).
+- `test/pages/actions.test.ts`: workflow runs and jobs from a real push, the
+  live job log (escape codes removed, polling URL), runs of other
+  repositories hidden.
 - `test/browser/collaboration.spec.ts`: a passkey user comments on a diff line
   through the inline form and opens an issue.
 - `test/browser/login.spec.ts`: an invited user signs up with a passkey

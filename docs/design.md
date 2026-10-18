@@ -1688,6 +1688,20 @@ of these pages: a click on a line's `+` clones a `<template>` form below the
 row with path, line and side filled in; the form posts to the page like every
 other form.
 
+### Actions pages
+
+`/{owner}/{repo}/actions` lists workflow runs, a run page lists its jobs
+(refreshing every five seconds while the run is active), and a job page shows
+the job log. Pages read through `services.actions`, which only returns runs
+and jobs of the repository the page already checked with
+`repositoryAccess(…, 'read')`; logs come from `readJobLog` of
+`@git-forge/actions`, the same function as the GHES job log endpoint (stored
+log chunks, or the live console lines while the job runs). The job page
+strips ANSI escapes, shows at most the last 2 MiB and, while the job is not
+done, polls `…/jobs/{job}/log.txt` every three seconds with a small inline
+script; the response header `X-Job-Done` makes the page reload into its final
+state.
+
 ### Rendering
 
 - Tailwind CSS with daisyUI, themes `light` (default) and `dark`

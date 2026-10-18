@@ -1,0 +1,50 @@
+---
+import NotFound from '../../../../../../components/NotFound.astro'
+import RepoHeader from '../../../../../../components/RepoHeader.astro'
+import Layout from '../../../../../../layouts/Layout.astro'
+import { branchOf, durationText, jobState, runState } from '../../../../../../ui/actions.ts'
+import { parseNumber } from '../../../../../../ui/collaboration.ts'
+import { shortId } from '../../../../../../ui/format.ts'
+import { commitUrl, openRepository, repoUrl } from '../../../../../../ui/repository.ts'
+
+const { forge, principal } = Astro.locals
+const repo = await openRepository(forge, principal, Astro.params.owner!, Astro.params.repo!)
+const id = parseNumber(Astro.params.id)
+const found = repo.kind === 'ok' && id !== null ? await forge.actions.run(repo.name, id) : null
+const state = found ? runState(found.run) : null
+if (state && !state.done) Astro.response.headers.set('Refresh', '5')
+---
+
+{
+  repo.kind !== 'ok' || !found || !state ? (
+    <NotFound />
+  ) : (
+    <Layout title={`${found.run.workflow_name} #${found.run.id} · ${repo.name.owner}/${repo.name.name}`}>
+      <RepoHeader repo={repo} tab="actions" />
+      <header class="mb-6">
+        <h2 class="text-2xl break-words">
+          {found.run.workflow_name} <span class="text-base-content/50">#{found.run.id}</span>
+        </h2>
+        <p class="mt-2 flex flex-wrap items-center gap-2 text-sm">
+          <span class:list={['badge', state.badge]}>{state.label}</span>
+          <span>
+            {found.run.event} on <span class="font-mono">{branchOf(found.run.ref)}</span> ·{' '}
+            <a class="font-mono link" href={commitUrl(repo.name, found.run.sha)}>{shortId(found.run.sha)}</a> by {found.run.actor} ·{' '}
+            <span class="font-mono">{found.run.workflow_path}</span>
+          </span>
+        </p>
+      </header>
+      <ul class="border border-base-300 rounded-box divide-y divide-base-300" aria-label="Jobs">
+        {found.jobs.map((job) => (
+          <li class="flex flex-wrap items-center gap-3 px-4 py-3">
+            <span class:list={['badge badge-sm', jobState(job).badge]}>{jobState(job).label}</span>
+            <a href={repoUrl(repo.name, 'actions', 'runs', String(found.run.id), 'jobs', encodeURIComponent(job.id))} class="font-semibold link link-hover break-words flex-1">
+              {job.display_name}
+            </a>
+            <span class="text-sm text-base-content/70">{durationText(job.started_at, job.completed_at)}</span>
+          </li>
+        ))}
+      </ul>
+    </Layout>
+  )
+}

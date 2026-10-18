@@ -16,6 +16,9 @@ import {
   getRun,
   type JobRow,
   listRunJobs,
+  listRuns,
+  readJobLog,
+  type RunRow,
   verifyToken,
   workflowJobPayload,
 } from '@git-forge/actions'
@@ -187,6 +190,7 @@ export type ForgeServices = {
   readonly inbox: InboxOperations
   readonly releases: ReleaseReads
   readonly collaboration: (request: Request, principal: Principal, owner: string, name: string) => Promise<CollaborationScope | null>
+  readonly actions: ActionsReads
 }
 
 export type InboxOperations = {
@@ -194,6 +198,12 @@ export type InboxOperations = {
   readonly markRead: (user: UserPrincipal, id: number) => Promise<boolean>
   readonly markDone: (user: UserPrincipal, id: number) => Promise<boolean>
   readonly markAllRead: (user: UserPrincipal) => Promise<number>
+}
+
+export type ActionsReads = {
+  readonly runs: (repository: RepositoryName, limit: number) => Promise<RunRow[]>
+  readonly run: (repository: RepositoryName, id: number) => Promise<{ readonly run: RunRow; readonly jobs: readonly JobRow[] } | null>
+  readonly log: (repository: RepositoryName, runId: number, jobId: string) => Promise<{ readonly job: JobRow; readonly log: Uint8Array[] } | null>
 }
 
 export type ReleaseReads = {
@@ -1120,6 +1130,20 @@ export const createForge = (options: ForgeOptions): Forge => {
           if (error instanceof CollaborationError && error.status === 404) return null
           throw error
         }
+      },
+      actions: {
+        runs: (repository, limit) => listRuns(db, repository.owner, repository.name, limit),
+        run: async (repository, id) => {
+          const run = await getRun(db, id)
+          if (!run || run.owner.toLowerCase() !== repository.owner.toLowerCase() || run.repo.toLowerCase() !== repository.name.toLowerCase()) return null
+          return { run, jobs: await listRunJobs(db, run.id) }
+        },
+        log: async (repository, runId, jobId) => {
+          const run = await getRun(db, runId)
+          if (!run || run.owner.toLowerCase() !== repository.owner.toLowerCase() || run.repo.toLowerCase() !== repository.name.toLowerCase()) return null
+          const job = (await listRunJobs(db, run.id)).find((candidate) => candidate.id === jobId)
+          return job ? { job, log: await readJobLog(db, storage, run, job) } : null
+        },
       },
       releases: {
         list: (repository, includeDrafts, limit, offset) => releaseStore.list(repository.id, includeDrafts, limit, offset),

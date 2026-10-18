@@ -29,7 +29,11 @@ import { fetchFeatures, fetchPackV2, fixedHaves } from './smart-client.ts'
 import type { Storage } from './storage.ts'
 import { isAncestor } from './walk.ts'
 
-export type ImportPhase = 'discover' | 'graph' | 'fetch' | 'lfs' | 'refs' | 'done' | 'failed'
+export type ImportPhase = 'discover' | 'graph' | 'fetch' | 'lfs' | 'refs' | 'metadata' | 'done' | 'failed'
+
+export type ImportMetadata = { readonly progress: unknown; readonly waitUntil?: string }
+
+export type ImportMetadataResult = ImportMetadata & { readonly done: boolean }
 
 export type ImportSplit = {
   readonly commit: ObjectId
@@ -77,6 +81,7 @@ export type ImportState = {
   readonly lfsRound?: number
   readonly lfsProgressAt?: string
   readonly updates: readonly RefUpdate[]
+  readonly metadata?: ImportMetadata
 }
 
 export type ImportSettings = {
@@ -85,6 +90,7 @@ export type ImportSettings = {
   readonly lfsUrl?: string
   readonly commitsPerStep?: number
   readonly defaultBranch?: string
+  readonly metadata?: boolean
 }
 
 export class ImportRunningError extends Error {}
@@ -173,6 +179,7 @@ const freshState = (settings: ImportSettings, at: string): ImportState => ({
   lfsQueue: [],
   lfsMissing: [],
   updates: [],
+  ...(settings.metadata ? { metadata: { progress: null } } : {}),
 })
 
 export const startImport = async (storage: Storage, repo: RepositoryName, settings: ImportSettings, now = new Date()): Promise<ImportState> => {
@@ -232,6 +239,7 @@ export type ImportStepOptions = {
   readonly digests?: DigestFactory
   readonly maxFailures?: number
   readonly enqueueLfs?: (pointer: LfsPointer, endpoint: ImportLfsEndpoint) => Promise<void>
+  readonly importMetadata?: (state: ImportState) => Promise<ImportMetadataResult>
 }
 
 type StepContext = {
@@ -662,7 +670,7 @@ const updateRefs = async (context: StepContext, state: ImportState): Promise<Imp
     const plan = await planImportRefUpdates(current.state.refs, state.targets, context.now(), (oldId, newId) => isAncestor(odb, oldId, newId))
     const adoptHead = Object.keys(current.state.refs).length === 0 && state.head !== undefined && state.targets[state.head] !== undefined
     const head = adoptHead ? (state.head as string) : current.state.head
-    const done = { ...state, phase: 'done' as const, updates: plan.updates, finishedAt: context.now().toISOString() }
+    const done: ImportState = state.metadata ? { ...state, phase: 'metadata', updates: plan.updates } : { ...state, phase: 'done', updates: plan.updates, finishedAt: context.now().toISOString() }
     const next: RefsState = { ...current.state, head, refs: plan.refs }
     if (plan.updates.length === 0 && head === current.state.head) {
       await writeServerInfo(options.storage, options.repo, current.state, odb)
@@ -674,6 +682,12 @@ const updateRefs = async (context: StepContext, state: ImportState): Promise<Imp
     }
   }
   throw new Error('could not update refs')
+}
+
+const metadataPhase = async (context: StepContext, state: ImportState): Promise<ImportState> => {
+  if (!context.options.importMetadata) throw new Error('this runtime cannot import issues, pull requests and releases')
+  const { done, ...next } = await context.options.importMetadata(state)
+  return done ? { ...state, metadata: next, phase: 'done', finishedAt: context.now().toISOString() } : { ...state, metadata: next }
 }
 
 const runPhase = (context: StepContext, state: ImportState): Promise<ImportState> => {
@@ -688,6 +702,8 @@ const runPhase = (context: StepContext, state: ImportState): Promise<ImportState
       return lfs(context, state)
     case 'refs':
       return updateRefs(context, state)
+    case 'metadata':
+      return metadataPhase(context, state)
     default:
       return Promise.resolve(state)
   }
@@ -726,6 +742,7 @@ export type ImportJob = {
   readonly owner: string
   readonly name: string
   readonly authorization?: string
+  readonly actor?: string
 }
 
 export type ImportScheduler = (job: ImportJob, delaySeconds: number) => Promise<void>
@@ -734,25 +751,35 @@ export type ImportLfsJob = ImportJob & { readonly kind: 'import-lfs'; readonly o
 
 export const retryDelaySeconds = (failures: number): number => (failures === 0 ? 0 : Math.min(15 * 2 ** (failures - 1), 600))
 
-export const importDelaySeconds = (state: ImportState): number =>
-  state.failures > 0 ? retryDelaySeconds(state.failures) : state.phase === 'lfs' && state.lfsQueue.length === 0 && (state.lfsPending?.length ?? 0) > 0 ? LFS_POLL_SECONDS : 0
+const waitSeconds = (until: string | undefined, now: Date): number => (until ? Math.min(Math.max(0, Math.ceil((Date.parse(until) - now.getTime()) / 1000)), 3600) : 0)
+
+export const importDelaySeconds = (state: ImportState, now = new Date()): number =>
+  state.failures > 0
+    ? retryDelaySeconds(state.failures)
+    : state.phase === 'lfs' && state.lfsQueue.length === 0 && (state.lfsPending?.length ?? 0) > 0
+      ? LFS_POLL_SECONDS
+      : state.phase === 'metadata'
+        ? waitSeconds(state.metadata?.waitUntil, now)
+        : 0
 
 export const continueImport = async (
   job: ImportJob,
-  options: Omit<ImportStepOptions, 'repo' | 'getAuthorization' | 'enqueueLfs'> & {
+  options: Omit<ImportStepOptions, 'repo' | 'getAuthorization' | 'enqueueLfs' | 'importMetadata'> & {
     readonly schedule: ImportScheduler
     readonly scheduleLfs?: (job: ImportLfsJob) => Promise<void>
+    readonly metadata?: (job: ImportJob, state: ImportState) => Promise<ImportMetadataResult>
   },
 ): Promise<ImportState> => {
-  const { schedule, scheduleLfs, ...rest } = options
+  const { schedule, scheduleLfs, metadata, ...rest } = options
   const authorization = job.authorization
   const state = await importStep({
     ...rest,
     repo: { owner: job.owner, name: job.name },
     ...(authorization ? { getAuthorization: async () => authorization } : {}),
+    ...(metadata ? { importMetadata: (state: ImportState) => metadata(job, state) } : {}),
     ...(scheduleLfs ? { enqueueLfs: (pointer: LfsPointer, endpoint: ImportLfsEndpoint) => scheduleLfs({ ...job, kind: 'import-lfs', oid: pointer.oid, size: pointer.size, endpoint }) } : {}),
   })
-  if (!isImportFinished(state)) await schedule(job, importDelaySeconds(state))
+  if (!isImportFinished(state)) await schedule(job, importDelaySeconds(state, (rest.now ?? (() => new Date()))()))
   return state
 }
 

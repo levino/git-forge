@@ -2,7 +2,7 @@
 import NotFound from '../../../components/NotFound.astro'
 import Layout from '../../../layouts/Layout.astro'
 import { formatBytes } from '../../../ui/format.ts'
-import { IMPORT_PHASES, importRunning, importStateFor } from '../../../ui/new-repository.ts'
+import { IMPORT_PHASES, importRunning, importStateFor, metadataStatus } from '../../../ui/new-repository.ts'
 import { cloneUrl, repoUrl } from '../../../ui/repository.ts'
 
 const { forge, session } = Astro.locals
@@ -11,6 +11,7 @@ if (!session) return Astro.redirect(`/login?return_to=${encodeURIComponent(Astro
 const state = await importStateFor(forge, session, repo)
 Astro.response.headers.set('Cache-Control', 'no-store')
 const running = state ? importRunning(state) : false
+const metadata = state ? metadataStatus(state) : null
 ---
 
 {
@@ -41,6 +42,8 @@ const running = state ? importRunning(state) : false
             <dd>{state.fetched.objects} objects, {formatBytes(state.fetched.bytes)}</dd>
             {state.lfs && <dt class="font-semibold">LFS objects left</dt>}
             {state.lfs && <dd>{state.lfsQueue.length}</dd>}
+            {metadata && <dt class="font-semibold">Issues, pull requests, releases</dt>}
+            {metadata && <dd>{metadata.stage}: {metadata.counts}{metadata.waitUntil && `, GitHub rate limit until ${metadata.waitUntil}`}</dd>}
             <dt class="font-semibold">Started</dt>
             <dd>{state.createdAt}</dd>
             {state.finishedAt && <dt class="font-semibold">Finished</dt>}

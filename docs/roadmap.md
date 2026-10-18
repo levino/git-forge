@@ -77,6 +77,7 @@ discussions.
 
 - [x] Streaming receive-pack and upload-pack with bounded memory, `packfile-uris`, geometric compaction
 - [x] Server-side import: create or update a repository by pulling from a URL (no request body limit), in resumable steps driven by a queue
+- [x] Import from GitHub (opt-in): issues, pull requests, comments, reviews, review comments, labels, milestones, releases and assets with their numbers, authors and times (migration `0023_imports`, design §7 *metadata*)
 - [x] Chunked push helper: `git forge push` splits history into pushes below the platform body limit, using the unmodified git client; single executables per platform from the release workflow
 - [x] Import and mirror sync: stream fetched packs into the streaming indexer (via `ingestPack`)
 - [x] Import commits, blobs and LFS objects of any size; LFS endpoint from `.lfsconfig` (#51)

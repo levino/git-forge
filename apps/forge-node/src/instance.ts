@@ -111,7 +111,13 @@ export const createInstance = async (vars: NodeVars, overrides: InstanceOverride
     ...queueOptions,
     queue: 'imports',
     handler: async (job) => {
-      const state = await continueImport(job, { storage, digests: nodeDigests, schedule: (next, delaySeconds) => imports.enqueue(next, { delaySeconds }), scheduleLfs: (lfs) => jobs.enqueue(lfs) })
+      const state = await continueImport(job, {
+        storage,
+        digests: nodeDigests,
+        schedule: (next, delaySeconds) => imports.enqueue(next, { delaySeconds }),
+        scheduleLfs: (lfs) => jobs.enqueue(lfs),
+        metadata: (next, current) => forge!.importMetadata(next, current),
+      })
       log({ event: 'import-step', repo: `${job.owner}/${job.name}`, phase: state.phase, steps: state.steps, error: state.error })
     },
     maxAttempts: 3,

@@ -444,6 +444,20 @@ as a sequence of stateless steps, each persisting its progress in
    runtimes without a queue use the sequential path.
 5. *refs* — update refs via compare-and-swap and rewrite `info/refs`; an
    empty repository adopts the upstream `HEAD`.
+6. *metadata* — only with `metadata: true` (GitHub URLs; API
+   `https://api.github.com` or `<origin>/api/v3`). One REST page per step,
+   in this order: labels, milestones, pulls, issues, issue comments, reviews
+   (per imported pull request), review comments, releases, then one release
+   asset per step (streamed into `lfs/objects/`, verified against GitHub's
+   `digest`). Progress (stage, next `Link` URL, pending assets, counts) lives
+   in `metadata.progress` of the state. Pages are fetched with the job's
+   token as Bearer and `If-None-Match` (`import_etags`); a `304` skips the
+   page. A rate limit (`403`/`429` with `x-ratelimit-remaining: 0` or
+   `retry-after`) is not a failure: the step returns `waitUntil` and the
+   next step is delayed (at most an hour per step). Writes go through the
+   collaboration package's import functions (permission `import`, admin),
+   with a principal rebuilt from the job's `actor` (the user who started the
+   import) on every step; no events or notifications are emitted.
 
 Fetched packs are handed to a `PackIngester` (`ingestPack`); the default
 streams each fetched pack into the same indexer as a push, so a step never
@@ -1804,6 +1818,18 @@ Issues, pull requests, reviews, commit statuses, check runs and discussions
   `pull_request`, `pull_request_review`, `pull_request_review_comment`);
   the collaboration package itself does not depend on the notifications
   package.
+- **Imported data** (§7 *metadata*). Numbers, authors and times are kept.
+  Every imported item has an `imported_items` row (node id, source key
+  such as `issue:7` or `review-comment:301`, original URL, author login,
+  time, unmapped assignees), which also makes re-runs idempotent. GitHub
+  users map to forge users by login, else by an `email` in the payload;
+  unmapped authors are stored as `github:<login>` and shown by login,
+  unmapped assignees from `imported_items`. A pull request stays one when
+  its head and base commits exist (and it is closed or from the same
+  repository); otherwise it becomes an issue with a note. Review comments
+  that do not anchor (`validateAnchor` on their original commit and line)
+  become issue comments quoting path and line. Releases keep their times;
+  assets are deduplicated by name.
 - **Limits of v1.** Same-repository pull requests only (forks later),
   computing mergeability and file lists loads the involved objects through
   the in-memory object database, no reactions, no search,

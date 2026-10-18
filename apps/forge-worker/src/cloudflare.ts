@@ -99,6 +99,7 @@ export const backgroundHandlers = {
         storage: new R2Storage(env.BUCKET),
         digests: digestStreams,
         schedule: importScheduler(queue),
+        metadata: async (job, state) => (await forgeFor(env)).importMetadata(job, state),
         ...(jobs ? { scheduleLfs: (job) => jobs.enqueue(job) } : {}),
       })
       console.log(JSON.stringify({ event: 'import-step', repo: `${message.body.owner}/${message.body.name}`, phase: state.phase, steps: state.steps, error: state.error }))

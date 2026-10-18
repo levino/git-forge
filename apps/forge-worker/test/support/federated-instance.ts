@@ -15,6 +15,7 @@ import { openSqliteDatabase } from '@git-forge/accounts-node'
 import {
   type ByteRange,
   createMemoryJobQueue,
+  type DigestFactory,
   type FetchFunction,
   MemoryStorage,
   type MemoryJobQueue,
@@ -93,6 +94,8 @@ export type InstanceOptions = {
   readonly storage?: Storage
   readonly privateJwk?: PrivateJwk
   readonly login?: string
+  readonly unitBytes?: number
+  readonly digests?: DigestFactory
 }
 
 const cpuNow = () => {
@@ -184,8 +187,10 @@ export const startInstance = async (name: string, options: InstanceOptions = {})
     mirrorIntervalMinutes: 24 * 60,
     allowInsecureFederation: true,
     deepCheckDays: 0,
+    mirrorUnitBytes: options.unitBytes ?? 0,
     fetch: outbound,
     jobs,
+    ...(options.digests ? { digests: options.digests } : {}),
   }
   const created = createForge(forgeOptions)
   forge = created

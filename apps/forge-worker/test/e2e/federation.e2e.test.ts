@@ -176,7 +176,7 @@ describe('three federated instances on wrangler dev', () => {
     await syncedByCron(beta)
     const refs = await lsRemote(beta)
     expect(refs.get('refs/upstream/origin/heads/main')).toBe(firstTip)
-    expect(refs.has('refs/heads/main')).toBe(false)
+    expect(refs.get('refs/heads/main')).toBe(firstTip)
     expect(sha256((await lfsObject(beta, sha256(firstBlob)))!)).toBe(sha256(firstBlob))
   })
 

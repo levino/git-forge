@@ -4,7 +4,17 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { readAll } from '../src/bytes.ts'
 import { lfsObjectKey } from '../src/lfs.ts'
 import { MemoryStorage } from '../src/memory-storage.ts'
-import { configureMirror, deepCheckMirror, deepCheckRepository, readMirrorStatus, syncMirror, type SyncOptions } from '../src/mirror.ts'
+import {
+  configureMirror,
+  copyPendingPack,
+  deepCheckMirror,
+  deepCheckRepository,
+  mirrorPendingLfsObject,
+  planPackCopy,
+  readMirrorStatus,
+  syncMirror,
+  type SyncOptions,
+} from '../src/mirror.ts'
 import { PackVerificationError, verifyPackIndex, verifyingPackStream } from '../src/pack-copy.ts'
 import { gitPrefix, ObjectDatabase, readRefs, type RepositoryName } from '../src/repository.ts'
 import type { Storage } from '../src/storage.ts'
@@ -195,6 +205,47 @@ describe('automatic strategy', () => {
     expect(result.strategy).toBe('fetch')
     expect(result.status).toBe('ok')
     expect((await readRefs(other.downstream.storage, backup))?.state.refs['refs/upstream/origin/heads/main']).toBe(other.main)
+  })
+})
+
+describe('copy in units of bytes', () => {
+  it('copies one pack per call, then updates refs and mirrors LFS objects one by one', async () => {
+    const context = await setup()
+    writeFile(context.source, 'second.md', 'second pack\n')
+    const second = commitAll(context.source, 'second')
+    await git(context.source, ['push', '-q', context.remote, 'main'])
+    const unit = { storage: context.downstream.storage, repo: backup, maxUnitBytes: 10 * 1024 * 1024 }
+    const plan = await planPackCopy(unit)
+    expect(plan).toHaveLength(2)
+    expect(plan!.every((pack) => pack.size !== null && pack.size > 0 && !pack.oversized)).toBe(true)
+    expect((await readMirrorStatus(context.downstream.storage, backup))?.pendingPacks).toEqual(plan)
+    const remaining = []
+    for (const pack of plan!) remaining.push((await copyPendingPack(unit, pack.name)).remaining)
+    expect(remaining).toEqual([1, 0])
+    const oid = lfsPointer(context.asset).oid
+    expect((await readMirrorStatus(context.downstream.storage, backup))?.lfsPending).toEqual([{ oid, size: context.asset.length, reason: 'deferred' }])
+    expect((await readRefs(context.downstream.storage, backup))?.state.refs['refs/upstream/origin/heads/main']).toBeUndefined()
+
+    const final = await context.sync({ deferLfs: true })
+    expect(final.status).toBe('ok')
+    expect(final.copied).toEqual({ packs: 0, bytes: 0, reused: 0 })
+    expect(final.lfs).toBeNull()
+    expect((await readRefs(context.downstream.storage, backup))?.state.refs['refs/upstream/origin/heads/main']).toBe(second)
+    const status = await readMirrorStatus(context.downstream.storage, backup)
+    expect(status?.pendingPacks).toEqual([])
+    expect(status?.lfsPending).toHaveLength(1)
+
+    const lfs = await mirrorPendingLfsObject(unit, { oid, size: context.asset.length })
+    expect(lfs.downloaded.map((pointer) => pointer.oid)).toEqual([oid])
+    expect((await readMirrorStatus(context.downstream.storage, backup))?.lfsPending).toEqual([])
+    expect(await packFiles(context.downstream.storage, backup)).toEqual(await packFiles(context.upstream.storage, project))
+  })
+
+  it('marks packs above the budget as oversized', async () => {
+    const context = await setup()
+    const plan = await planPackCopy({ storage: context.downstream.storage, repo: backup, maxUnitBytes: 1000 })
+    expect(plan).toEqual([expect.objectContaining({ oversized: true })])
+    expect((await readMirrorStatus(context.downstream.storage, backup))?.pendingPacks).toEqual(plan)
   })
 })
 

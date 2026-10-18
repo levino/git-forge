@@ -57,7 +57,8 @@
     "MAX_PUSH_BYTES": "16777216",
     "MAX_LFS_OBJECT_BYTES": "104857600",
     "MIRROR_INTERVAL_MINUTES": "1440",
-    "MIRROR_DEEP_CHECK_DAYS": "30"
+    "MIRROR_DEEP_CHECK_DAYS": "30",
+    "MIRROR_UNIT_BYTES": "0"
   },
   "secrets": {
     "required": [
@@ -110,7 +111,8 @@
         "MAX_PUSH_BYTES": "16777216",
         "MAX_LFS_OBJECT_BYTES": "104857600",
         "MIRROR_INTERVAL_MINUTES": "1440",
-        "MIRROR_DEEP_CHECK_DAYS": "30"
+        "MIRROR_DEEP_CHECK_DAYS": "30",
+        "MIRROR_UNIT_BYTES": "0"
       },
       "secrets": {
         "required": [
@@ -163,7 +165,8 @@
         "MAX_PUSH_BYTES": "16777216",
         "MAX_LFS_OBJECT_BYTES": "104857600",
         "MIRROR_INTERVAL_MINUTES": "1440",
-        "MIRROR_DEEP_CHECK_DAYS": "30"
+        "MIRROR_DEEP_CHECK_DAYS": "30",
+        "MIRROR_UNIT_BYTES": "0"
       },
       "secrets": {
         "required": [
@@ -216,7 +219,8 @@
         "MAX_PUSH_BYTES": "16777216",
         "MAX_LFS_OBJECT_BYTES": "104857600",
         "MIRROR_INTERVAL_MINUTES": "1440",
-        "MIRROR_DEEP_CHECK_DAYS": "30"
+        "MIRROR_DEEP_CHECK_DAYS": "30",
+        "MIRROR_UNIT_BYTES": "0"
       },
       "secrets": {
         "required": [

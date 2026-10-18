@@ -23,6 +23,7 @@ export const nodeForge = async (overrides: Partial<ForgeOptions> = {}): Promise<
     mirrorIntervalMinutes: 30,
     allowInsecureFederation: false,
     deepCheckDays: 0,
+    mirrorUnitBytes: 0,
     ...overrides,
   })
   return { ...forge, storage }

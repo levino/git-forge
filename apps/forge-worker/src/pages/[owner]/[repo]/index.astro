@@ -8,7 +8,7 @@ import { importStateFor } from '../../../ui/new-repository.ts'
 import { openRepository } from '../../../ui/repository.ts'
 
 if (Astro.params.repo!.endsWith('.git')) return Astro.redirect(`/${Astro.params.owner}/${Astro.params.repo!.slice(0, -4)}`, 301)
-const repo = await openRepository(Astro.locals.forge, Astro.locals.principal, Astro.params.owner!, Astro.params.repo!)
+const repo = await openRepository(Astro.locals.forge, Astro.locals.principal, Astro.params.owner!, Astro.params.repo!, true)
 const view = repo.kind === 'ok' ? await browse(repo, [], 'tree') : null
 const imported = repo.kind === 'ok' && view?.kind === 'empty' ? await importStateFor(Astro.locals.forge, Astro.locals.session, repo.name) : null
 ---

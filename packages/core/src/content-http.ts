@@ -19,6 +19,9 @@ import type { Authorize } from './http.ts'
 import { locateLfsObject } from './lfs.ts'
 import { advertisedRefs, ObjectDatabase, readRefs, type RepositoryName } from './repository.ts'
 import type { ByteRange, Storage } from './storage.ts'
+import { commitReach, readableLfsObjects, visibleRefs } from './visibility.ts'
+
+const PRIVATE_CACHE = 'private, max-age=60'
 
 export type ContentHttpOptions = {
   readonly storage: Storage
@@ -111,14 +114,19 @@ export const handleContentRequest = async (request: Request, options: ContentHtt
   if (!route) return null
   if (request.method !== 'GET' && request.method !== 'HEAD') return text(405, 'method not allowed\n', { Allow: 'GET, HEAD' })
   const { storage } = options
-  const denied = await options.authorize?.(request, route.repo, 'read', route.kind === 'media' ? 'lfs' : 'git')
-  if (denied) return denied
+  const view = await options.authorize?.(request, route.repo, 'read', route.kind === 'media' ? 'lfs' : 'git')
+  if (view instanceof Response) return view
   const refs = await readRefs(storage, route.repo)
   if (!refs) return text(404, 'repository not found\n')
-  if (route.kind === 'media') return serveLfs(request, storage, route.repo, route.oid, route.filename, IMMUTABLE_CACHE)
-  const target = await resolveRaw(new ObjectDatabase(storage, route.repo), advertisedRefs(refs.state), route.segments)
-  if (target.kind === 'not-found') return text(404, `${target.message}\n`)
-  const cacheControl = refCacheControl(target.immutable, options.refMaxAgeSeconds ?? 60)
+  if (route.kind === 'media') {
+    if (view && !(await readableLfsObjects(storage, route.repo, view, [route.oid])).has(route.oid)) return text(404, 'object does not exist\n')
+    return serveLfs(request, storage, route.repo, route.oid, route.filename, view ? PRIVATE_CACHE : IMMUTABLE_CACHE)
+  }
+  const odb = new ObjectDatabase(storage, route.repo)
+  const allowed = view ? async (commit: string, path: readonly string[]) => (await commitReach(odb, refs.state, view, commit))?.(path.join('/')) === 'inside' : undefined
+  const target = await resolveRaw(odb, view ? visibleRefs(refs.state, view) : advertisedRefs(refs.state), route.segments, allowed)
+  if (target.kind === 'not-found') return text(404, view ? 'not found\n' : `${target.message}\n`)
+  const cacheControl = view ? PRIVATE_CACHE : refCacheControl(target.immutable, options.refMaxAgeSeconds ?? 60)
   if (target.kind === 'lfs') {
     if ((await locateLfsObject(storage, route.repo, target.pointer.oid))?.size !== target.pointer.size) {
       return text(404, `LFS object ${target.pointer.oid} is not present\n`)

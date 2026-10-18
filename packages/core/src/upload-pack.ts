@@ -7,12 +7,14 @@ import { DELIM, FLUSH, packetText, parsePackets, pkt, sideband, SIDEBAND_DATA, S
 import { AGENT } from './receive-pack.ts'
 import { type AdvertisedRefs, advertisedRefs, type LoadedPack, ObjectDatabase, type RepositoryName, readRefs, sortedRefs } from './repository.ts'
 import type { Storage } from './storage.ts'
-import { MissingObjectError, objectsToSend } from './walk.ts'
+import { type ReadView, visibleRefs } from './visibility.ts'
+import { commitsReachable, MissingObjectError, objectsToSend } from './walk.ts'
 
 export type PackfileUri = (pack: { readonly name: string; readonly key: string }) => Promise<string | null>
 
 export type UploadPackOptions = {
   readonly packfileUri?: PackfileUri
+  readonly view?: ReadView
 }
 
 export const advertiseUploadPackV2 = (options: UploadPackOptions = {}): Uint8Array =>
@@ -223,11 +225,13 @@ const fetch = async (state: AdvertisedRefs, odb: ObjectDatabase, args: readonly 
       return errorResponse('only "deepen <depth>" shallow fetches are supported; partial clones are not')
     }
   }
+  const tips = options.view ? new Set(await Promise.all(Object.values(state.refs).flatMap((id) => [id, odb.peel(id)]))) : null
   for (const id of wants) {
-    if (!isObjectId(id) || !(await odb.has(id))) return errorResponse(`not our ref ${id}`)
+    if (!isObjectId(id) || !(await odb.has(id)) || (tips && !tips.has(id))) return errorResponse(`not our ref ${id}`)
   }
+  const reachable = tips && haves.length > 0 ? await commitsReachable(odb, tips) : null
   const common: ObjectId[] = []
-  for (const id of haves) if (isObjectId(id) && (await odb.has(id))) common.push(id)
+  for (const id of haves) if (isObjectId(id) && (await odb.has(id)) && (!tips || reachable?.has(id))) common.push(id)
   const sections: Uint8Array[] = []
   if (!done) {
     sections.push(pkt('acknowledgments\n'))
@@ -260,7 +264,7 @@ const fetch = async (state: AdvertisedRefs, odb: ObjectDatabase, args: readonly 
     sections.push(pkt('shallow-info\n'), ...plan.lines, DELIM)
     pack = withTrailer(generatePack(odb, ids, { sending: new Set(ids) }))
     progress = `Sending ${ids.length} objects\n`
-  } else if (common.length === 0) {
+  } else if (common.length === 0 && !options.view) {
     const packs = await odb.packs()
     const uris = options.packfileUri && uriProtocols.length > 0 ? await uriSection(packs, uriProtocols, options.packfileUri) : null
     if (uris) {
@@ -320,11 +324,12 @@ export const uploadPackV2 = async (
   if (!refs) return streamOf(errorResponse('repository not found'))
   const odb = new ObjectDatabase(storage, repo)
   const request = parseRequest(body)
+  const state = options.view ? visibleRefs(refs.state, options.view, true) : advertisedRefs(refs.state)
   switch (request.command) {
     case 'ls-refs':
-      return streamOf(await lsRefs(advertisedRefs(refs.state), odb, request.args))
+      return streamOf(await lsRefs(state, odb, request.args))
     case 'fetch': {
-      const result = await fetch(advertisedRefs(refs.state), odb, request.args, options)
+      const result = await fetch(state, odb, request.args, options)
       return result instanceof Uint8Array ? streamOf(result) : streamFrom(result)
     }
     default:

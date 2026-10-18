@@ -22,11 +22,14 @@ import {
   readMirrorConfig,
   readMirrorStatus,
   readRefs,
+  type ReadView,
+  type RefsState,
   type RepositoryName,
   type SpotSample,
   type Storage,
   sha256Hex,
   upstreamRefPrefix,
+  visibleRefs,
 } from '@git-forge/core'
 import type { MirrorFederation } from './mirror-federation.ts'
 
@@ -37,6 +40,16 @@ export const SPOT_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000
 const LFS_CANDIDATES = 1000
 
 const nameOf = (repo: RepositoryName): string => `${repo.owner}/${repo.name}`.toLowerCase()
+
+export type InstanceRead = ReadView | 'full' | null
+
+const viewChecksum = async (verification: MirrorVerificationStore, repository: string, state: RefsState, namespace: string, issuer: string, read: InstanceRead) => {
+  if (!read || read === 'full') return { key: namespace, current: namespacedChecksum(state, namespace) }
+  const key = `view:${issuer}:${namespace}`
+  const current = namespacedChecksum(visibleRefs(state, read, true), namespace)
+  await verification.recordChecksum(repository, key, current.checksum, current.refs)
+  return { key, current }
+}
 
 const repositoryOf = (repository: string): RepositoryName => {
   const [owner = '', name = ''] = repository.split('/')
@@ -106,10 +119,13 @@ export const handleAttestation = async (federation: MirrorFederation, request: R
   const { attestation } = verified
   const repo = repositoryOf(attestation.repository)
   const principal = { kind: 'instance' as const, issuer: attestation.issuer, repositories: [attestation.repository], scopes: ['git:read'], tokenId: attestation.id }
-  if (!(await readRefs(federation.storage, repo)) || !(await federation.canRead(principal, repo))) return json(404, { error: 'repository not found' })
+  const refs = await readRefs(federation.storage, repo)
+  const read = refs ? await federation.canRead(principal, repo) : null
+  if (!refs || !read) return json(404, { error: 'repository not found' })
   const previous = (await federation.verification.spotChecks(attestation.repository)).find((check) => check.issuer === attestation.issuer)
   await federation.verification.recordAttestation(attestation, token)
   await recordChecksums(federation.verification, federation.storage, repo)
+  await viewChecksum(federation.verification, attestation.repository, refs.state, attestation.namespace, attestation.issuer, read)
   const now = (federation.now ?? (() => new Date()))()
   if (attestation.url && (!previous || now.getTime() - Date.parse(previous.at) >= SPOT_CHECK_INTERVAL_MS)) {
     await federation.jobs.enqueue({ kind: 'mirror-spot-check', repository: attestation.repository, issuer: attestation.issuer })
@@ -257,6 +273,7 @@ export type OverviewContext = {
   readonly storage: Storage
   readonly verification: MirrorVerificationStore
   readonly subscribers: (repository: string) => Promise<readonly { readonly issuer: string }[]>
+  readonly readOf?: (issuer: string) => Promise<InstanceRead>
   readonly now: Date
 }
 
@@ -282,10 +299,10 @@ export const mirrorOverview = async (context: OverviewContext, repo: RepositoryN
   for (const issuer of issuers) {
     const attestation = attestations.find((candidate) => candidate.issuer === issuer) ?? null
     const spot = spotChecks.find((candidate) => candidate.issuer === issuer) ?? null
-    const namespace = attestation?.namespace ?? ''
+    const { key, current } = await viewChecksum(context.verification, repository, refs.state, attestation?.namespace ?? '', issuer, (await context.readOf?.(issuer)) ?? null)
     const evaluation = evaluateMirror({
-      current: namespacedChecksum(refs.state, namespace),
-      history: await historyOf(namespace),
+      current,
+      history: await historyOf(key),
       attestation,
       spotCheck: spot,
       now: context.now,

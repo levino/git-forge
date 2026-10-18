@@ -11,7 +11,7 @@ import { browse, previewKind } from '../../../../ui/browse.ts'
 import { formatBytes, plural } from '../../../../ui/format.ts'
 import { blameUrl, blobUrl, commitsUrl, mediaUrl, openRepository, rawUrl, treeUrl } from '../../../../ui/repository.ts'
 
-const repo = await openRepository(Astro.locals.forge, Astro.locals.principal, Astro.params.owner!, Astro.params.repo!)
+const repo = await openRepository(Astro.locals.forge, Astro.locals.principal, Astro.params.owner!, Astro.params.repo!, true)
 const segments = (Astro.params.path ?? '').split('/').filter((segment) => segment !== '')
 const view = repo.kind === 'ok' ? await browse(repo, segments, 'any') : null
 if (repo.kind === 'ok' && view?.kind === 'tree') return Astro.redirect(treeUrl(repo.name, view.target.ref, view.target.path))

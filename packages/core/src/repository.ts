@@ -264,20 +264,28 @@ export class ObjectDatabase {
     if (!pack) throw new Error(`pack ${name} is not registered`)
     const blobs: { id: ObjectId; data: Uint8Array }[] = []
     for (const position of pack.index.positionsByOffset) {
-      const offset = pack.index.offsetAt(position)
-      const head = await this.#range(pack, offset, 32)
-      const header = readEntryHeader(head, 0)
-      let candidate = header.typeCode === BLOB_CODE && header.size <= maxSize
-      if ((header.typeCode === OFS_DELTA || header.typeCode === REF_DELTA) && header.size <= 2 * maxSize + 64) {
-        const raw = await this.readRaw(pack, offset)
-        const start = header.headerLength + (header.typeCode === OFS_DELTA ? readOfsDeltaOffset(raw, header.headerLength).length : 20)
-        candidate = deltaResultSize(inflateExact(raw.subarray(start), header.size)) <= maxSize
-      }
-      if (!candidate) continue
-      const object = await this.#readAt(pack, offset)
-      if (object.type === 'blob') blobs.push({ id: pack.index.idAt(position), data: object.data })
+      const data = await this.#smallBlobAt(pack, pack.index.offsetAt(position), maxSize)
+      if (data) blobs.push({ id: pack.index.idAt(position), data })
     }
     return blobs
+  }
+
+  async smallBlob(id: ObjectId, maxSize: number): Promise<Uint8Array | null> {
+    const location = await this.locate(id)
+    return location ? this.#smallBlobAt(location.pack, location.offset, maxSize) : null
+  }
+
+  async #smallBlobAt(pack: LoadedPack, offset: number, maxSize: number): Promise<Uint8Array | null> {
+    const header = readEntryHeader(await this.#range(pack, offset, 32), 0)
+    let candidate = header.typeCode === BLOB_CODE && header.size <= maxSize
+    if ((header.typeCode === OFS_DELTA || header.typeCode === REF_DELTA) && header.size <= 2 * maxSize + 64) {
+      const raw = await this.readRaw(pack, offset)
+      const start = header.headerLength + (header.typeCode === OFS_DELTA ? readOfsDeltaOffset(raw, header.headerLength).length : 20)
+      candidate = deltaResultSize(inflateExact(raw.subarray(start), header.size)) <= maxSize
+    }
+    if (!candidate) return null
+    const object = await this.#readAt(pack, offset)
+    return object.type === 'blob' ? object.data : null
   }
 
   invalidate(): void {

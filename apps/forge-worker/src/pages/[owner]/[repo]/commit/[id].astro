@@ -7,7 +7,7 @@ import { isoTime, plural, relativeTime, shortId } from '../../../../ui/format.ts
 import { commitView } from '../../../../ui/history.ts'
 import { blobUrl, commitUrl, openRepository, treeUrl } from '../../../../ui/repository.ts'
 
-const repo = await openRepository(Astro.locals.forge, Astro.locals.principal, Astro.params.owner!, Astro.params.repo!)
+const repo = await openRepository(Astro.locals.forge, Astro.locals.principal, Astro.params.owner!, Astro.params.repo!, true)
 const view = repo.kind === 'ok' ? await commitView(repo, Astro.params.id!) : null
 const now = Math.floor(Date.now() / 1000)
 const body = view?.kind === 'commit' ? view.commit.message.split('\n').slice(1).join('\n').trim() : ''

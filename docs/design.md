@@ -89,7 +89,7 @@ issues, pull requests and discussions.
 **Later / maybe**
 
 - Pages (first version implemented, §20).
-- Partial visibility within a repository (levels, derived views).
+- Partial visibility within a repository (refs and paths for a wider audience, implemented, §8).
 - SSH-to-HTTPS gateway (§9).
 
 ## 4. Instances and mirrors
@@ -856,6 +856,35 @@ log.
 **Visibility.** Repositories are private by default; visibility is a
 per-repository setting in the database. There is no instance-wide public read
 switch.
+
+**Partial visibility.** Rows in `visibility_rules` (migration `0017`) let a
+wider audience (`public`, a user, a team, a trusted instance) read refs
+matching a pattern (`refs/tags/*`, branch protection syntax), optionally only
+one path. Admins manage them at `/api/repos/{owner}/{name}/visibility`
+(`GET`, `POST` with `refs`, `path`, `audience`, `subject`; `DELETE …/{id}`).
+`checkRepositoryAccess` turns the matching rules into a `ReadView`
+(`reach(ref, path)`) for principals without read; audience matching is one SQL
+fragment shared with listing and search. The `Authorize` hook hands the view
+to the core, which applies it to Git, LFS, raw/media and the code pages of the
+UI; everything else still needs full read.
+
+- **Paths never reach Git.** Git cannot hide a blob inside a reachable tree;
+  hiding it would need rewritten commits under a separate namespace (new ids,
+  broken signatures, rewrite state, extra storage, mirror checksums that
+  differ from the upstream). Path rules therefore only serve the UI, raw,
+  media and LFS; a Git-cloneable subset belongs on its own branch. A visible
+  ref exposes its whole history.
+- **Git:** `ls-refs` lists the visible refs, `fetch` accepts wants only at
+  their tips, ignores haves outside their history and always walks (no stored
+  packs or packfile URIs); dumb HTTP answers `404`, so mirrors fetch.
+- **LFS and commit ids** are readable when a visible path of a visible ref's
+  history reaches them.
+- **Mirrors:** partial readers may subscribe and attest; notifications carry
+  only their refs; attestations compare with the view's checksum, kept under
+  the namespace `view:{issuer}:{namespace}`.
+- A view answers anonymous fetches instead of `401`, so members send
+  credentials up front (`http.proactiveAuth=basic`, git ≥ 2.46).
+
 
 **Size limits.** Git pushes are only limited by the platform's request body
 limit unless `MAX_PUSH_BYTES` is set; single LFS

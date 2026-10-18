@@ -75,6 +75,39 @@ export const readableRepositories = (principal: Principal): Statement => {
   return fragment(`r.deleted_at IS NULL AND a.disabled_at IS NULL AND (r.visibility = 'public' OR (${granted.sql}))`, ...granted.params)
 }
 
+const or = (...parts: readonly Statement[]): Statement => fragment(parts.map((part) => `(${part.sql})`).join(' OR '), ...parts.flatMap((part) => part.params))
+
+export const ruleAudience = (principal: Principal, surface: 'git' | 'lfs' = 'git'): Statement => {
+  const everyone = fragment("v.audience = 'public'")
+  if (principal.kind === 'user' && principal.limits?.ceiling !== 'none') {
+    const own = fragment(
+      "(v.audience = 'user' AND v.subject = ?) OR (v.audience = 'team' AND v.subject IN (SELECT team_id FROM team_members WHERE user_id = ?))",
+      principal.id,
+      principal.id,
+    )
+    return or(everyone, principal.limits?.repositoryIds ? and(inList('r.id', principal.limits.repositoryIds), own) : own)
+  }
+  if (principal.kind !== 'instance' || !principal.scopes.includes(`${surface}:read`)) return everyone
+  return or(
+    everyone,
+    and(
+      fragment("v.audience = 'instance' AND v.subject = ?", principal.issuer),
+      inList("lower(a.login || '/' || r.name)", principal.repositories.map((name) => name.toLowerCase())),
+      fragment('EXISTS (SELECT 1 FROM trusted_instances ti WHERE ti.issuer = v.subject AND ti.disabled_at IS NULL)'),
+    ),
+  )
+}
+
+export const listableRepositories = (principal: Principal): Statement => {
+  const readable = readableRepositories(principal)
+  const audience = ruleAudience(principal)
+  return fragment(
+    `(${readable.sql}) OR (r.deleted_at IS NULL AND a.disabled_at IS NULL AND EXISTS (SELECT 1 FROM visibility_rules v WHERE v.repository_id = r.id AND (${audience.sql})))`,
+    ...readable.params,
+    ...audience.params,
+  )
+}
+
 export const REPOSITORY_COLUMNS = `r.id, r.name, r.visibility, r.owner_id, a.login AS owner_login, a.kind AS owner_kind, a.default_repository_role,
   r.description, r.homepage, r.topics, r.archived_at, r.default_branch, r.last_commit_at, r.stats_at`
 
@@ -122,7 +155,7 @@ export type RepositoryListOptions = PageRequest & { readonly owner?: string; rea
 
 export const listReadableRepositories = async (db: Database, principal: Principal, options: RepositoryListOptions = {}): Promise<Page<RepositoryListing>> => {
   const { page, perPage, offset } = pageWindow(options)
-  const readable = readableRepositories(principal)
+  const readable = listableRepositories(principal)
   const owner = options.owner === undefined ? fragment('1') : fragment('a.login = ?', options.owner)
   const rows = await db.all<ListingRow>(
     sql(

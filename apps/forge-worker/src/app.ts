@@ -50,6 +50,7 @@ import {
   createOidcProvider,
   createGitAccess,
   createInstanceVerifier,
+  type InstancePrincipal,
   createJwksCache,
   type Database,
   type Decision,
@@ -69,6 +70,7 @@ import {
   type RepositorySubject,
   type Role,
   type UserPrincipal,
+  type VisibilityAudience,
   readActiveSession,
   isUnsafeMethod,
   type CreatedToken,
@@ -105,6 +107,7 @@ import {
 } from '@git-forge/accounts'
 import {
   type Authorize,
+  type ReadView,
   compactRepository,
   configureMirror,
   createRepository,
@@ -457,6 +460,7 @@ export type RepositoryAccess = {
   readonly decision: Decision
   readonly access: Access
   readonly repository: RepositorySubject | null
+  readonly view?: ReadView | null
 }
 
 export type Forge = {
@@ -652,7 +656,12 @@ export const createForge = (options: ForgeOptions): Forge => {
         return { decision: atLeast(ceiling, required) && !archivedBlocks(check.repository, required) ? 'allow' : 'forbidden', access: ceiling, repository: check.repository }
       }
     }
-    return { decision: check.decision, access: check.access, repository: check.repository }
+    return { decision: check.decision, access: check.access, repository: check.repository, view: check.view ?? null }
+  }
+
+  const instanceRead = async (principal: InstancePrincipal, repo: RepositoryName): Promise<ReadView | 'full' | null> => {
+    const check = await checkRepositoryAccess(store, principal, repo, 'read')
+    return check.decision === 'allow' ? 'full' : (check.view ?? null)
   }
 
   const refreshRepository = async (repo: RepositoryName): Promise<void> => {
@@ -837,7 +846,7 @@ export const createForge = (options: ForgeOptions): Forge => {
           jwks,
           jobs: options.jobs,
           verification,
-          canRead: async (principal, repo) => (await checkRepositoryAccess(store, principal, repo, 'read')).decision === 'allow',
+          canRead: instanceRead,
           deepCheckDays: options.deepCheckDays,
           unitBytes: options.mirrorUnitBytes,
           now,
@@ -1514,6 +1523,34 @@ export const createForge = (options: ForgeOptions): Forge => {
     return json(200, { names: check.repository.topics })
   }
 
+  const visibilitySubject = async (audience: unknown, subject: string | undefined): Promise<string | null> => {
+    if (audience === 'public') return null
+    if (!subject) throw new HttpError(422, 'subject is required')
+    if (audience === 'instance') return normalizeIssuer(subject)
+    const [login = '', slug] = subject.split('/')
+    const account = await store.findAccount(login)
+    const id = audience === 'user' ? (account?.kind === 'user' ? account.id : null) : account && slug ? ((await store.findTeam(account.id, slug))?.id ?? null) : null
+    if (!id) throw new HttpError(422, `unknown ${String(audience)} ${subject}`)
+    return id
+  }
+
+  const listVisibilityRules = async (request: Request, params: string[]): Promise<Response> =>
+    json(200, await store.listVisibilityRules((await requireRepositoryAdmin(request, repoName(params))).repository.id))
+
+  const addVisibilityRule = async (request: Request, params: string[]): Promise<Response> => {
+    const { principal, repository } = await requireRepositoryAdmin(request, repoName(params))
+    const body = await readBody(request)
+    const audience = body.audience as VisibilityAudience
+    const subject = await visibilitySubject(audience, optionalString(body, 'subject'))
+    return json(201, await store.addVisibilityRule(repository.id, { refs: requiredString(body, 'refs'), path: optionalString(body, 'path') ?? null, audience, subject }, { kind: 'user', id: principal.id }))
+  }
+
+  const removeVisibilityRule = async (request: Request, params: string[]): Promise<Response> => {
+    const { principal, repository } = await requireRepositoryAdmin(request, repoName(params))
+    if (!(await store.removeVisibilityRule(repository.id, params[2]!, { kind: 'user', id: principal.id }))) throw new HttpError(404, 'no such rule')
+    return new Response(null, { status: 204 })
+  }
+
   const setCollaborator = async (request: Request, params: string[]): Promise<Response> => {
     const principal = await principalOf(request)
     const repo = repoName(params)
@@ -1541,7 +1578,8 @@ export const createForge = (options: ForgeOptions): Forge => {
     }
     const subject = { owner: check.repository.owner, name: check.repository.name }
     const at = now()
-    const overview = await mirrorOverview({ storage, verification, subscribers: store.mirrorSubscriptions, now: at }, subject)
+    const readOf = (issuer: string) => instanceRead({ kind: 'instance', issuer, repositories: [`${subject.owner}/${subject.name}`.toLowerCase()], scopes: ['git:read'], tokenId: '' }, subject)
+    const overview = await mirrorOverview({ storage, verification, subscribers: store.mirrorSubscriptions, readOf, now: at }, subject)
     if (!overview) throw new HttpError(404, 'repository not found')
     const signed = options.instanceKey && options.publicUrl ? await signOverview(options.instanceKey, options.publicUrl, overview, at) : null
     return json(200, { ...overview, ...(signed ? { signed } : {}) })
@@ -1899,7 +1937,9 @@ export const createForge = (options: ForgeOptions): Forge => {
   const withSessionReads = (authorize: Authorize): Authorize => async (request, repo, access, ...rest) => {
     if (access === 'read' && !request.headers.has('Authorization') && !isUnsafeMethod(request.method)) {
       const active = await readActiveSession(request, (await loginOptions(request)))
-      if (active && (await repositoryAccess(sessionUserPrincipal(active.session), repo, 'read')).decision === 'allow') return null
+      const check = active ? await repositoryAccess(sessionUserPrincipal(active.session), repo, 'read') : null
+      if (check?.decision === 'allow') return null
+      if (check?.view) return check.view
     }
     return authorize(request, repo, access, ...rest)
   }
@@ -2093,6 +2133,9 @@ export const createForge = (options: ForgeOptions): Forge => {
     { method: 'POST', pattern: new RegExp(`^${REPO}/transfer$`), handler: transferRepository },
     { method: 'PATCH', pattern: new RegExp(`^/api/accounts/${SEGMENT}$`), handler: renameAccountRoute },
     { method: 'PUT', pattern: new RegExp(`^${REPO}/collaborators/${SEGMENT}$`), handler: setCollaborator },
+    { method: 'GET', pattern: new RegExp(`^${REPO}/visibility$`), handler: listVisibilityRules },
+    { method: 'POST', pattern: new RegExp(`^${REPO}/visibility$`), handler: addVisibilityRule },
+    { method: 'DELETE', pattern: new RegExp(`^${REPO}/visibility/${SEGMENT}$`), handler: removeVisibilityRule },
     { method: 'POST', pattern: new RegExp(`^${REPO}/instances$`), handler: grantInstance },
     { method: 'POST', pattern: new RegExp(`^${REPO}/import$`), handler: importRepository },
     { method: 'GET', pattern: new RegExp(`^${REPO}/import$`), handler: importStatus },

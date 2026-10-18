@@ -225,6 +225,8 @@ to the hook, and `createGitAuthorizer` hands it to
 token only counts for Git routes with the scope `git:read` and for LFS routes
 with `lfs:read`. Without the scope the instance is treated like a caller
 without grants (public repositories stay readable, private ones answer `404`).
+A caller without read who matches visibility rules gets a `ReadView` instead of
+a denial (design §8); the core then serves only what the view reaches.
 
 ## Instance admins and bootstrap
 

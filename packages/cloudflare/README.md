@@ -29,6 +29,15 @@ const storage = new R2Storage(env.BUCKET, { prefix: 'optional/prefix/' })
 Presigned URLs for LFS need R2's S3 API with an access key; use `S3Storage`
 from [`@git-forge/s3`](../s3) for that.
 
+## `createCloudflareEmailSender`
+
+`EmailSender` over a `send_email` binding (Cloudflare Email Service):
+`createCloudflareEmailSender(env.EMAIL, 'Forge <forge@example.org>')`. The
+sender's domain must be onboarded for Email Sending. Error codes
+`E_RATE_LIMIT_EXCEEDED`, `E_DAILY_LIMIT_EXCEEDED`, `E_INTERNAL_SERVER_ERROR`,
+`E_DELIVERY_FAILED` and errors without a code are rethrown (the job queue
+retries); every other code is an `EmailRejectedError`.
+
 ## Tests
 
 `pnpm --filter @git-forge/cloudflare test` runs the tests inside workerd with

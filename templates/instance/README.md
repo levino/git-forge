@@ -206,7 +206,7 @@ OIDC_NAME = "Example ID"
 | `UI` | `true` | `false` for a headless instance (for example a backup mirror): Git, LFS and the API only. |
 | `MAX_LFS_OBJECT_BYTES`, `MIRROR_INTERVAL_MINUTES`, `MIRROR_DEEP_CHECK_DAYS` | see the forge-worker README | Limits and mirror schedule. |
 | `R2_S3_ENDPOINT`, `R2_BUCKET_NAME` | none: LFS through the Worker | Presigned uploads straight to R2, see [Large LFS objects](#large-lfs-objects). |
-| `EMAIL_PROVIDER` | `none` | `ses` or `console`, see [Email](#notifications-email-and-webhooks). |
+| `EMAIL_PROVIDER`, `EMAIL_FROM` | `cloudflare` with an `EMAIL` binding, else `none`; `Forge <forge@<PUBLIC_URL host>>` | `none`, `ses` or `console`, see [Email](#notifications-email-and-webhooks). |
 | `PAGES_HOST`, `PAGES_DOMAINS`, `PAGES_MAX_AGE` | none: no Pages; `60` | Pages hosts, custom domains and cache lifetime, see [Pages](#pages). |
 | `LFS_PUBLISH_PREFIX` | | Key prefix in `CDN_BUCKET`, see [Public LFS bucket](#public-lfs-bucket). |
 
@@ -280,7 +280,34 @@ Notifications (`/api/v3/notifications`), webhooks
 (`/api/v3/repos/<owner>/<name>/releases`) work without further setup; their
 jobs run on the jobs queue (its name must end in `-jobs`).
 
-Emails are off. To send them through Amazon SES, verify the sender address or
+Emails (notification digests, mentions, review requests, invites) are off
+until you add an email binding. To send through Cloudflare Email Service,
+onboard the sender domain (it must use Cloudflare DNS) once:
+
+```sh
+npx wrangler@4 email sending enable git.example.com
+```
+
+then add to `wrangler.toml` and deploy:
+
+```toml
+[[send_email]]
+name = "EMAIL"
+```
+
+Mail goes out from `EMAIL_FROM` or `Forge <forge@<PUBLIC_URL host>>`; test
+with **Send test email** on `/-/admin`. Onboarding also works in the
+dashboard (Compute > Email Service > Email Sending > Onboard Domain) or with
+the API: `POST /zones/{zone_id}/email/sending/subdomains`, then the
+records from `GET …/subdomains/{id}/dns`. It adds MX, SPF and DKIM on
+`cf-bounce.<domain>` and DMARC on `_dmarc.<domain>`.
+
+Sending to arbitrary recipients needs the Workers Paid plan (3,000 emails a
+month included, then $0.35 per 1,000; daily limits per account). On the free
+plan only addresses verified in Email Routing receive mail; others are
+rejected and logged.
+
+To send through Amazon SES instead, verify the sender address or
 domain in SES, create an IAM user with `ses:SendEmail`, and set
 
 ```toml

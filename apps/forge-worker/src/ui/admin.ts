@@ -28,6 +28,10 @@ export const adminAction = async (forge: ForgeServices, session: UiSession, form
       case 'distrust':
         await instance.distrust(principal, text(form, 'issuer'))
         return { kind: 'ok', message: `${text(form, 'issuer')} is no longer trusted.` }
+      case 'test-email': {
+        const sent = await instance.sendTestEmail(principal, text(form, 'to') || null)
+        return { kind: 'ok', message: `Test email sent (${sent.id}).` }
+      }
       case 'backup-run':
         await instance.backup.run(principal)
         return { kind: 'ok', message: 'Backup started.' }

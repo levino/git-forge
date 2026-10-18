@@ -169,6 +169,7 @@ Design: [design.md §17](design.md#17-collaboration).
 ## Later
 
 - [x] Email adapter in the core, Amazon SES v2 implementation (`@git-forge/ses`), console adapter for development
+- [x] Cloudflare Email Service adapter (`send_email` binding, default on Workers when bound), admin test email
 - [x] SMTP email adapter for the Node deployment (`@git-forge/smtp`: STARTTLS or implicit TLS, `AUTH PLAIN`/`LOGIN`)
 - [x] Notifications: event log, watching and participating subscriptions, mentions, per-user settings, inbox API (`/api/v3/notifications`), email digests (instant, hourly, daily) via the job queue (design §16)
 - [x] Event producers: push, create/delete, mirror alarms, CI job and run completion, releases

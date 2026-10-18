@@ -41,10 +41,11 @@ export type TestForgeOptions = {
 }
 
 const presented = (request: Request): string | null => {
-  const header = request.headers.get('Authorization') ?? ''
-  if (header.startsWith('Bearer ')) return header.slice(7)
-  if (!header.startsWith('Basic ')) return null
-  const decoded = atob(header.slice(6))
+  const [scheme, value] = (request.headers.get('Authorization') ?? '').trim().split(/\s+/, 2) as [string, string | undefined]
+  if (!value) return null
+  if (scheme.toLowerCase() === 'bearer' || scheme.toLowerCase() === 'token') return value
+  if (scheme.toLowerCase() !== 'basic') return null
+  const decoded = atob(value)
   return decoded.slice(decoded.indexOf(':') + 1)
 }
 

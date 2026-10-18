@@ -307,7 +307,7 @@ export const createWorkflowRun = async (options: DispatchOptions, request: Workf
   )
   for (const job of jobLevels(request.workflow.jobs).flat()) {
     const placeholder: JobDefinition = { job, workflowEnv: request.workflow.env, workflowDefaults: request.workflow.defaults }
-    await createJob(db, { runId, jobKey: job.id, displayName: job.name, labels: job.runsOn, needs: job.needs, definition: placeholder, expanded: false, status: 'pending' }, now)
+    await createJob(db, { runId, jobKey: job.id, displayName: placeholderName(job), labels: job.runsOn, needs: job.needs, definition: placeholder, expanded: false, status: 'pending' }, now)
   }
   if (group !== null) {
     for (const other of await activeRunsInGroup(db, request.repo.owner, request.repo.name, group)) {
@@ -319,6 +319,8 @@ export const createWorkflowRun = async (options: DispatchOptions, request: Workf
   await advance(options, runId)
   return { runId, workflowPath: request.workflowPath, jobs: await listCurrentJobs(db, runId) }
 }
+
+const placeholderName = (job: WorkflowJob): string => (job.name.includes('${{') ? job.id : job.name)
 
 type Group = {
   readonly key: string
@@ -639,7 +641,7 @@ export const rerunRun = async (options: DispatchOptions, runId: number, mode: Re
   for (const job of jobLevels(definition.workflow.jobs).flat()) {
     if (!chosen.has(job.id)) continue
     const placeholder: JobDefinition = { job, workflowEnv: definition.workflow.env, workflowDefaults: definition.workflow.defaults }
-    await createJob(db, { runId, jobKey: job.id, displayName: job.name, labels: job.runsOn, needs: job.needs, definition: placeholder, expanded: false, status: 'pending', attempt }, now)
+    await createJob(db, { runId, jobKey: job.id, displayName: placeholderName(job), labels: job.runsOn, needs: job.needs, definition: placeholder, expanded: false, status: 'pending', attempt }, now)
   }
   await advance(options, runId)
   return attempt

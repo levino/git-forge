@@ -1740,7 +1740,7 @@ render.
 ## 19. Pages
 
 Static sites per repository, like GitHub Pages, served by the same Worker.
-Package `@git-forge/pages`, tables from migration `0010_pages.sql`
+Package `@git-forge/pages`, tables from migration `0012_pages.sql`
 (`pages_sites`, `pages_deployments`, `pages_grants`, `pages_sessions`).
 
 ### Sources

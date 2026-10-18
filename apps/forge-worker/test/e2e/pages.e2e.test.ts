@@ -66,7 +66,7 @@ const api = (method: string, path: string, body?: unknown, headers: Record<strin
   fetch(`${dev.url}${path}`, {
     method,
     headers: { Authorization: `Bearer ${TOKEN}`, ...(body !== undefined && !(body instanceof Uint8Array) ? { 'Content-Type': 'application/json' } : {}), ...headers },
-    ...(body instanceof Uint8Array ? { body } : body !== undefined ? { body: JSON.stringify(body) } : {}),
+    ...(body instanceof Uint8Array ? { body: new Blob([body as Uint8Array<ArrayBuffer>]) } : body !== undefined ? { body: JSON.stringify(body) } : {}),
     redirect: 'manual',
   })
 

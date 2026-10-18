@@ -3,7 +3,7 @@
 Static sites per repository, like GitHub Pages. Design:
 [design.md §19](../../docs/design.md#19-pages). Tables: `pages_sites`,
 `pages_deployments`, `pages_grants`, `pages_sessions` (migration
-`0010_pages.sql`).
+`0012_pages.sql`).
 
 `createPages(options)` returns:
 

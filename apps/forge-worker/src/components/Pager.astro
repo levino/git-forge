@@ -1,0 +1,32 @@
+---
+import { pageHref } from '../ui/listing.ts'
+
+type Props = { page: number; more: boolean }
+
+const { page, more } = Astro.props
+---
+
+{
+  (page > 1 || more) && (
+    <nav class="join mt-6 flex justify-center" aria-label="Pagination">
+      {page > 1 ? (
+        <a class="join-item btn btn-sm" href={pageHref(Astro.url, { page: page === 2 ? null : page - 1 })} rel="prev">
+          Previous
+        </a>
+      ) : (
+        <span class="join-item btn btn-sm btn-disabled" aria-disabled="true">
+          Previous
+        </span>
+      )}
+      {more ? (
+        <a class="join-item btn btn-sm" href={pageHref(Astro.url, { page: page + 1 })} rel="next">
+          Next
+        </a>
+      ) : (
+        <span class="join-item btn btn-sm btn-disabled" aria-disabled="true">
+          Next
+        </span>
+      )}
+    </nav>
+  )
+}

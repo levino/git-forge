@@ -421,3 +421,7 @@ Instance-wide workflow secrets go into the `ACTIONS_SECRETS` secret, a JSON
 object such as `{"CLOUDFLARE_API_TOKEN": "…"}`. For repository and
 environment secrets set the `ACTIONS_SECRETS_KEY` secret to 32 random bytes
 (`openssl rand -base64 32`); they are stored encrypted with it in D1.
+`actions/cache` and `actions/upload-artifact`/`download-artifact` store their
+data in the bucket. For OIDC ID tokens (`permissions: id-token: write`) set the
+`ACTIONS_OIDC_KEY` secret to a P-256 private JWK (`git-forge-node oidc-key`);
+the issuer is `https://<your domain>/_services/token`.

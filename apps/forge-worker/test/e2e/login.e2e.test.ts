@@ -157,7 +157,7 @@ describe('interactive login on wrangler dev', () => {
 
   it('logs the CLI in by pasting the code from the browser, creates a repository and pushes with plain git and git-lfs', async () => {
     const env = cliEnv()
-    const login = runCli(['auth', 'login', dev.url, '--scopes', 'repo:admin'], env)
+    const login = runCli(['auth', 'login', dev.url, '--paste', '--scopes', 'repo:admin'], env)
     const link = new URL((await login.waitFor(linkPattern('/login/cli/')))[1]!)
     expect(link.pathname).toMatch(/^\/login\/cli\/[A-Za-z0-9_-]{22}$/)
     expect(link.search).toBe('')

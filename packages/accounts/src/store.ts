@@ -63,7 +63,7 @@ export const LOGIN_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/
 
 export const TEAM_SLUG_PATTERN = LOGIN_PATTERN
 
-export const RESERVED_LOGINS: ReadonlySet<string> = new Set(['api', 'explore', 'login', 'logout', 'settings', 'notifications', 'organizations', 'orgs', 'new'])
+export const RESERVED_LOGINS: ReadonlySet<string> = new Set(['api', 'explore', 'login', 'logout', 'settings', 'notifications', 'organizations', 'orgs', 'new', 'search'])
 
 export const isReservedLogin = (login: string): boolean => RESERVED_LOGINS.has(login.toLowerCase())
 
@@ -385,8 +385,8 @@ export const createAccountsStore = (db: Database, options: AccountsStoreOptions 
       return row ? { id: row.id, login: row.login, displayName: row.display_name, email: row.email } : null
     },
 
-    findAccount: async (login: string): Promise<{ readonly id: string; readonly kind: OwnerKind; readonly login: string } | null> =>
-      first<{ id: string; kind: OwnerKind; login: string }>(db, sql('SELECT id, kind, login FROM accounts WHERE login = ?', login)),
+    findAccount: async (login: string): Promise<{ readonly id: string; readonly kind: OwnerKind; readonly login: string; readonly displayName?: string | null } | null> =>
+      first<{ id: string; kind: OwnerKind; login: string; displayName: string | null }>(db, sql('SELECT id, kind, login, display_name AS displayName FROM accounts WHERE login = ?', login)),
 
     isOrganizationOwner: async (organizationId: string, userId: string): Promise<boolean> =>
       (await first(db, sql("SELECT 1 AS ok FROM organization_members WHERE organization_id = ? AND user_id = ? AND role = 'owner'", organizationId, userId))) !== null,

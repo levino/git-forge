@@ -286,7 +286,8 @@ export const parseLoginArguments = (args: readonly string[], interactive: boolea
       const value = inline ?? args[++i]
       if (!isScope(value)) throw new Error(`${flag} must be repo:read, repo:write or repo:admin`)
       scope = value
-    } else if (flag === '--browser-redirect') mode = 'redirect'
+    } else if (flag === '--paste') mode = 'paste'
+    else if (flag === '--browser-redirect') mode = 'redirect'
     else if (flag === '--device') mode = 'device'
     else if (flag === '--no-browser') browser = false
     else if (flag === '--no-setup-git') git = false

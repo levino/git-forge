@@ -1,5 +1,8 @@
 import type { Database } from '@git-forge/accounts'
 import { commitTarball, gzipStream, isValidName, ObjectDatabase, readAll, resolveCommitish, type Storage } from '@git-forge/core'
+import { artifactFilename, type ArtifactRow, deleteArtifact, getArtifact, listArtifacts } from './artifacts.ts'
+import { blobUrl, issueBlobGrant } from './blobs.ts'
+import { type CacheEntryRow, cacheUsage, evictCacheEntries, getCacheEntry, listCaches } from './cache.ts'
 import { jobDefinitionOf } from './definitions.ts'
 import {
   ApprovalError,
@@ -51,6 +54,7 @@ import {
   type RunRow,
   verifyToken,
 } from './store.ts'
+import { deleteVariable, getVariable, listVariables, putVariable, type Variable } from './variables.ts'
 
 export type RepositoryAuthorize = (request: Request, owner: string, repo: string) => Promise<boolean>
 
@@ -159,6 +163,104 @@ const jobJson = (job: JobRow, run: RunRow | null, urls: ServiceUrls) => {
     ...(definition.matrix ? { matrix: definition.matrix } : {}),
     outputs: job.outputs ? (JSON.parse(job.outputs) as Record<string, string>) : {},
   }
+}
+
+const artifactJson = (artifact: ArtifactRow, run: RunRow | null, urls: ServiceUrls, now: number) => {
+  const url = `${urls.serverUrl}/api/v3/repos/${artifact.owner}/${artifact.repo}/actions/artifacts/${artifact.id}`
+  return {
+    id: artifact.id,
+    node_id: `artifact-${artifact.id}`,
+    name: artifact.name,
+    size_in_bytes: artifact.size ?? 0,
+    url,
+    archive_download_url: `${url}/zip`,
+    expired: artifact.expires_at <= now,
+    digest: artifact.digest,
+    created_at: iso(artifact.created_at),
+    updated_at: iso(artifact.finalized_at ?? artifact.created_at),
+    expires_at: iso(artifact.expires_at),
+    workflow_run: { id: artifact.run_id, head_branch: run ? run.ref.replace(/^refs\/(heads|tags)\//, '') : null, head_sha: run?.sha ?? null },
+  }
+}
+
+const cacheJson = (entry: CacheEntryRow) => ({
+  id: entry.id,
+  ref: entry.scope,
+  key: entry.key,
+  version: entry.version,
+  last_accessed_at: iso(entry.last_accessed_at),
+  created_at: iso(entry.created_at),
+  size_in_bytes: entry.size ?? 0,
+})
+
+const ARTIFACT_DOWNLOAD_GRANT_MS = 60 * 1000
+
+const perPage = (url: URL): number => Math.min(Math.max(Number(url.searchParams.get('per_page')) || 30, 1), 100)
+
+const artifactsResponse = async (context: RepoRequest, filter: { readonly runId?: number }): Promise<Response> => {
+  const { options, url, owner, repo, now } = context
+  const name = url.searchParams.get('name')
+  const artifacts = await listArtifacts(options.db, owner, repo, { ...filter, ...(name ? { name } : {}), includeExpired: true }, now, perPage(url))
+  const runs = new Map<number, RunRow | null>()
+  for (const artifact of artifacts) if (!runs.has(artifact.run_id)) runs.set(artifact.run_id, await getRun(options.db, artifact.run_id))
+  return json(200, { total_count: artifacts.length, artifacts: artifacts.map((artifact) => artifactJson(artifact, runs.get(artifact.run_id) ?? null, options.urls, now)) })
+}
+
+const artifactRoutes = async (context: RepoRequest, rest: readonly string[]): Promise<Response> => {
+  const { options, request, owner, repo, now } = context
+  const method = request.method
+  const read = options.authorizeRead ?? options.authorize
+  if (!(await read(request, owner, repo))) return error(404, 'Not Found')
+  if (rest.length === 0 && method === 'GET') return artifactsResponse(context, {})
+  const artifact = /^\d+$/.test(rest[0] ?? '') ? await getArtifact(options.db, Number(rest[0])) : null
+  if (!artifact || artifact.owner !== owner || artifact.repo !== repo || artifact.deleted_at !== null || artifact.finalized_at === null) return error(404, 'Not Found')
+  if (rest.length === 1 && method === 'GET') return json(200, artifactJson(artifact, await getRun(options.db, artifact.run_id), options.urls, now))
+  if (rest.length === 1 && method === 'DELETE') {
+    if (!(await (options.authorizeWrite ?? options.authorize)(request, owner, repo))) return error(403, 'write access is required')
+    await deleteArtifact(options.db, artifact.id, now)
+    return noContent()
+  }
+  if (rest.length === 2 && rest[1] === 'zip' && method === 'GET') {
+    if (artifact.expires_at <= now) return error(410, 'Artifact has expired')
+    const filename = artifactFilename(artifact)
+    const token = await issueBlobGrant(options.db, { blobId: artifact.blob_id, access: 'read', jobId: null, filename, ttlMs: ARTIFACT_DOWNLOAD_GRANT_MS }, now)
+    return new Response(null, { status: 302, headers: { Location: blobUrl(options.urls.serverUrl, token, filename) } })
+  }
+  return error(404, 'Not Found')
+}
+
+const cacheRoutes = async (context: RepoRequest, collection: string, rest: readonly string[]): Promise<Response> => {
+  const { options, request, url, owner, repo, now } = context
+  const method = request.method
+  if (!(await (options.authorizeRead ?? options.authorize)(request, owner, repo))) return error(404, 'Not Found')
+  if (collection === 'cache' && rest.length === 1 && rest[0] === 'usage' && method === 'GET') {
+    const usage = await cacheUsage(options.db, owner, repo)
+    return json(200, { full_name: `${owner}/${repo}`, active_caches_size_in_bytes: usage.bytes, active_caches_count: usage.count })
+  }
+  if (collection !== 'caches') return error(404, 'Not Found')
+  const key = url.searchParams.get('key') ?? undefined
+  const ref = url.searchParams.get('ref') ?? undefined
+  if (rest.length === 0 && method === 'GET') {
+    const entries = await listCaches(options.db, owner, repo, { ...(key ? { key } : {}), ...(ref ? { ref } : {}) }, perPage(url))
+    return json(200, { total_count: entries.length, actions_caches: entries.map(cacheJson) })
+  }
+  if (method !== 'DELETE') return error(404, 'Not Found')
+  if (!(await (options.authorizeWrite ?? options.authorize)(request, owner, repo))) return error(403, 'write access is required')
+  if (rest.length === 1 && /^\d+$/.test(rest[0]!)) {
+    const entry = await getCacheEntry(options.db, Number(rest[0]))
+    if (!entry || entry.owner !== owner || entry.repo !== repo || entry.evicted_at !== null) return error(404, 'Not Found')
+    await evictCacheEntries(options.db, [entry.id], now)
+    return noContent()
+  }
+  if (rest.length !== 0 || !key) return error(422, 'key is required')
+  const entries = (await listCaches(options.db, owner, repo, { key, ...(ref ? { ref } : {}) }, 100)).filter((entry) => entry.key === key)
+  if (entries.length === 0) return error(404, 'Not Found')
+  await evictCacheEntries(
+    options.db,
+    entries.map((entry) => entry.id),
+    now,
+  )
+  return json(200, { total_count: entries.length, actions_caches: entries.map(cacheJson) })
 }
 
 const secretJson = (secret: SecretInfo) => ({ name: secret.name, created_at: new Date(secret.createdAt).toISOString(), updated_at: new Date(secret.updatedAt).toISOString() })
@@ -307,6 +409,36 @@ const secretRoutes = async (context: RepoRequest, scope: SecretScope, rest: read
   }
 }
 
+const variableJson = (variable: Variable) => ({ name: variable.name, value: variable.value, created_at: new Date(variable.created_at).toISOString(), updated_at: new Date(variable.updated_at).toISOString() })
+
+const variableRoutes = async (context: RepoRequest, scope: SecretScope, rest: readonly string[]): Promise<Response> => {
+  const { options, request, now } = context
+  const method = request.method
+  if (rest.length === 0 && method === 'GET') {
+    const variables = await listVariables(options.db, scope)
+    return json(200, { total_count: variables.length, variables: variables.map(variableJson) })
+  }
+  if (rest.length > 1 || (rest.length === 0 && method !== 'POST')) return error(404, 'Not Found')
+  const existing = rest[0] === undefined ? null : await getVariable(options.db, scope, rest[0])
+  if (method === 'GET') return existing ? json(200, variableJson(existing)) : error(404, 'Not Found')
+  if (method === 'DELETE') return existing && (await deleteVariable(options.db, scope, existing.name)) ? noContent() : error(404, 'Not Found')
+  if (method !== 'POST' && method !== 'PATCH') return error(404, 'Not Found')
+  if (method === 'PATCH' && !existing) return error(404, 'Not Found')
+  const body = (await readBody(request)) ?? {}
+  const name = typeof body['name'] === 'string' ? body['name'] : existing?.name
+  const value = typeof body['value'] === 'string' ? body['value'] : existing?.value
+  if (name === undefined || value === undefined) return error(422, 'name and value must be strings')
+  if (method === 'POST' && (await getVariable(options.db, scope, name))) return error(409, 'Variable already exists')
+  try {
+    await putVariable(options.db, scope, name, value, now)
+  } catch (caught) {
+    if (caught instanceof SecretNameError) return error(422, caught.message)
+    throw caught
+  }
+  if (existing && existing.name !== name.toUpperCase()) await deleteVariable(options.db, scope, existing.name)
+  return noContent(method === 'POST' ? 201 : 204)
+}
+
 const parseReviewers = (value: unknown): EnvironmentReviewer[] | null => {
   if (value === undefined || value === null) return []
   if (!Array.isArray(value)) return null
@@ -347,6 +479,11 @@ const environmentRoutes = async (context: RepoRequest, rest: readonly string[]):
     const environment = await getEnvironment(options.db, owner, repo, name)
     if (!environment) return error(404, 'Not Found')
     return secretRoutes(context, { owner, repo, environment: environment.name }, rest.slice(2))
+  }
+  if (rest[1] === 'variables') {
+    const environment = await getEnvironment(options.db, owner, repo, name)
+    if (!environment) return error(404, 'Not Found')
+    return variableRoutes(context, { owner, repo, environment: environment.name }, rest.slice(2).map(decodeURIComponent))
   }
   return error(404, 'Not Found')
 }
@@ -415,6 +552,7 @@ const runRoutes = async (context: RepoRequest, rest: readonly string[]): Promise
     return json(200, { total_count: jobs.length, jobs: jobs.map((job) => jobJson(job, run, options.urls)) })
   }
   if (rest.length === 2 && action === 'pending_deployments') return pendingDeploymentRoutes(context, run)
+  if (rest.length === 2 && action === 'artifacts' && method === 'GET') return artifactsResponse(context, { runId: run.id })
   if (rest.length !== 2 || method !== 'POST') return error(404, 'Not Found')
   if (!(await write(request, owner, repo))) return error(403, 'write access is required')
   if (action === 'cancel' || action === 'force-cancel') {
@@ -437,6 +575,8 @@ const actionsRoutes = async (context: RepoRequest, collection: string | undefine
   const { options, request, url, owner, repo, now } = context
   const method = request.method
   if (collection === 'runs') return runRoutes(context, rest)
+  if (collection === 'artifacts') return artifactRoutes(context, rest)
+  if (collection === 'caches' || collection === 'cache') return cacheRoutes(context, collection, rest)
   if (collection === 'jobs' && rest.length >= 1 && /^\d+$/.test(rest[0]!)) {
     const read = options.authorizeRead ?? options.authorize
     const job = await getJob(options.db, Number(rest[0]))
@@ -478,6 +618,7 @@ const actionsRoutes = async (context: RepoRequest, collection: string | undefine
   }
   if (!(await options.authorize(request, owner, repo))) return error(404, 'Not Found')
   if (collection === 'secrets') return secretRoutes(context, { owner, repo, environment: '' }, rest.map(decodeURIComponent))
+  if (collection === 'variables') return variableRoutes(context, { owner, repo, environment: '' }, rest.map(decodeURIComponent))
   if (collection === 'runners') {
     if (rest.length === 0 && method === 'GET') {
       const runners = await listRunners(options.db, owner, repo, url.searchParams.get('name') ?? undefined)

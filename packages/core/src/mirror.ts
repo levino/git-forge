@@ -2,9 +2,10 @@ import { equalBytes, fromUtf8, readAll, toHex, utf8 } from './bytes.ts'
 import type { DigestFactory } from './digest.ts'
 import { fetchDumb, lsRefsDumb } from './dumb-client.ts'
 import { type ObjectId, sha1 } from './hash.ts'
-import { connectRemote, type Protocol, type ProtocolPreference } from './fetch-client.ts'
+import { connectRemote, type Protocol, type ProtocolPreference, type RemoteConnection } from './fetch-client.ts'
 import { LFS_POINTER_MAX_SIZE, lfsObjectKey, parseLfsPointer } from './lfs.ts'
-import { type LfsMissing, type LfsMirrorResult, type LfsPointer, mirrorLfsObjects } from './lfs-mirror.ts'
+import { type LfsEndpoint, mayAuthorizeLfs, resolveLfsEndpoint } from './lfs-config.ts'
+import { lfsEndpointFor, type LfsMissing, type LfsMirrorResult, type LfsPointer, mirrorLfsObjects } from './lfs-mirror.ts'
 import { type CopiedPack, copyPack, listRemotePacks } from './pack-copy.ts'
 import { ByteCursor } from './cursor.ts'
 import { indexPack } from './pack-indexer.ts'
@@ -27,12 +28,14 @@ import {
   writeRefs,
   writeServerInfo,
 } from './repository.ts'
+import { fetchFeatures } from './smart-client.ts'
+import { fetchCommitGraph, fetchNextStep, initialProgress, type SteppedFetchLimits, type SteppedProgress } from './stepped-fetch.ts'
 import type { Storage } from './storage.ts'
 import { isAncestor, MissingObjectError, type ObjectSource } from './walk.ts'
 
 export type MirrorMode = 'auto' | 'manual'
 
-export type MirrorAuth = 'none' | 'instance'
+export type MirrorAuth = 'none' | 'instance' | 'token'
 
 export type MirrorConfig = {
   readonly version: 1
@@ -91,6 +94,19 @@ export type MirrorStatus = {
   readonly alarms: readonly MirrorAlarm[]
   readonly lastDeepCheck?: DeepCheck
   readonly pendingPacks?: readonly PendingPack[]
+  readonly lfsEndpoint?: LfsEndpoint
+}
+
+export type MirrorFetchState = SteppedProgress & {
+  readonly version: 1
+  readonly phase: 'graph' | 'fetch' | 'done' | 'failed'
+  readonly startedAt: string
+  readonly updatedAt: string
+  readonly refs: Readonly<Record<string, ObjectId>>
+  readonly head?: string
+  readonly steps: number
+  readonly failures: number
+  readonly error?: string
 }
 
 export type RefUpdate = {
@@ -113,6 +129,10 @@ const mirrorPrefix = (repo: RepositoryName, remote: string) => `${repositoryPref
 export const mirrorConfigKey = (repo: RepositoryName, remote: string): string => `${mirrorPrefix(repo, remote)}config.json`
 
 export const mirrorStatusKey = (repo: RepositoryName, remote: string): string => `${mirrorPrefix(repo, remote)}status.json`
+
+export const mirrorFetchKey = (repo: RepositoryName, remote: string): string => `${mirrorPrefix(repo, remote)}fetch.json`
+
+export const MAX_MIRROR_FETCH_FAILURES = 5
 
 export const upstreamRefPrefix = (remote: string): string => `${UPSTREAM_PREFIX}${remote}/`
 
@@ -153,7 +173,7 @@ export const configureMirror = async (storage: Storage, repo: RepositoryName, se
   if (!isValidName(remote)) throw new Error(`invalid remote name ${remote}`)
   if (!validUrl(settings.url)) throw new Error(`invalid upstream URL ${settings.url}`)
   if (!validNamespace(namespace)) throw new Error(`invalid upstream namespace ${namespace}`)
-  if (settings.auth !== undefined && settings.auth !== 'none' && settings.auth !== 'instance') throw new Error(`invalid mirror auth ${String(settings.auth)}`)
+  if (settings.auth !== undefined && settings.auth !== 'none' && settings.auth !== 'instance' && settings.auth !== 'token') throw new Error(`invalid mirror auth ${String(settings.auth)}`)
   if (!(await readRefs(storage, repo))) throw new Error(`repository ${repo.owner}/${repo.name} not found`)
   const config: MirrorConfig = {
     version: 1,
@@ -448,10 +468,13 @@ export type SyncOptions = {
   readonly now?: () => Date
   readonly protocol?: ProtocolPreference
   readonly maxPackBytes?: number
+  readonly maxSteps?: number
+  readonly commitsPerStep?: number
+  readonly stepLimits?: SteppedFetchLimits
 }
 
 export type SyncResult = {
-  readonly status: 'ok' | 'detached' | 'failed'
+  readonly status: 'ok' | 'detached' | 'failed' | 'pending'
   readonly strategy?: Exclude<SyncStrategy, 'auto'>
   readonly protocol?: Protocol
   readonly copied?: { readonly packs: number; readonly bytes: number; readonly reused: number }
@@ -496,6 +519,95 @@ const saveStatus = async (storage: Storage, repo: RepositoryName, remote: string
   throw new Error(`could not save mirror status for ${remote}`)
 }
 
+type FetchOutcome = {
+  readonly protocol: Protocol
+  readonly upstream: UpstreamRefs | null
+  readonly lfs: readonly LfsPointer[]
+  readonly fetched: SyncResult['fetched']
+  readonly scanned: SyncResult['scanned']
+}
+
+const supportsFilter = (connection: RemoteConnection): boolean =>
+  connection.protocol === 'v2' && connection.capabilities !== undefined && fetchFeatures(connection.capabilities).has('filter')
+
+const fetchOnce = async (options: SyncOptions, config: MirrorConfig, odb: ObjectDatabase, connection: RemoteConnection, upstream: UpstreamRefs, localTips: readonly ObjectId[], connected: ReadonlySet<ObjectId>, newTips: readonly ObjectId[]): Promise<FetchOutcome> => {
+  let fetched: SyncResult['fetched'] = { objects: 0, packs: [], rounds: 0 }
+  if (newTips.length > 0 && !(await isComplete(odb, newTips, connected))) {
+    fetched = await connection.fetchObjects(odb, {
+      wants: newTips,
+      haveTips: localTips,
+      isConnected: (id) => connected.has(id),
+      ...(options.maxPackBytes !== undefined ? { maxPackBytes: options.maxPackBytes } : {}),
+    })
+  }
+  const scan = await scanNewObjects(odb, newTips, connected, config.lfs)
+  return { protocol: connection.protocol, upstream, lfs: scan.lfs, fetched, scanned: { objects: scan.objects, commits: scan.commits } }
+}
+
+const fetchFromRemote = async (options: SyncOptions, config: MirrorConfig, remote: Remote, odb: ObjectDatabase, localRefs: Readonly<Record<string, ObjectId>>): Promise<FetchOutcome> => {
+  const { storage, repo } = options
+  const now = options.now ?? (() => new Date())
+  const key = mirrorFetchKey(repo, config.remote)
+  const stored = await readJson<MirrorFetchState>(storage, key)
+  let etag = stored?.etag ?? null
+  let state = stored && (stored.value.phase === 'graph' || stored.value.phase === 'fetch') ? stored.value : null
+  if (!state) {
+    const connection = await connectRemote(remote, options.protocol ?? 'auto')
+    const source = `refs/${config.namespace}`
+    const listing = await connection.listRefs([`${source}heads/`, `${source}tags/`])
+    const upstream = selectUpstreamRefs(listing.refs, config.namespace, listing.head)
+    const localTips = [...new Set(Object.values(localRefs))]
+    const connected = await commitClosure(odb, localTips)
+    const newTips = [...new Set(upstream.refs.values())].filter((id) => !connected.has(id))
+    if (newTips.length === 0 || !supportsFilter(connection) || (await isComplete(odb, newTips, connected))) {
+      return fetchOnce(options, config, odb, connection, upstream, localTips, connected, newTips)
+    }
+    const at = now().toISOString()
+    state = {
+      ...initialProgress(config.lfs, options.commitsPerStep),
+      version: 1,
+      phase: 'graph',
+      startedAt: at,
+      updatedAt: at,
+      refs: Object.fromEntries(upstream.refs),
+      ...(upstream.head ? { head: upstream.head } : {}),
+      wants: newTips,
+      localTips,
+      steps: 0,
+      failures: 0,
+    }
+  }
+  const stepped = { ...options.stepLimits, storage, repo, odb, remote, commitsKey: `${mirrorPrefix(repo, config.remote)}commits.txt`, blobsKey: `${mirrorPrefix(repo, config.remote)}blobs.txt` }
+  const save = async (next: MirrorFetchState): Promise<boolean> => {
+    const written = await writeJson(storage, key, next, etag ? { ifMatch: etag } : { ifNoneMatch: '*' })
+    if (written.ok) etag = written.info.etag
+    return written.ok
+  }
+  for (let steps = 0; (state.phase === 'graph' || state.phase === 'fetch') && steps < (options.maxSteps ?? Number.POSITIVE_INFINITY); steps++) {
+    let next: MirrorFetchState
+    try {
+      if (state.phase === 'graph') next = { ...(await fetchCommitGraph(stepped, state)), phase: 'fetch' }
+      else {
+        const step = await fetchNextStep(stepped, state)
+        next = step.done ? { ...step.state, phase: 'done' } : step.state
+      }
+      const { error: _error, ...clean } = next
+      next = { ...clean, failures: 0 }
+    } catch (error) {
+      const failures = state.failures + 1
+      await save({ ...state, failures, error: error instanceof Error ? error.message : String(error), updatedAt: now().toISOString(), ...(failures >= MAX_MIRROR_FETCH_FAILURES ? { phase: 'failed' as const } : {}) })
+      throw error
+    }
+    next = { ...next, steps: state.steps + 1, updatedAt: now().toISOString() }
+    if (!(await save(next))) return { protocol: 'v2', upstream: null, lfs: [], fetched: { objects: 0, packs: [], rounds: 0 }, scanned: { objects: 0, commits: 0 } }
+    state = next
+  }
+  const fetched = { objects: state.fetched.objects, packs: [], rounds: state.steps }
+  const scanned = { objects: state.fetched.objects, commits: state.commits }
+  if (state.phase !== 'done') return { protocol: 'v2', upstream: null, lfs: [], fetched, scanned }
+  return { protocol: 'v2', upstream: { refs: new Map(Object.entries(state.refs)), ignored: [], ...(state.head ? { head: state.head } : {}) }, lfs: state.lfsQueue, fetched, scanned }
+}
+
 export const syncMirror = async (options: SyncOptions): Promise<SyncResult> => {
   const { storage, repo } = options
   const remoteName = options.remote ?? DEFAULT_REMOTE
@@ -524,45 +636,35 @@ export const syncMirror = async (options: SyncOptions): Promise<SyncResult> => {
       lfsFound = copied.lfs
       result = { ...result, strategy: 'copy', protocol, fetched: copied.fetched, copied: copied.copied }
     } else {
-      const connection = await connectRemote(remote, options.protocol ?? 'auto')
-      protocol = connection.protocol
-      result = { ...result, strategy: 'fetch', protocol }
-      const source = `refs/${config.namespace}`
-      const listing = await connection.listRefs([`${source}heads/`, `${source}tags/`])
-      upstream = selectUpstreamRefs(listing.refs, config.namespace, listing.head)
-      const localTips = [...new Set(Object.values(local.state.refs))]
-      const connected = await commitClosure(odb, localTips)
-      const newTips = [...new Set(upstream.refs.values())].filter((id) => !connected.has(id))
-      if (newTips.length > 0 && !(await isComplete(odb, newTips, connected))) {
-        const fetched = await connection.fetchObjects(odb, {
-          wants: newTips,
-          haveTips: localTips,
-          isConnected: (id) => connected.has(id),
-          ...(options.maxPackBytes !== undefined ? { maxPackBytes: options.maxPackBytes } : {}),
-        })
-        result = { ...result, fetched }
-      }
-      const scan = await scanNewObjects(odb, newTips, connected, config.lfs)
-      result = { ...result, scanned: { objects: scan.objects, commits: scan.commits } }
-      lfsFound = scan.lfs
+      const outcome = await fetchFromRemote(options, config, remote, odb, local.state.refs)
+      result = { ...result, strategy: 'fetch', protocol: outcome.protocol, fetched: outcome.fetched, scanned: outcome.scanned }
+      if (!outcome.upstream) return { ...result, status: 'pending' }
+      protocol = outcome.protocol
+      upstream = outcome.upstream
+      lfsFound = outcome.lfs
     }
     const upstreamChecksum = refsChecksum(upstream.refs)
     result = { ...result, upstreamChecksum, ...(upstream.head ? { upstreamHead: upstream.head } : {}) }
     let lfsPending: readonly LfsMissing[] = pending
-    if (config.lfs && options.deferLfs) {
-      lfsPending = deferred(pending, lfsFound)
-    } else if (config.lfs && (lfsFound.length > 0 || pending.length > 0)) {
-      if (lfsFound.length > 0) await saveStatus(storage, repo, remoteName, (status) => ({ ...status, lfsPending: deferred(status.lfsPending, lfsFound) }))
-      const lfs = await mirrorLfsObjects({
-        storage,
-        repo,
-        remote,
-        ...(config.lfsUrl ? { endpoint: config.lfsUrl } : {}),
-        ...(options.digests ? { digests: options.digests } : {}),
-        objects: [...pending, ...lfsFound].map(({ oid, size }) => ({ oid, size })),
-      })
-      lfsPending = lfs.missing
-      result = { ...result, lfs }
+    let lfsEndpoint = previous?.lfsEndpoint
+    if (config.lfs && (lfsFound.length > 0 || pending.length > 0)) {
+      lfsEndpoint = await resolveLfsEndpoint(odb, config.url, config.lfsUrl, Object.fromEntries(upstream.refs), upstream.head)
+      if (options.deferLfs) {
+        lfsPending = deferred(pending, lfsFound)
+      } else {
+        if (lfsFound.length > 0) await saveStatus(storage, repo, remoteName, (status) => ({ ...status, lfsPending: deferred(status.lfsPending, lfsFound) }))
+        const lfs = await mirrorLfsObjects({
+          storage,
+          repo,
+          remote,
+          endpoint: lfsEndpoint.url,
+          authorize: mayAuthorizeLfs(config.url, lfsEndpoint),
+          ...(options.digests ? { digests: options.digests } : {}),
+          objects: [...pending, ...lfsFound].map(({ oid, size }) => ({ oid, size })),
+        })
+        lfsPending = lfs.missing
+        result = { ...result, lfs }
+      }
     }
     const plan = await updateUpstreamRefs(storage, repo, odb, remoteName, upstream.refs, upstream.head, now())
     result = { ...result, status: 'ok', updates: plan.updates, alarms: plan.alarms }
@@ -576,6 +678,7 @@ export const syncMirror = async (options: SyncOptions): Promise<SyncResult> => {
       upstreamRefs: upstream.refs.size,
       upstreamChecksum,
       lfsPending,
+      ...(lfsEndpoint ? { lfsEndpoint } : {}),
       pendingPacks: [],
       alarms: [...status.alarms, ...plan.alarms].slice(-MAX_STORED_ALARMS),
     }))
@@ -787,11 +890,16 @@ export const copyPendingPack = async (options: UnitOptions, name: string): Promi
 
 export const mirrorPendingLfsObject = async (options: UnitOptions, pointer: LfsPointer): Promise<LfsMirrorResult> => {
   const { remoteName, config, remote } = await unitContext(options)
+  const endpoint: LfsEndpoint = (await readMirrorStatus(options.storage, options.repo, remoteName))?.lfsEndpoint ?? {
+    url: config.lfsUrl ?? lfsEndpointFor(config.url),
+    source: config.lfsUrl ? 'setting' : 'default',
+  }
   const result = await mirrorLfsObjects({
     storage: options.storage,
     repo: options.repo,
     remote,
-    ...(config.lfsUrl ? { endpoint: config.lfsUrl } : {}),
+    endpoint: endpoint.url,
+    authorize: mayAuthorizeLfs(config.url, endpoint),
     ...(options.digests ? { digests: options.digests } : {}),
     objects: [{ oid: pointer.oid, size: pointer.size }],
   })

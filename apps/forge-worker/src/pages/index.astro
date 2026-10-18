@@ -1,55 +1,58 @@
 ---
+import Icon from '../components/Icon.astro'
 import RepoList from '../components/RepoList.astro'
 import Layout from '../layouts/Layout.astro'
-import { visibleRepositories } from '../ui/listing.ts'
+import { repositoryPage } from '../ui/listing.ts'
 
 const { forge, principal } = Astro.locals
 const login = principal.kind === 'user' ? principal.login : null
-const repositories = await visibleRepositories(forge, principal, login ?? undefined)
-const explore = login ? [] : repositories.slice(0, 20)
+const repositories = await repositoryPage(forge, principal, Astro.url, login ?? undefined, login ? undefined : 20)
 ---
 
 <Layout title={Astro.url.host}>
   {
     login ? (
-      <section aria-labelledby="your-repositories">
-        <div class="flex flex-wrap items-center justify-between gap-2 mb-4">
-          <h1 id="your-repositories" class="text-2xl font-semibold">
+      <section aria-labelledby="your-repositories" class="max-w-4xl mx-auto">
+        <div class="flex flex-wrap items-center justify-between gap-2 mb-3">
+          <h1 id="your-repositories" class="text-lg font-semibold">
             Your repositories
           </h1>
-          {Astro.locals.session && (
-            <a href="/new" class="btn btn-primary btn-sm">
-              New repository
+          <div class="flex gap-2">
+            <a href="/explore" class="btn btn-sm">
+              <Icon name="search" />
+              Explore
             </a>
-          )}
+            {Astro.locals.session && (
+              <a href="/new" class="btn btn-primary btn-sm">
+                <Icon name="plus" />
+                New
+              </a>
+            )}
+          </div>
         </div>
-        <RepoList repositories={repositories} showOwner={false} />
+        <RepoList listing={repositories} showOwner={false} empty="You have no repositories yet." />
       </section>
     ) : (
-      <>
-        <section class="hero bg-base-200 rounded-box mb-8">
-          <div class="hero-content text-center py-12">
-            <div class="max-w-xl">
-              <h1 class="text-3xl font-bold">{Astro.url.host}</h1>
-              <p class="py-4">Git repositories with Git LFS, served by git-forge.</p>
-              <div class="flex gap-2 justify-center">
-                <a href="/explore" class="btn btn-primary">
-                  Explore repositories
-                </a>
-                <a href="/login" class="btn">
-                  Sign in
-                </a>
-              </div>
-            </div>
+      <div class="max-w-4xl mx-auto">
+        <section class="flex flex-wrap items-center justify-between gap-4 pb-6 mb-6 border-b border-base-300" aria-label="About">
+          <p class="text-base-content/70 max-w-xl">Git repositories with Git LFS, issues, pull requests and actions, served by git-forge.</p>
+          <div class="flex gap-2">
+            <a href="/explore" class="btn btn-sm">
+              <Icon name="search" />
+              Explore repositories
+            </a>
+            <a href="/login" class="btn btn-sm btn-primary">
+              Sign in
+            </a>
           </div>
         </section>
         <section aria-labelledby="recent">
-          <h2 id="recent" class="text-xl font-semibold mb-4">
+          <h1 id="recent" class="text-lg font-semibold mb-3">
             Public repositories
-          </h2>
-          <RepoList repositories={explore} />
+          </h1>
+          <RepoList listing={repositories} controls={false} empty="There are no public repositories yet." />
         </section>
-      </>
+      </div>
     )
   }
 </Layout>

@@ -178,6 +178,34 @@ storage. Mirrors therefore do not poll; the upstream tells them.
   a duplicate that slips through runs a sync that changes nothing.
 - **Chains:** a sync that moved refs notifies the mirror's own subscribers,
   so a mirror of a mirror (gamma ← beta ← alpha) follows without any cron.
+- **GitHub upstreams** notify through a repository webhook (`push` event) at
+  `POST /api/repos/{owner}/{repo}/mirrors/{remote}/webhook`. The body is
+  verified with HMAC-SHA256 (`X-Hub-Signature-256`, WebCrypto `verify`)
+  against a per-mirror secret; `ping` answers `200`, `push` enqueues a sync
+  (`202`), other events are ignored. `PUT` on the same path (repository
+  admin) creates or rotates the secret and returns URL and secret; with
+  `githubToken` (classic `admin:repo_hook`, fine-grained "Webhooks: write")
+  it also creates or updates the hook through the GitHub REST API. Without
+  a job queue the endpoint answers `503`.
+- **Mirror credentials** (an upstream token for `auth: token`, the webhook
+  secret) live in `mirror_secrets` (migration `0023`), sealed with AES-GCM
+  under `ACTIONS_SECRETS_KEY` like Actions secrets, with the repository,
+  remote and kind as additional data. They are never written to the bucket,
+  returned by an API or logged. A token goes to the upstream as
+  `Basic x-access-token:<token>`.
+- **Bulk GitHub mirrors:** `POST /api/mirrors/github` (and the form on
+  `/new`) with `account` (GitHub user or organization), `owner` (forge
+  account the caller may create repositories in), optional `token`,
+  `forks` (default false), `archived` (default true), `visibility`
+  (`private` default, `public`, `upstream`), `mode`, `lfs` and `webhook`
+  lists the account's repositories (`/user/repos?affiliation=owner` when the
+  token belongs to `account`, else `/orgs/{org}/repos` or
+  `/users/{user}/repos`, following `Link` pagination) and enqueues one
+  `mirror-github` job per repository whose name is free on the forge.
+  Private repositories need the token; it travels sealed in the job and is
+  stored per mirror. The job creates the repository (permission checked
+  again), configures `origin` and enqueues the first sync; existing
+  repositories are skipped, so the call is idempotent.
 - **Safety net:** the scheduled handler runs once a day (cron `17 3 * * *`,
   `MIRROR_INTERVAL_MINUTES` = 1440 in `wrangler.jsonc`) and enqueues a sync
   and a subscription renewal for every auto mirror whose last run is older
@@ -284,6 +312,9 @@ the [accounts README](../packages/accounts/README.md#branch-protection).
   import/status.json                # progress of the last import
   import/commits.txt                # commit order of the last import
   import/blobs.txt                  # blobs of the commit an import is splitting
+  actions/jobs/<jobId>/…            # CI logs, console lines, attachments (§15)
+  actions/caches/<blobId>/blocks/<uuid>     # parts of a cache archive (§15)
+  actions/artifacts/<blobId>/blocks/<uuid>  # parts of an artifact (§15)
   README.txt                        # plain text: what this is, how to read it
 tmp/<repo>/<timestamp>-<uuid>/<n>   # staging chunks of a push or fetch, expired by the bucket
 tmp/<repo>/<timestamp>-<uuid>/asset # a release asset upload without a declared SHA-256 (§16)
@@ -317,6 +348,9 @@ tmp/<repo>/<timestamp>-<uuid>/part/<nnnnn>  # its parts, 1-based, five digits
 - **Pages files** are stored the same way, under the SHA-256 of their
   content, and each deployment is one manifest that maps paths to those
   hashes (§20). Which deployment is active lives only in the database.
+- **CI caches and artifacts** are stored as the uploaded parts, each under a
+  fresh key; which parts make up an entry lives only in the database (§15).
+  Evicting or deleting only stops referencing them.
 - **Release assets** are content-addressed like LFS objects
   (`lfs/objects/…`, §16). Which asset belongs to which release lives only in
   the database; a deleted asset or release leaves its bytes in place.
@@ -389,7 +423,9 @@ adapter works. Finalize indexes in one request, bounded by `cpu_ms`.
 **Import** — create or update a repository by pulling from any Git URL
 (smart HTTP v2 or dumb HTTP, optional token). It reuses the mirror client
 (`connectRemote`, `fetchPackV2`, the dumb walker, `commitClosure`,
-`scanNewObjects`, `mirrorLfsObjects`). Unlike a mirror, refs land directly in
+`scanNewObjects`, `mirrorLfsObjects`); the *graph* and *fetch* phases are the
+stepped fetch in `packages/core/src/stepped-fetch.ts`, shared with mirror
+sync. Unlike a mirror, refs land directly in
 `refs/heads/*` and `refs/tags/*`, it runs once and keeps no upstream config.
 Rewritten refs are archived as on a force push; local refs missing upstream
 are kept. To stay within the CPU and memory limits of one invocation it runs
@@ -435,6 +471,14 @@ as a sequence of stateless steps, each persisting its progress in
    normalized (http(s), no credentials, trailing `/objects/batch` removed);
    other keys are ignored. The token goes to a `.lfsconfig` endpoint only if
    it has the import URL's origin.
+   With a job queue (`scheduleLfs`), each pointer becomes an `import-lfs` job
+   as soon as a fetch step finds it (`lfsPending`), carrying the token and the
+   endpoint known so far (provisionally the setting or `<url>.git/info/lfs`;
+   jobs are re-queued once `.lfsconfig` names another); *lfs* then only checks
+   presence, re-queues after 10 minutes without progress (doubling,
+   `lfsRound`), and after three rounds hands the rest to the sequential path
+   above, which records them as missing. States without `lfsPending` and
+   runtimes without a queue use the sequential path.
 5. *refs* — update refs via compare-and-swap and rewrite `info/refs`; an
    empty repository adopts the upstream `HEAD`.
 
@@ -511,10 +555,23 @@ objects via the Batch API and verify their hashes. Two strategies:
   object is re-hashed and no index is recomputed, so the mirror's packs are
   byte-identical to the upstream's, down the whole chain. Copy-only trusts
   the upstream for connectivity; integrity of the bytes is verified.
-- **Fetch** (any Git server, `strategy: 'fetch'`): negotiate with protocol v2
-  `upload-pack` (or walk dumb HTTP), parse and index the received pack, check
-  connectivity from the new tips. Used for non-forge upstreams such as
-  GitHub.
+- **Fetch** (any Git server, `strategy: 'fetch'`): used for non-forge
+  upstreams such as GitHub. If the server supports `filter` and objects are
+  missing, the sync runs the import's stepped fetch (graph with
+  `filter tree:0`, commit ranges, split of oversized commits into blob
+  batches) with its progress in `mirrors/{remote}/fetch.json` (plus
+  `commits.txt`, `blobs.txt`), written with compare-and-swap. The target
+  refs are fixed at the first step; `syncMirror` with `maxSteps` returns
+  `pending` until the last step, and refs move only after it. A queued sync
+  runs `MIRROR_STEPS_PER_JOB` (4) steps and enqueues a `continue` sync; LFS
+  objects then get one `mirror-lfs` job each. After five failures in a row
+  the state is dropped (`failed`) and the next sync starts over from new
+  upstream refs. Without `filter`, or for dumb servers, one fetch as before
+  (v2 negotiation or dumb walk), then a connectivity scan from the new tips.
+  LFS endpoint for both strategies as for imports (`lfsUrl`, `.lfsconfig` of
+  the upstream default branch first, `<url>/info/lfs`; the token only for the
+  upstream origin), stored as `lfsEndpoint` in the mirror status for the
+  `mirror-lfs` jobs.
 - **Deep check** (`deepCheckRepository`, on demand via
   `POST /api/repos/{owner}/{repo}/mirrors/{remote}/verify` or scheduled
   rarely): inflate and hash every object of every pack, recompute every
@@ -1169,6 +1226,7 @@ Pieces and where they live:
 | Dispatch: triggers → runs → jobs → JIT runners; `needs`, `if`, matrix, throttling, approvals, cancellation, re-runs, schedules, reaper | `@git-forge/actions` (`dispatch.ts`) | See "Workflow semantics" below. |
 | Secrets and environments | `@git-forge/actions` (`secrets.ts`) | AES-256-GCM under the instance key `ACTIONS_SECRETS_KEY`. |
 | Action downloads | `@git-forge/actions` (`actions-download.ts`) | `owner/repo@ref` → repository on the forge (usually a mirror) → tarball URL plus a scoped token. |
+| Results service: cache (v1 REST and v2 twirp), artifacts v4, blob URLs, ID tokens | `@git-forge/actions` (`results.ts`, `cache.ts`, `artifacts.ts`, `blobs.ts`, `oidc.ts`) | Mounted at `/twirp/`, `/_services/cache/`, `/_services/results/` and `/_services/token/`. See "Results service" below. |
 | Runner container | `apps/forge-worker` (`runner-container.ts`, `runner-launcher.ts`, `runner/Dockerfile`), declared in `apps/forge-worker/wrangler.jsonc` (opt-in snippet in the README of `templates/instance`) | Cloudflare Containers; the only Cloudflare-specific part. A plain Durable Object class on `ctx.container`, so the release bundle stays one module without imports. |
 
 #### Runner protocol
@@ -1237,6 +1295,17 @@ inserts one placeholder job per workflow job (`expanded = 0`, `pending`).
   `cancel-in-progress` older runs of the group are cancelled; without it,
   older runs that have not started are cancelled. A run waits (its
   placeholders stay) while an older run of its group is not complete.
+- `concurrency` (job level): evaluated per leg and stored in its
+  definition. A grouped leg starts `pending`; it is promoted only while no
+  job of the repository in that group is queued or running (one atomic
+  `UPDATE`). A new leg cancels the pending ones of its group, with
+  `cancel-in-progress` also the running ones. A completed job advances the
+  run with the oldest waiting job of its group.
+- `vars`: repository variables, overridden by those of the approved
+  environment in the job message (`actions_variables`, `GET/POST
+  …/actions/variables`, `GET/PATCH/DELETE …/actions/variables/{name}`, same
+  under `…/environments/{name}/`; names as for secrets). Untrusted runs get
+  none.
 
 Cancellation (`cancelRun`, API `…/cancel`): `pending` and `queued` jobs are
 completed as `cancelled` at once (and their ephemeral runner is removed,
@@ -1277,7 +1346,10 @@ Reaper (`reapActions`, from `actionsTick` on the `*/5 * * * *` cron):
 | `schedule` | `syncSchedules` (on push to the default branch) and `runDueSchedules` (cron) | `actions_schedules` holds `(repo, workflow, cron, next_run_at)`; a due row is claimed with a compare-and-swap on `next_run_at`, the workflow is read again from the current default branch. Cron in UTC, five fields with names, ranges, steps, lists. |
 | `pull_request` | `queueRunsForPullRequest(event)`, called by the Worker for the collaboration package's `pull_request` activities | Base branch filters and `types` (default `opened`, `synchronize`, `reopened`); the workflow is read from the merge commit if given, else the head; `github.ref` is `refs/pull/{n}/merge` or `…/head`. The caller decides `trusted`; pull requests on this forge come from branches of the same repository, so they are trusted. |
 
-`paths` filters are rejected as unsupported until they are implemented.
+`paths` and `paths-ignore` (`push`, `pull_request`) match the changed files:
+`before..after` of a push (none for new branches, so they run; ignored for
+tags), base..merge commit (or head) of a pull request. `paths-ignore` skips
+only when every file matches, `paths` needs one match (`!` negates).
 
 #### Actions (`uses:`)
 
@@ -1313,6 +1385,71 @@ in `actions_jobs.check_run_id`. The collaboration package owns the
 the Worker implements the sink with its `recordCheckRun` /
 `updateCheckRunRecord`. Without a sink no check runs are written.
 
+#### Results service: cache, artifacts, ID tokens
+
+No broker or v2 flow: in the legacy flow the runner takes the URLs from the
+`SystemVssConnection` endpoint data (`CacheServerUrl` → `ACTIONS_CACHE_URL`
+= `/_services/cache/`, `ResultsServiceUrl` → `ACTIONS_RESULTS_URL` = `/`,
+`GenerateIdTokenUrl` → `ACTIONS_ID_TOKEN_REQUEST_URL`) and the variable
+`actions_uses_cache_service_v2`. `ACTIONS_RUNTIME_TOKEN` is opaque (checked
+by hash) but JWT-shaped with `scp: "Actions.Results:{runId}:{jobId}"`,
+because `@actions/artifact` reads the IDs from it; the forge derives job,
+run and repository from the token and rejects IDs that differ.
+
+The toolkit treats every host except `github.com`, `*.ghe.com` and
+`*.localhost` as GHES. There `actions/cache@v4` uses the **v1** REST protocol
+(`_apis/artifactcache/…`, `PATCH` chunks of 32 MiB with `Content-Range`);
+elsewhere the **v2** twirp `CacheService`. `@actions/artifact` 2.x
+(`upload-artifact@v4`, `download-artifact@v4`) refuses
+GHES hosts on the client, so the twirp `ArtifactService` only works with the
+official actions on `*.localhost`, or with forks that drop the check (e.g.
+`christopherhx/gitea-upload-artifact@v4`, mapped with
+`ACTIONS_REPOSITORIES`; `upload-pages-artifact` follows the mapping).
+`deploy-pages@v4` itself only uses REST (`runs/{id}/artifacts?name=`,
+`pages/deployments`) and an ID token. Artifacts v3 are not implemented.
+
+**Blobs.** Uploads and downloads use capability URLs
+`/_services/results/blobs/{token}[/{filename}]` (`actions_blob_grants`:
+SHA-256 of a random token, read or write, bound to the job). The handler
+speaks the Azure block blob subset the Azure SDK uses (`PUT`,
+`?comp=block`, `?comp=blocklist`, `GET`/`HEAD` with `Range`). Every block or
+v1 chunk is written once to a new key; the commit records the ordered parts
+in `actions_blob_parts` and freezes the blob. Uploads always pass through
+the Worker: the Azure SDK appends `comp`/`blockid` to the signed URL and the
+v1 client builds its own URLs, so presigned R2 URLs (which sign the query
+and need size and SHA-256 up front) cannot be handed out. Blocks (8 MiB for
+artifacts, 32 MiB v1 chunks) stay below the Worker body limit; only v2
+single-shot uploads of 100–128 MiB, which occur on `*.localhost` only, exceed it.
+
+**Cache.** Entries are scoped per repository and ref; a restore searches
+the run's ref, the pull request base, then the default branch, each by
+exact primary key, then restore keys exactly and as prefix, newest first.
+Entries are immutable; a run only writes its own ref. The reaper evicts by
+setting `evicted_at`: unused for `ACTIONS_CACHE_UNUSED_DAYS` (7), older than
+`ACTIONS_CACHE_MAX_DAYS` (30), unfinished reservations after six hours, and
+least recently used beyond `ACTIONS_CACHE_LIMIT_BYTES` (10 GiB). Bytes stay;
+a lifecycle rule may expire `…/actions/caches/` after the max age plus one
+day, and `…/actions/artifacts/` after `ACTIONS_ARTIFACT_RETENTION_DAYS`
+(90) plus one.
+
+**Artifacts.** One per name and run; retention capped by
+`ACTIONS_ARTIFACT_RETENTION_DAYS`; deleting sets `deleted_at`. REST:
+`artifacts[/{id}[/zip]]`, `runs/{id}/artifacts`, `caches`, `cache/usage`.
+Pages deployments with `artifact_id` read the artifact through
+`openArtifactFile`: `artifact.tar` (or the only entry) of the stored zip,
+located by its central directory and inflated while streaming.
+
+**ID tokens.** Only for trusted runs whose job or workflow `permissions`
+grant `id-token: write`, checked when the URL is handed out and again on
+`GET /_services/token/idtoken?audience=…`. Claims follow GitHub's (`sub`
+`repo:o/r:ref:…`, `…:environment:e` or `…:pull_request`; IDs are the forge's
+strings; `ref_protected` is always `false`); default audience
+`{PUBLIC_URL}/{owner}`; five minutes. Issuer `{PUBLIC_URL}/_services/token`
+with discovery and JWKS. Signed ES256 with `ACTIONS_OIDC_KEY` (P-256 JWK,
+`git-forge-node oidc-key`), else EdDSA with `INSTANCE_KEY` (not accepted by
+AWS STS). Trust from AWS or Google Cloud is configured as for GitHub with
+this issuer; not verified against real accounts.
+
 #### GHES API (`/api/v3`)
 
 Implemented for repositories: `POST …/actions/runners/generate-jitconfig`,
@@ -1340,7 +1477,7 @@ All CI credentials are random opaque tokens, stored only as SHA-256 hashes in
 |---|---|---|
 | `registration` | `config.sh` | Register one runner for one repository (1 h). |
 | `runner` | Runner listener | Its own sessions, messages and job requests (1 h, renewed via OAuth). |
-| `runtime` | Runner worker (`SystemVssConnection`) | Timeline, logs and completion of exactly one job (plan id checked on every call). Revoked when the job completes. |
+| `runtime` | Runner worker (`SystemVssConnection`), steps (`ACTIONS_RUNTIME_TOKEN`) | Timeline, logs and completion of exactly one job (plan id checked on every call); the results service (cache, artifacts, ID tokens) for that job. JWT-shaped with an `Actions.Results` scope, still verified only by hash. Revoked when the job completes. |
 | `github` | Steps (`GITHUB_TOKEN`); action downloads | Read access to the job's repository over Git HTTP, or, for an action, to that action's repository (Git HTTP and tarball). Revoked when the job completes. |
 
 The forge never trusts IDs from the runner: the runner is derived from the
@@ -1428,21 +1565,24 @@ same functions (`reviewDeployment`).
 
 #### Data
 
-- SQLite, migrations `packages/accounts/migrations/0005_actions.sql` and
-  `0009_actions_workflows.sql`, applied by the Worker on start like every
-  other migration and shipped in the release bundle and its
+- SQLite, migrations `packages/accounts/migrations/0005_actions.sql`,
+  `0009_actions_workflows.sql` and `0013_actions_results.sql`, applied by the
+  Worker on start like every other migration and shipped in the release bundle and its
   `migrations.tar.gz`: `actions_runners`, `actions_tokens`,
   `actions_sessions`, `actions_runs` (plus definition, attempt, trusted,
   concurrency group, cancellation, completion), `actions_jobs` (plus
   attempt, `expanded`, matrix, outputs, environment, approval,
   cancellation, launches, check run), `actions_timeline_records`,
   `actions_logs`, `actions_secrets`, `actions_environments`,
-  `actions_schedules`. `0009` only adds columns and tables,
+  `actions_schedules`; `0013`: blobs, blocks, parts, grants, caches,
+  artifacts, variables. `0009` only adds columns and tables,
   so the previous release keeps working on the new schema.
 - Bucket, append-only, written with `If-None-Match: *`:
   `repos/<owner>/<repo>/actions/jobs/<jobId>/logs/<logId>/<chunk>`,
   `…/console/<recordId>/<startLine>` and
-  `…/attachments/<recordId>/<type>/<name>`. Like the rest of the bucket
+  `…/attachments/<recordId>/<type>/<name>`; cache and artifact parts under
+  `repos/<owner>/<repo>/actions/caches/<blobId>/blocks/<uuid>` and
+  `…/actions/artifacts/<blobId>/blocks/<uuid>`. Like the rest of the bucket
   layout this is a durable format.
 
 #### Status and known gaps
@@ -1450,16 +1590,20 @@ same functions (`reviewDeployment`).
 - The real runner runs in CI (`packages/actions/test/runner.integration.test.ts`):
   `actions/checkout@v4` from a mirror of `github.com/actions/checkout` on
   the forge, a matrix with job outputs through `needs`, a masked secret,
-  `wrangler deploy --dry-run`, and the cancellation of a running job.
+  `wrangler deploy --dry-run`, the cancellation of a running job,
+  `actions/cache@v4` (v1 and v2), an ES256 ID token verified against the
+  JWKS, and `upload-artifact@v4` → `download-artifact@v4` on `forge.localhost`.
 - Deployed on Cloudflare Containers on the production instance (image
   built by Workers Builds, `basic` instances, `ACTIONS_GITHUB_FALLBACK` for
   `actions/checkout`).
 - Not supported yet: `container:`, `services:`, reusable workflows,
-  job-level `concurrency`, `paths` filters, `vars` (configuration
-  variables, the context is empty), `hashFiles` server-side, wait timers and
-  branch policies of environments, re-running single matrix legs.
-- Broker / run service (v2 flow), results service, cache, artifacts, OIDC
-  tokens, message encryption with the session key.
+  organization variables, `hashFiles` server-side, wait timers and branch
+  policies of environments, re-running single matrix legs.
+- Broker / run service (v2 flow) and message encryption with the session
+  key: not needed for cache, artifacts or ID tokens (see "Results service");
+  only needed if a future runner drops the legacy flow for GHES.
+- Official artifact actions v4 (and so `upload-pages-artifact`) only on
+  `*.localhost` hosts; artifacts v3 not implemented (see "Results service").
 - Web UI for runs, logs and reviews.
 
 ### Deployment
@@ -1814,7 +1958,7 @@ Issues, pull requests, reviews, commit statuses, check runs and discussions
   package.
 - **Limits of v1.** Same-repository pull requests only (forks later),
   computing mergeability and file lists loads the involved objects through
-  the in-memory object database, no reactions, no search,
+  the in-memory object database, no reactions,
   no CODEOWNERS parsing, no in-browser conflict resolution.
 
 ## 18. Web UI
@@ -1855,7 +1999,7 @@ bundle.
 - Pages hosts (§20) never reach Astro: `worker.ts` hands every request whose
   host matches `PAGES_HOST` or `PAGES_DOMAINS` to `createForge` directly.
   `/_pages/` (the Pages session handoff) is a forge path on the forge host.
-- Reserved first path segments: `api`, `explore`, `login`, `logout`,
+- Reserved first path segments: `api`, `explore`, `search`, `login`, `logout`,
   `settings`, `notifications`, `organizations`, `orgs`, `new`, `-` (assets,
   login and admin pages) and the other page routes. Account names must not
   use them: `RESERVED_LOGINS` of `@git-forge/accounts` is checked when an
@@ -1873,8 +2017,8 @@ the `Authorization` header, as for the API. Repository pages call `repositoryAcc
 repo, role)`, the same function the JSON API uses for its admin checks, which
 wraps `checkRepositoryAccess` from `@git-forge/accounts` and adds instance
 admins. Private repositories answer 404 to visitors who may not read them,
-like the Git endpoints. Lists (home, explore, profiles) filter with the same
-function.
+like the Git endpoints. Lists and search filter in SQL with the same rules
+(see *Lists and search*).
 
 Writes from pages (settings forms) need the session and its CSRF token:
 `verifySessionWrite` is `checkSession` of the login package (same origin and
@@ -1918,6 +2062,47 @@ xdiff, §17), the same code pull requests use.
 They read through `ObjectDatabase` like the Git endpoints. The UI layer
 (`src/ui/*.ts`) only composes them into view models; `.astro` files only
 render.
+
+Blame (`/{owner}/{repo}/blame/{ref}/{path}`) is `blame` in core: newest
+commit first, lines unchanged against a parent pass to it (the first parent
+that has them wins at merges, as in git), the rest belong to the commit. No
+rename, move or copy detection; files up to 512 KiB. Each `depth` step walks
+500 more commits (at most 20 steps, *Load more history*); lines not reached
+show *Older history not loaded*. Tested against `git blame`.
+
+### Lists and search
+
+- **Repository lists** (home, explore, profiles, `GET /api/repos?owner=&sort=updated|name&page=&per_page=`)
+  are one query: `listReadableRepositories` of `@git-forge/accounts`.
+  `readableRepositories(principal)` is the SQL form of `resolveAccess` plus
+  the instance-admin rule of `repositoryAccess` (public, owner,
+  collaborators, organization owners, members with a base role or a team
+  role, apps, granted instances with `git:read`, token ceiling and
+  repository list); a test compares it with `checkRepositoryAccess` for every
+  principal kind. Sorting by last commit or name, `LIMIT/OFFSET` paging,
+  total via `count(*) OVER ()`.
+- **Stored summary.** `repositories.default_branch`, `last_commit_at`
+  (committer time of the default branch head, ms) and `stats_at` (migration
+  `0026`). `refreshRepository` rewrites them after every push (also merges and
+  release tags), every mirror sync with ref updates and every import step.
+  Rows without `stats_at` (repositories from before `0026`) are filled the
+  first time a list shows them; after that lists read no storage.
+- **Full-text search** with FTS5 (migration `0026`): `search_repositories`
+  (owner, name, description, topics; the last two stay empty until
+  repositories have metadata), `search_accounts` (login, display name) and
+  external-content tables over `issues` (title, body; pull requests
+  included), `issue_comments`, `discussions` and `discussion_comments`.
+  Triggers update them inside the writing statement; the migration backfills,
+  `POST /api/admin/search/rebuild` (instance admins) rebuilds. Review
+  comments are not indexed.
+- **Queries.** Words become prefix terms (`"word"*`, all must match, at most
+  12); qualifiers `repo:owner/name`, `user:`/`org:`, `is:issue|pr|open|closed`.
+  Ranked by bm25, filtered with `readableRepositories`, disabled owners
+  hidden, issues need `has_issues` (pull requests always), discussions
+  `has_discussions`. `GET /api/search?q=&type=repositories|issues|discussions|users&page=&per_page=`
+  and `GET /api/v3/search/{repositories,issues,users}` answer with GitHub's
+  `{ total_count, incomplete_results, items }` and reduced item shapes; the
+  page `/search` and the navbar box call the same `search`.
 
 ### Collaboration pages
 
@@ -2016,28 +2201,38 @@ progress answers 409.
 
 ### Rendering
 
-- Tailwind CSS with daisyUI, themes `light` (default) and `dark`
-  (`prefers-color-scheme`). The stylesheet is compiled at build time
+- Tailwind CSS with daisyUI, own themes `forge` (default) and `forge-dark`
+  (`prefers-color-scheme`) in `src/styles/global.css`: neutral base, one blue
+  accent, flat buttons, system font stack. Icons are inline Lucide paths
+  (MIT) in `src/components/Icon.astro`; avatars are initials coloured from a
+  hash of the name. The stylesheet is compiled at build time
   (`?inline`) and served by the Worker at `/-/style.css?v=<hash>` with an
   immutable cache header, so pages stay small and the release needs no asset
   directory.
 - Syntax highlighting is server-side with shiki's JavaScript regex engine (no
   WebAssembly) and a fixed set of grammars; tokens carry light and dark
   colours as CSS variables. Files above 256 KiB or with unknown types are
-  shown unhighlighted.
+  shown unhighlighted. Diffs highlight the old and the new side of each hunk
+  separately. Fenced Markdown code blocks (`language-*`) are highlighted after
+  `rehype-sanitize`, so only highlighter spans carry styles.
 - Markdown (README, `.md` files) goes through remark/rehype with GFM and
   `rehype-sanitize` (GitHub's schema); relative links point to the blob view,
   relative images to the raw endpoint.
 - LFS files are previewed through the media URL (images, video, audio, PDF),
   binary files through the raw URL at the commit id.
+- Repository lists read each repository's `refs.json` and head commit for
+  the default branch and the last update time. Tree views mark LFS files by
+  the `filter=lfs` patterns of the `.gitattributes` files on the path.
 - No client-side framework. Interactive bits use native elements
   (`<details>` dropdowns); islands are added only where a page needs them
-  (passkey ceremonies, diff line comments).
+  (passkey ceremonies, diff line comments, copy buttons).
 
 ### Tests
 
 - `packages/core/test/browse.test.ts`: read model against a real pushed
-  repository.
+  repository; `blame.test.ts`: blame against `git blame` across a merge.
+- `packages/accounts-node/test/search.test.ts`: the SQL access filter against
+  `checkRepositoryAccess`, FTS backfill, triggers and private repositories.
 - `apps/forge-worker/test/unit/ui.test.ts`: routing split, origin check,
   Markdown sanitizing and link rewriting, highlighting.
 - `apps/forge-worker/test/pages/`: pages rendered with Astro's container API
@@ -2074,7 +2269,10 @@ instance, kept somewhere that cannot be rewritten.
 - **Database.** D1 Time Travel restores any minute of the last 30 days
   (Workers Paid; 7 days on Free). For longer retention export the database
   daily and put the dump into the same locked bucket. On Node, take an online
-  copy of the SQLite file.
+  copy of the SQLite file. `wrangler d1 export` refuses databases with
+  virtual tables, so since migration `0026` (FTS5 search tables) D1 exports
+  need a workaround; the search tables are derived data
+  (`POST /api/admin/search/rebuild`).
 - **Consistency.** Copy the database first, then the bucket: every row
   refers only to objects that exist by then, and objects are never removed.
 - **No encryption.** Backups are plain copies of the bucket and the
@@ -2128,12 +2326,11 @@ Package `@git-forge/pages`, tables from migration `0012_pages.sql`
 - **Workflow** (`build_type: workflow`): `POST
   /api/v3/repos/{owner}/{repo}/pages/deployments`. With `artifact_id` or
   `artifact_url` (what `actions/deploy-pages` sends) the deployment reads the
-  artifact through the `ArtifactSource` adapter, which returns the tar of
-  the `github-pages` artifact (`actions/upload-pages-artifact`). The forge
-  does not store workflow artifacts yet (§15), so without an adapter these
-  requests answer `422`; until then any CI uploads the same tar (or tar.gz)
-  as the request body (`Content-Type: application/x-tar`), deployed while it
-  streams. The `GITHUB_TOKEN` of a trusted, non-`pull_request` run of the
+  artifact through the `ArtifactSource` adapter; the Worker's reads the
+  stored CI artifact (§15) and streams its `artifact.tar`
+  (`actions/upload-pages-artifact`). `artifact_url` alone is not resolved.
+  Any CI may instead upload the same tar (or tar.gz) as the request body
+  (`Content-Type: application/x-tar`), deployed while it streams. The `GITHUB_TOKEN` of a trusted, non-`pull_request` run of the
   same repository may create deployments, like `pages: write` on GitHub; so
   may users with write access. `GET …/deployments/{id}` reports GitHub's
   status strings (`deployment_queued`, `deployment_in_progress`, `succeed`,
@@ -2231,8 +2428,6 @@ that site scripts cannot set cookies for the forge.
 
 ### Not yet
 
-- Reading workflow artifacts (`ArtifactSource` on top of the CI artifact
-  storage, §15), so `actions/deploy-pages` works unchanged.
 - Repository settings page in the UI; custom domains set per repository
   (today: instance configuration), HTTPS certificates for them beyond
   Workers custom domains.

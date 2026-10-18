@@ -4,7 +4,7 @@ import { continueImport, createConsoleEmailSender, type EmailSender, type Import
 import { S3Storage } from '@git-forge/s3'
 import { createSesEmailSender } from '@git-forge/ses'
 import { type AppJob, createForge, type Forge } from './app.ts'
-import { ACTIONS_CRON, type EmailSettings, type ForgeVars, loadSecretsKey, parseActionsSettings, parseEmailSettings, parseR2Signing, parseSettings, uiEnabled } from './config.ts'
+import { ACTIONS_CRON, type EmailSettings, type ForgeVars, loadIdTokenKeys, loadSecretsKey, parseActionsSettings, parseEmailSettings, parseR2Signing, parseSettings, uiEnabled } from './config.ts'
 import { containerLauncher } from './runner-launcher.ts'
 import { captureLoginPage } from './ui/login-pages.ts'
 
@@ -36,7 +36,8 @@ export const forgeFor = (env: Env): Promise<Forge> => {
     .then(async (settings) => {
       await migrateOnStart(d1Database(env.DB), MIGRATIONS)
       const actions = parseActionsSettings(env)
-      const secretsKey = await loadSecretsKey(actions)
+      const secretsKey = await loadSecretsKey(actions, env)
+      const idTokenKeys = await loadIdTokenKeys(actions, settings.instanceKey)
       const email = emailSender(parseEmailSettings(env))
       const signing = parseR2Signing(env)
       return createForge({
@@ -44,6 +45,7 @@ export const forgeFor = (env: Env): Promise<Forge> => {
         storage: new R2Storage(env.BUCKET),
         db: d1Database(env.DB),
         digests: digestStreams,
+        ...(secretsKey ? { secretsKey } : {}),
         clientAddress: (request) => request.headers.get('CF-Connecting-IP'),
         ...(uiEnabled(env) ? { renderLoginPage: captureLoginPage } : {}),
         ...(env.IMPORTS ? { scheduleImport: importScheduler(env.IMPORTS) } : {}),
@@ -59,6 +61,9 @@ export const forgeFor = (env: Env): Promise<Forge> => {
                 ...(secretsKey ? { secretsKey } : {}),
                 repositories: actions.repositories,
                 githubFallback: actions.githubFallback,
+                idTokenKeys,
+                artifactRetentionDays: actions.artifactRetentionDays,
+                cacheLimits: actions.cacheLimits,
                 ...(env.RUNNER ? { launcher: containerLauncher(env.RUNNER) } : {}),
               },
             }
@@ -94,7 +99,14 @@ export const backgroundHandlers = {
     const queue = env.IMPORTS
     if (!queue) throw new Error('IMPORTS queue binding is missing')
     for (const message of (batch as MessageBatch<ImportJob>).messages) {
-      const state = await continueImport(message.body, { storage: new R2Storage(env.BUCKET), digests: digestStreams, schedule: importScheduler(queue) })
+      const jobs = env.JOBS ? new QueueJobs(env.JOBS) : null
+      const state = await continueImport(message.body, {
+        storage: new R2Storage(env.BUCKET),
+        digests: digestStreams,
+        schedule: importScheduler(queue),
+        ...(jobs ? { scheduleLfs: (job) => jobs.enqueue(job) } : {}),
+      })
+      await (await forgeFor(env)).refreshRepository(message.body)
       console.log(JSON.stringify({ event: 'import-step', repo: `${message.body.owner}/${message.body.name}`, phase: state.phase, steps: state.steps, error: state.error }))
       message.ack()
     }

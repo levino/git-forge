@@ -4,7 +4,8 @@ import { diffTrees, type TreeChange } from './diff.ts'
 import type { ObjectId } from './hash.ts'
 import { type LfsObjectSpec, parseLfsPointer } from './lfs.ts'
 import { isSubmodule, isTreeMode, parseCommitMetadata, parseTag, parseTree, type Signature, type TreeEntry } from './objects.ts'
-import { advertisedRefs, type ObjectDatabase, type RefsState } from './repository.ts'
+import { advertisedRefs, ObjectDatabase, readRefs, type RefsState, type RepositoryName } from './repository.ts'
+import type { Storage } from './storage.ts'
 
 export type CommitInfo = {
   readonly id: ObjectId
@@ -84,7 +85,7 @@ export const resolveTarget = async (odb: ObjectDatabase, commit: ObjectId, path:
   return { kind: 'blob', entry: current }
 }
 
-const entryAt = async (odb: ObjectDatabase, tree: ObjectId, path: readonly string[]): Promise<TreeEntry | null> => {
+export const entryAt = async (odb: ObjectDatabase, tree: ObjectId, path: readonly string[]): Promise<TreeEntry | null> => {
   let current: TreeEntry = { mode: '40000', name: '', id: tree }
   for (const segment of path) {
     if (!isTreeMode(current.mode)) return null
@@ -182,6 +183,14 @@ export const namedRefs = (state: RefsState): { readonly head: string; readonly b
 export const defaultBranch = (state: RefsState): string | null => {
   const { head, refs } = advertisedRefs(state)
   return head.startsWith('refs/heads/') && refs[head] !== undefined ? head.slice(11) : null
+}
+
+export const repositoryStats = async (storage: Storage, repo: RepositoryName): Promise<{ readonly defaultBranch: string | null; readonly lastCommitAt: number | null }> => {
+  const state = (await readRefs(storage, repo))?.state
+  if (!state) return { defaultBranch: null, lastCommitAt: null }
+  const { head, refs } = advertisedRefs(state)
+  const commit = refs[head] ? await readCommit(new ObjectDatabase(storage, repo), refs[head]).catch(() => null) : null
+  return { defaultBranch: defaultBranch(state), lastCommitAt: commit ? commit.committer.timestamp * 1000 : null }
 }
 
 export const peelToCommitId = async (odb: ObjectDatabase, id: ObjectId): Promise<ObjectId | null> => {

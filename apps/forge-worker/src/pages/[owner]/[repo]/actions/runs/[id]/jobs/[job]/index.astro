@@ -45,7 +45,7 @@ const logHref = found ? `${runHref}/jobs/${encodeURIComponent(found.job.id)}/log
       {log.truncated && <p class="text-sm mb-2">Showing the last 2 MiB of the log.</p>}
       <pre
         id="job-log"
-        class="bg-base-200 rounded-box p-4 text-xs leading-5 overflow-x-auto whitespace-pre min-h-24"
+        class="bg-base-200 border border-base-300 rounded-box p-4 text-xs leading-5 overflow-x-auto whitespace-pre min-h-24"
         aria-label="Job log"
         aria-live={state.done ? 'off' : 'polite'}
         data-log-url={state.done ? undefined : logHref}>{log.text || 'Waiting for the runner…'}</pre>

@@ -20,6 +20,25 @@ const failure = (error: unknown): NewRepositoryAction => {
 
 export const newRepositoryAction = async (forge: ForgeServices, session: UiSession, form: FormData): Promise<NewRepositoryAction> => {
   const action = form.get('action')
+  if (action === 'github') {
+    const account = field(form, 'account')
+    const owner = field(form, 'owner')
+    const token = field(form, 'token')
+    if (account === '' || owner === '') return { kind: 'error', status: 400, message: 'Enter the GitHub account and choose an owner.' }
+    try {
+      const result = await forge.repositories.mirrorGitHub(session.principal, {
+        account,
+        owner,
+        ...(token ? { token } : {}),
+        forks: form.get('forks') === 'on',
+        archived: form.get('archived') === 'on',
+        webhook: form.get('webhook') === 'on',
+      })
+      return { kind: 'redirect', location: `/${encodeURIComponent(result.owner)}` }
+    } catch (error) {
+      return failure(error)
+    }
+  }
   const input = repositoryFields(form)
   if (input.owner === '' || input.name === '') return { kind: 'error', status: 400, message: 'Choose an owner and a repository name.' }
   try {

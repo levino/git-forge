@@ -103,9 +103,9 @@ describe('parseWorkflow', () => {
 
   it('rejects job keys that would otherwise be ignored', () => {
     expect(() =>
-      parseWorkflow('on:\n  push:\n    paths: [src]\nrun-name: x\njobs:\n  a:\n    services: {}\n    runs-on: x\n    strategy: {matrix: {os: x}, retry: 1}\n    steps: [{run: x, retry: 3}]'),
+      parseWorkflow('on:\n  push:\n    paths-filter: [src]\nrun-name: x\njobs:\n  a:\n    services: {}\n    runs-on: x\n    strategy: {matrix: {os: x}, retry: 1}\n    steps: [{run: x, retry: 3}]'),
     ).toThrow(
-      'run-name: is not supported yet; jobs.a.services: is not supported yet; jobs.a.strategy.retry: is not supported yet; jobs.a.strategy.matrix.os: expected a list or an expression; jobs.a.steps[0].retry: is not supported yet; on.push.paths: is not supported yet',
+      'run-name: is not supported yet; jobs.a.services: is not supported yet; jobs.a.strategy.retry: is not supported yet; jobs.a.strategy.matrix.os: expected a list or an expression; jobs.a.steps[0].retry: is not supported yet; on.push.paths-filter: is not supported yet',
     )
   })
 
@@ -230,6 +230,21 @@ describe('push filters', () => {
     expect(triggeredByPush(tags, 'refs/tags/v1.0')).toBe(true)
     expect(triggeredByPush(tags, 'refs/heads/main')).toBe(false)
     expect(triggeredByPush(workflow("    branches-ignore: ['wip/*']"), 'refs/heads/wip/x')).toBe(false)
+  })
+
+  it('applies paths and paths-ignore to changed files, not to tags or unknown changes', () => {
+    const docs = workflow("    paths-ignore: ['**.md', 'docs/**']")
+    expect(triggeredByPush(docs, 'refs/heads/main', ['README.md', 'docs/a/b.txt'])).toBe(false)
+    expect(triggeredByPush(docs, 'refs/heads/main', ['README.md', 'src/a.ts'])).toBe(true)
+    expect(triggeredByPush(docs, 'refs/heads/main', null)).toBe(true)
+    expect(triggeredByPush(docs, 'refs/tags/v1', ['README.md'])).toBe(true)
+    const src = workflow("    paths: ['src/**', '!src/**.test.ts']")
+    expect(triggeredByPush(src, 'refs/heads/main', ['src/a.test.ts'])).toBe(false)
+    expect(triggeredByPush(src, 'refs/heads/main', ['src/a.test.ts', 'src/a.ts'])).toBe(true)
+    const pr = parseWorkflow("on:\n  pull_request:\n    paths: ['src/**']\njobs:\n  a:\n    concurrency: {group: 'g-${{ matrix.x }}', cancel-in-progress: true}\n    runs-on: x\n    steps: [{run: x}]")
+    expect(triggeredByPullRequest(pr, 'main', 'opened', ['README.md'])).toBe(false)
+    expect(triggeredByPullRequest(pr, 'main', 'opened', ['src/x'])).toBe(true)
+    expect(pr.jobs[0]!.concurrency).toEqual({ group: 'g-${{ matrix.x }}', cancelInProgress: true })
   })
 
   it('translates filter patterns', () => {

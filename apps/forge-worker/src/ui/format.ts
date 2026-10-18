@@ -34,4 +34,6 @@ export const shortId = (id: string): string => id.slice(0, 7)
 
 export const encodePath = (segments: readonly string[]): string => segments.map(encodeURIComponent).join('/')
 
-export const plural = (count: number, singular: string, pluralForm = `${singular}s`): string => `${count} ${count === 1 ? singular : pluralForm}`
+export const hue = (text: string): number => [...text.toLowerCase()].reduce((value, character) => (value * 31 + character.charCodeAt(0)) % 360, 7)
+
+export const plural =(count: number, singular: string, pluralForm = `${singular}s`): string => `${count} ${count === 1 ? singular : pluralForm}`

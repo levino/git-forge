@@ -1,4 +1,5 @@
 ---
+import EmptyState from '../../../../../components/EmptyState.astro'
 import { getPullSummary, pullCommits } from '@git-forge/collaboration'
 import NotFound from '../../../../../components/NotFound.astro'
 import PullHeader from '../../../../../components/PullHeader.astro'
@@ -25,7 +26,7 @@ const now = Math.floor(Date.now() / 1000)
       <RepoHeader repo={repo} tab="pulls" />
       <PullHeader repo={repo} pull={pull} tab="commits" />
       {commits.length === 0 ? (
-        <p>No commits.</p>
+        <EmptyState icon="commit" title="No commits." />
       ) : (
         <ul class="border border-base-300 rounded-box divide-y divide-base-300" aria-label="Commits">
           {commits.map((commit) => (

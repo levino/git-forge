@@ -2,6 +2,7 @@
 import { accessLabel, CONSENT_WARNING, COPY_SCRIPT, formatRequestTime, PASSKEY_SCRIPT } from '@git-forge/accounts'
 import AccessChoice from '../../components/AccessChoice.astro'
 import NotFound from '../../components/NotFound.astro'
+import Icon from '../../components/Icon.astro'
 import Layout from '../../layouts/Layout.astro'
 import { loginContentSecurityPolicy, loginPageTitle } from '../../ui/login-pages.ts'
 
@@ -29,9 +30,10 @@ const configJson = config ? JSON.stringify(config).replace(/</g, '\\u003c') : nu
     <NotFound />
   ) : (
     <Layout title={loginPageTitle(page)}>
-      <div class="max-w-md mx-auto card bg-base-200">
+      <div class="max-w-sm mx-auto mt-4 sm:mt-10 card border border-base-300 bg-base-100">
         <div class="card-body gap-4">
-          <h1 class="card-title text-2xl">{loginPageTitle(page)}</h1>
+          <Icon name="logo" class="size-8 text-primary" />
+          <h1 class="card-title text-xl">{loginPageTitle(page)}</h1>
           {page.kind === 'login' && page.message && <div role="alert" class="alert alert-warning">{page.message}</div>}
           {page.kind === 'login' && page.user && (
             <>

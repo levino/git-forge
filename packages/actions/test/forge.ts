@@ -9,6 +9,8 @@ import {
   type DispatchOptions,
   handleActionsService,
   handleGhesApi,
+  handleResultsService,
+  type IdTokenKey,
   type QueuedRun,
   queueRunsForPush,
   type RunnerLauncher,
@@ -53,10 +55,12 @@ export type TestForgeOptions = {
   readonly secrets?: SecretsProvider
   readonly messageWaitMs?: number
   readonly pollIntervalMs?: number
-  readonly publicUrl?: () => string
+  readonly publicUrl?: (request: Request) => string | undefined
   readonly secretsKey?: SecretsKey
   readonly actionSources?: ActionSources
   readonly now?: () => number
+  readonly idTokenKeys?: readonly IdTokenKey[]
+  readonly results?: boolean
 }
 
 const presented = (request: Request): string | null => {
@@ -75,7 +79,7 @@ export const createTestForge = async (options: TestForgeOptions = {}): Promise<T
   const runs: QueuedRun[] = []
   const checks = memoryChecks()
   const urlsFor = (request: Request) => {
-    const origin = options.publicUrl?.() ?? new URL(request.url).origin
+    const origin = options.publicUrl?.(request) ?? new URL(request.url).origin
     return { serverUrl: origin, serviceUrl: `${origin}${SERVICE_PATH}` }
   }
   const dispatchFor = (urls: { serverUrl: string; serviceUrl: string }): DispatchOptions => ({
@@ -95,6 +99,17 @@ export const createTestForge = async (options: TestForgeOptions = {}): Promise<T
   const handler = async (request: Request): Promise<Response> => {
     const urls = urlsFor(request)
     const dispatch = dispatchFor(urls)
+    if (options.results !== false) {
+      const results = await handleResultsService(request, {
+        db,
+        storage,
+        serverUrl: urls.serverUrl,
+        ...(options.idTokenKeys ? { idTokenKeys: options.idTokenKeys } : {}),
+        repositoryFacts: async (owner, repo) => ({ id: `${owner}/${repo}`, ownerId: owner, visibility: 'private' }),
+        ...(options.now ? { now: options.now } : {}),
+      })
+      if (results) return results
+    }
     const service = await handleActionsService(request, {
       db,
       storage,
@@ -111,6 +126,7 @@ export const createTestForge = async (options: TestForgeOptions = {}): Promise<T
       onJobCompleted: async (job) => {
         await advanceRun(dispatch, job)
       },
+      ...(options.results !== false ? { results: { idTokens: (options.idTokenKeys?.length ?? 0) > 0 } } : {}),
     })
     if (service) return service
     const api = await handleGhesApi(request, {

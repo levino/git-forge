@@ -1,0 +1,87 @@
+---
+import type { SearchType } from '@git-forge/accounts'
+import Avatar from '../components/Avatar.astro'
+import EmptyState from '../components/EmptyState.astro'
+import Icon from '../components/Icon.astro'
+import Pager from '../components/Pager.astro'
+import RepoList from '../components/RepoList.astro'
+import Layout from '../layouts/Layout.astro'
+import { pageHref } from '../ui/listing.ts'
+import { repoUrl } from '../ui/repository.ts'
+import { parseSearchRequest } from '../search.ts'
+
+const request = parseSearchRequest(Astro.url)
+const results = await Astro.locals.forge.search(Astro.locals.principal, request)
+const tabs: readonly [SearchType, string][] = [
+  ['repositories', 'Repositories'],
+  ['issues', 'Issues and pull requests'],
+  ['discussions', 'Discussions'],
+  ['users', 'Users and organizations'],
+]
+const excerpt = (body: string | null) => (body && body.length > 200 ? `${body.slice(0, 200)}…` : body)
+---
+
+<Layout title={request.q ? `${request.q} · Search` : 'Search'}>
+  <div class="max-w-4xl mx-auto">
+    <form action="/search" method="get" role="search" class="flex gap-2 mb-4">
+      <input type="hidden" name="type" value={request.type} />
+      <input type="search" name="q" value={request.q} class="input input-sm w-full" placeholder="Search" aria-label="Search query" />
+      <button class="btn btn-sm btn-primary">Search</button>
+    </form>
+    <div role="tablist" class="tabs tabs-border mb-4 overflow-x-auto flex-nowrap">
+      {
+        tabs.map(([type, label]) => (
+          <a role="tab" href={pageHref(Astro.url, { type, page: null })} class:list={['tab whitespace-nowrap', type === request.type && 'tab-active']} aria-selected={type === request.type ? 'true' : 'false'}>
+            {label}
+          </a>
+        ))
+      }
+    </div>
+    <p class="text-sm text-base-content/70 mb-3">{results.page.total} {results.page.total === 1 ? 'result' : 'results'}</p>
+    {results.type === 'repositories' && <RepoList listing={{ ...results.page, sort: 'updated' }} empty="No repositories match." controls={false} />}
+    {
+      (results.type === 'issues' || results.type === 'discussions') &&
+        (results.page.items.length === 0 ? (
+          <EmptyState icon="search" title="Nothing matches." />
+        ) : (
+          <ul class="border border-base-300 rounded-box divide-y divide-base-300 bg-base-100" aria-label="Results">
+            {results.page.items.map((hit) => {
+              const pull = 'isPull' in hit && hit.isPull
+              const href = repoUrl(hit.repository, results.type === 'discussions' ? 'discussions' : pull ? 'pull' : 'issues', String(hit.number))
+              return (
+                <li class="px-4 py-3">
+                  <p class="text-xs text-base-content/60">
+                    {hit.repository.owner}/{hit.repository.name} #{hit.number} · {hit.state}
+                  </p>
+                  <a href={href} class="font-semibold text-primary hover:underline">
+                    {hit.title}
+                  </a>
+                  {hit.body && <p class="text-sm text-base-content/70 mt-1 break-words">{excerpt(hit.body)}</p>}
+                </li>
+              )
+            })}
+          </ul>
+        ))
+    }
+    {
+      results.type === 'users' &&
+        (results.page.items.length === 0 ? (
+          <EmptyState icon="search" title="Nobody matches." />
+        ) : (
+          <ul class="border border-base-300 rounded-box divide-y divide-base-300 bg-base-100" aria-label="Results">
+            {results.page.items.map((hit) => (
+              <li class="flex items-center gap-3 px-4 py-3">
+                <Avatar name={hit.login} size={28} square={hit.kind === 'organization'} />
+                <a href={`/${encodeURIComponent(hit.login)}`} class="font-semibold text-primary hover:underline">
+                  {hit.login}
+                </a>
+                {hit.displayName && <span class="text-base-content/70">{hit.displayName}</span>}
+                <Icon name={hit.kind === 'organization' ? 'org' : 'user'} class="size-3.5 ml-auto text-base-content/50" />
+              </li>
+            ))}
+          </ul>
+        ))
+    }
+    <Pager page={results.page.page} more={results.page.page * results.page.perPage < results.page.total} />
+  </div>
+</Layout>

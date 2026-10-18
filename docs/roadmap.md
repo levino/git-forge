@@ -59,7 +59,7 @@ discussions.
 - [ ] Chunked push helper: `git forge push` splits history into pushes below the platform body limit, using the unmodified git client
 - [ ] Remote helper `git-remote-forge`: resumable multipart pack upload directly to object storage via presigned URLs, then a finalize call that indexes the pack and updates refs
 
-## M5b — CI and self-update
+## M5b — CI and distribution
 
 - [ ] Spike: official `actions/runner` registers via JIT config, runs one job in a Cloudflare Container and deploys a hello-world Worker with `wrangler`
 - [ ] Actions service: sessions, jobs, timeline, logs; then cache, artifacts, OIDC

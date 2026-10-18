@@ -26,6 +26,8 @@ import { isAncestor, MissingObjectError, type ObjectSource } from './walk.ts'
 
 export type MirrorMode = 'auto' | 'manual'
 
+export type MirrorAuth = 'none' | 'instance'
+
 export type MirrorConfig = {
   readonly version: 1
   readonly remote: string
@@ -34,6 +36,7 @@ export type MirrorConfig = {
   readonly namespace: string
   readonly lfs: boolean
   readonly lfsUrl?: string
+  readonly auth?: MirrorAuth
   readonly createdAt: string
   readonly detachedAt?: string
 }
@@ -117,6 +120,7 @@ export type MirrorSettings = {
   readonly namespace?: string
   readonly lfs?: boolean
   readonly lfsUrl?: string
+  readonly auth?: MirrorAuth
 }
 
 const validNamespace = (namespace: string): boolean => /^([A-Za-z0-9_][A-Za-z0-9._-]*\/)*$/.test(namespace) && !namespace.includes('..') && !/\.lock\//.test(namespace)
@@ -136,6 +140,7 @@ export const configureMirror = async (storage: Storage, repo: RepositoryName, se
   if (!isValidName(remote)) throw new Error(`invalid remote name ${remote}`)
   if (!validUrl(settings.url)) throw new Error(`invalid upstream URL ${settings.url}`)
   if (!validNamespace(namespace)) throw new Error(`invalid upstream namespace ${namespace}`)
+  if (settings.auth !== undefined && settings.auth !== 'none' && settings.auth !== 'instance') throw new Error(`invalid mirror auth ${String(settings.auth)}`)
   if (!(await readRefs(storage, repo))) throw new Error(`repository ${repo.owner}/${repo.name} not found`)
   const config: MirrorConfig = {
     version: 1,
@@ -145,6 +150,7 @@ export const configureMirror = async (storage: Storage, repo: RepositoryName, se
     namespace,
     lfs: settings.lfs ?? true,
     ...(settings.lfsUrl ? { lfsUrl: settings.lfsUrl } : {}),
+    ...(settings.auth && settings.auth !== 'none' ? { auth: settings.auth } : {}),
     createdAt: now.toISOString(),
   }
   const result = await writeJson(storage, mirrorConfigKey(repo, remote), config, { ifNoneMatch: '*' })
@@ -397,7 +403,7 @@ const isComplete = async (odb: ObjectDatabase, tips: readonly ObjectId[], connec
   }
 }
 
-export type SyncStrategy = 'fetch' | 'copy'
+export type SyncStrategy = 'fetch' | 'copy' | 'auto'
 
 export type SyncOptions = {
   readonly storage: Storage
@@ -413,7 +419,7 @@ export type SyncOptions = {
 
 export type SyncResult = {
   readonly status: 'ok' | 'detached' | 'failed'
-  readonly strategy?: SyncStrategy
+  readonly strategy?: Exclude<SyncStrategy, 'auto'>
   readonly protocol?: Protocol
   readonly copied?: { readonly packs: number; readonly bytes: number; readonly reused: number }
   readonly fetched: { readonly objects: number; readonly packs: readonly string[]; readonly rounds: number }
@@ -469,8 +475,9 @@ export const syncMirror = async (options: SyncOptions): Promise<SyncResult> => {
     let upstream: UpstreamRefs
     let protocol: Protocol
     let lfsFound: readonly LfsPointer[]
-    if (options.strategy === 'copy') {
-      const copied = await copyUpstreamPacks(remote, storage, repo, odb, config, options.maxPackBytes)
+    const remotePacks = options.strategy === 'copy' || options.strategy === 'auto' ? await listRemotePacks(remote) : null
+    if (options.strategy === 'copy' || remotePacks !== null) {
+      const copied = await copyUpstreamPacks(remote, storage, repo, odb, config, remotePacks ?? [], options.maxPackBytes)
       upstream = copied.upstream
       protocol = 'dumb'
       lfsFound = copied.lfs
@@ -575,12 +582,13 @@ const copyUpstreamPacks = async (
   repo: RepositoryName,
   odb: ObjectDatabase,
   config: MirrorConfig,
+  remotePacks: readonly string[],
   maxPackBytes: number | undefined,
 ): Promise<CopyOutcome> => {
   const listing = await lsRefsDumb(remote)
   const upstream = selectUpstreamRefs(listing.refs, config.namespace, listing.head)
   const local = new Set(await odb.packNames())
-  const missing = (await listRemotePacks(remote)).filter((name) => !local.has(name))
+  const missing = remotePacks.filter((name) => !local.has(name))
   const copied = []
   for (const name of missing) {
     copied.push(await copyPack({ remote, storage, repo, name, ...(maxPackBytes !== undefined ? { maxPackBytes } : {}) }))

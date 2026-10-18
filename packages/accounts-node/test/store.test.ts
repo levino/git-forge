@@ -26,7 +26,7 @@ const tables = (db: Database) => db.all<{ name: string }>(sql("SELECT name FROM 
 describe('migrations on node:sqlite', () => {
   it('creates the schema once and is idempotent', async () => {
     const { db } = openSqliteDatabase()
-    expect(await applyMigrations(db, MIGRATIONS)).toEqual(['0001_initial', '0002_branch_protection', '0004_mirror_subscriptions'])
+    expect(await applyMigrations(db, MIGRATIONS)).toEqual(['0001_initial', '0002_branch_protection', '0003_instance_admins', '0004_mirror_subscriptions'])
     expect(await applyMigrations(db, MIGRATIONS)).toEqual([])
     expect((await tables(db)).map((row) => row.name)).toEqual(
       expect.arrayContaining([
@@ -47,6 +47,7 @@ describe('migrations on node:sqlite', () => {
         'branch_protection_rules',
         'branch_protection_push_allowances',
         'branch_protection_status_checks',
+        'instance_admins',
         'schema_migrations',
       ]),
     )
@@ -66,8 +67,8 @@ describe('migrations on node:sqlite', () => {
     const broken = [...MIGRATIONS, { name: '9998_broken', sql: 'CREATE TABLE extra (x);\n--> statement-breakpoint\nNOT VALID SQL' }]
     await expect(applyMigrations(db, broken)).rejects.toThrow()
     expect((await tables(db)).map((row) => row.name)).not.toContain('extra')
-    const good = [...MIGRATIONS, { name: '9999_extra', sql: 'CREATE TABLE extra (x);' }]
-    expect(await applyMigrations(db, good)).toEqual(['9999_extra'])
+    const good = [...MIGRATIONS, { name: '9998_extra', sql: 'CREATE TABLE extra (x);' }]
+    expect(await applyMigrations(db, good)).toEqual(['9998_extra'])
     await expect(applyMigrations(db, [{ name: 'bad-name', sql: '' }])).rejects.toThrow(/invalid migration name/)
   })
 
@@ -212,6 +213,37 @@ describe('accounts store', () => {
     expect(resolveAccess(principal, repo, await store.grantsFor(principal, repo))).toBe('none')
   })
 
+  it('bootstraps exactly one first instance admin', async () => {
+    const { store } = await fresh()
+    const admin = await store.bootstrapInstanceAdmin({ login: 'root', email: 'root@example.org' })
+    expect(admin).not.toBeNull()
+    expect(await store.isInstanceAdmin(admin!.id)).toBe(true)
+    expect(await store.bootstrapInstanceAdmin({ login: 'second' })).toBeNull()
+    expect(await store.findAccount('second')).toBeNull()
+    expect((await store.auditLog()).map((entry) => entry.action)).toEqual(['instance.bootstrap'])
+    const other = await store.createUser({ login: 'other' })
+    expect(await store.isInstanceAdmin(other.id)).toBe(false)
+    await store.setInstanceAdmin(other.id, true)
+    expect(await store.isInstanceAdmin(other.id)).toBe(true)
+    await store.setInstanceAdmin(other.id, false)
+    expect(await store.isInstanceAdmin(other.id)).toBe(false)
+    await store.disableAccount(admin!.id)
+    expect(await store.isInstanceAdmin(admin!.id)).toBe(false)
+  })
+
+  it('lists repositories of enabled owners', async () => {
+    const { store } = await fresh()
+    const { alice } = await seed(store)
+    await store.createRepository({ ownerId: alice.id, name: 'notes', visibility: 'private' })
+    expect((await store.listRepositories()).map((repo) => `${repo.owner}/${repo.name}:${repo.visibility}`)).toEqual([
+      'alice/notes:private',
+      'village/archive:private',
+      'village/site:public',
+    ])
+    await store.disableAccount(alice.id)
+    expect((await store.listRepositories()).map((repo) => repo.name)).toEqual(['archive', 'site'])
+  })
+
   it('stores mirror subscriptions only for trusted instances', async () => {
     const { store } = await fresh()
     const subscription = { issuer: 'https://beta.example/', repository: 'Village/Archive', callback: 'https://beta.example/api/federation/notify/b/a/origin' }
@@ -228,13 +260,6 @@ describe('accounts store', () => {
     expect(await store.unsubscribeMirror(subscription)).toBe(false)
     expect(await store.mirrorSubscriptions('village/archive')).toEqual([])
     expect((await store.auditLog()).map((entry) => entry.action)).toEqual(expect.arrayContaining(['mirror.subscribe', 'mirror.unsubscribe']))
-  })
-
-  it('remembers local mirrors for the scheduled safety net', async () => {
-    const { store } = await fresh()
-    await store.registerLocalMirror('Backup/Archive', 'origin')
-    await store.registerLocalMirror('backup/archive', 'origin')
-    expect(await store.localMirrors()).toEqual([{ repository: 'backup/archive', remote: 'origin' }])
   })
 
   it('writes every change and its audit entry atomically', async () => {
@@ -288,7 +313,7 @@ describe('D1 adapter', () => {
     const handle = new DatabaseSync(':memory:')
     handle.exec('PRAGMA foreign_keys = ON')
     const db = d1Database(fakeD1(handle))
-    expect(await applyMigrations(db, MIGRATIONS)).toEqual(['0001_initial', '0002_branch_protection', '0004_mirror_subscriptions'])
+    expect(await applyMigrations(db, MIGRATIONS)).toEqual(['0001_initial', '0002_branch_protection', '0003_instance_admins', '0004_mirror_subscriptions'])
     const store = createAccountsStore(db)
     const { alice } = await seed(store)
     const { token } = await store.createPersonalAccessToken(alice.id, { name: 'd1', scopes: ['repo:admin'], expiresAt: null })

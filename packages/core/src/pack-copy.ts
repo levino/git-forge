@@ -105,11 +105,11 @@ export const verifyingPackStream = (expected: PackExpectation): TransformStream<
   })
 }
 
-export const listRemotePacks = async (remote: Remote): Promise<string[]> => {
+export const listRemotePacks = async (remote: Remote): Promise<string[] | null> => {
   const response = await remoteRequest(remote, remoteUrl(remote.url, 'objects/info/packs'))
   if (response.status === 404) {
     await response.body?.cancel()
-    return []
+    return null
   }
   const text = await (await expectOk(response, 'objects/info/packs')).text()
   return text

@@ -7,10 +7,3 @@ CREATE TABLE mirror_subscriptions (
 );
 --> statement-breakpoint
 CREATE INDEX mirror_subscriptions_repository ON mirror_subscriptions (repository);
---> statement-breakpoint
-CREATE TABLE local_mirrors (
-  repository TEXT NOT NULL COLLATE NOCASE,
-  remote TEXT NOT NULL,
-  created_at INTEGER NOT NULL,
-  PRIMARY KEY (repository, remote)
-);

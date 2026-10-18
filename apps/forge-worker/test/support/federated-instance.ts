@@ -5,7 +5,6 @@ import {
   type AccountsStore,
   applyMigrations,
   createAccountsStore,
-  createJwksCache,
   generateSigningKey,
   importSigningKey,
   MIGRATIONS,
@@ -26,10 +25,11 @@ import {
   type Storage,
   type StoredObject,
 } from '@git-forge/core'
-import { type ForgeConfig, handleRequest } from '../../src/app.ts'
-import { type ForgeJob, type MirrorFederation, runJob } from '../../src/mirror-federation.ts'
+import { createForge, type Forge, type ForgeOptions } from '../../src/app.ts'
+import { DEFAULT_MAX_LFS_OBJECT_BYTES } from '../../src/config.ts'
+import type { ForgeJob } from '../../src/mirror-federation.ts'
 
-export const ADMIN_TOKEN = 'admin-secret'
+export const BOOTSTRAP_TOKEN = 'bootstrap-secret'
 
 export type Invocation = {
   readonly kind: 'request' | 'job'
@@ -77,19 +77,22 @@ export type Instance = {
   readonly storage: Storage
   readonly store: AccountsStore
   readonly jobs: MemoryJobQueue<ForgeJob>
-  readonly federation: MirrorFederation
+  readonly forge: Forge
+  readonly options: ForgeOptions
   readonly invocations: Invocation[]
   readonly requests: { readonly method: string; readonly path: string }[]
+  readonly token: string
   failNextFetches: (predicate: (request: Request) => boolean, count: number) => void
   api: (method: string, path: string, body?: unknown) => Promise<Response>
+  gitUrl: (repository: string, withToken?: boolean) => string
   close: () => Promise<void>
 }
 
 export type InstanceOptions = {
   readonly retryDelayMs?: (seconds: number) => number
-  readonly safetySyncHours?: number
   readonly storage?: Storage
   readonly privateJwk?: PrivateJwk
+  readonly login?: string
 }
 
 const cpuNow = () => {
@@ -126,9 +129,8 @@ export const startInstance = async (name: string, options: InstanceOptions = {})
     }
     return globalThis.fetch(request)
   }
-  let server: Server | undefined
   let handler: (request: Request) => Promise<Response> = async () => new Response('starting', { status: 503 })
-  server = createServer((incoming, outgoing) => {
+  const server: Server = createServer((incoming, outgoing) => {
     const headers = new Headers()
     for (const [header, value] of Object.entries(incoming.headers)) if (typeof value === 'string') headers.set(header, value)
     const method = incoming.method ?? 'GET'
@@ -151,7 +153,7 @@ export const startInstance = async (name: string, options: InstanceOptions = {})
       }
     })()
   })
-  await new Promise<void>((done) => server!.listen(0, '127.0.0.1', done))
+  await new Promise<void>((done) => server.listen(0, '127.0.0.1', done))
   const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
   const invocation = async <T>(kind: Invocation['kind'], label: string, action: () => Promise<T>, ok: (value: T) => boolean): Promise<T> => {
     const opsBefore = counting.operations
@@ -166,25 +168,35 @@ export const startInstance = async (name: string, options: InstanceOptions = {})
       },
     )
   }
-  const jobs = createMemoryJobQueue<ForgeJob>((job) => invocation('job', job.kind, () => runJob(federation, job), () => true), {
+  let forge: Forge | undefined
+  const jobs = createMemoryJobQueue<ForgeJob>((job) => invocation('job', job.kind, () => forge!.runJob(job), () => true), {
     maxAttempts: 6,
     delayMs: options.retryDelayMs ?? ((seconds) => seconds),
   })
-  const federation: MirrorFederation = {
+  const forgeOptions: ForgeOptions = {
     storage: counting,
-    store,
-    issuer: url,
-    key,
-    jwks: createJwksCache({ allowInsecureHttp: true, fetch: (input, init) => outbound(new Request(input, init)) }),
-    jobs,
-    canRead: async () => true,
-    fetch: outbound,
-    safetySyncHours: options.safetySyncHours ?? 24,
+    db,
+    publicUrl: url,
+    instanceKey: key,
+    bootstrapToken: BOOTSTRAP_TOKEN,
+    maxPushBytes: 64 * 1024 * 1024,
+    maxLfsObjectBytes: DEFAULT_MAX_LFS_OBJECT_BYTES,
+    mirrorIntervalMinutes: 24 * 60,
+    allowInsecureFederation: true,
     deepCheckDays: 0,
+    fetch: outbound,
+    jobs,
   }
-  const config: ForgeConfig = { storage: counting, adminToken: ADMIN_TOKEN, publicRead: true, maxPushBytes: 64 * 1024 * 1024, federation }
-  handler = (request) =>
-    invocation('request', `${request.method} ${new URL(request.url).pathname}`, () => handleRequest(request, config), (response) => response.ok)
+  const created = createForge(forgeOptions)
+  forge = created
+  handler = (request) => invocation('request', `${request.method} ${new URL(request.url).pathname}`, () => created.fetch(request), (response) => response.ok)
+  const bootstrap = await fetch(`${url}/api/bootstrap`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${BOOTSTRAP_TOKEN}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ login: options.login ?? 'village' }),
+  })
+  if (bootstrap.status !== 201) throw new Error(`bootstrap of ${name} failed: ${bootstrap.status} ${await bootstrap.text()}`)
+  const token = ((await bootstrap.json()) as { token: string }).token
   return {
     name,
     url,
@@ -192,21 +204,24 @@ export const startInstance = async (name: string, options: InstanceOptions = {})
     storage,
     store,
     jobs,
-    federation,
+    forge: created,
+    options: forgeOptions,
     invocations,
     requests,
+    token,
     failNextFetches: (predicate, count) => {
       failures = { predicate, remaining: count }
     },
     api: (method, path, body) =>
       fetch(`${url}${path}`, {
         method,
-        headers: { Authorization: `Bearer ${ADMIN_TOKEN}`, 'Content-Type': 'application/json' },
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
         ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
       }),
+    gitUrl: (repository, withToken = false) => `${withToken ? url.replace('http://', `http://git:${token}@`) : url}/${repository}.git`,
     close: async () => {
       await jobs.idle()
-      await new Promise<void>((done) => server!.close(() => done()))
+      await new Promise<void>((done) => server.close(() => done()))
     },
   }
 }

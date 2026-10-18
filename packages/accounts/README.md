@@ -67,8 +67,13 @@ triggers with `RAISE`), all of which D1, Durable Objects and libSQL support.
 - Workers cannot read files, so `src/migrations.generated.ts` embeds the SQL.
   Regenerate it with `pnpm --filter @git-forge/accounts migrations:bundle`; a
   test fails if it is out of sync with `migrations/`.
-- Use `applyMigrations(db, MIGRATIONS)` on every platform (including D1)
-  instead of `wrangler d1 migrations apply`, so there is one migration ledger.
+- Ledgers: on Cloudflare the files are applied by
+  `wrangler d1 migrations apply` (ledger `d1_migrations`): the instance
+  template's `deploy.sh` runs it before the upload, `apps/forge-worker` points
+  `migrations_dir` at this directory, and the Worker never migrates at
+  runtime. Everywhere else (node:sqlite, libSQL, tests) use
+  `applyMigrations(db, MIGRATIONS)` (ledger `schema_migrations`). One database
+  uses one of the two, never both.
 
 ## Data model
 
@@ -85,11 +90,11 @@ triggers with `RAISE`), all of which D1, Durable Objects and libSQL support.
 | `tokens` | personal and app tokens: SHA-256 hash only, display prefix, scopes, optional repository restriction, expiry, last use, revocation |
 | `trusted_instances`, `instance_repositories` | federation trust: issuer (+ optional pinned key thumbprint) may read specific repositories |
 | `mirror_subscriptions` | upstream side: which trusted instance wants a notification for which repository at which callback URL (migration `0004`) |
-| `local_mirrors` | mirror side: index of this instance's mirrors (`repository`, `remote`) for the scheduled safety net; the mirror configuration itself stays in the bucket |
 | `audit_log` | append-only; `UPDATE` and `DELETE` are rejected by triggers |
 | `branch_protection_rules` | one rule per `(repository, pattern)`: force push, deletion, admin enforcement, push restriction, pull request reviews, status checks (migration `0002`) |
 | `branch_protection_push_allowances` | who may push when a rule restricts pushes: `user`, `team`, `app` (by ID) or `role` (minimum role) |
 | `branch_protection_status_checks` | required status check names per rule |
+| `instance_admins` | users who administer the instance (create users and tokens, trust other instances, act as admin on every repository)  (migration `0003`) |
 
 Timestamps are Unix milliseconds. IDs are random UUIDs. Logins and repository
 names are case-insensitive (`COLLATE NOCASE`).
@@ -148,9 +153,22 @@ Credentials are read from `Authorization: Basic` (password = token, username
 ignored, as with GitHub) or `Authorization: Bearer` (for
 `git -c http.extraHeader=...`). A value shaped like a JWT goes to the
 instance verifier, anything else is looked up as a token. Invalid credentials
-always yield `401`. `checkRepositoryAccess(directory, principal, repo, role,
-surface)` is the same check for other HTTP surfaces such as the LFS batch API
-(`surface: 'lfs'` requires the instance token scope `lfs:read`).
+always yield `401`. The core passes the request surface (`'git'` or `'lfs'`)
+to the hook, and `createGitAuthorizer` hands it to
+`checkRepositoryAccess(directory, principal, repo, role, surface)`: an instance
+token only counts for Git routes with the scope `git:read` and for LFS routes
+with `lfs:read`. Without the scope the instance is treated like a caller
+without grants (public repositories stay readable, private ones answer `404`).
+
+## Instance admins and bootstrap
+
+`store.bootstrapInstanceAdmin({ login, email? })` creates the first user and
+makes it an instance admin in one atomic batch, but only while
+`instance_admins` is empty; it returns `null` afterwards, so concurrent or
+repeated bootstrap calls cannot create a second admin. Further admins are
+managed with `store.setInstanceAdmin(userId, admin)`; `store.isInstanceAdmin`
+ignores disabled accounts. `store.listRepositories()` lists the repositories
+of enabled owners, e.g. for scheduled mirror sync.
 
 ## Branch protection
 
@@ -328,7 +346,9 @@ signature.
 
 `createJwksCache({ fetch?, cacheSeconds = 300, minRefreshSeconds = 30, allowInsecureHttp = false })`
 fetches the discovery document, requires `issuer` to match and `jwks_uri` to
-be on the issuer's origin, refuses plain HTTP and redirects, limits documents
+be on the issuer's origin, refuses plain HTTP and redirects (requests use
+`redirect: 'manual'` and treat any 3xx as an error, because Workers do not
+implement `redirect: 'error'`), limits documents
 to 64 KiB, and refetches at most every 30 s on unknown key ids.
 
 Trust is managed with `store.trustInstance({ issuer, pinnedThumbprint? })`,

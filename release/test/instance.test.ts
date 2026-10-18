@@ -12,7 +12,7 @@ const run = promisify(execFile)
 const releaseRoot = resolve(import.meta.dirname, '..')
 const templateRoot = resolve(releaseRoot, '../templates/instance')
 const wrangler = join(releaseRoot, 'node_modules/.bin/wrangler')
-const ADMIN_TOKEN = `release-${crypto.randomUUID()}`
+const BOOTSTRAP_TOKEN = `release-${crypto.randomUUID()}`
 
 const gitEnv = {
   GIT_AUTHOR_NAME: 'Release',
@@ -79,7 +79,7 @@ const startDev = async (): Promise<void> => {
   const port = await freePort()
   child = spawn(
     wrangler,
-    ['dev', '--ip', '127.0.0.1', '--port', String(port), '--persist-to', persist, '--show-interactive-dev-session=false', '--var', `ADMIN_TOKEN:${ADMIN_TOKEN}`],
+    ['dev', '--ip', '127.0.0.1', '--port', String(port), '--persist-to', persist, '--show-interactive-dev-session=false', '--var', `BOOTSTRAP_TOKEN:${BOOTSTRAP_TOKEN}`],
     { cwd: instance, detached: true, env: wranglerEnv(releaseUrl), stdio: ['ignore', 'pipe', 'pipe'] },
   )
   child.stdout?.on('data', (chunk: Buffer) => (log += chunk.toString()))
@@ -167,6 +167,7 @@ describe('instance template build script', () => {
   it('applies the bundled D1 migrations', async () => {
     const { stdout, stderr } = await run(wrangler, ['d1', 'migrations', 'apply', 'DB', '--local', '--persist-to', persist], { cwd: instance, env: wranglerEnv(releaseUrl) })
     expect(stdout + stderr).toContain('0001_initial.sql')
+    expect(stdout + stderr).toContain('0003_instance_admins.sql')
   })
 })
 
@@ -193,12 +194,12 @@ describe('instance template deploy script', () => {
 describe('instance on wrangler dev', () => {
   it('serves a push and a clone with the real git client', async () => {
     await startDev()
-    const created = await fetch(`${url}/api/admin/repos`, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${ADMIN_TOKEN}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ owner: 'smoke', name: 'site' }),
-    })
-    expect(created.status).toBe(201)
+    const post = (path: string, token: string, body: unknown) =>
+      fetch(`${url}${path}`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    const bootstrapped = await post('/api/bootstrap', BOOTSTRAP_TOKEN, { login: 'smoke' })
+    expect(bootstrapped.status).toBe(201)
+    const { token } = (await bootstrapped.json()) as { token: string }
+    expect((await post('/api/repos', token, { owner: 'smoke', name: 'site', visibility: 'public' })).status).toBe(201)
     const source = tempDir()
     await git(source, ['init', '-q', '-b', 'main'])
     for (let commit = 0; commit < 3; commit++) {
@@ -207,7 +208,7 @@ describe('instance on wrangler dev', () => {
       await git(source, ['commit', '-q', '-m', `commit ${commit}`])
     }
     const remote = `${url}/smoke/site.git`
-    await git(source, ['push', '-q', remote.replace('http://', `http://git:${ADMIN_TOKEN}@`), 'main'])
+    await git(source, ['push', '-q', remote.replace('http://', `http://git:${token}@`), 'main'])
     const target = tempDir()
     await git(target, ['clone', '-q', remote, 'out'])
     expect(await git(join(target, 'out'), ['log', '--format=%H %s'])).toBe(await git(source, ['log', '--format=%H %s']))

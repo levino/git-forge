@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { generateSigningKey, mintMirrorNotification } from '@git-forge/accounts'
 import { gitPrefix, lfsObjectKey, readAll, readMirrorStatus, readRefs, type RepositoryName, type Storage } from '@git-forge/core'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { ADMIN_TOKEN, type Instance, quiesce, startInstance } from '../support/federated-instance.ts'
+import { type Instance, quiesce, startInstance } from '../support/federated-instance.ts'
 import { git, tempDir } from './history.ts'
 
 const repo: RepositoryName = { owner: 'village', name: 'archive' }
@@ -31,9 +31,9 @@ const expectStatus = async (response: Promise<Response>, status: number): Promis
   return resolved
 }
 
-const repoUrl = (instance: Instance) => `${instance.url}/${repository}.git`
+const repoUrl = (instance: Instance) => instance.gitUrl(repository)
 
-const pushUrl = (instance: Instance) => repoUrl(instance).replace('http://', `http://git:${ADMIN_TOKEN}@`)
+const pushUrl = (instance: Instance) => instance.gitUrl(repository, true)
 
 const refs = async (instance: Instance) => (await readRefs(instance.storage, repo))?.state.refs ?? {}
 
@@ -69,11 +69,13 @@ const notify = (target: Instance, token: string, remote = 'origin') =>
 beforeAll(async () => {
   ;[alpha, beta, gamma] = await Promise.all([startInstance('alpha'), startInstance('beta'), startInstance('gamma')])
   for (const instance of [alpha, beta, gamma]) {
-    await expectStatus(instance.api('POST', '/api/admin/repos', { owner: repo.owner, name: repo.name }), 201)
+    await expectStatus(instance.api('POST', '/api/repos', { owner: repo.owner, name: repo.name }), 201)
   }
   await expectStatus(alpha.api('POST', '/api/admin/instances', { issuer: beta.url }), 200)
+  await expectStatus(alpha.api('POST', `/api/repos/${repository}/instances`, { issuer: beta.url }), 200)
   await expectStatus(beta.api('POST', '/api/admin/instances', { issuer: alpha.url }), 200)
   await expectStatus(beta.api('POST', '/api/admin/instances', { issuer: gamma.url }), 200)
+  await expectStatus(beta.api('POST', `/api/repos/${repository}/instances`, { issuer: gamma.url }), 200)
   await expectStatus(gamma.api('POST', '/api/admin/instances', { issuer: beta.url }), 200)
 }, 60_000)
 
@@ -83,8 +85,8 @@ afterAll(async () => {
 
 describe('push-notified mirror sync across three instances', () => {
   it('subscribes mirrors at their upstream when they are configured', async () => {
-    await expectStatus(beta.api('POST', `/api/repos/${repository}/mirrors`, { url: repoUrl(alpha) }), 201)
-    await expectStatus(gamma.api('POST', `/api/repos/${repository}/mirrors`, { url: repoUrl(beta), namespace: 'upstream/origin/' }), 201)
+    await expectStatus(beta.api('POST', `/api/repos/${repository}/mirrors`, { url: repoUrl(alpha), auth: 'instance' }), 201)
+    await expectStatus(gamma.api('POST', `/api/repos/${repository}/mirrors`, { url: repoUrl(beta), auth: 'instance', namespace: 'upstream/origin/' }), 201)
     await quiesce([alpha, beta, gamma])
     expect(await alpha.store.mirrorSubscriptions(repository)).toEqual([
       { issuer: beta.url, repository, callback: `${beta.url}/api/federation/notify/${repository}/origin` },
@@ -123,7 +125,7 @@ describe('push-notified mirror sync across three instances', () => {
     }
     const clone = tempDir()
     await git(clone, ['init', '-q', '--bare'])
-    await git(clone, ['fetch', '-q', repoUrl(gamma), '+refs/upstream/*:refs/upstream/*'])
+    await git(clone, ['fetch', '-q', pushUrl(gamma), '+refs/upstream/*:refs/upstream/*'])
     expect(await git(clone, ['fsck', '--full', '--strict', '--no-dangling'])).toBe('')
   })
 
@@ -159,6 +161,7 @@ describe('push-notified mirror sync across three instances', () => {
     const refsNow = await refs(alpha)
     const untrusted = await mintMirrorNotification({ key: mallory, issuer: 'http://127.0.0.1:9', audience: beta.url, repository, refs: refsNow })
     expect(await (await expectStatus(notify(beta, untrusted), 401)).json()).toEqual({ error: 'notification rejected: unknown-issuer' })
+    await expectStatus(notify(beta, untrusted, 'nope'), 401)
     const forged = await mintMirrorNotification({ key: mallory, issuer: alpha.url, audience: beta.url, repository, refs: refsNow })
     expect(await (await expectStatus(notify(beta, forged), 401)).json()).toEqual({ error: 'notification rejected: unknown-key' })
     const wrongAudience = await mintMirrorNotification({ key: alpha.key, issuer: alpha.url, audience: gamma.url, repository, refs: refsNow })
@@ -212,7 +215,7 @@ describe('push notifications when the job queue is down', () => {
   it('still accepts the push', async () => {
     const solo = await startInstance('solo')
     try {
-      await expectStatus(solo.api('POST', '/api/admin/repos', { owner: repo.owner, name: repo.name }), 201)
+      await expectStatus(solo.api('POST', '/api/repos', { owner: repo.owner, name: repo.name }), 201)
       await solo.store.trustInstance({ issuer: beta.url })
       await solo.store.subscribeMirror({ issuer: beta.url, repository, callback: `${beta.url}/api/federation/notify/${repository}/solo` })
       const enqueue = solo.jobs.enqueue

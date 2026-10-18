@@ -77,10 +77,10 @@ export const createGitAccess = (options: AuthenticateOptions & { readonly direct
   }
   const denyAll: RefPolicy = () => 'permission denied'
   return {
-    authorize: async (request, repo, access) => {
+    authorize: async (request, repo, access, surface) => {
       const principal = await principalOf(request)
       if (!principal) return challenge('invalid credentials\n')
-      const check = await checkRepositoryAccess(options.directory, principal, repo, access === 'write' ? 'write' : 'read')
+      const check = await checkRepositoryAccess(options.directory, principal, repo, access === 'write' ? 'write' : 'read', surface)
       return decisionResponse(check.decision, principal)
     },
     pushPolicy: async (request, repo) => {

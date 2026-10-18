@@ -129,12 +129,15 @@ Typical instances see new data once a month or every half year; it must
 reach every mirror quickly, and an idle instance must cost nothing but
 storage. Mirrors therefore do not poll; the upstream tells them.
 
-- **Subscription:** when a mirror is configured, the mirror registers with
-  the upstream through an authenticated federation call
+- **Subscription:** when a mirror with `auth: instance` is configured, the
+  mirror registers with the upstream through an authenticated federation call
   (`POST /api/federation/subscriptions`, instance JWT, body `repository` and
   `callback`). The upstream stores it in `mirror_subscriptions` only for
   issuers in its trust table, only for repositories named in the token and
-  only for callbacks below the subscriber's own issuer URL. The daily safety
+  only for callbacks below the subscriber's own issuer URL, and only if the
+  subscriber may read the repository (instance grant or public). Trust is
+  mutual: the mirror needs the upstream in its own trust table to verify
+  notifications. The daily safety
   net renews the subscription (idempotent), so a lost one heals itself.
 - **Notification:** after a push that updated at least one ref, the upstream
   enqueues one job per subscriber. The job signs a JWT with the instance key
@@ -156,9 +159,11 @@ storage. Mirrors therefore do not poll; the upstream tells them.
 - **Chains:** a sync that moved refs notifies the mirror's own subscribers,
   so a mirror of a mirror (gamma ← beta ← alpha) follows without any cron.
 - **Safety net:** the scheduled handler runs once a day (cron `17 3 * * *`,
-  interval `MIRROR_SAFETY_SYNC_HOURS`, default 24) and enqueues a sync and a
-  subscription renewal for every auto mirror whose last run is older than
-  the interval. The rare deep check (§7) is enqueued every
+  `MIRROR_INTERVAL_MINUTES` = 1440 in `wrangler.jsonc`) and enqueues a sync
+  and a subscription renewal for every auto mirror whose last run is older
+  than the interval. Without a job queue (e.g. a Node deployment without
+  one) there are no notifications and the scheduled handler syncs inline, so
+  a shorter interval is the right choice there. The rare deep check (§7) is enqueued every
   `MIRROR_DEEP_CHECK_DAYS` (default 30, 0 = off).
 
 ### Instance-to-instance access (federation)
@@ -175,6 +180,16 @@ OIDC-style, modelled on GitHub Actions OIDC:
 - The target fetches the issuer's JWKS over HTTPS; the trust anchor is the
   issuer's domain. Optionally a key thumbprint is pinned per grant.
 - Public repositories need no grant.
+- The token carries the scopes `git:read` and `lfs:read`. The core tells the
+  authorization hook whether a request is a Git or an LFS request, so both are
+  checked separately.
+- A mirror marks in its config (`auth: "instance"`) that it presents an
+  instance token to its upstream; otherwise it fetches anonymously. A mirror
+  of a mirror reads the upstream's `refs/upstream/{remote}/*` by setting the
+  namespace to `upstream/{remote}/`.
+- JWKS documents are fetched without following redirects (`redirect:
+  "manual"`, any 3xx is an error), because Workers do not implement
+  `redirect: "error"`.
 - There are no push certificates. The instance signs; trust is
   server-to-server.
 
@@ -342,9 +357,9 @@ there is no upload or publish step.
   Rule "Set Request Header" or origin header setting). Everything the CDN
   caches is then readable by whoever can reach the CDN URL, so for private
   repositories the pull zone itself must restrict access (e.g. Bunny token
-  authentication / signed URLs) or the repository should be public. Until
-  accounts are wired in, the Worker offers a single `READ_TOKEN` for this;
-  later a PAT or app token with the `read` role.
+  authentication / signed URLs) or the repository should be public. The
+  Worker has no special token for this: a personal access token with the
+  scope `repo:read` of a user with read access does it.
 - Core: `matchContentRoute`, `resolveRevision`, `resolvePath`, `resolveRaw`,
   `parseRange` and the content-type helpers are pure functions;
   `handleContentRequest` builds the HTTP responses. Plain blobs are read
@@ -381,11 +396,28 @@ SQLite database. A new instance works without an external identity provider.
 For the village archive: people log in via OIDC with ZITADEL; apps and
 automations use app tokens; mirrors use instance federation (§4).
 
+**Instance admins and bootstrap.** Instance admins (table `instance_admins`)
+create users and tokens, trust other instances and count as admins of every
+repository. A fresh instance has none: one call of `POST /api/bootstrap`,
+authenticated with the deployment secret `BOOTSTRAP_TOKEN`, creates the first
+admin atomically and returns a personal access token; further calls answer
+`409`. Until login methods exist, the JSON API is used with personal access
+tokens that carry the scope `repo:admin`.
+
+**Visibility.** Repositories are private by default; visibility is a
+per-repository setting in the database. There is no instance-wide public read
+switch.
+
+**Size limits.** Git pushes are limited by `MAX_PUSH_BYTES`; single LFS
+objects by `MAX_LFS_OBJECT_BYTES` (default 100 MiB, the request body limit of
+Cloudflare's Free and Pro plans), enforced in the batch API and on `PUT`.
+
 ## 9. Git over SSH
 
-Not supported: serverless functions accept only HTTP. Git uses HTTPS with
-tokens, later also a device flow. An optional SSH-to-HTTPS gateway could run
-on a Pi or VPS later.
+Not supported, by decision. Serverless functions accept only HTTP; SSH would
+need an always-on host or a TCP-capable container platform, and SSH over
+WebSocket needs client-side configuration. Git uses HTTPS with tokens, made
+convenient by `git forge auth login` (credential helper, device flow).
 
 ## 10. Mirror overview and verification
 
@@ -414,6 +446,16 @@ dev environments) need real machines, started on demand via API.
 | CI (later) | Compute adapter, e.g. with `act` |
 
 Every building block is an interface; Cloudflare is the first implementation.
+
+**Cloudflare deployment.** One Worker serves Git, LFS, media and raw URLs, the
+JSON API and the well-known federation documents, and runs mirror sync from a
+Cron Trigger. It binds one R2 bucket (`BUCKET`) and one D1 database (`DB`).
+The Worker never migrates its database: `wrangler d1 migrations apply` does,
+from `packages/accounts/migrations` (`migrations_dir` in
+`apps/forge-worker/wrangler.jsonc`, the release's `dist/migrations` in the
+instance template; see §15). Several instances on one account are Wrangler
+environments (`alpha`, `beta`, `gamma`), each with its own Worker, bucket and
+database.
 
 | Building block | Cloudflare | Others |
 |---|---|---|
@@ -492,13 +534,13 @@ development container:
 
 | per invocation (CPU ms) | small repo (0.9 MiB pack) | medium repo (14.1 MiB pack) |
 |---|---|---|
-| notification request, in-process replay | 1.6–2.8 | 1.4–2.4 |
-| copy-only sync of a 1-commit push, replay | 4.6–5.4 | 4.3–4.7 |
-| delivering a notification | 0.7–1.0 | 0.7–2.0 |
-| same three through Node's HTTP stack | 6–7, 11–15, 2–3 | 6–7, 8–9, — |
-| copy-only sync of the initial push, replay | 21.8 | 156 |
-| re-indexing sync (fetch strategy) for comparison | 207 | 874 |
-| deep check | 656 | 2 668 |
+| notification request, in-process replay | 1.4–2.1 | 1.3–1.5 |
+| copy-only sync of a 1-commit push, replay | 4.6–5.4 | 4.1–5.6 |
+| delivering a notification, replay | 0.6–0.7 | 0.6–3.1 |
+| same three through Node's HTTP stack | 4.5, 8.7–14.0, 1.7–2.0 | 6.4–10.0, 8.9–13.3, — |
+| copy-only sync of the initial push, replay | 21.8 | 157 |
+| re-indexing sync (fetch strategy) for comparison | 195 | 858 |
+| deep check | 606 | 2 624 |
 
 The replay rows run the same code in process against a storage snapshot and
 recorded upstream responses; they exclude Node's JavaScript HTTP client and
@@ -524,12 +566,12 @@ D1 Free: 5 M rows read and 100 000 written per day; R2: 10 GB-month,
 Result:
 
 - **Steady state fits.** The typical case — a small push once a month —
-  costs a mirror about 2 ms (notification) + 5 ms (sync) + 1 ms per
+  costs a mirror about 1.5 ms (notification) + 5 ms (sync) + under 1 ms per
   downstream subscriber, each in its own invocation, i.e. at roughly half the
   10 ms budget, with ~30 subrequests (≈ 25 storage operations + 5 fetches)
   per sync. Queues, Cron and D1 stay far below their free allowances.
-- **Bulk data does not fit.** Verifying bytes in JavaScript costs 6.2 ms per
-  MiB of pack (SHA-1) and 7.3 ms per MiB of LFS object (SHA-256), so the
+- **Bulk data does not fit.** Verifying bytes in JavaScript costs 6.3 ms per
+  MiB of pack (SHA-1) and 7.7 ms per MiB of LFS object (SHA-256), so the
   initial copy of a repository, any push with more than about 0.8 MiB of new
   pack data and any LFS object above about 1 MiB exceed 10 ms. The deep
   check and the re-indexing sync never fit.
@@ -540,7 +582,7 @@ Changes that would make a pure mirror fit more often (proposed, not built):
    and the LFS verification; on Workers back it with `crypto.DigestStream`
    (non-standard, native, [docs](https://developers.cloudflare.com/workers/runtime-apis/web-crypto/)),
    elsewhere with the JavaScript implementation. Native SHA-1/SHA-256 cost
-   1.8/1.2 ms per MiB in the same measurement, so packs of ~3 MiB and LFS
+   1.8/1.3 ms per MiB in the same measurement, so packs of ~3 MiB and LFS
    objects of ~5 MiB would fit.
 2. **One unit of bytes per invocation.** Enqueue one job per pack and per
    LFS object and update the refs in a final job once all packs are
@@ -659,7 +701,7 @@ update themselves.
   `wrangler.jsonc` and created by Wrangler, never by hand. D1 and R2 have a
   name and no id, so the first `wrangler deploy` provisions them (automatic
   resource provisioning) and later commands find them by name. Cron, vars,
-  routes (custom domains) and the required `ADMIN_TOKEN` secret
+  routes (custom domains) and the required `BOOTSTRAP_TOKEN` secret
   (`secrets.required`) are declared there as well; only the secret's value is
   set outside the repository.
 - **Build on Cloudflare (Workers Builds):** build command `sh build.sh`,
@@ -672,8 +714,9 @@ update themselves.
   a no-op.
 - **First install:** "Deploy to Cloudflare" button (copies the template and
   connects Workers Builds) or "Use this template" plus importing the
-  repository in the dashboard. The first admin is the `ADMIN_TOKEN` secret
-  until accounts are wired up.
+  repository in the dashboard. The setup page asks for `BOOTSTRAP_TOKEN`
+  (from `.dev.vars.example`); one call of `POST /api/bootstrap` with it
+  creates the first instance admin (§8).
 - **Update:** bump `version` and `sha256` in `git-forge.json` and push.
   Renovate proposes the version via a regex manager on the GitHub releases of
   `levino/git-forge`. It cannot compute the checksum (the `github-releases`

@@ -1,5 +1,4 @@
 import {
-  type AccountsStore,
   authorizeSubscription,
   createInstanceVerifier,
   type InstancePrincipal,
@@ -15,12 +14,11 @@ import {
   verifyMirrorNotification,
 } from '@git-forge/accounts'
 import {
-  type AuthorizationSupplier,
   deepCheckMirror,
-  type FetchFunction,
   isMirrorDue,
   isValidName,
   type JobQueue,
+  listMirrors,
   type MirrorConfig,
   PermanentJobError,
   type PushOutcome,
@@ -32,10 +30,9 @@ import {
   type RepositoryName,
   selectUpstreamRefs,
   SizeLimitError,
-  type Storage,
-  syncMirror,
   type SyncResult,
 } from '@git-forge/core'
+import { type MirrorContext, runMirrorSync, type ScheduledMirrorRun } from './mirrors.ts'
 
 export type ForgeJob =
   | { readonly kind: 'mirror-sync'; readonly repository: string; readonly remote: string; readonly reason: 'notification' | 'schedule' | 'configure' }
@@ -43,47 +40,35 @@ export type ForgeJob =
   | { readonly kind: 'mirror-subscribe'; readonly repository: string; readonly remote: string }
   | { readonly kind: 'mirror-deep-check'; readonly repository: string; readonly remote: string }
 
-export type MirrorFederation = {
-  readonly storage: Storage
-  readonly store: AccountsStore
+export type MirrorFederation = MirrorContext & {
   readonly issuer: string
-  readonly key: SigningKey
+  readonly instanceKey: SigningKey
   readonly jwks: JwksSource
   readonly jobs: JobQueue<ForgeJob>
   readonly canRead: (principal: InstancePrincipal, repo: RepositoryName) => Promise<boolean>
-  readonly fetch?: FetchFunction
-  readonly safetySyncHours: number
   readonly deepCheckDays: number
   readonly now?: () => Date
 }
 
-export const DEFAULT_SAFETY_SYNC_HOURS = 24
-
-export const DEFAULT_DEEP_CHECK_DAYS = 30
-
-const HOUR = 60 * 60 * 1000
+const DAY = 24 * 60 * 60 * 1000
 
 const json = (status: number, body: unknown) =>
   new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } })
 
 export const repositoryOf = (repository: string): RepositoryName => {
-  const [owner = '', name = ''] = repository.split('/')
-  if (!isValidName(owner) || !isValidName(name)) throw new PermanentJobError(`invalid repository ${repository}`)
+  const [owner = '', name = '', ...rest] = repository.split('/')
+  if (rest.length > 0 || !isValidName(owner) || !isValidName(name)) throw new PermanentJobError(`invalid repository ${repository}`)
   return { owner, name }
 }
 
-const nameOf = (repo: RepositoryName): string => `${repo.owner}/${repo.name}`.toLowerCase()
+const nameOf = (repo: RepositoryName): string => `${repo.owner}/${repo.name}`
 
 export const notifyCallback = (federation: MirrorFederation, repo: RepositoryName, remote: string): string =>
   `${federation.issuer}${NOTIFY_PATH_PREFIX}${repo.owner}/${repo.name}/${remote}`
 
-const send = (federation: MirrorFederation, request: Request): Promise<Response> => (federation.fetch ?? globalThis.fetch)(request)
+const upstreamOf = (config: MirrorConfig) => parseUpstreamUrl(config.url, new URL(config.url).origin)
 
-export const upstreamAuthorization = (federation: MirrorFederation, config: MirrorConfig): AuthorizationSupplier => {
-  const upstream = parseUpstreamUrl(config.url)
-  return async () =>
-    `Bearer ${await mintInstanceToken({ key: federation.key, issuer: federation.issuer, audience: upstream.issuer, repositories: [upstream.repository] })}`
-}
+const send = (federation: MirrorFederation, request: Request): Promise<Response> => (federation.fetch ?? globalThis.fetch)(request)
 
 export const enqueueNotifications = async (federation: MirrorFederation, repo: RepositoryName): Promise<number> => {
   const subscriptions = await federation.store.mirrorSubscriptions(nameOf(repo))
@@ -110,7 +95,7 @@ const deliverNotification = async (federation: MirrorFederation, job: Extract<Fo
   const refs = await readRefs(federation.storage, repositoryOf(job.repository))
   if (!refs) throw new PermanentJobError(`repository ${job.repository} not found`)
   const token = await mintMirrorNotification({
-    key: federation.key,
+    key: federation.instanceKey,
     issuer: federation.issuer,
     audience: job.issuer,
     repository: job.repository,
@@ -124,27 +109,17 @@ const deliverNotification = async (federation: MirrorFederation, job: Extract<Fo
   throw new Error(message)
 }
 
-export const runMirrorSync = async (federation: MirrorFederation, repo: RepositoryName, remote: string): Promise<SyncResult> => {
-  const config = await readMirrorConfig(federation.storage, repo, remote)
-  if (!config) throw new PermanentJobError(`mirror ${remote} of ${nameOf(repo)} not configured`)
-  const result = await syncMirror({
-    storage: federation.storage,
-    repo,
-    remote,
-    strategy: 'copy',
-    getAuthorization: upstreamAuthorization(federation, config),
-    ...(federation.fetch ? { fetch: federation.fetch } : {}),
-    ...(federation.now ? { now: federation.now } : {}),
-  })
+export const syncAndNotify = async (federation: MirrorFederation, repo: RepositoryName, config: MirrorConfig): Promise<SyncResult> => {
+  const result = await runMirrorSync(federation, repo, config)
   if (result.status === 'ok' && result.updates.length > 0) await enqueueNotifications(federation, repo)
   return result
 }
 
 const subscribeUpstream = async (federation: MirrorFederation, repo: RepositoryName, remote: string): Promise<void> => {
   const config = await readMirrorConfig(federation.storage, repo, remote)
-  if (!config || config.detachedAt) return
-  const upstream = parseUpstreamUrl(config.url)
-  const token = await mintInstanceToken({ key: federation.key, issuer: federation.issuer, audience: upstream.issuer, repositories: [upstream.repository] })
+  if (!config || config.detachedAt || config.auth !== 'instance') return
+  const upstream = upstreamOf(config)
+  const token = await mintInstanceToken({ key: federation.instanceKey, issuer: federation.issuer, audience: upstream.issuer, repositories: [upstream.repository] })
   const response = await send(
     federation,
     new Request(`${upstream.issuer}${SUBSCRIPTIONS_PATH}`, {
@@ -169,41 +144,39 @@ export const runJob = async (federation: MirrorFederation, job: ForgeJob): Promi
       return
     }
     case 'mirror-sync': {
-      const result = await runMirrorSync(federation, repositoryOf(job.repository), job.remote)
+      const repo = repositoryOf(job.repository)
+      const config = await readMirrorConfig(federation.storage, repo, job.remote)
+      if (!config) throw new PermanentJobError(`mirror ${job.remote} of ${job.repository} not configured`)
+      const result = await syncAndNotify(federation, repo, config)
       if (result.status === 'failed') throw new Error(result.error ?? 'mirror sync failed')
     }
   }
 }
 
-export const configureMirrorFederation = async (federation: MirrorFederation, repo: RepositoryName, config: MirrorConfig): Promise<void> => {
-  parseUpstreamUrl(config.url)
-  await federation.store.registerLocalMirror(nameOf(repo), config.remote)
-  await federation.jobs.enqueue({ kind: 'mirror-subscribe', repository: nameOf(repo), remote: config.remote })
-  await federation.jobs.enqueue({ kind: 'mirror-sync', repository: nameOf(repo), remote: config.remote, reason: 'configure' })
+export const enqueueMirrorSetup = async (federation: MirrorFederation, repo: RepositoryName, config: MirrorConfig): Promise<void> => {
+  if (config.auth === 'instance') await federation.jobs.enqueue({ kind: 'mirror-subscribe', repository: nameOf(repo), remote: config.remote })
+  if (config.mode === 'auto') await federation.jobs.enqueue({ kind: 'mirror-sync', repository: nameOf(repo), remote: config.remote, reason: 'configure' })
 }
 
-export type ScheduledWork = { readonly syncs: number; readonly deepChecks: number }
-
-export const scheduleSafetyNet = async (federation: MirrorFederation, now: Date): Promise<ScheduledWork> => {
-  let syncs = 0
-  let deepChecks = 0
-  for (const { repository, remote } of await federation.store.localMirrors()) {
-    const repo = repositoryOf(repository)
-    const config = await readMirrorConfig(federation.storage, repo, remote)
-    if (!config) continue
-    const status = await readMirrorStatus(federation.storage, repo, remote)
-    if (isMirrorDue(config, status, now, Math.max(0, federation.safetySyncHours * HOUR - HOUR / 2))) {
-      await federation.jobs.enqueue({ kind: 'mirror-subscribe', repository, remote })
-      await federation.jobs.enqueue({ kind: 'mirror-sync', repository, remote, reason: 'schedule' })
-      syncs++
-    }
-    const lastCheck = status?.lastDeepCheck ? Date.parse(status.lastDeepCheck.at) : 0
-    if (federation.deepCheckDays > 0 && !config.detachedAt && now.getTime() - lastCheck >= federation.deepCheckDays * 24 * HOUR) {
-      await federation.jobs.enqueue({ kind: 'mirror-deep-check', repository, remote })
-      deepChecks++
+export const enqueueDueMirrors = async (federation: MirrorFederation, now: Date, intervalMinutes: number): Promise<ScheduledMirrorRun[]> => {
+  const intervalMs = Math.max(0, intervalMinutes * 60_000 - 60_000)
+  const queued: ScheduledMirrorRun[] = []
+  for (const subject of await federation.store.listRepositories()) {
+    const repo = { owner: subject.owner, name: subject.name }
+    const repository = nameOf(repo)
+    for (const config of await listMirrors(federation.storage, repo)) {
+      const status = await readMirrorStatus(federation.storage, repo, config.remote)
+      if (isMirrorDue(config, status, now, intervalMs)) {
+        await enqueueMirrorSetup(federation, repo, config)
+        queued.push({ repository, remote: config.remote, status: 'queued', updates: 0, alarms: 0 })
+      }
+      const lastCheck = status?.lastDeepCheck ? Date.parse(status.lastDeepCheck.at) : 0
+      if (federation.deepCheckDays > 0 && !config.detachedAt && now.getTime() - lastCheck >= federation.deepCheckDays * DAY) {
+        await federation.jobs.enqueue({ kind: 'mirror-deep-check', repository, remote: config.remote })
+      }
     }
   }
-  return { syncs, deepChecks }
+  return queued
 }
 
 const bearer = (request: Request): string | null => /^\s*Bearer\s+(\S+)\s*$/i.exec(request.headers.get('Authorization') ?? '')?.[1] ?? null

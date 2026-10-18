@@ -413,6 +413,45 @@ export const createAccountsStore = (db: Database, options: AccountsStoreOptions 
       return row ? toSubject(row) : null
     },
 
+    listRepositories: async (): Promise<RepositorySubject[]> =>
+      (await db.all<RepositoryRow>(sql(`${REPOSITORY_SELECT} WHERE a.disabled_at IS NULL ORDER BY a.login, r.name`))).map(toSubject),
+
+    bootstrapInstanceAdmin: async (input: { readonly login: string; readonly email?: string }): Promise<{ readonly id: string } | null> => {
+      requireLogin(input.login)
+      const id = randomId()
+      const at = now()
+      const entry = audit(SYSTEM, { action: 'instance.bootstrap', subjectKind: 'user', subjectId: id, data: { login: input.login } }, at)
+      const results = await db.batch([
+        sql(
+          `INSERT INTO accounts (id, kind, login, email, created_at) SELECT ?, 'user', ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM instance_admins)`,
+          id,
+          input.login,
+          input.email ?? null,
+          at,
+        ),
+        sql(
+          'INSERT INTO instance_admins (user_id, created_at) SELECT ?, ? WHERE NOT EXISTS (SELECT 1 FROM instance_admins) AND EXISTS (SELECT 1 FROM accounts WHERE id = ?)',
+          id,
+          at,
+          id,
+        ),
+        sql(`${entry.sql.replace('VALUES (?, ?, ?, ?, ?, ?, ?, ?)', 'SELECT ?, ?, ?, ?, ?, ?, ?, ?')} WHERE EXISTS (SELECT 1 FROM instance_admins WHERE user_id = ?)`, ...entry.params, id),
+      ])
+      return results[1]!.changes === 1 ? { id } : null
+    },
+
+    setInstanceAdmin: async (userId: string, admin: boolean, actor: AuditActor = SYSTEM): Promise<void> => {
+      await requireAccount(userId, 'user')
+      await write(actor, { action: admin ? 'instance.admin.grant' : 'instance.admin.revoke', subjectKind: 'user', subjectId: userId }, [
+        admin
+          ? sql('INSERT INTO instance_admins (user_id, created_at) VALUES (?, ?) ON CONFLICT (user_id) DO NOTHING', userId, now())
+          : sql('DELETE FROM instance_admins WHERE user_id = ?', userId),
+      ])
+    },
+
+    isInstanceAdmin: async (userId: string): Promise<boolean> =>
+      (await first(db, sql('SELECT 1 AS ok FROM instance_admins i JOIN accounts a ON a.id = i.user_id WHERE i.user_id = ? AND a.disabled_at IS NULL', userId))) !== null,
+
     setCollaborator: async (repositoryId: string, userId: string, role: Role, actor: AuditActor = SYSTEM): Promise<void> => {
       requireRole(role)
       await requireAccount(userId, 'user')
@@ -638,22 +677,6 @@ export const createAccountsStore = (db: Database, options: AccountsStoreOptions 
           ),
         )
       ).map((row) => ({ issuer: row.issuer, repository: row.repository, callback: row.callback })),
-
-    registerLocalMirror: async (repository: string, remote: string, actor: AuditActor = SYSTEM): Promise<void> => {
-      await write(actor, { action: 'mirror.register', data: { repository: repository.toLowerCase(), remote } }, [
-        sql(
-          'INSERT INTO local_mirrors (repository, remote, created_at) VALUES (?, ?, ?) ON CONFLICT (repository, remote) DO NOTHING',
-          repository.toLowerCase(),
-          remote,
-          now(),
-        ),
-      ])
-    },
-
-    localMirrors: async (): Promise<{ readonly repository: string; readonly remote: string }[]> =>
-      (await db.all<{ repository: string; remote: string }>(sql('SELECT repository, remote FROM local_mirrors ORDER BY repository, remote'))).map(
-        (row) => ({ repository: row.repository, remote: row.remote }),
-      ),
 
     grantsFor: async (principal: Principal, repo: RepositorySubject): Promise<Grants> => {
       switch (principal.kind) {

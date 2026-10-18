@@ -18,19 +18,23 @@ discussions.
 
 ## M2 — Git LFS
 
-- [ ] Batch API with presigned URLs (in progress)
-- [ ] Verify step (size, SHA-256) before an object counts as present
-- [ ] Reject pushes referencing missing LFS objects
+- [x] Batch API (presigned URLs where the storage can sign, upload through the function otherwise)
+- [x] Verify step (size, SHA-256) before an object counts as present
+- [x] Reject pushes referencing missing LFS objects
+- [x] Per-object size limit (`MAX_LFS_OBJECT_BYTES` in the Worker)
 - [x] Media URLs `/{owner}/{repo}/media/{oid}` and raw endpoint `/{owner}/{repo}/raw/{ref}/{path}` resolving LFS pointers (CDN pull-zone friendly: immutable caching, ETag, Range, HEAD)
 - [ ] Optional: publish public LFS objects to a CDN bucket on push
 
 ## M3 — Accounts and federation
 
-- [ ] Users, organizations, teams, roles, PATs, apps in SQLite (in progress)
+- [x] Users, organizations, teams, roles, PATs, apps in SQLite
+- [x] Instance admins, one-time bootstrap of the first admin
+- [x] Private repositories by default, per-repository visibility
 - [ ] Login: OIDC (ZITADEL etc.), passkeys
-- [ ] Git over HTTPS with PATs and app tokens
-- [ ] Instance keys (Ed25519), `/.well-known/openid-configuration`, `/.well-known/jwks.json` (in progress)
-- [ ] Short-lived instance JWTs, trust table "issuer X may read repo Y", optional pinned thumbprint
+- [x] Git over HTTPS with PATs and app tokens
+- [x] Git and LFS as separate authorization surfaces (`git:read` / `lfs:read`)
+- [x] Instance keys (Ed25519), `/.well-known/openid-configuration`, `/.well-known/jwks.json`
+- [x] Short-lived instance JWTs, trust table "issuer X may read repo Y", optional pinned thumbprint
 - [ ] Device flow (`gh auth login`-style)
 - [ ] Break-glass key
 - [ ] SAML, SCIM
@@ -39,18 +43,19 @@ discussions.
 
 ## M4 — Mirrors
 
-- [ ] Sync Git content into `refs/upstream/{remote}/heads|tags/*` (in progress)
-- [x] Push-notified sync: signed notifications (EdDSA JWT, ref state only) to subscribed mirrors, subscriptions via authenticated federation call, job queue with exponential backoff, idempotent duplicates, chains of mirrors; cron only as a daily safety net
+- [x] Sync Git content into `refs/upstream/{remote}/heads|tags/*`
+- [x] Sync LFS objects
+- [x] Per-repository auto/manual sync, detach
+- [x] Archive and alarm on rewritten upstream history (tested across three instances)
+- [x] Push-notified sync: signed notifications (EdDSA JWT, ref state only) to subscribed mirrors, subscriptions via authenticated federation call, job queue with exponential backoff, idempotent duplicates, chains of mirrors; the Cron Trigger is only a daily safety net
 - [x] Copy-only sync: copy upstream packs and indexes as stored (byte-identical), verify index consistency and pack trailer while streaming; deep check (re-hash everything, recompute indexes, walk refs) on demand or every 30 days
 - [ ] Native streaming hashes (`crypto.DigestStream`) and one job per pack / LFS object, so a mirror fits the Workers Free plan beyond small pushes (see design §12)
-- [ ] Sync LFS objects
-- [ ] Per-repository auto/manual sync, detach
-- [ ] Archive and alarm on rewritten upstream history
 - [ ] Mirror overview
 
 ## M5 — Deployment and adapters
 
-- [x] Cloudflare Worker app
+- [x] Cloudflare Worker app with accounts (D1), federation and scheduled mirror sync
+- [x] Wrangler environments `alpha`, `beta`, `gamma` and a three-instance E2E test
 - [x] S3 storage adapter (`@git-forge/s3`, presigned PUTs bound to length and SHA-256)
 - [x] File system storage adapter (`@git-forge/node`)
 - [x] Shared storage conformance suite for all adapters
@@ -70,7 +75,7 @@ discussions.
 - [ ] Actions service: sessions, jobs, timeline, logs; then cache, artifacts, OIDC
 - [ ] Workflow parsing and job scheduling, secrets
 - [ ] GHES-style `/api/v3` runner API and `workflow_job` webhooks for external providers (WarpBuild, CodeBuild, RunsOn)
-- [ ] "Deploy to Cloudflare" button and three test instances (alpha, beta, gamma)
+- [x] "Deploy to Cloudflare" button in the README pointing at the instance template; template wired to accounts (`BOOTSTRAP_TOKEN`)
 - [x] Release artifact (bundled worker + migrations + checksums) and instance template with pinned version
 - [ ] Create `levino/git-forge-instance`, add the deploy key secret `INSTANCE_TEMPLATE_DEPLOY_KEY`, cut the first release
 - [ ] Verify the Deploy button, Workers Builds settings and automatic provisioning of D1/R2 of the template against a real Cloudflare account
@@ -97,5 +102,4 @@ discussions.
 - [ ] Releases
 - [ ] Encrypted full backups, partial visibility
 - [ ] External mirror verification
-- [ ] SSH-to-HTTPS gateway
 - [ ] Pages

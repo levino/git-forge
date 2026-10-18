@@ -2,15 +2,18 @@ import { spawn } from 'node:child_process'
 import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { createInterface } from 'node:readline'
+import { createServer } from 'node:http'
+import type { AddressInfo } from 'node:net'
 import { generateSigningKey, importSigningKey, mintMirrorNotification, type PrivateJwk } from '@git-forge/accounts'
 import {
   type ByteRange,
+  configureMirror,
+  createRepository,
   createSha1,
   createSha256,
   deepCheckRepository,
   type FetchFunction,
   parseInfoRefs,
-  readMirrorConfig,
   type ObjectInfo,
   type PutBody,
   type PutOptions,
@@ -20,12 +23,12 @@ import {
   type Storage,
   type StoredObject,
   syncMirror,
-  configureMirror,
 } from '@git-forge/core'
 import { generateHistory, git, tempDir } from '../test/e2e/history.ts'
-import { handleRequest } from '../src/app.ts'
-import { type MirrorFederation, runJob, upstreamAuthorization } from '../src/mirror-federation.ts'
-import { ADMIN_TOKEN, type Instance, type Invocation, quiesce, startInstance } from '../test/support/federated-instance.ts'
+import { createForge } from '../src/app.ts'
+import type { ForgeJob } from '../src/mirror-federation.ts'
+import { mirrorAuthorization } from '../src/mirrors.ts'
+import { type Instance, type Invocation, quiesce, startInstance } from '../test/support/federated-instance.ts'
 
 class BucketLikeStorage implements Storage {
   readonly #objects = new Map<string, { data: Uint8Array; etag: string }>()
@@ -71,7 +74,12 @@ class BucketLikeStorage implements Storage {
 
 if (process.argv.includes('--upstream')) {
   const upstream = await startInstance('alpha', { storage: new BucketLikeStorage(), privateJwk: JSON.parse(process.env.ALPHA_KEY!) as PrivateJwk })
-  console.log(JSON.stringify({ url: upstream.url }))
+  const sink = createServer((incoming, outgoing) => {
+    incoming.resume()
+    incoming.on('end', () => outgoing.end('{}'))
+  })
+  await new Promise<void>((done) => sink.listen(0, '127.0.0.1', done))
+  console.log(JSON.stringify({ url: upstream.url, token: upstream.token, sink: `http://127.0.0.1:${(sink.address() as AddressInfo).port}/hook` }))
   createInterface({ input: process.stdin }).on('close', () => void upstream.close().then(() => process.exit(0)))
 } else {
   const alphaJwk = (await generateSigningKey()).privateJwk
@@ -80,11 +88,16 @@ if (process.argv.includes('--upstream')) {
     stdio: ['pipe', 'pipe', 'inherit'],
     env: { ...process.env, ALPHA_KEY: JSON.stringify(alphaJwk) },
   })
-  const alphaUrl = await new Promise<string>((done) =>
-    createInterface({ input: child.stdout! }).once('line', (line) => done((JSON.parse(line) as { url: string }).url)),
+  const alpha = await new Promise<{ url: string; token: string; sink: string }>((done) =>
+    createInterface({ input: child.stdout! }).once('line', (line) => done(JSON.parse(line) as { url: string; token: string; sink: string })),
   )
+  const alphaUrl = alpha.url
   const alphaApi = (method: string, path: string, body?: unknown) =>
-    fetch(`${alphaUrl}${path}`, { method, headers: { Authorization: `Bearer ${ADMIN_TOKEN}` }, ...(body ? { body: JSON.stringify(body) } : {}) })
+    fetch(`${alphaUrl}${path}`, {
+      method,
+      headers: { Authorization: `Bearer ${alpha.token}`, 'Content-Type': 'application/json' },
+      ...(body ? { body: JSON.stringify(body) } : {}),
+    })
   const betaStorage = new BucketLikeStorage()
   const beta: Instance = await startInstance('beta', { storage: betaStorage })
   const expectOk = async (response: Promise<Response>) => {
@@ -93,7 +106,6 @@ if (process.argv.includes('--upstream')) {
   }
   await expectOk(alphaApi('POST', '/api/admin/instances', { issuer: beta.url }))
   await expectOk(beta.api('POST', '/api/admin/instances', { issuer: alphaUrl }))
-  await beta.store.subscribeMirror({ issuer: alphaUrl, repository: 'bench/fetch', callback: `${alphaUrl}/api/health` })
 
   type Row = { scenario: string; invocation: string; cpuMs: number; wallMs: number; storageOps: number; fetches: number }
   const rows: Row[] = []
@@ -102,38 +114,38 @@ if (process.argv.includes('--upstream')) {
       rows.push({ scenario, invocation: invocation.label, cpuMs: invocation.cpuMs, wallMs: invocation.wallMs, storageOps: invocation.storageOps, fetches: invocation.fetches })
     }
   }
-  const measure = async (label: string, action: () => Promise<unknown>) => {
-    const before = process.cpuUsage()
-    const started = performance.now()
-    await action()
-    const used = process.cpuUsage(before)
-    rows.push({ scenario: label, invocation: 'inline call', cpuMs: (used.user + used.system) / 1000, wallMs: performance.now() - started, storageOps: 0, fetches: 0 })
-  }
-
-  const cpuOf = async (action: () => Promise<unknown>) => {
+  const cpuOf = async <T>(action: () => Promise<T>) => {
     const before = process.cpuUsage()
     const started = performance.now()
     const value = await action()
     const used = process.cpuUsage(before)
     return { value, cpuMs: (used.user + used.system) / 1000, wallMs: performance.now() - started }
   }
+  const measure = async (scenario: string, action: () => Promise<unknown>) => {
+    const measured = await cpuOf(action)
+    rows.push({ scenario, invocation: 'inline call', cpuMs: measured.cpuMs, wallMs: measured.wallMs, storageOps: 0, fetches: 0 })
+  }
   type Recorded = { status: number; headers: [string, string][]; body: Uint8Array }
-  const recording = (log: Map<string, Recorded>): FetchFunction => async (request) => {
-    const response = await fetch(request)
-    const body = new Uint8Array(await response.arrayBuffer())
-    log.set(`${request.method} ${request.url}`, { status: response.status, headers: [...response.headers], body })
-    return new Response(response.status === 204 ? null : (body as Uint8Array<ArrayBuffer>), { status: response.status, headers: response.headers })
-  }
-  const replaying = (log: Map<string, Recorded>): FetchFunction => async (request) => {
-    const entry = log.get(`${request.method} ${request.url}`)
-    if (!entry) throw new Error(`not recorded: ${request.method} ${request.url}`)
-    return new Response(entry.body.slice() as Uint8Array<ArrayBuffer>, { status: entry.status, headers: entry.headers })
-  }
+  const recording =
+    (log: Map<string, Recorded>): FetchFunction =>
+    async (request) => {
+      const response = await fetch(request)
+      const body = new Uint8Array(await response.arrayBuffer())
+      log.set(`${request.method} ${request.url}`, { status: response.status, headers: [...response.headers], body })
+      return new Response(response.status === 204 ? null : (body as Uint8Array<ArrayBuffer>), { status: response.status, headers: response.headers })
+    }
+  const replaying =
+    (log: Map<string, Recorded>): FetchFunction =>
+    async (request) => {
+      const entry = log.get(`${request.method} ${request.url}`)
+      if (!entry) throw new Error(`not recorded: ${request.method} ${request.url}`)
+      return new Response(entry.body.slice() as Uint8Array<ArrayBuffer>, { status: entry.status, headers: entry.headers })
+    }
   const noJobs = { enqueue: async () => undefined }
+  const replayForge = (storage: Storage, fetcher: FetchFunction) => createForge({ ...beta.options, storage, jobs: noJobs, fetch: fetcher })
   const replay = async (scenario: string, name: string, before: BucketLikeStorage) => {
-    const repo = { owner: 'bench', name }
-    const repository = `bench/${name}`
-    const upstreamRefs = parseInfoRefs(await (await fetch(`${alphaUrl}/${repository}.git/info/refs`)).text())
+    const repository = `village/${name}`
+    const upstreamRefs = parseInfoRefs(await (await alphaApi('GET', `/${repository}.git/info/refs`)).text())
     const token = await mintMirrorNotification({
       key: alphaKey,
       issuer: alphaUrl,
@@ -141,32 +153,19 @@ if (process.argv.includes('--upstream')) {
       repository,
       refs: Object.fromEntries(upstreamRefs.map((ref) => [ref.name, ref.id])),
     })
-    const notified = before.snapshot()
-    const federation: MirrorFederation = { ...beta.federation, storage: notified, jobs: noJobs }
-    const notification = await cpuOf(() =>
-      handleRequest(new Request(`${beta.url}/api/federation/notify/${repository}/origin`, { method: 'POST', body: token }), {
-        storage: notified,
-        adminToken: ADMIN_TOKEN,
-        publicRead: true,
-        maxPushBytes: 1,
-        federation,
-      }),
-    )
-    rows.push({ scenario, invocation: `replay: notification handler (HTTP ${(notification.value as Response).status})`, cpuMs: notification.cpuMs, wallMs: notification.wallMs, storageOps: 0, fetches: 0 })
+    const notified = replayForge(before.snapshot(), (request) => fetch(request))
+    const notify = () => notified.fetch(new Request(`${beta.url}/api/federation/notify/${repository}/origin`, { method: 'POST', body: token }))
+    await notify()
+    const notification = await cpuOf(notify)
+    rows.push({ scenario, invocation: `replay: notification handler (HTTP ${notification.value.status})`, cpuMs: notification.cpuMs, wallMs: notification.wallMs, storageOps: 0, fetches: 0 })
+    const job: ForgeJob = { kind: 'mirror-sync', repository, remote: 'origin', reason: 'notification' }
     const log = new Map<string, Recorded>()
-    const config = (await readMirrorConfig(before, repo))!
-    await syncMirror({ storage: before.snapshot(), repo, strategy: 'copy', fetch: recording(log), getAuthorization: upstreamAuthorization(beta.federation, config) })
+    await replayForge(before.snapshot(), recording(log)).runJob(job)
     const synced = before.snapshot()
-    const sync = await cpuOf(() =>
-      syncMirror({ storage: synced, repo, strategy: 'copy', fetch: replaying(log), getAuthorization: upstreamAuthorization(beta.federation, config) }),
-    )
-    rows.push({ scenario, invocation: `replay: copy-only sync job (${(sync.value as { updates: unknown[] }).updates.length} ref updates)`, cpuMs: sync.cpuMs, wallMs: sync.wallMs, storageOps: 0, fetches: log.size })
-    const delivery = await cpuOf(() =>
-      runJob(
-        { ...beta.federation, storage: synced, jobs: noJobs, fetch: async () => new Response('{}') },
-        { kind: 'mirror-notify', repository: 'bench/small', issuer: alphaUrl, callback: `${alphaUrl}/api/health` },
-      ),
-    )
+    const sync = await cpuOf(() => replayForge(synced, replaying(log)).runJob(job))
+    rows.push({ scenario, invocation: 'replay: copy-only sync job', cpuMs: sync.cpuMs, wallMs: sync.wallMs, storageOps: 0, fetches: log.size })
+    const delivering = replayForge(synced, async () => new Response('{}'))
+    const delivery = await cpuOf(() => delivering.runJob({ kind: 'mirror-notify', repository: 'village/small', issuer: alphaUrl, callback: alpha.sink }))
     rows.push({ scenario, invocation: 'replay: notification delivery job', cpuMs: delivery.cpuMs, wallMs: delivery.wallMs, storageOps: 0, fetches: 1 })
   }
 
@@ -195,22 +194,25 @@ if (process.argv.includes('--upstream')) {
     { name: 'medium', commits: 500, files: 200, binaryBytes: 256 * 1024 },
   ]
   for (const scenario of scenarios) {
-    await expectOk(alphaApi('POST', '/api/admin/repos', { owner: 'bench', name: scenario.name }))
-    await expectOk(beta.api('POST', '/api/admin/repos', { owner: 'bench', name: scenario.name }))
-    await expectOk(beta.api('POST', `/api/repos/bench/${scenario.name}/mirrors`, { url: `${alphaUrl}/bench/${scenario.name}.git`, lfs: false }))
+    const repository = `village/${scenario.name}`
+    const repo = { owner: 'village', name: scenario.name }
+    await expectOk(alphaApi('POST', '/api/repos', repo))
+    await expectOk(alphaApi('POST', `/api/repos/${repository}/instances`, { issuer: beta.url }))
+    await expectOk(beta.api('POST', '/api/repos', repo))
+    await expectOk(beta.api('POST', `/api/repos/${repository}/mirrors`, { url: `${alphaUrl}/${repository}.git`, auth: 'instance', lfs: false }))
     await quiesce([beta])
-    if (scenario.name === 'small') await beta.store.subscribeMirror({ issuer: alphaUrl, repository: 'bench/small', callback: `${alphaUrl}/api/health` })
+    if (scenario.name === 'small') await beta.store.subscribeMirror({ issuer: alphaUrl, repository, callback: alpha.sink })
     const source = tempDir()
     await git(source, ['init', '-q', '-b', 'main'])
     generateHistory(source, { ...scenario, seed: 7 })
     await git(source, ['gc', '-q'])
     const packBytes = Number(/size-pack: (\d+)/.exec(await git(source, ['count-objects', '-v']))?.[1] ?? 0) * 1024
     const objects = (await git(source, ['rev-list', '--objects', '--all'])).trim().split('\n').length
-    const remote = `http://git:${ADMIN_TOKEN}@${alphaUrl.slice('http://'.length)}/bench/${scenario.name}.git`
+    const remote = `http://git:${alpha.token}@${alphaUrl.slice('http://'.length)}/${repository}.git`
     const waitFor = async (tip: string) => {
       for (;;) {
         await quiesce([beta])
-        if ((await readRefs(beta.storage, { owner: 'bench', name: scenario.name }))?.state.refs['refs/upstream/origin/heads/main'] === tip) return
+        if ((await readRefs(beta.storage, repo))?.state.refs['refs/upstream/origin/heads/main'] === tip) return
         await new Promise((done) => setTimeout(done, 20))
       }
     }
@@ -233,13 +235,15 @@ if (process.argv.includes('--upstream')) {
         await git(source, ['commit', '-q', '-m', `update ${round}`])
       })
     }
-    const fetchRepo = { owner: 'bench', name: `${scenario.name}-fetch` }
-    await expectOk(beta.api('POST', '/api/admin/repos', fetchRepo))
-    await configureMirror(beta.storage, fetchRepo, { url: `${alphaUrl}/bench/${scenario.name}.git`, mode: 'manual', lfs: false })
+    const context = { storage: beta.storage, store: beta.store, issuer: beta.url, instanceKey: beta.key }
+    const fetchStorage = new BucketLikeStorage()
+    await createRepository(fetchStorage, repo)
+    const config = await configureMirror(fetchStorage, repo, { url: `${alphaUrl}/${repository}.git`, remote: 'fetch', mode: 'manual', lfs: false, auth: 'instance' })
+    const getAuthorization = mirrorAuthorization(context, config)!
     await measure(`${scenario.name} same repository, re-indexing sync (strategy fetch, protocol v2)`, () =>
-      syncMirror({ storage: beta.storage, repo: fetchRepo, strategy: 'fetch' }),
+      syncMirror({ storage: fetchStorage, repo, remote: 'fetch', strategy: 'fetch', getAuthorization }),
     )
-    await measure(`${scenario.name} deep check of the mirror`, () => deepCheckRepository(beta.storage, { owner: 'bench', name: scenario.name }))
+    await measure(`${scenario.name} deep check of the mirror`, () => deepCheckRepository(beta.storage, repo))
   }
   await beta.close()
   child.stdin!.end()

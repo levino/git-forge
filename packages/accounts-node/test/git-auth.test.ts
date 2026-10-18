@@ -179,6 +179,17 @@ describe('git with accounts', () => {
     writeFile(`${dir}/out`, 'mirror.txt', 'mirror\n')
     commitAll(`${dir}/out`, 'from mirror')
     expect(await gitFails(`${dir}/out`, [...bearer(await mint(['village/archive'])), 'push', 'origin', 'main'])).toMatch(/403|permission denied/i)
+    const gitOnly = await mintInstanceToken({ key: backupKey, issuer: backup.url, audience: source.url, repositories: ['village/archive'], scopes: ['git:read'] })
+    const lfsBatch = (token: string) =>
+      fetch(`${remote('archive')}/info/lfs/objects/batch`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/vnd.git-lfs+json' },
+        body: JSON.stringify({ operation: 'download', objects: [{ oid: 'a'.repeat(64), size: 1 }] }),
+      })
+    expect((await lfsBatch(gitOnly)).status).toBe(404)
+    expect((await lfsBatch(await mint(['village/archive']))).status).toBe(200)
+    const lfsOnly = await mintInstanceToken({ key: backupKey, issuer: backup.url, audience: source.url, repositories: ['village/archive'], scopes: ['lfs:read'] })
+    expect((await fetch(`${remote('archive')}/info/refs?service=git-upload-pack`, { headers: { Authorization: `Bearer ${lfsOnly}` } })).status).toBe(404)
     const viaPassword = tempDir()
     await gitAsync(viaPassword, ['clone', '-q', withCredentials(remote('archive'), 'instance', await mint(['village/archive'])), 'out'])
   })

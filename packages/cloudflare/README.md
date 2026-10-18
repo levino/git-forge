@@ -35,3 +35,17 @@ from [`@git-forge/s3`](../s3) for that.
 a Miniflare R2 bucket through `@cloudflare/vitest-plugin`. The shared storage
 conformance suite from `@git-forge/core/test/storage-conformance.ts` runs
 against `R2Storage` with a list page size of 7 to exercise pagination.
+
+### Simulator noise
+
+The conformance tests that make a `put` fail (stream errors, wrong length)
+abort an upload stream on purpose. Miniflare's local R2 simulator, which runs in its
+own workerd worker, then leaves internal promises unhandled, and workerd logs
+`uncaught exception; … Error: Network connection lost.`,
+`… TypeError: Can't read from request stream because client disconnected.`
+and `disconnected: fixed-length pipe ended prematurely`. The promise is not in
+`R2Storage` or the test worker (an `unhandledrejection` listener in the test
+worker never fires), the `put` itself rejects as it should, and real R2 is not
+involved. The vitest pool overrides Miniflare's log handler, so
+`vitest.config.ts` drops exactly these lines from the test process output.
+Any other workerd output is passed through.

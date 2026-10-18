@@ -184,6 +184,20 @@ describe('copy-only mirror sync', () => {
   })
 })
 
+describe('automatic strategy', () => {
+  it('copies from servers that expose the pack list and fetches from the others', async () => {
+    const context = await setup()
+    expect((await context.sync({ strategy: 'auto' })).strategy).toBe('copy')
+    const other = await setup()
+    const smartOnly = async (request: Request): Promise<Response> =>
+      request.url.endsWith('/objects/info/packs') ? new Response('not found', { status: 404 }) : fetch(request)
+    const result = await other.sync({ strategy: 'auto', fetch: smartOnly })
+    expect(result.strategy).toBe('fetch')
+    expect(result.status).toBe('ok')
+    expect((await readRefs(other.downstream.storage, backup))?.state.refs['refs/upstream/origin/heads/main']).toBe(other.main)
+  })
+})
+
 describe('deep check', () => {
   it('recomputes every index and walks every ref', async () => {
     const context = await setup()

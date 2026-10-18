@@ -1,44 +1,88 @@
-import { handleWellKnownRequest, normalizeIssuer } from '@git-forge/accounts'
 import {
-  type Authorize,
+  type AccountsStore,
+  AccountsError,
+  authenticateRequest,
+  checkRepositoryAccess,
+  createAccountsStore,
+  createGitAccess,
+  createInstanceVerifier,
+  createJwksCache,
+  type Database,
+  type Decision,
+  handleBranchProtectionRequest,
+  handleWellKnownRequest,
+  isRole,
+  isTokenScope,
+  type JwksSource,
+  normalizeIssuer,
+  type Principal,
+  type RepositorySubject,
+  type UserPrincipal,
+} from '@git-forge/accounts'
+import {
   configureMirror,
   createRepository,
   deepCheckMirror,
-  listMirrors,
-  MirrorExistsError,
-  readMirrorConfig,
-  readMirrorStatus,
-  type RepositoryName,
+  detachMirror,
+  type FetchFunction,
   handleContentRequest,
+  type JobQueue,
   handleGitRequest,
   isValidName,
+  listMirrors,
+  MirrorExistsError,
+  MirrorNotFoundError,
+  readAll,
+  readMirrorConfig,
+  readMirrorStatus,
   RepositoryExistsError,
+  type RepositoryName,
+  SizeLimitError,
   type Storage,
 } from '@git-forge/core'
+import type { ForgeSettings } from './config.ts'
 import {
-  configureMirrorFederation,
+  enqueueDueMirrors,
+  enqueueMirrorSetup,
+  type ForgeJob,
   handleFederationRequest,
   type MirrorFederation,
   notifyAfterPush,
-  runMirrorSync,
+  runJob,
+  syncAndNotify,
 } from './mirror-federation.ts'
+import { MirrorAuthError, type MirrorContext, runMirrorSync, type ScheduledMirrorRun, syncDueMirrors } from './mirrors.ts'
 
-export type ForgeConfig = {
+export type ForgeOptions = ForgeSettings & {
   readonly storage: Storage
-  readonly adminToken: string | undefined
-  readonly readToken?: string | undefined
-  readonly publicRead: boolean
-  readonly maxPushBytes: number
-  readonly federation?: MirrorFederation
+  readonly db: Database
+  readonly fetch?: FetchFunction
+  readonly now?: () => Date
+  readonly jobs?: JobQueue<ForgeJob>
+}
+
+export type Forge = {
+  readonly fetch: (request: Request) => Promise<Response>
+  readonly scheduled: (at?: Date) => Promise<ScheduledMirrorRun[]>
+  readonly runJob: (job: ForgeJob) => Promise<void>
+}
+
+class HttpError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+    readonly headers: Record<string, string> = {},
+  ) {
+    super(message)
+  }
 }
 
 const json = (status: number, body: unknown, headers: Record<string, string> = {}) =>
-  new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json', ...headers } })
+  new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', ...headers } })
 
-const digest = async (value: string): Promise<Uint8Array> =>
-  new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value)))
+const digest = async (value: string): Promise<Uint8Array> => new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value)))
 
-export const tokenMatches = async (presented: string, expected: string | undefined): Promise<boolean> => {
+export const secretMatches = async (presented: string, expected: string | undefined): Promise<boolean> => {
   if (!expected) return false
   const [a, b] = await Promise.all([digest(presented), digest(expected)])
   let difference = 0
@@ -46,162 +90,373 @@ export const tokenMatches = async (presented: string, expected: string | undefin
   return difference === 0
 }
 
-export const presentedToken = (request: Request): string | null => {
-  const header = request.headers.get('Authorization') ?? ''
-  const [scheme, value] = header.split(' ', 2) as [string, string | undefined]
-  if (!value) return null
-  if (scheme.toLowerCase() === 'bearer') return value
-  if (scheme.toLowerCase() !== 'basic') return null
-  try {
-    const decoded = atob(value)
-    const colon = decoded.indexOf(':')
-    return colon === -1 ? null : decoded.slice(colon + 1)
-  } catch {
-    return null
-  }
+const bearer = (request: Request): string | null => {
+  const match = /^\s*Bearer\s+(\S+)\s*$/i.exec(request.headers.get('Authorization') ?? '')
+  return match ? match[1]! : null
 }
 
-const unauthorized = () =>
-  new Response('authentication required\n', {
-    status: 401,
-    headers: { 'Content-Type': 'text/plain; charset=utf-8', 'WWW-Authenticate': 'Basic realm="git-forge", charset="UTF-8"' },
-  })
+type Body = Record<string, unknown>
 
-const isAdmin = async (request: Request, config: ForgeConfig): Promise<boolean> => {
-  const token = presentedToken(request)
-  return token !== null && (await tokenMatches(token, config.adminToken))
-}
-
-const isReader = async (request: Request, config: ForgeConfig): Promise<boolean> => {
-  const token = presentedToken(request)
-  return token !== null && (await tokenMatches(token, config.readToken))
-}
-
-const authorizer =
-  (config: ForgeConfig): Authorize =>
-  async (request, _repo, access) => {
-    if (access === 'read' && (config.publicRead || (await isReader(request, config)))) return null
-    return (await isAdmin(request, config)) ? null : unauthorized()
-  }
-
-type CreateRepositoryBody = { owner?: unknown; name?: unknown; defaultBranch?: unknown }
-
-const createRepositoryRoute = async (request: Request, config: ForgeConfig): Promise<Response> => {
-  if (!config.adminToken) return json(503, { error: 'ADMIN_TOKEN is not configured' })
-  if (!(await isAdmin(request, config))) return json(401, { error: 'invalid admin token' }, { 'WWW-Authenticate': 'Bearer' })
-  let body: CreateRepositoryBody
+const readBody = async (request: Request): Promise<Body> => {
+  if (!request.body) return {}
+  let bytes: Uint8Array
   try {
-    body = (await request.json()) as CreateRepositoryBody
-  } catch {
-    return json(400, { error: 'expected a JSON body' })
-  }
-  const { owner, name } = body
-  const defaultBranch = body.defaultBranch ?? 'main'
-  if (typeof owner !== 'string' || typeof name !== 'string' || !isValidName(owner) || !isValidName(name)) {
-    return json(400, { error: 'owner and name must match [A-Za-z0-9][A-Za-z0-9._-]* and must not end in .git' })
-  }
-  if (typeof defaultBranch !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$/.test(defaultBranch) || defaultBranch.includes('..')) {
-    return json(400, { error: 'invalid defaultBranch' })
-  }
-  try {
-    await createRepository(config.storage, { owner, name }, defaultBranch)
+    bytes = await readAll(request.body, 64 * 1024)
   } catch (error) {
-    if (error instanceof RepositoryExistsError) return json(409, { error: `${owner}/${name} already exists` })
+    if (error instanceof SizeLimitError) throw new HttpError(413, 'request body too large')
     throw error
   }
-  const cloneUrl = new URL(`/${owner}/${name}.git`, request.url).toString()
-  return json(201, { owner, name, defaultBranch, cloneUrl })
-}
-
-type JsonBody = Record<string, unknown>
-
-const readJson = async (request: Request): Promise<JsonBody | null> => {
+  if (bytes.length === 0) return {}
   try {
-    const value: unknown = await request.json()
-    return typeof value === 'object' && value !== null && !Array.isArray(value) ? (value as JsonBody) : null
-  } catch {
-    return null
-  }
+    const value: unknown = JSON.parse(new TextDecoder().decode(bytes))
+    if (typeof value === 'object' && value !== null && !Array.isArray(value)) return value as Body
+  } catch {}
+  throw new HttpError(400, 'expected a JSON object')
 }
 
-const optional = (body: JsonBody, key: string): string | undefined => (typeof body[key] === 'string' ? (body[key] as string) : undefined)
-
-const MIRRORS_ROUTE = /^\/api\/repos\/([^/]+)\/([^/]+)\/mirrors(?:\/([^/]+)\/(sync|verify))?$/
-
-const federationAdminRoute = async (request: Request, config: ForgeConfig, federation: MirrorFederation): Promise<Response | null> => {
-  const url = new URL(request.url)
-  const mirrors = MIRRORS_ROUTE.exec(url.pathname)
-  if (url.pathname !== '/api/admin/instances' && !mirrors) return null
-  if (!config.adminToken) return json(503, { error: 'ADMIN_TOKEN is not configured' })
-  if (!(await isAdmin(request, config))) return json(401, { error: 'invalid admin token' }, { 'WWW-Authenticate': 'Bearer' })
-  if (!mirrors) {
-    if (request.method !== 'POST') return json(405, { error: 'method not allowed' }, { Allow: 'POST' })
-    const body = await readJson(request)
-    const issuer = body && optional(body, 'issuer')
-    if (!issuer) return json(400, { error: 'issuer is required' })
-    const pinnedThumbprint = optional(body, 'pinnedThumbprint') ?? null
-    await federation.store.trustInstance({ issuer, pinnedThumbprint })
-    return json(200, { issuer: normalizeIssuer(issuer), pinnedThumbprint })
-  }
-  const [, owner = '', name = '', remote, action] = mirrors
-  if (!isValidName(owner) || !isValidName(name)) return json(404, { error: 'repository not found' })
-  const repo: RepositoryName = { owner, name }
-  if (remote && action) {
-    if (request.method !== 'POST') return json(405, { error: 'method not allowed' }, { Allow: 'POST' })
-    if (!(await readMirrorConfig(config.storage, repo, remote))) return json(404, { error: 'mirror not configured' })
-    if (action === 'verify') return json(200, await deepCheckMirror(config.storage, repo, remote))
-    const result = await runMirrorSync(federation, repo, remote)
-    return json(result.status === 'failed' ? 502 : 200, result)
-  }
-  if (request.method === 'GET') {
-    const configs = await listMirrors(config.storage, repo)
-    return json(200, await Promise.all(configs.map(async (mirror) => ({ config: mirror, status: await readMirrorStatus(config.storage, repo, mirror.remote) }))))
-  }
-  if (request.method !== 'POST') return json(405, { error: 'method not allowed' }, { Allow: 'GET, POST' })
-  const body = await readJson(request)
-  const upstream = body && optional(body, 'url')
-  if (!body || !upstream) return json(400, { error: 'url is required' })
-  const remoteName = optional(body, 'remote')
-  const namespace = optional(body, 'namespace')
-  const lfsUrl = optional(body, 'lfsUrl')
-  try {
-    const mirror = await configureMirror(config.storage, repo, {
-      url: upstream,
-      ...(remoteName ? { remote: remoteName } : {}),
-      ...(namespace !== undefined ? { namespace } : {}),
-      ...(typeof body.lfs === 'boolean' ? { lfs: body.lfs } : {}),
-      ...(lfsUrl ? { lfsUrl } : {}),
-    })
-    await configureMirrorFederation(federation, repo, mirror)
-    return json(201, mirror)
-  } catch (error) {
-    if (error instanceof MirrorExistsError) return json(409, { error: error.message })
-    return json(400, { error: (error as Error).message })
-  }
+const optionalString = (body: Body, key: string): string | undefined => {
+  const value = body[key]
+  if (value === undefined || value === null) return undefined
+  if (typeof value !== 'string') throw new HttpError(400, `${key} must be a string`)
+  return value
 }
 
-export const handleRequest = async (request: Request, config: ForgeConfig): Promise<Response> => {
-  const url = new URL(request.url)
-  if (url.pathname === '/api/admin/repos') {
-    if (request.method !== 'POST') return json(405, { error: 'method not allowed' }, { Allow: 'POST' })
-    return createRepositoryRoute(request, config)
-  }
-  if (url.pathname === '/' || url.pathname === '/api/health') return json(200, { ok: true, service: 'git-forge' })
-  const { federation } = config
-  if (federation) {
-    const wellKnown = handleWellKnownRequest(request, { issuer: federation.issuer, keys: [federation.key.publicJwk] })
-    if (wellKnown) return wellKnown
-    const handled = (await handleFederationRequest(federation, request)) ?? (await federationAdminRoute(request, config, federation))
-    if (handled) return handled
-  }
-  const authorize = authorizer(config)
-  const content = await handleContentRequest(request, { storage: config.storage, authorize })
-  if (content) return content
-  const git = await handleGitRequest(request, {
-    storage: config.storage,
-    authorize,
-    maxRequestBytes: config.maxPushBytes,
-    ...(federation ? { onPush: notifyAfterPush(federation) } : {}),
+const requiredString = (body: Body, key: string): string => {
+  const value = optionalString(body, key)
+  if (value === undefined || value === '') throw new HttpError(400, `${key} is required`)
+  return value
+}
+
+const DECISION_STATUS: Record<Exclude<Decision, 'allow'>, [number, string]> = {
+  unauthenticated: [401, 'authentication required'],
+  forbidden: [403, 'permission denied'],
+  'not-found': [404, 'repository not found'],
+}
+
+const BRANCH = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$/
+
+type Route = { readonly pattern: RegExp; readonly method: string; readonly handler: (request: Request, params: string[]) => Promise<Response> }
+
+export const createForge = (options: ForgeOptions): Forge => {
+  const { storage, db } = options
+  const store: AccountsStore = createAccountsStore(db)
+  const now = options.now ?? (() => new Date())
+  const jwks: JwksSource = createJwksCache({
+    allowInsecureHttp: options.allowInsecureFederation,
+    ...(options.fetch ? { fetch: (input, init) => options.fetch!(new Request(input, init)) } : {}),
   })
-  return git ?? json(404, { error: 'not found' })
+  const issuerFor = (request: Request): string => options.publicUrl ?? normalizeIssuer(new URL(request.url).origin)
+
+  const authenticateOptions = (request: Request) => ({
+    directory: store,
+    verifyInstance: createInstanceVerifier({ audience: issuerFor(request), trust: store.lookupTrustedIssuer, jwks }),
+  })
+
+  const principalOf = async (request: Request): Promise<Principal> => {
+    const principal = await authenticateRequest(request, authenticateOptions(request))
+    if (!principal) throw new HttpError(401, 'invalid credentials', { 'WWW-Authenticate': 'Bearer' })
+    return principal
+  }
+
+  const canManage = (principal: Principal): principal is UserPrincipal =>
+    principal.kind === 'user' && (principal.limits === null || principal.limits.ceiling === 'admin')
+
+  const requireManager = async (request: Request): Promise<UserPrincipal> => {
+    const principal = await principalOf(request)
+    if (principal.kind === 'anonymous') throw new HttpError(401, 'authentication required', { 'WWW-Authenticate': 'Bearer' })
+    if (!canManage(principal)) throw new HttpError(403, 'this needs a personal access token with the repo:admin scope')
+    return principal
+  }
+
+  const requireInstanceAdmin = async (request: Request): Promise<UserPrincipal> => {
+    const principal = await requireManager(request)
+    if (!(await store.isInstanceAdmin(principal.id))) throw new HttpError(403, 'instance admin required')
+    return principal
+  }
+
+  const requireRepositoryAdmin = async (request: Request, repo: RepositoryName): Promise<{ principal: UserPrincipal; repository: RepositorySubject }> => {
+    const principal = await requireManager(request)
+    const check = await checkRepositoryAccess(store, principal, repo, 'admin')
+    if (check.repository && (check.decision === 'allow' || (await store.isInstanceAdmin(principal.id)))) {
+      return { principal, repository: check.repository }
+    }
+    const [status, message] = DECISION_STATUS[check.decision === 'allow' ? 'not-found' : check.decision]
+    throw new HttpError(status, message)
+  }
+
+  const mirrorContext = (issuer: string | undefined): MirrorContext => ({
+    storage,
+    store,
+    issuer,
+    instanceKey: options.instanceKey,
+    ...(options.fetch ? { fetch: options.fetch } : {}),
+  })
+
+  const federation: MirrorFederation | null =
+    options.publicUrl && options.instanceKey && options.jobs
+      ? {
+          ...mirrorContext(options.publicUrl),
+          issuer: options.publicUrl,
+          instanceKey: options.instanceKey,
+          jwks,
+          jobs: options.jobs,
+          canRead: async (principal, repo) => (await checkRepositoryAccess(store, principal, repo, 'read')).decision === 'allow',
+          deepCheckDays: options.deepCheckDays,
+          now,
+        }
+      : null
+
+  const repoName = (params: string[]): RepositoryName => {
+    const [owner, name] = params as [string, string]
+    if (!isValidName(owner) || !isValidName(name)) throw new HttpError(404, 'repository not found')
+    return { owner, name }
+  }
+
+  const bootstrap = async (request: Request): Promise<Response> => {
+    if (!options.bootstrapToken) throw new HttpError(503, 'BOOTSTRAP_TOKEN is not configured')
+    const presented = bearer(request)
+    if (presented === null || !(await secretMatches(presented, options.bootstrapToken))) {
+      throw new HttpError(401, 'invalid bootstrap token', { 'WWW-Authenticate': 'Bearer' })
+    }
+    const body = await readBody(request)
+    const login = requiredString(body, 'login')
+    const email = optionalString(body, 'email')
+    const admin = await store.bootstrapInstanceAdmin({ login, ...(email ? { email } : {}) })
+    if (!admin) throw new HttpError(409, 'this instance already has an admin')
+    const token = await store.createPersonalAccessToken(admin.id, { name: 'bootstrap', scopes: ['repo:admin'], expiresAt: null }, { kind: 'system' })
+    return json(201, { login, token: token.token })
+  }
+
+  const createUser = async (request: Request): Promise<Response> => {
+    const actor = await requireInstanceAdmin(request)
+    const body = await readBody(request)
+    const login = requiredString(body, 'login')
+    const email = optionalString(body, 'email')
+    if (await store.findAccount(login)) throw new HttpError(409, `${login} already exists`)
+    const user = await store.createUser({ login, ...(email ? { email } : {}) }, { kind: 'user', id: actor.id })
+    if (body.admin === true) await store.setInstanceAdmin(user.id, true, { kind: 'user', id: actor.id })
+    return json(201, { id: user.id, login, admin: body.admin === true })
+  }
+
+  const createToken = async (request: Request, params: string[]): Promise<Response> => {
+    const actor = await requireInstanceAdmin(request)
+    const account = await store.findAccount(params[0]!)
+    if (!account || account.kind !== 'user') throw new HttpError(404, 'user not found')
+    const body = await readBody(request)
+    const scopes = body.scopes ?? ['repo:write']
+    if (!Array.isArray(scopes) || !scopes.every(isTokenScope)) throw new HttpError(400, 'scopes must be a list of repo:read, repo:write, repo:admin')
+    const expiresAt = body.expiresAt ?? null
+    if (expiresAt !== null && (typeof expiresAt !== 'number' || !Number.isSafeInteger(expiresAt))) throw new HttpError(400, 'expiresAt must be Unix milliseconds')
+    const created = await store.createPersonalAccessToken(account.id, { name: optionalString(body, 'name') ?? 'api', scopes, expiresAt }, { kind: 'user', id: actor.id })
+    return json(201, created)
+  }
+
+  const trustInstance = async (request: Request): Promise<Response> => {
+    const actor = await requireInstanceAdmin(request)
+    const body = await readBody(request)
+    const issuer = normalizeIssuer(requiredString(body, 'issuer'))
+    const pinnedThumbprint = optionalString(body, 'pinnedThumbprint') ?? null
+    await store.trustInstance({ issuer, pinnedThumbprint }, { kind: 'user', id: actor.id })
+    return json(200, { issuer, pinnedThumbprint })
+  }
+
+  const createRepositoryRoute = async (request: Request): Promise<Response> => {
+    const actor = await requireManager(request)
+    const body = await readBody(request)
+    const owner = requiredString(body, 'owner')
+    const name = requiredString(body, 'name')
+    const visibility = optionalString(body, 'visibility') ?? 'private'
+    const defaultBranch = optionalString(body, 'defaultBranch') ?? 'main'
+    if (!isValidName(owner) || !isValidName(name)) throw new HttpError(400, 'owner and name must match [A-Za-z0-9][A-Za-z0-9._-]* and must not end in .git')
+    if (visibility !== 'private' && visibility !== 'public') throw new HttpError(400, 'visibility must be private or public')
+    if (!BRANCH.test(defaultBranch) || defaultBranch.includes('..')) throw new HttpError(400, 'invalid defaultBranch')
+    const account = await store.findAccount(owner)
+    if (!account) throw new HttpError(404, `no account ${owner}`)
+    const own = account.kind === 'user' && account.id === actor.id
+    if (!own && !(await store.isInstanceAdmin(actor.id))) throw new HttpError(403, `you cannot create repositories for ${owner}`)
+    if (await store.findRepository(owner, name)) throw new HttpError(409, `${owner}/${name} already exists`)
+    try {
+      await createRepository(storage, { owner: account.login, name }, defaultBranch)
+    } catch (error) {
+      if (!(error instanceof RepositoryExistsError)) throw error
+    }
+    try {
+      await store.createRepository({ ownerId: account.id, name, visibility }, { kind: 'user', id: actor.id })
+    } catch (error) {
+      if (await store.findRepository(owner, name)) throw new HttpError(409, `${owner}/${name} already exists`)
+      throw error
+    }
+    const cloneUrl = new URL(`/${account.login}/${name}.git`, request.url).toString()
+    return json(201, { owner: account.login, name, visibility, defaultBranch, cloneUrl })
+  }
+
+  const updateRepository = async (request: Request, params: string[]): Promise<Response> => {
+    const { principal, repository } = await requireRepositoryAdmin(request, repoName(params))
+    const body = await readBody(request)
+    const visibility = optionalString(body, 'visibility')
+    if (visibility !== undefined) {
+      if (visibility !== 'private' && visibility !== 'public') throw new HttpError(400, 'visibility must be private or public')
+      await store.setRepositoryVisibility(repository.id, visibility, { kind: 'user', id: principal.id })
+    }
+    return json(200, { owner: repository.owner, name: repository.name, visibility: visibility ?? repository.visibility })
+  }
+
+  const setCollaborator = async (request: Request, params: string[]): Promise<Response> => {
+    const { principal, repository } = await requireRepositoryAdmin(request, repoName(params))
+    const account = await store.findAccount(params[2]!)
+    if (!account || account.kind !== 'user') throw new HttpError(404, 'user not found')
+    const role = (await readBody(request)).role
+    if (!isRole(role)) throw new HttpError(400, 'role must be read, triage, write, maintain or admin')
+    await store.setCollaborator(repository.id, account.id, role, { kind: 'user', id: principal.id })
+    return json(200, { login: account.login, role })
+  }
+
+  const grantInstance = async (request: Request, params: string[]): Promise<Response> => {
+    const { principal, repository } = await requireRepositoryAdmin(request, repoName(params))
+    const issuer = normalizeIssuer(requiredString(await readBody(request), 'issuer'))
+    if (!(await store.lookupTrustedIssuer(issuer))) throw new HttpError(422, `${issuer} is not a trusted instance; an instance admin must trust it first`)
+    await store.grantInstanceRepository(issuer, repository.id, { kind: 'user', id: principal.id })
+    return json(200, { issuer, role: 'read' })
+  }
+
+  const listMirrorsRoute = async (request: Request, params: string[]): Promise<Response> => {
+    const repo = repoName(params)
+    await requireRepositoryAdmin(request, repo)
+    const mirrors = await listMirrors(storage, repo)
+    return json(200, await Promise.all(mirrors.map(async (config) => ({ config, status: await readMirrorStatus(storage, repo, config.remote) }))))
+  }
+
+  const addMirror = async (request: Request, params: string[]): Promise<Response> => {
+    const repo = repoName(params)
+    const { repository } = await requireRepositoryAdmin(request, repo)
+    const body = await readBody(request)
+    const mode = optionalString(body, 'mode')
+    const auth = optionalString(body, 'auth')
+    if (mode !== undefined && mode !== 'auto' && mode !== 'manual') throw new HttpError(400, 'mode must be auto or manual')
+    if (auth !== undefined && auth !== 'none' && auth !== 'instance') throw new HttpError(400, 'auth must be none or instance')
+    if (body.lfs !== undefined && typeof body.lfs !== 'boolean') throw new HttpError(400, 'lfs must be a boolean')
+    const remote = optionalString(body, 'remote')
+    const namespace = optionalString(body, 'namespace')
+    const lfsUrl = optionalString(body, 'lfsUrl')
+    try {
+      const config = await configureMirror(storage, { owner: repository.owner, name: repository.name }, {
+        url: requiredString(body, 'url'),
+        ...(remote !== undefined ? { remote } : {}),
+        ...(mode !== undefined ? { mode } : {}),
+        ...(namespace !== undefined ? { namespace } : {}),
+        ...(body.lfs !== undefined ? { lfs: body.lfs as boolean } : {}),
+        ...(lfsUrl !== undefined ? { lfsUrl } : {}),
+        ...(auth !== undefined ? { auth } : {}),
+      })
+      if (federation) await enqueueMirrorSetup(federation, { owner: repository.owner, name: repository.name }, config)
+      return json(201, config)
+    } catch (error) {
+      if (error instanceof MirrorExistsError) throw new HttpError(409, error.message)
+      if (error instanceof HttpError) throw error
+      throw new HttpError(400, (error as Error).message)
+    }
+  }
+
+  const syncMirrorRoute = async (request: Request, params: string[]): Promise<Response> => {
+    const { repository } = await requireRepositoryAdmin(request, repoName(params))
+    const repo = { owner: repository.owner, name: repository.name }
+    const config = await readMirrorConfig(storage, repo, params[2]!)
+    if (!config) throw new HttpError(404, 'mirror not configured')
+    try {
+      const result = federation ? await syncAndNotify(federation, repo, config) : await runMirrorSync(mirrorContext(issuerFor(request)), repo, config)
+      return json(result.status === 'failed' ? 502 : 200, result)
+    } catch (error) {
+      if (error instanceof MirrorAuthError) throw new HttpError(409, error.message)
+      throw error
+    }
+  }
+
+  const verifyMirrorRoute = async (request: Request, params: string[]): Promise<Response> => {
+    const { repository } = await requireRepositoryAdmin(request, repoName(params))
+    const repo = { owner: repository.owner, name: repository.name }
+    if (!(await readMirrorConfig(storage, repo, params[2]!))) throw new HttpError(404, 'mirror not configured')
+    return json(200, await deepCheckMirror(storage, repo, params[2]!, now()))
+  }
+
+  const detachMirrorRoute = async (request: Request, params: string[]): Promise<Response> => {
+    const { repository } = await requireRepositoryAdmin(request, repoName(params))
+    try {
+      return json(200, await detachMirror(storage, { owner: repository.owner, name: repository.name }, params[2]!, now()))
+    } catch (error) {
+      if (error instanceof MirrorNotFoundError) throw new HttpError(404, 'mirror not configured')
+      throw error
+    }
+  }
+
+  const health = async () => json(200, { ok: true, service: 'git-forge' })
+
+  const SEGMENT = '([^/]+)'
+  const REPO = `/api/repos/${SEGMENT}/${SEGMENT}`
+  const routes: Route[] = [
+    { method: 'GET', pattern: /^\/$/, handler: health },
+    { method: 'GET', pattern: /^\/api\/health$/, handler: health },
+    { method: 'POST', pattern: /^\/api\/bootstrap$/, handler: bootstrap },
+    { method: 'POST', pattern: /^\/api\/admin\/users$/, handler: createUser },
+    { method: 'POST', pattern: new RegExp(`^/api/admin/users/${SEGMENT}/tokens$`), handler: createToken },
+    { method: 'POST', pattern: /^\/api\/admin\/instances$/, handler: trustInstance },
+    { method: 'POST', pattern: /^\/api\/repos$/, handler: createRepositoryRoute },
+    { method: 'PATCH', pattern: new RegExp(`^${REPO}$`), handler: updateRepository },
+    { method: 'PUT', pattern: new RegExp(`^${REPO}/collaborators/${SEGMENT}$`), handler: setCollaborator },
+    { method: 'POST', pattern: new RegExp(`^${REPO}/instances$`), handler: grantInstance },
+    { method: 'GET', pattern: new RegExp(`^${REPO}/mirrors$`), handler: listMirrorsRoute },
+    { method: 'POST', pattern: new RegExp(`^${REPO}/mirrors$`), handler: addMirror },
+    { method: 'POST', pattern: new RegExp(`^${REPO}/mirrors/${SEGMENT}/sync$`), handler: syncMirrorRoute },
+    { method: 'POST', pattern: new RegExp(`^${REPO}/mirrors/${SEGMENT}/detach$`), handler: detachMirrorRoute },
+    { method: 'POST', pattern: new RegExp(`^${REPO}/mirrors/${SEGMENT}/verify$`), handler: verifyMirrorRoute },
+  ]
+
+  const route = async (request: Request): Promise<Response | null> => {
+    const { pathname } = new URL(request.url)
+    const matching = routes.filter((candidate) => candidate.pattern.test(pathname))
+    if (matching.length === 0) return null
+    const match = matching.find((candidate) => candidate.method === request.method)
+    if (!match) return json(405, { error: 'method not allowed' }, { Allow: [...new Set(matching.map((candidate) => candidate.method))].join(', ') })
+    const params = match.pattern.exec(pathname)!.slice(1).map(decodeURIComponent)
+    return match.handler(request, params)
+  }
+
+  const handle = async (request: Request): Promise<Response> => {
+    const wellKnown = options.instanceKey ? handleWellKnownRequest(request, { issuer: issuerFor(request), keys: [options.instanceKey.publicJwk] }) : null
+    if (wellKnown) return wellKnown
+    const federated = federation ? await handleFederationRequest(federation, request) : null
+    if (federated) return federated
+    const authentication = authenticateOptions(request)
+    const protection = await handleBranchProtectionRequest(request, { store, verifyInstance: authentication.verifyInstance })
+    if (protection) return protection
+    try {
+      const api = await route(request)
+      if (api) return api
+    } catch (error) {
+      if (error instanceof HttpError) return json(error.status, { error: error.message }, error.headers)
+      if (error instanceof AccountsError) return json(400, { error: error.message })
+      throw error
+    }
+    const access = createGitAccess(authentication)
+    const content = await handleContentRequest(request, { storage, authorize: access.authorize })
+    if (content) return content
+    const git = await handleGitRequest(request, {
+      storage,
+      authorize: access.authorize,
+      pushPolicy: access.pushPolicy,
+      maxRequestBytes: options.maxPushBytes,
+      lfs: { maxObjectBytes: options.maxLfsObjectBytes },
+      ...(federation ? { onPush: notifyAfterPush(federation) } : {}),
+    })
+    return git ?? json(404, { error: 'not found' })
+  }
+
+  return {
+    fetch: handle,
+    scheduled: (at = now()) =>
+      federation ? enqueueDueMirrors(federation, at, options.mirrorIntervalMinutes) : syncDueMirrors(mirrorContext(options.publicUrl), at, options.mirrorIntervalMinutes),
+    runJob: async (job) => {
+      if (!federation) throw new Error('jobs need PUBLIC_URL, INSTANCE_KEY and a job queue')
+      await runJob(federation, job)
+    },
+  }
 }

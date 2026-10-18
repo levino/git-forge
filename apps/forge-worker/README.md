@@ -2,73 +2,84 @@
 
 The Cloudflare Worker deployment of git-forge. It serves Git over HTTPS
 (smart HTTP protocol v2 for fetch, `receive-pack` for push, dumb HTTP for
-protocol v0 clients) straight from an R2 bucket, using `handleGitRequest` from
-`@git-forge/core` and `R2Storage` from `@git-forge/cloudflare`.
+protocol v0 clients) and Git LFS straight from an R2 bucket, keeps accounts,
+tokens and federation trust in D1, and keeps mirrors current through signed
+push notifications, a job queue and a daily Cron Trigger as safety net.
 
-## What is deployed
+`src/app.ts` is platform-neutral: `createForge({ storage, db, ... })` takes a
+core `Storage` and an accounts `Database` and returns `{ fetch, scheduled, runJob }`.
+`src/index.ts` only wires the Cloudflare bindings (`R2Storage`, `d1Database`,
+`QueueJobs` and the queue consumer)
+and parses the vars (`src/config.ts`). The same app runs in Node for the unit
+tests and the benchmark.
 
-| Piece | Purpose |
-|---|---|
-| `BUCKET` (R2) | All repository data, in the bucket layout described in `docs/design.md` (`repos/<owner>/<name>/…`). |
-| `DB` (D1) | Federation tables of the accounts package: trusted instances, mirror subscriptions, local mirrors. Migrations are applied on the first request of an isolate. |
-| `JOBS` (Queue `git-forge-jobs`) | Background jobs: mirror syncs, notification deliveries, subscription renewals, deep checks. One message per invocation, retried with exponential backoff. |
-| Cron Trigger `17 3 * * *` | Daily safety net: re-syncs auto mirrors whose last run is older than `MIRROR_SAFETY_SYNC_HOURS`, renews their subscriptions and schedules deep checks. |
-| `ADMIN_TOKEN` (secret) | Protects `POST /api/admin/repos` and, until accounts exist, every push. |
-| `READ_TOKEN` (secret, optional) | Read-only token: clones, LFS downloads, media and raw URLs, but no pushes. Meant for a CDN pulling a private instance. |
-| `PUBLIC_READ` (var) | `true` (default): anyone may read. `false`: reads need the read or admin token. |
-| `MAX_PUSH_BYTES` (var) | Largest accepted push request, default 16 MiB. Larger files belong in Git LFS. |
-| `PUBLIC_URL` (var) | Base URL of this instance, its federation issuer. Federation and mirrors are enabled when `PUBLIC_URL`, `INSTANCE_KEY` and `JOBS` are present. |
-| `INSTANCE_KEY` (secret) | Ed25519 private JWK of this instance (`pnpm --filter forge-worker instance-key`). Signs instance tokens and mirror notifications; the public key is served at `/.well-known/jwks.json`. |
-| `ALLOW_INSECURE_FEDERATION` (var) | `true` lets the JWKS cache fetch plain-HTTP issuers. Only for local tests. |
-| `MIRROR_SAFETY_SYNC_HOURS` (var) | Interval of the safety-net sync, default 24. Push notifications make mirrors current within seconds; the safety net only catches lost notifications. |
-| `MIRROR_DEEP_CHECK_DAYS` (var) | Every how many days a mirror gets the full re-verification, default 30, `0` = only on demand. |
+## Configuration
 
-### Routes
+| Name | Kind | Purpose |
+|---|---|---|
+| `BUCKET` | R2 binding | Repository data in the bucket layout of `docs/design.md` (`repos/<owner>/<name>/…`). |
+| `DB` | D1 binding | Accounts, tokens, repository roles, branch protection, instance trust, audit log (`@git-forge/accounts`). Migrations come from `packages/accounts/migrations` (`migrations_dir`) and are applied with `wrangler d1 migrations apply`. |
+| `JOBS` | Queue binding, optional | Background jobs: mirror syncs, notification deliveries, subscription renewals, deep checks (`src/mirror-federation.ts`). One message per invocation (`max_batch_size: 1`), retried with exponential backoff. With `JOBS`, `INSTANCE_KEY` and `PUBLIC_URL` set, push notifications are on. |
+| Cron `17 3 * * *` | trigger | Daily safety net: with `JOBS`, enqueues a sync (and a subscription renewal) for every due auto mirror and the periodic deep checks; without `JOBS`, syncs due mirrors inline. |
+| `BOOTSTRAP_TOKEN` | secret | Allows exactly one successful `POST /api/bootstrap`, which creates the first instance admin. |
+| `INSTANCE_KEY` | secret, optional | Ed25519 private JWK of this instance. Needed to mirror private repositories from other instances; also publishes `/.well-known/openid-configuration` and `/.well-known/jwks.json`. Generate with `pnpm --filter forge-worker instance-key`. |
+| `PUBLIC_URL` | var, optional | Base URL of the instance, used as its issuer (when minting) and audience (when verifying instance tokens). Defaults to the origin of the request; scheduled sync with instance tokens needs it set. |
+| `MAX_PUSH_BYTES` | var | Largest accepted push request, default 16 MiB. Larger files belong in Git LFS. |
+| `MAX_LFS_OBJECT_BYTES` | var | Largest accepted LFS object, default 100 MiB (Cloudflare's request body limit on the Free and Pro plans). Larger objects get a per-object error in the batch API and `413` on `PUT`. |
+| `MIRROR_INTERVAL_MINUTES` | var | Minimum time between two scheduled syncs of a mirror, default 30; `wrangler.jsonc` sets 1440 (daily) because notifications carry the real-time updates; `0` syncs on every cron tick. |
+| `MIRROR_DEEP_CHECK_DAYS` | var | Every how many days a mirror gets the full re-verification (re-hash every object, recompute every index), default 30, `0` = only on demand. |
+| `ALLOW_INSECURE_FEDERATION` | var | `true` lets the instance fetch other instances' JWKS over plain HTTP. Only for local tests. |
 
-- `POST /api/admin/repos` with `Authorization: Bearer <ADMIN_TOKEN>` and a JSON
-  body `{"owner": "acme", "name": "site", "defaultBranch": "main"}` creates a
-  repository. Answers `201` with the clone URL, `409` if it exists, `400` for
-  invalid names, `401` for a wrong token and `503` if no token is configured.
-- `GET /api/health` answers `{"ok": true}`.
-- `/<owner>/<name>.git/…` is Git and Git LFS. Push with the admin token as the
-  HTTP Basic password (any user name), e.g.
-  `https://git:<token>@forge.example/acme/site.git` or via a credential helper.
+Repositories are **private by default**; visibility is set per repository.
+There is no global "public read" switch any more.
+
+## Authentication
+
+- **Git and LFS** use personal access tokens (`gfp_…`) as HTTP Basic password
+  (any user name) or as `Authorization: Bearer`, e.g.
+  `https://git:<token>@forge.example/acme/site.git`. The token's scopes cap the
+  access (`repo:read`, `repo:write`, `repo:admin`); the repository role decides
+  the rest (`@git-forge/accounts`).
+- **Other instances** present a short-lived EdDSA JWT. The core tells the
+  authorizer whether a request is Git or LFS, so the token scopes `git:read`
+  and `lfs:read` are checked separately.
+- **The JSON API** needs a token with `repo:admin`.
+
+## API
+
+| Route | Who | Purpose |
+|---|---|---|
+| `POST /api/bootstrap` `{login, email?}` | `Bearer <BOOTSTRAP_TOKEN>` | Creates the first instance admin and returns `{login, token}` (a `repo:admin` token without expiry). `409` once an admin exists. |
+| `POST /api/admin/users` `{login, email?, admin?}` | instance admin | Creates a user. |
+| `POST /api/admin/users/{login}/tokens` `{name?, scopes?, expiresAt?}` | instance admin | Issues a personal access token (shown once). |
+| `POST /api/admin/instances` `{issuer, pinnedThumbprint?}` | instance admin | Trusts another instance. |
+| `POST /api/repos` `{owner, name, visibility?, defaultBranch?}` | the owner, or an instance admin | Creates a repository in R2 and D1 (`visibility` defaults to `private`). |
+| `PATCH /api/repos/{owner}/{name}` `{visibility}` | repository admin | Changes visibility. |
+| `PUT /api/repos/{owner}/{name}/collaborators/{login}` `{role}` | repository admin | Sets a collaborator role. |
+| `POST /api/repos/{owner}/{name}/instances` `{issuer}` | repository admin | Lets a trusted instance read this repository (Git and LFS). |
+| `GET /api/repos/{owner}/{name}/mirrors` | repository admin | Mirror configs and status (last run, alarms, pending LFS objects). |
+| `POST /api/repos/{owner}/{name}/mirrors` `{url, remote?, mode?, namespace?, lfs?, lfsUrl?, auth?}` | repository admin | Configures a mirror. `auth: "instance"` presents an instance token to the upstream and, with jobs enabled, subscribes to its push notifications. The first sync is enqueued. |
+| `POST /api/repos/{owner}/{name}/mirrors/{remote}/sync` | repository admin | Syncs now; `502` with the error if the sync failed. |
+| `POST /api/repos/{owner}/{name}/mirrors/{remote}/verify` | repository admin | Runs the deep check now and stores the result in the mirror status. |
+| `POST\|DELETE /api/federation/subscriptions` `{repository, callback}` | trusted instance (instance JWT) | Subscribes to push notifications for a repository it may read; the callback must be below its own issuer URL. |
+| `POST /api/federation/notify/{owner}/{name}/{remote}` | trusted upstream (signed body, `application/jwt`) | Push notification. `401` for an untrusted issuer, unknown key, bad signature, wrong audience or expired token; `403` if this mirror does not follow that repository; `200 up-to-date` for a duplicate; `202 queued` otherwise. |
+| `POST /api/repos/{owner}/{name}/mirrors/{remote}/detach` | repository admin | Stops syncing. |
+| `GET /api/health` | anyone | `{"ok": true}` |
+
+Instance admins count as admins of every repository.
+
+Branch protection rules use the GitHub-style API of `@git-forge/accounts`
+(`GET /api/repos/{owner}/{name}/branch-protection`,
+`GET|PUT|DELETE /api/repos/{owner}/{name}/branches/{pattern}/protection`) and
+are enforced on every push.
+
+## Media and raw URLs
+
 - `GET|HEAD /<owner>/<name>/media/<oid>[/<filename>]` serves an LFS object by
-  its SHA-256 oid, immutable and with Range support.
+  its SHA-256 oid, immutable and with Range support (authorized as LFS read).
 - `GET|HEAD /<owner>/<name>/raw/<ref>/<path>` serves a file from a branch, tag,
-  `HEAD` or full commit id; LFS pointers redirect to the media URL. Details in
-  `docs/design.md` §7.
-
-### Federation and mirrors
-
-With federation enabled (see `PUBLIC_URL` above) the Worker also serves:
-
-- `GET /.well-known/openid-configuration` and `GET /.well-known/jwks.json`.
-- `POST|DELETE /api/federation/subscriptions` — a trusted instance
-  subscribes to push notifications for a repository (instance JWT, body
-  `{"repository": "owner/name", "callback": "<url below its issuer>"}`).
-- `POST /api/federation/notify/<owner>/<name>/<remote>` — receives a signed
-  notification (`Content-Type: application/jwt`). `401` for untrusted
-  issuers, bad signatures, wrong audience or expired tokens; `403` if this
-  mirror does not follow the notifying repository; `200 up-to-date` for a
-  duplicate; `202 queued` otherwise.
-- Admin routes (`Authorization: Bearer <ADMIN_TOKEN>`):
-  - `POST /api/admin/instances` `{"issuer": "...", "pinnedThumbprint"?: "..."}`
-    trusts another instance (both directions are needed: the upstream trusts
-    the mirror to accept its subscription, the mirror trusts the upstream to
-    accept its notifications).
-  - `POST /api/repos/<owner>/<name>/mirrors` `{"url": "<upstream>/<o>/<n>.git", "remote"?, "namespace"?, "lfs"?, "lfsUrl"?}`
-    configures a mirror, subscribes at the upstream and enqueues the first
-    sync. A mirror of a mirror uses `"namespace": "upstream/origin/"`.
-  - `GET /api/repos/<owner>/<name>/mirrors` lists mirrors with their status
-    (last run, alarms, last deep check).
-  - `POST /api/repos/<owner>/<name>/mirrors/<remote>/sync` runs a copy-only
-    sync now; `…/verify` runs the deep check now.
-
-After a successful push the Worker enqueues one notification per
-subscriber; it does not send anything inside the push request. Mirrors copy
-the upstream's packs as stored (copy-only sync, `docs/design.md` §7) and, if
-refs moved, notify their own subscribers, so chains propagate without cron.
+  `HEAD` or full commit id; LFS pointers redirect to the media URL (authorized
+  as Git read). Details in `docs/design.md` §7.
 
 ### Putting a CDN in front (e.g. Bunny)
 
@@ -80,73 +91,130 @@ Worker on a cache miss, nothing is uploaded.
    commit id are `immutable` for a year, raw URLs on branches and tags are
    cached for 60 seconds. Query strings are not used, so the cache may ignore
    them.
-3. For a private instance (`PUBLIC_READ=false`), create a read token and let
-   the pull zone send it with every origin request:
-
-   ```sh
-   openssl rand -base64 32 | npx wrangler secret put READ_TOKEN
-   ```
-
-   In Bunny add an Edge Rule with the action "Set Request Header" (applied to
-   origin requests) `Authorization: Bearer <READ_TOKEN>`. The token can read
-   every repository but cannot push. Whatever the CDN has cached is readable
-   by anyone who can reach the pull zone, so protect the pull zone itself
-   (Bunny token authentication) unless the content is meant to be public.
+3. For private repositories, create a user for the CDN (`POST
+   /api/admin/users`), give it the `read` role on the repositories
+   (`PUT /api/repos/{owner}/{name}/collaborators/{login}`), issue it a token
+   with the scope `repo:read`, and let the pull zone send it with every origin
+   request. In Bunny add an Edge Rule with the action "Set Request Header"
+   (applied to origin requests) `Authorization: Bearer <token>`. The token can
+   read but cannot push. Whatever the CDN has cached is readable by anyone who
+   can reach the pull zone, so protect the pull zone itself (Bunny token
+   authentication) unless the content is meant to be public.
 
 Then `https://<zone>.b-cdn.net/acme/site/raw/main/photos/a.jpg` redirects to
 `https://<zone>.b-cdn.net/acme/site/media/<oid>/a.jpg`, which the CDN keeps.
 
 ## Deploying to Cloudflare
 
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/levino/git-forge-instance)
+
+New instances are deployed from the
+[instance template](../../templates/instance): the button copies it (as
+`levino/git-forge-instance`), connects Workers Builds, asks for
+`BOOTSTRAP_TOKEN` and creates the R2 bucket and the D1 database from its
+`wrangler.jsonc`. The template deploys a pinned, checksummed release bundle of
+this Worker and applies the D1 migrations before every upload
+(`docs/design.md` §15). A button pointing at this directory would not work:
+Cloudflare requires a subdirectory to be self-contained, and this Worker
+builds from the workspace packages.
+
 A Workers **Paid** plan is required for an instance that receives pushes:
 the Free plan allows 10 ms of CPU per request, which is not enough to index
-even a small push (see the measurements below), and `limits.cpu_ms` cannot
-be set on it. A pure mirror can follow small pushes on the Free plan once
-it has been seeded (see "A pure mirror on the Workers Free plan").
+even a small push (see the measurements below), and `limits.cpu_ms` cannot be
+set on it. A pure mirror can follow small pushes on the Free plan once it has
+been seeded (see "A pure mirror on the Workers Free plan").
+
+From a checkout of this repository (for development instances):
 
 ```sh
 pnpm install
 cd apps/forge-worker
 npx wrangler login
-npx wrangler r2 bucket create git-forge
-npx wrangler d1 create git-forge
-```
-
-For federation and mirrors also create the job queue and the instance key:
-
-```sh
-npx wrangler queues create git-forge-jobs
-pnpm --filter forge-worker instance-key | npx wrangler secret put INSTANCE_KEY
-```
-
-and set `PUBLIC_URL` in `vars`.
-
-Put the `database_id` printed by `d1 create` into `wrangler.jsonc` (the
-committed value is an all-zero placeholder). If you pick other bucket or
-database names, change `bucket_name` / `database_name` as well.
-
-```sh
-openssl rand -base64 32 | npx wrangler secret put ADMIN_TOKEN
+openssl rand -base64 32 | npx wrangler secret put BOOTSTRAP_TOKEN
 npx wrangler deploy
+npx wrangler d1 migrations apply DB --remote
 ```
 
-Create a repository and push:
+The first `wrangler deploy` creates the bucket and the database from the
+binding names; no IDs need to be filled in. Later deployments apply new
+migrations first (`wrangler d1 migrations apply DB --remote`, then
+`wrangler deploy`). The Worker never migrates the database itself.
+
+### First admin
 
 ```sh
-curl -X POST https://git-forge.<account>.workers.dev/api/admin/repos \
-  -H "Authorization: Bearer $ADMIN_TOKEN" \
-  -d '{"owner":"acme","name":"site"}'
-git push https://git:$ADMIN_TOKEN@git-forge.<account>.workers.dev/acme/site.git main
-git clone https://git-forge.<account>.workers.dev/acme/site.git
+curl -X POST https://git-forge.<account>.workers.dev/api/bootstrap \
+  -H "Authorization: Bearer $BOOTSTRAP_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"login":"alice"}'
+# {"login":"alice","token":"gfp_…"}
 ```
+
+Keep the returned token; it is shown once. Afterwards the bootstrap token is
+useless and may be deleted (`npx wrangler secret delete BOOTSTRAP_TOKEN`).
+
+```sh
+curl -X POST https://git-forge.<account>.workers.dev/api/repos \
+  -H "Authorization: Bearer $TOKEN" -d '{"owner":"alice","name":"site"}'
+git push https://git:$TOKEN@git-forge.<account>.workers.dev/alice/site.git main
+```
+
+### Federation
+
+To mirror private repositories of other instances, give the instance a key and
+its public URL:
+
+```sh
+pnpm --filter forge-worker instance-key | npx wrangler secret put INSTANCE_KEY
+npx wrangler queues create git-forge-jobs
+npx wrangler deploy --var PUBLIC_URL:https://git-forge.<account>.workers.dev
+```
+
+(or set `PUBLIC_URL` under `vars`). On the upstream an instance admin trusts
+the mirror's URL (`POST /api/admin/instances`), and a repository admin grants
+it the repository (`POST /api/repos/{owner}/{name}/instances`). The mirror then
+configures `POST /api/repos/{owner}/{name}/mirrors` with
+`{"url": "https://upstream.example/owner/name.git", "auth": "instance"}`.
+Upstream refs land under `refs/upstream/origin/*`. To mirror a mirror, use
+`"namespace": "upstream/origin/"`. For push notifications the mirror must
+also trust the upstream (`POST /api/admin/instances` on the mirror), because
+it verifies the upstream's signature; the subscription itself is made by the
+mirror when the mirror is configured and renewed by the daily cron. After a
+push the upstream enqueues one notification per subscriber, the mirror
+enqueues a copy-only sync (`docs/design.md` §4, §7), and a mirror whose refs
+moved notifies its own subscribers, so chains propagate without cron.
 
 To use your own domain, add a `routes` entry with `custom_domain: true` to
 `wrangler.jsonc` or attach the domain in the dashboard.
+
+## Several instances: `alpha`, `beta`, `gamma`
+
+`wrangler.jsonc` defines three environments, each with its own Worker name,
+R2 bucket and D1 database (`git-forge-alpha`, …). Every Cloudflare resource
+comes from the config, nothing is created in the dashboard: buckets and
+databases have names but no IDs, so the first `wrangler deploy` provisions
+them; migrations come from `migrations_dir`; cron, vars and the required
+secret (`secrets.required`) are declared as well. An environment goes from
+nothing to running with:
+
+```sh
+npx wrangler deploy --env alpha
+npx wrangler d1 migrations apply DB --env alpha --remote
+npx wrangler secret put BOOTSTRAP_TOKEN --env alpha
+```
+
+Later deployments apply migrations first, then deploy. For federation each
+environment also needs `INSTANCE_KEY` (secret) and `PUBLIC_URL` (var). Locally:
+
+```sh
+npx wrangler d1 migrations apply DB --env beta --local
+npx wrangler dev --env beta --port 8788
+```
 
 ## Local development
 
 ```sh
 cp .dev.vars.example .dev.vars
+npx wrangler d1 migrations apply DB --local
 pnpm --filter forge-worker dev
 ```
 
@@ -155,33 +223,52 @@ database (Miniflare), persisted under `.wrangler/`. `.dev.vars` is gitignored.
 
 ## Tests
 
-- `pnpm --filter forge-worker test` runs the unit tests of the request
-  handling and then the end-to-end suite.
-- `pnpm --filter forge-worker test:e2e` runs only the end-to-end suite: it
-  starts `wrangler dev` on a free port with a fresh local R2 bucket, creates a
-  repository through the admin endpoint, pushes a generated history of 120
-  commits with the real `git` client, clones it with protocol v2 and with
-  `git -c protocol.version=0` (dumb HTTP), pushes incrementally, force-pushes
-  and checks that the previous tip is kept under `refs/archive/`, and fires the
-  Cron Trigger through `/__scheduled`. A second suite starts a private
-  instance (`PUBLIC_READ=false` with a `READ_TOKEN`), uploads a JPEG with the
-  real `git lfs push` and reads it back through the media and raw URLs
-  (headers, Range, HEAD, `304`, redirect). Together they take about 20 seconds
-  and are part of the root `pnpm test`.
-- `test/e2e/notify.e2e.test.ts` (part of `test:e2e`) runs three instances
-  alpha → beta → gamma in one Node process with the same request handler,
-  SQLite and the in-memory job queue: mirrors subscribe at their upstream, a
-  push of a commit with an LFS object to alpha reaches gamma through
-  notifications alone (no scheduled handler is called, and the first
-  delivery is made to fail to exercise the retry), packs are byte-identical
-  on all three, duplicate notifications are no-ops, notifications from
-  untrusted issuers, with foreign keys, for other audiences or about other
-  repositories are rejected, subscriptions from untrusted instances or with
-  foreign callbacks are refused, and a force push is archived with an alarm
-  on both mirrors.
+- `pnpm --filter forge-worker test` runs the unit tests and then the
+  end-to-end suites (about 25 seconds, part of the root `pnpm test`). Each
+  `wrangler dev` start applies the D1 migrations with
+  `wrangler d1 migrations apply --local` first, as a deployment does.
+- Unit tests (`test/unit`) run the app in Node with `MemoryStorage` and
+  `node:sqlite`: settings, media/raw authorization, branch protection API, bootstrap, admin API, PAT authorization, private
+  defaults, visibility and collaborators, the LFS size limit, federation and
+  scheduled sync between two in-process instances over real HTTP, and the
+  shape of the wrangler environments.
+- `test/e2e/forge.e2e.test.ts` starts `wrangler dev` with a fresh local R2
+  bucket and D1 database, bootstraps an admin, creates repositories, pushes a
+  generated history of 120 commits with the real `git` client, clones it with
+  protocol v2 and with `git -c protocol.version=0` (dumb HTTP), checks that
+  repositories are private by default, pushes incrementally, force-pushes and
+  checks the previous tip under `refs/archive/`, and fires the Cron Trigger
+  through `/__scheduled`.
+- `test/e2e/federation.e2e.test.ts` starts the `alpha`, `beta` and `gamma`
+  environments as three `wrangler dev` processes with their own keys. It
+  pushes a private repository with Git LFS objects to alpha with the real
+  `git` and `git-lfs`; beta mirrors it from alpha, first failing with `401`,
+  then succeeding once alpha trusts beta and grants the repository; gamma
+  mirrors beta's `refs/upstream/origin/*` and may not read alpha directly. A
+  force push on alpha must be archived on alpha, beta and gamma, raise a
+  `history-rewritten` alarm on both mirrors, and bring its new LFS object down
+  the chain. Those syncs are started by the Cron Trigger (which now
+  enqueues them on the local Queue). Finally beta and gamma trust their
+  upstreams, and a new push to alpha must reach beta and gamma through push
+  notifications and the job queues alone, without any cron tick.
+- `test/e2e/notify.e2e.test.ts` runs alpha → beta → gamma as three
+  `createForge` instances in one Node process (own HTTP servers, SQLite,
+  in-memory job queue, real keys): mirrors subscribe at their upstream; a push
+  with an LFS object to alpha reaches gamma through notifications alone (the
+  scheduled handler is never called; the first delivery is made to fail to
+  exercise the retry); packs are byte-identical on all three; duplicate
+  notifications are no-ops; notifications from untrusted issuers, with
+  foreign keys, for other audiences or about other repositories are
+  rejected; subscriptions from untrusted instances or with foreign callbacks
+  are refused; a force push is archived with an alarm on both mirrors; the
+  deep check passes; and a push still succeeds when the job queue is down.
+- `test/e2e/media.e2e.test.ts` starts an instance, issues a `repo:read`
+  token, uploads a JPEG to a private repository with the real `git lfs push`
+  and reads it back through the media and raw URLs (headers, Range, HEAD,
+  `304`, redirect).
 - `pnpm --filter forge-worker bench` measures CPU time and memory per
-  operation (below); `pnpm --filter forge-worker bench:mirror` measures a
-  pure mirror per invocation (further below).
+  operation (below); `pnpm --filter forge-worker bench:mirror` measures a pure
+  mirror per invocation (further below).
 
 The R2 adapter itself is tested inside workerd in `packages/cloudflare`.
 
@@ -232,72 +319,71 @@ Conclusions for the configuration:
 ## A pure mirror on the Workers Free plan
 
 `pnpm --filter forge-worker bench:mirror` runs an upstream instance in a
-child process and a mirror in the measuring process (same request handler,
-SQLite, in-memory job queue, an in-memory bucket that costs no JavaScript CPU
-for ETags, like R2). It pushes generated histories to the upstream with the
-real `git` client and records, for every invocation on the mirror, process
-CPU time, wall time, storage operations and outbound fetches. Each push
-leads to one notification request, one copy-only sync job and one delivery
-job to a subscriber of the mirror. A second set of rows ("replay") repeats
-the notification handling, the sync and the delivery in process against a
-snapshot of the mirror's bucket and the recorded upstream responses; these
-exclude Node's JavaScript HTTP client and server (workerd's `fetch` is
-native) and SQLite (D1 is remote I/O, not CPU), and are the better estimate
-for the Worker. Median (and range) of three runs on the development
-container, Node 22.22:
+child process and a mirror in the measuring process (`createForge` with
+SQLite, the in-memory job queue and an in-memory bucket that, like R2, spends
+no JavaScript CPU on ETags). It pushes generated histories to the upstream
+with the real `git` client and records, for every invocation on the mirror,
+process CPU time, storage operations and outbound fetches. Each push leads to
+one notification request, one copy-only sync job and one delivery job to a
+subscriber of the mirror. The "replay" rows repeat the notification
+handling, the sync job and the delivery in process against a snapshot of the
+mirror's bucket and the recorded upstream responses. They exclude Node's
+JavaScript HTTP client and server (workerd's `fetch` is native) and SQLite
+(D1 is remote I/O, not CPU) and are the better estimate for the Worker; the
+live rows are upper bounds. Median and range of three runs on the
+development container, Node 22.22:
 
 | scenario | invocation | CPU ms, median | range | storage ops | fetches |
 |---|---|---|---|---|---|
-| small repo, initial push (120 commits, 1047 objects, 0.9 MiB pack) | notification request | 10.6 | 9.6–10.9 | 3 | 2 (JWKS, cold) |
-| | sync job | 38.7 | 32.0–45.0 | 23 | 5 |
-| | delivery job | 3.8 | 3.4–4.6 | 1 | 1 |
-| | replay: notification handler | 2.0 | 1.8–2.0 | | |
-| | replay: copy-only sync | 21.8 | 19.2–26.6 | | 5 |
-| | replay: delivery | 1.0 | 1.0–1.6 | | 1 |
-| small repo, incremental push (1 commit, 2 files), 3 pushes | notification request | 5.6–7.1 | 4.3–7.9 | 3 | 0 |
-| | sync job | 11.0–14.5 | 9.8–14.7 | 24–26 | 5 |
-| | delivery job | 2.1–2.8 | 2.0–4.9 | 1 | 1 |
-| | replay: notification handler | 1.6–2.8 | 1.6–5.5 | | |
-| | replay: copy-only sync | 4.6–5.4 | 4.3–8.8 | | 5 |
-| | replay: delivery | 0.7–0.8 | 0.7–4.0 | | 1 |
-| medium repo, initial push (500 commits, 4382 objects, 14.1 MiB pack) | notification request | 3.8 | 3.8–4.0 | 3 | 0 |
-| | sync job | 230.7 | 207.8–295.9 | 22 | 5 |
-| | replay: copy-only sync | 156.0 | 150.8–157.6 | | 5 |
-| medium repo, incremental push (1 commit, 2 files), 3 pushes | notification request | 6.2–6.8 | 5.6–8.6 | 3 | 0 |
-| | sync job | 8.1–9.4 | 8.0–10.4 | 23–25 | 5 |
-| | replay: notification handler | 1.4–2.4 | 1.4–2.5 | | |
-| | replay: copy-only sync | 4.3–4.7 | 3.5–6.3 | | 5 |
-| | replay: delivery | 0.7–2.0 | 0.7–2.8 | | 1 |
-| for comparison: re-indexing sync (fetch strategy, protocol v2) | small / medium | 207 / 874 | | | |
-| deep check | small / medium | 656 / 2 668 | | | |
-| hashing in JavaScript (`@noble/hashes`) | SHA-1 / SHA-256 per MiB | 6.2 / 7.3 | 5.1–13.3 | | |
-| hashing natively (WebCrypto) | SHA-1 / SHA-256 per MiB | 1.8 / 1.2 | 1.0–2.0 | | |
+| small repo, initial push (120 commits, 1047 objects, 0.9 MiB pack) | notification request | 6.8 | 6.6–7.1 | 3 | 2 (JWKS, cold) |
+| | sync job | 33.7 | 31.7–37.0 | 23 | 5 |
+| | delivery job | 3.6 | 3.2–3.9 | 1 | 1 |
+| | replay: notification handler | 1.7 | 1.6–1.8 | | |
+| | replay: copy-only sync job | 21.8 | 20.1–27.1 | | 5 |
+| | replay: delivery job | 0.9 | 0.8–1.0 | | 1 |
+| small repo, incremental push (1 commit, 2 files), 3 pushes | notification request | 4.5–4.6 | 4.1–6.1 | 3 | 0 |
+| | sync job | 8.7–14.0 | 7.9–16.8 | 24–26 | 5 |
+| | delivery job | 1.7–2.0 | 1.5–6.2 | 1 | 1 |
+| | replay: notification handler | 1.4–2.1 | 1.3–2.2 | | |
+| | replay: copy-only sync job | 4.6–5.4 | 3.6–5.8 | | 5 |
+| | replay: delivery job | 0.6–0.7 | 0.6–0.7 | | 1 |
+| medium repo, initial push (500 commits, 4382 objects, 14.1 MiB pack) | notification request | 3.6 | 3.5–3.6 | 3 | 0 |
+| | sync job | 210.0 | 196.0–237.3 | 22 | 5 |
+| | replay: copy-only sync job | 156.9 | 138.0–165.3 | | 5 |
+| medium repo, incremental push (1 commit, 2 files), 3 pushes | notification request | 6.4–10.0 | 6.3–12.9 | 3 | 0 |
+| | sync job | 8.9–13.3 | 8.1–17.1 | 23–25 | 5 |
+| | replay: notification handler | 1.3–1.5 | 1.2–2.0 | | |
+| | replay: copy-only sync job | 4.1–5.6 | 3.3–6.1 | | 5 |
+| | replay: delivery job | 0.6–3.1 | 0.5–3.5 | | 1 |
+| for comparison: re-indexing sync (fetch strategy, protocol v2) into an empty mirror | small / medium | 195 / 858 | | | |
+| deep check | small / medium | 606 / 2 624 | | | |
+| hashing in JavaScript (`@noble/hashes`) | SHA-1 / SHA-256 per MiB | 6.3 / 7.7 | 6.2–10.4 | | |
+| hashing natively (WebCrypto) | SHA-1 / SHA-256 per MiB | 1.8 / 1.3 | 1.1–1.8 | | |
 
 Process CPU time includes V8's garbage-collector threads, and the container
-is noisy (single runs vary by up to ±50 %), so read these as estimates.
+is noisy (single values vary by up to ±50 %); read these as estimates.
 
 **Does a pure mirror fit the Free plan?** Workers Free allows 10 ms CPU per
-invocation, 50 subrequests per invocation (R2, KV and D1 calls count),
-100 000 requests per day and five Cron Triggers; Queues are included with
-10 000 operations per day (about three per message) and Workflows with
-10 ms CPU per step (sources and details in `docs/design.md` §12).
+invocation, 50 subrequests per invocation (calls to R2, KV and D1 count),
+100 000 requests per day and five Cron Triggers per account; Queues are
+included with 10 000 operations per day (about three per message) and
+Workflows with 10 ms CPU per step (sources in `docs/design.md` §12).
 
-- **Yes for the steady state:** a small push costs the mirror about 2 ms
-  for the notification, 5 ms for the copy-only sync and 1 ms per delivery
-  to its own subscribers, each in its own invocation (`max_batch_size: 1`),
-  with about 30 subrequests per sync. Idle, the mirror runs one cron
-  invocation per day.
+- **Yes for the steady state:** a small push costs the mirror about 1.5 ms
+  for the notification, 5 ms for the copy-only sync and under 1 ms per
+  delivery to its own subscribers, each in its own invocation, with about 30
+  subrequests per sync. Idle, the mirror runs one cron invocation per day.
 - **No for bulk data:** the initial copy of a repository, pushes with more
   than about 0.8 MiB of new pack data and LFS objects above about 1 MiB
   exceed 10 ms, because every byte is hashed in JavaScript (SHA-1 for the
   pack trailer, SHA-256 for LFS). The deep check and the re-indexing sync
-  need Workers Paid (or a Node/Pi instance).
+  need Workers Paid (or a Node instance).
 - **Nearly there:** native streaming hashes (`crypto.DigestStream`), one job
-  per pack and per LFS object, and ranged object reads would raise the
-  per-invocation limit to packs of ~3 MiB and LFS objects of ~5 MiB; seeding
-  a mirror once on a larger runtime covers the rest. The full list is in
-  `docs/design.md` §12. A Free-plan deployment must drop `limits.cpu_ms`
-  from `wrangler.jsonc`.
+  per pack and per LFS object, and ranged object reads would raise the limit
+  to packs of ~3 MiB and LFS objects of ~5 MiB per invocation; seeding a
+  mirror once on a larger runtime covers the rest. The list of proposed
+  changes is in `docs/design.md` §12. A Free-plan deployment must drop
+  `limits.cpu_ms` from `wrangler.jsonc`.
 
 ## Cost notes
 
@@ -316,6 +402,7 @@ Workers and R2 pricing pages before relying on them.
   fees. A push performs about six writes (pack, index, pack list, refs, server
   info) and a few reads; a clone a handful of reads. For a 100 GB archive
   storage dominates: about 1.35 USD per month.
-- **D1** holds only the federation tables and stays within its free allowance.
+- **D1** holds accounts, tokens, trust and the audit log: a few row reads
+  per Git request, well within the free allowance for small instances.
 - **Queues:** a notification, a sync and a delivery are three messages per
-  push and mirror, far below the 10 000 free operations per day.
+  push and mirror; idle instances send none.

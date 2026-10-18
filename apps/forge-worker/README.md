@@ -136,7 +136,12 @@ request origin when it is unset.
 Branch protection rules use the GitHub-style API of `@git-forge/accounts`
 (`GET /api/repos/{owner}/{name}/branch-protection`,
 `GET|PUT|DELETE /api/repos/{owner}/{name}/branches/{pattern}/protection`) and
-are enforced on every push and every pull request merge.
+are enforced on every push and every pull request merge. The rules live in
+D1 (`DB`); the API accepts `repo:admin` tokens, instance JWTs and browser
+sessions (CSRF token and same origin on `PUT` and `DELETE`), and
+`receive-pack` asks `createGitAccess(...).pushPolicy` before every ref
+transaction. `forge-node` runs the same `createForge` and gets the same
+wiring over its SQLite file.
 
 Issues, pull requests, reviews, statuses, check runs and discussions are
 served under `/api/v3/repos/{owner}/{name}/…` with GitHub-compatible shapes
@@ -479,7 +484,8 @@ argument.
   the forge; with the UI, pages and the API answer and cross-site form posts
   are refused.
 - Unit tests (`test/unit`) run the app in Node with `MemoryStorage` and
-  `node:sqlite`: settings, media/raw authorization, branch protection API, bootstrap, admin API, PAT authorization, private
+  `node:sqlite`: settings, media/raw authorization, branch protection API and
+  push policy with the real `git` client, bootstrap, admin API, PAT authorization, private
   defaults, visibility and collaborators, the LFS size limit, the import
   endpoint's authorization and validation, federation and
   scheduled sync between two in-process instances over real HTTP, and the
@@ -512,6 +518,13 @@ argument.
   redelivery with the same delivery id, and a release whose asset is uploaded
   to R2, redirected from `browser_download_url` and served by the media URL,
   with the tag visible to `git ls-remote`.
+- `test/e2e/protection.e2e.test.ts` starts `wrangler dev` with a fresh D1
+  database, protects `main` and `release/*` through the API (only the
+  repository admin may), and checks with the real `git` client that a writer's
+  force push and deletion of `main` are rejected as `[remote rejected]`
+  (also with `--atomic`), that `release/*` allows force pushes but no
+  deletion, that fast-forwards still work, and that the admin bypasses the
+  rule until `enforce_admins` is set.
 - `test/e2e/forge.e2e.test.ts` starts `wrangler dev` with a fresh local R2
   bucket and D1 database, bootstraps an admin, creates repositories, pushes a
   generated history of 120 commits with the real `git` client, clones it with

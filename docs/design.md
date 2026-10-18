@@ -262,8 +262,12 @@ the [accounts README](../packages/accounts/README.md#branch-protection).
   `refs/upstream/*` itself. Branch protection applies only to the
   repository's own branches.
 - **Storage:** rules live in the accounts database (migration
-  `0002_branch_protection`), not in the bucket, so a plain clone of a bucket
-  carries no rules. Changes are audited.
+  `0002_branch_protection`; D1 on Cloudflare, an SQLite file on Node), not in
+  the bucket, so a plain clone of a bucket carries no rules. Changes are
+  audited.
+- **API authentication:** repository admins manage rules with `repo:admin`
+  tokens or a browser session; session writes need the CSRF token and the
+  instance's origin (§8), like every other JSON API.
 
 ## 6. Bucket layout
 

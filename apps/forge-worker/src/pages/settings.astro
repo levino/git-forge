@@ -1,5 +1,6 @@
 ---
-import { PASSKEY_SCRIPT, TOKEN_SCOPES } from '@git-forge/accounts'
+import { PASSKEY_SCRIPT } from '@git-forge/accounts'
+import AccessChoice from '../components/AccessChoice.astro'
 import Layout from '../layouts/Layout.astro'
 import { accountAction, type AccountAction, EXPIRY_DAYS } from '../ui/account.ts'
 import { isoTime } from '../ui/format.ts'
@@ -103,17 +104,7 @@ const configJson = JSON.stringify({ returnTo: '/settings', csrf: session.csrf })
         <input type="hidden" name="action" value="create-token" />
         <label class="text-sm font-semibold" for="token-name">Name</label>
         <input id="token-name" name="name" class="input w-full" maxlength="100" required />
-        <fieldset class="flex flex-wrap gap-4">
-          <legend class="text-sm font-semibold mb-1">Scopes</legend>
-          {
-            TOKEN_SCOPES.map((scope) => (
-              <label class="flex items-center gap-2">
-                <input type="checkbox" class="checkbox checkbox-sm" name="scopes" value={scope} checked={scope === 'repo:write'} />
-                <span class="font-mono text-sm">{scope}</span>
-              </label>
-            ))
-          }
-        </fieldset>
+        <AccessChoice selected="repo:write" />
         <label class="text-sm font-semibold" for="token-expires">Expires</label>
         <select id="token-expires" name="expires" class="select w-full">
           {EXPIRY_DAYS.map((days) => <option value={String(days)} selected={days === 90}>in {days} days</option>)}

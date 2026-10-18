@@ -84,7 +84,7 @@ issues, pull requests and discussions.
 - Reactions, search in issues and discussions.
 - Edit and upload files in the browser (commit via form).
 - Releases (§16).
-- `gh auth login`-style device flow for the command line.
+- Browser login for the command line (`git forge auth login`, §8).
 
 **Later / maybe**
 
@@ -623,7 +623,7 @@ SQLite database. A new instance works without an external identity provider.
 | Passkeys (WebAuthn) | Default, built in; passkey-only accounts need no IdP |
 | OIDC (ZITADEL, Keycloak, Authentik, Pocket ID, Google, …) | Connect existing identities; one provider per instance; groups → teams later |
 | Personal access tokens | Git over HTTPS (as HTTP Basic password), JSON API |
-| Device flow (`git forge auth login`, like `gh auth login`) | Command line: issues a `repo:write` token, git uses it through the credential helper |
+| Command-line login (`git forge auth login`) | Paste a one-time code from the browser (PKCE), optionally a loopback redirect or the RFC 8628 device flow; issues a token with the chosen scope, git uses it through the credential helper |
 | Break-glass key | Offline Ed25519 key, opens a short admin session when the IdP is down |
 | SAML, SCIM | Later, for organizations that require them |
 
@@ -700,16 +700,38 @@ including `/api/user/passkeys`), and the login page model carries
 buttons and no ceremony script. Stored credentials are kept, not deleted.
 Break-glass and the device flow are unaffected.
 
-**Device flow.** RFC 8628 with the fixed client id `git-forge-cli`. The user
-code (8 letters without vowels and look-alikes) is entered or confirmed at
-`/login/device` in a signed-in browser, which shows the client name and the
-scope before approval. The first successful poll consumes the authorization
-and issues a personal access token with `repo:write`, 90 days; a poll faster
-than the interval gets `slow_down`. The CLI stores the token per host in
-`~/.config/git-forge/hosts.json` (0600) and configures
-`credential.<host>.helper = !git-forge auth git-credential` (after an empty
-helper, which resets others), so plain `git` and `git-lfs` authenticate
-without tokens in URLs.
+**Access levels.** `repo:read` < `repo:write` < `repo:admin` are cumulative
+ceilings; forms offer one radio choice (`accessChoices`). Effective rights are
+the minimum of ceiling and repository role.
+
+**Command-line login.** `git forge auth login [--scopes …]` gets a 90-day
+token for client id `git-forge-cli`. Consent pages (session + CSRF) show
+client, reported host, request IP, time and a phishing warning; the user may
+lower the requested scope, never raise it.
+
+1. *Paste (default).* `POST /login/cli/start` stores the PKCE challenge (S256)
+   and scope under a random id (`cli_authorizations`, 10 minutes) and returns
+   `/login/cli/{id}`. After approval the page shows a one-time code; the CLI
+   redeems it with the verifier at `POST /login/cli/token`.
+2. *Loopback (`--browser-redirect`, RFC 8252).* Same, but approval redirects
+   to `http://127.0.0.1|[::1]|localhost:{port}` with `code` and `state`; that
+   consent page's CSP `form-action` allows loopback origins.
+3. *Device flow (`--device`, RFC 8628),* for compatibility; the CLI prints
+   `verification_uri_complete`.
+
+All three are phishable the same way (whoever starts the request and sends
+the link gets the token), hence the consent details. Paste works over SSH and
+in containers and a leaked code is useless without the verifier; loopback
+needs a local browser; the device code is the only secret of the device flow.
+The token goes to `hosts.json` (0600) and the git credential helper.
+`git forge repo create` uses it against `POST /api/repos` (needs `repo:admin`).
+
+**Rate limits and purging.** Login, consent and token endpoints are limited
+per client address (`LOGIN_RATE_LIMITS`, sliding window in `rate_limits`,
+`429` with `Retry-After`). The address is `CF-Connecting-IP` on Cloudflare and
+the socket (or last `X-Forwarded-For` hop with `TRUST_PROXY`) on Node. The
+scheduled handler deletes challenges, device and CLI authorizations an hour
+after expiry and stale rate-limit windows.
 
 **Break-glass.** An Ed25519 key pair generated offline
 (`pnpm --filter forge-worker break-glass keygen`); only the public JWK is
@@ -734,7 +756,7 @@ Cloudflare's Free and Pro plans), enforced in the batch API and on `PUT`.
 Not supported, by decision. Serverless functions accept only HTTP; SSH would
 need an always-on host or a TCP-capable container platform, and SSH over
 WebSocket needs client-side configuration. Git uses HTTPS with tokens, made
-convenient by `git forge auth login` (credential helper, device flow, §8).
+convenient by `git forge auth login` (credential helper, browser login, §8).
 
 ## 10. Mirror overview and verification
 

@@ -88,7 +88,7 @@ There is no global "public read" switch any more.
   (cookie) plus the CSRF token from `GET /api/session` in `X-CSRF-Token` for
   every state-changing request from the same origin.
 - **People** sign in interactively with OIDC, passkeys or the break-glass key;
-  the CLI gets a `repo:write` token through the device flow. See
+  the CLI gets a token with the chosen scope through `git forge auth login`. See
   [Login](#login).
 
 ## API
@@ -192,13 +192,19 @@ their tokens and passkeys at `/settings`.
 | `POST /login/passkey/options`, `POST /login/passkey` | WebAuthn authentication (discoverable credentials, user verification required). |
 | `POST /login/passkey/register/options` `{invite?, login?}`, `POST /login/passkey/register` `{handle, credential, name?}` | WebAuthn registration, attestation `none`. With a session (and CSRF token) it adds a passkey to that account; with an invite or `SELF_SIGNUP` it creates the account. |
 | `GET /login/invite/{code}` | Invite page (OIDC or passkey). |
-| `POST /login/device/code` `client_id=git-forge-cli&client_name=…` | RFC 8628 device authorization: `device_code`, `user_code` (`BCDF-GHJK`), `verification_uri`, 15 minutes, interval 5 s. |
-| `GET /login/device?user_code=…`, `POST /login/device` | The user-code page: requires a session, shows the client and scope, approve or deny with the CSRF token. |
-| `POST /login/device/token` | Polling: `authorization_pending`, `slow_down` (interval + 5 s), `access_denied`, `expired_token`, or a `repo:write` personal access token valid 90 days (`access_token`, `login`, `expires_in`). Each approval yields exactly one token. |
+| `POST /login/cli/start` | Starts a CLI login (PKCE S256, scope, `redirect_uri` out-of-band or loopback); returns `authorization_url` `/login/cli/{id}`. |
+| `GET\|POST /login/cli/{id}` | Consent page; approve shows a one-time code or redirects to the loopback URI. |
+| `POST /login/cli/token` | Redeems the code once with the PKCE verifier for a token with the granted scope. |
+| `POST /login/device/code` `client_id=git-forge-cli&client_host=…&scope=…` | RFC 8628 device authorization, 15 minutes, interval 5 s. |
+| `GET /login/device?user_code=…`, `POST /login/device` | Consent page (session, CSRF). |
+| `POST /login/device/token` | Polling: `authorization_pending`, `slow_down`, `access_denied`, `expired_token`, or a 90-day token with the granted scope. |
 | `GET\|POST /login/break-glass` | Paste a token signed with the offline break-glass key; opens a one-hour session for an instance admin. |
 | `POST /logout` | Revokes the session (CSRF token required). |
 | `GET /api/session` | `{login, userId, method, expiresAt, csrfToken, admin}` or `401`. |
 | `GET /api/user/passkeys`, `DELETE /api/user/passkeys/{id}` | The signed-in user's passkeys. |
+
+Login endpoints are rate-limited per `CF-Connecting-IP` (`429`); the cron
+purges expired login state (design §8).
 
 Session cookies are `HttpOnly`, `SameSite=Lax`, `Path=/`, 30 days (break-glass
 one hour), and on `https` origins `Secure` with the `__Host-` prefix
@@ -647,17 +653,21 @@ argument.
   `@git-forge/accounts`: invite and self-signup, phishing origin, missing user
   verification, replayed counters, CSRF and origin checks, OIDC without
   invite, unbound and forged callbacks, the device flow (pending, slow_down,
-  approve, deny, one token per approval) and break-glass (replay, non-admin,
-  foreign key).
+  approve, deny, one token per approval, scope cap), the CLI login (paste,
+  loopback), rate limits, purging and break-glass (replay, non-admin, foreign
+  key).
 - `test/e2e/login.e2e.test.ts` starts `wrangler dev` against a mock OIDC
   provider (ES256) on a local HTTP server: an unknown identity is refused, an
   invite links it to the bootstrapped admin, the session creates a
   repository with its CSRF token; then the real CLI runs
-  `git forge auth login` (device flow, approved through the session), and
-  plain `git push` and `git clone` with an LFS file work through the
-  configured credential helper alone; a passkey-only account is created from
+  `git forge auth login --scopes repo:admin` (code pasted from the consent
+  page), `git forge repo create --remote origin`, and plain `git push` and
+  `git clone` with an LFS file work through the configured credential helper
+  alone; `--browser-redirect` (loopback) and `--device` log in too; a passkey-only account is created from
   an invite and signs in again; the break-glass key opens an admin session
   once.
+- `test/browser/cli-login.spec.ts`: CLI consent in Chromium (code page,
+  loopback redirect under the CSP).
 - `test/unit/events.test.ts` pushes with
   the real `git` client into a forge without a job queue and checks the push
   webhook (commits read from the object database), watcher notifications and

@@ -1,6 +1,6 @@
 import { request as httpRequest } from 'node:http'
 import { afterEach, describe, expect, it } from 'vitest'
-import { type FetchHandler, type RunningServer, serve } from '../src/http.ts'
+import { CLIENT_ADDRESS_HEADER, type FetchHandler, type RunningServer, serve } from '../src/http.ts'
 
 let running: RunningServer | undefined
 
@@ -84,6 +84,16 @@ describe('serve', () => {
     await running!.close()
     const trusting = await start(handler, true)
     expect(await (await fetch(`${trusting}/x`, { headers: forwarded })).text()).toBe('https://forge.example/x')
+  })
+
+  it('sets the client address from the socket, or the last forwarded hop when trusted, never from the client', async () => {
+    const handler: FetchHandler = async (request) => new Response(request.headers.get(CLIENT_ADDRESS_HEADER))
+    const headers = { 'X-Forwarded-For': '198.51.100.1, 203.0.113.5', [CLIENT_ADDRESS_HEADER]: '192.0.2.66' }
+    const plain = await start(handler)
+    expect(await (await fetch(`${plain}/x`, { headers })).text()).toBe('127.0.0.1')
+    await running!.close()
+    const trusting = await start(handler, true)
+    expect(await (await fetch(`${trusting}/x`, { headers })).text()).toBe('203.0.113.5')
   })
 
   it('cancels the response stream when the client goes away', async () => {

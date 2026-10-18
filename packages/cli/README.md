@@ -29,20 +29,19 @@ git clone forge::https://forge.example/acme/site
 
 ```sh
 git forge auth login https://forge.example   # or without URL: the host of origin
+git forge auth login --scopes repo:admin     # also lets you create repositories
 git clone https://forge.example/acme/site.git  # no token in the URL
 git forge auth status
 git forge auth logout https://forge.example
 ```
 
-`auth login` works like `gh auth login`: it asks the forge for a device code
-(`POST /login/device/code`, RFC 8628), prints the code and
-`https://forge.example/login/device`, and polls until you approve the request
-in the browser, signed in with OIDC or a passkey. The forge then issues a
-personal access token with the scope `repo:write` (Git and Git LFS, no admin
-API) valid for 90 days. The token is stored in
-`~/.config/git-forge/hosts.json` (`$XDG_CONFIG_HOME/git-forge`, or
-`GIT_FORGE_CONFIG_DIR`), mode `0600`, and git is configured globally to use it
-for that host only:
+`auth login` prints a short link (opened when a local browser is available),
+you approve in the browser and paste the one-time code shown there. Options:
+`--scopes repo:read|repo:write|repo:admin` (default `repo:write`),
+`--browser-redirect` (code via `http://127.0.0.1:<port>`), `--device`
+(RFC 8628), `--no-browser`, `--no-setup-git`. The token (90 days) is stored in
+`~/.config/git-forge/hosts.json` (mode `0600`, or `GIT_FORGE_CONFIG_DIR`) and
+git uses it for that host:
 
 ```ini
 [credential "https://forge.example"]
@@ -54,9 +53,19 @@ The empty `helper =` resets other helpers for that host, so a stale password
 from the system keychain is never tried first. `git forge auth git-credential
 get` answers git's credential protocol from `hosts.json` (`username` is your
 login, `password` the token); `store` and `erase` do nothing, so a rejected
-token stays until you log in again. `--no-setup-git` skips the git
-configuration; `git forge auth setup-git [<url>]` writes it later and
-`git forge auth token [<url>]` prints the token for scripts.
+token stays until you log in again. `git forge auth setup-git [<url>]` writes
+the git configuration later and `git forge auth token [<url>]` prints the
+token for scripts.
+
+## Creating repositories
+
+```sh
+git forge repo create acme/site --public --remote origin
+git forge repo create notes                  # owned by you, private
+```
+
+`repo create` needs a `repo:admin` token, prints the clone URL and with
+`--remote` adds it to the current repository.
 
 ## Remote helper `git-remote-forge`
 

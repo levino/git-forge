@@ -146,7 +146,7 @@ describe('full-text search', () => {
 
   it('finds repositories by name and never leaks private ones', async () => {
     const { db, principals } = await fresh()
-    const found = async (principal: Principal, q: string) => ((await search(db, principal, 'repositories', q)).page.items as { owner: string; name: string }[]).map((repo) => `${repo.owner}/${repo.name}`)
+    const found = async (principal: Principal, q: string) => ((await search(db, principal, 'repositories', q)).page.items as unknown as { owner: string; name: string }[]).map((repo) => `${repo.owner}/${repo.name}`)
     expect(await found(principals.carol!, 'vau')).toEqual(['village/vault'])
     expect(await found(principals.anonymous!, 'vault')).toEqual([])
     expect(await found(principals.bob!, 'vault')).toEqual([])
@@ -159,7 +159,7 @@ describe('full-text search', () => {
     await issue(db, repos.notes.id, 1, 'Secret plans', 'the zebra escapes')
     await issue(db, repos.notes.id, 2, 'Merge me', null, 1)
     await comment(db, await issueId(db, repos.notes.id, 2), 'mentions a zebra too')
-    const titles = async (principal: Principal, q: string) => ((await search(db, principal, 'issues', q)).page.items as { title: string }[]).map((hit) => hit.title).sort()
+    const titles = async (principal: Principal, q: string) => ((await search(db, principal, 'issues', q)).page.items as unknown as { title: string }[]).map((hit) => hit.title).sort()
     expect(await titles(principals.anonymous!, 'zebra')).toEqual(['Public zebra'])
     expect(await titles(principals.bob!, 'zebra')).toEqual(['Public zebra'])
     expect(await titles(principals.alice!, 'zebra')).toEqual(['Merge me', 'Public zebra', 'Secret plans'])
@@ -184,7 +184,7 @@ describe('full-text search', () => {
     )
     expect((await search(db, principals.bob!, 'discussions', 'agenda')).page.total).toBe(1)
     expect((await search(db, principals.carol!, 'discussions', 'agenda')).page.total).toBe(0)
-    expect(((await search(db, ANONYMOUS, 'users', 'vil')).page.items as { login: string }[]).map((hit) => hit.login)).toEqual(['village'])
+    expect(((await search(db, ANONYMOUS, 'users', 'vil')).page.items as unknown as { login: string }[]).map((hit) => hit.login)).toEqual(['village'])
     await store.disableAccount(ids.town)
     expect((await search(db, principals.bob!, 'discussions', 'agenda')).page.total).toBe(0)
     expect((await search(db, ANONYMOUS, 'users', 'town')).page.total).toBe(0)

@@ -36,6 +36,10 @@ const instanceAdmin = session !== null && session !== undefined && (await Astro.
             <span class="truncate">{host}</span>
           </a>
           <a href="/explore" class="text-base-content/70 hover:text-base-content font-medium">Explore</a>
+          <form action="/search" method="get" role="search" class="hidden md:block flex-1 max-w-xs">
+            <input type="search" name="q" class="input input-sm w-full" placeholder="Search" aria-label="Search" />
+          </form>
+          <a href="/search" class="md:hidden btn btn-ghost btn-sm btn-square" aria-label="Search"><Icon name="search" /></a>
         </div>
         <div class="flex-none flex items-center gap-1">
           {

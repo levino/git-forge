@@ -208,7 +208,22 @@ export const parseFetchResponse = async (stream: ReadableStream<Uint8Array>, max
   return { acks, ready, pack: sawPack ? concat(packParts) : null, progress }
 }
 
-export class HaveWalker {
+export type HaveSource = {
+  next(count: number, common: ReadonlySet<ObjectId>): Promise<ObjectId[]>
+}
+
+export const fixedHaves = (ids: readonly ObjectId[]): HaveSource => {
+  let sent = false
+  return {
+    next: async () => {
+      if (sent) return []
+      sent = true
+      return [...new Set(ids)]
+    },
+  }
+}
+
+export class HaveWalker implements HaveSource {
   readonly #source: ObjectSource
   readonly #queue: ObjectId[]
   readonly #seen = new Set<ObjectId>()
@@ -252,7 +267,8 @@ export class HaveWalker {
 
 export type FetchPackOptions = {
   readonly wants: readonly ObjectId[]
-  readonly haves: HaveWalker
+  readonly haves: HaveSource
+  readonly filter?: string
   readonly maxPackBytes?: number
   readonly maxHaves?: number
 }
@@ -263,8 +279,11 @@ export type FetchedPack = {
   readonly common: readonly ObjectId[]
 }
 
+export const fetchFeatures = (capabilities: V2Capabilities): ReadonlySet<string> => new Set((capabilities.get('fetch') ?? '').split(' ').filter(Boolean))
+
 export const fetchPackV2 = async (remote: Remote, capabilities: V2Capabilities, options: FetchPackOptions): Promise<FetchedPack> => {
   if (!capabilities.has('fetch')) throw new RemoteError('remote does not support fetch')
+  if (options.filter && !fetchFeatures(capabilities).has('filter')) throw new RemoteError('remote does not support filter')
   const maxHaves = options.maxHaves ?? 2048
   const common = new Set<ObjectId>()
   let sent = 0
@@ -276,6 +295,7 @@ export const fetchPackV2 = async (remote: Remote, capabilities: V2Capabilities, 
     const args = [
       'ofs-delta',
       'no-progress',
+      ...(options.filter ? [`filter ${options.filter}`] : []),
       ...options.wants.map((id) => `want ${id}`),
       ...[...common, ...batch].map((id) => `have ${id}`),
       ...(done ? ['done'] : []),

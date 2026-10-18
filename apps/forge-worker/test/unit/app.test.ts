@@ -1,9 +1,9 @@
 import { generateSigningKey, type SigningKey } from '@git-forge/accounts'
-import { readRefs } from '@git-forge/core'
+import { type ImportJob, readImportState, readRefs } from '@git-forge/core'
 import { initRepo, sampleHistory } from '@git-forge/core/test/git-helpers.ts'
 import { type RunningServer, startServer } from '@git-forge/core/test/http-server.ts'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { secretMatches } from '../../src/app.ts'
+import { basicAuthorization, secretMatches } from '../../src/app.ts'
 import { git } from '../e2e/history.ts'
 import { DEFAULT_MAX_LFS_OBJECT_BYTES, parseSettings } from '../../src/config.ts'
 import { upstreamRepository } from '../../src/mirrors.ts'
@@ -254,6 +254,78 @@ describe('federation between two instances', () => {
   })
 })
 
+describe('import endpoint', () => {
+  let forge: NodeForge
+  let admin: string
+  let alice: string
+  let aliceWrite: string
+  let bob: string
+  const jobs: { job: ImportJob; delay: number }[] = []
+
+  beforeAll(async () => {
+    forge = await nodeForge({ scheduleImport: async (job, delay) => void jobs.push({ job, delay }) })
+    admin = await bootstrap(forge, BASE)
+    for (const login of ['alice', 'bob']) await call(forge, BASE, 'POST', '/api/admin/users', admin, { login })
+    const token = async (login: string, scopes: string[]) =>
+      (await json<{ token: string }>(await call(forge, BASE, 'POST', `/api/admin/users/${login}/tokens`, admin, { scopes }))).token
+    alice = await token('alice', ['repo:admin'])
+    aliceWrite = await token('alice', ['repo:write'])
+    bob = await token('bob', ['repo:admin'])
+  })
+
+  it('creates the repository for its owner and schedules the first step with the credentials', async () => {
+    const response = await call(forge, BASE, 'POST', '/api/repos/alice/site/import', alice, {
+      url: 'https://github.com/acme/site.git',
+      token: 'ghp_x',
+      commitsPerStep: 50,
+      defaultBranch: 'trunk',
+    })
+    expect(response.status).toBe(202)
+    expect(response.headers.get('Location')).toBe('https://forge.example/api/repos/alice/site/import')
+    expect(await json(response)).toMatchObject({ phase: 'discover', url: 'https://github.com/acme/site.git', commitsPerStep: 50, cloneUrl: 'https://forge.example/alice/site.git' })
+    expect(jobs).toEqual([{ job: { owner: 'alice', name: 'site', authorization: basicAuthorization('git', 'ghp_x') }, delay: 0 }])
+    expect((await readRefs(forge.storage, { owner: 'alice', name: 'site' }))?.state.head).toBe('refs/heads/trunk')
+    expect(JSON.stringify(await readImportState(forge.storage, { owner: 'alice', name: 'site' }))).not.toContain('ghp_x')
+    const status = await call(forge, BASE, 'GET', '/api/repos/alice/site/import', alice)
+    expect(status.status).toBe(200)
+    expect(await json(status)).toMatchObject({ phase: 'discover' })
+    expect((await call(forge, BASE, 'POST', '/api/repos/alice/site/import', alice, { url: 'https://github.com/acme/site.git' })).status).toBe(409)
+  })
+
+  it('needs repository admin or instance admin from the verified token', async () => {
+    const url = 'https://example.org/x.git'
+    expect((await call(forge, BASE, 'POST', '/api/repos/alice/site/import', undefined, { url })).status).toBe(401)
+    expect((await call(forge, BASE, 'POST', '/api/repos/alice/site/import', aliceWrite, { url })).status).toBe(403)
+    expect((await call(forge, BASE, 'POST', '/api/repos/alice/site/import', bob, { url })).status).toBe(404)
+    expect((await call(forge, BASE, 'GET', '/api/repos/alice/site/import', bob)).status).toBe(404)
+    expect((await call(forge, BASE, 'POST', '/api/repos/alice/fresh/import', bob, { url })).status).toBe(403)
+    expect((await call(forge, BASE, 'POST', '/api/repos/bob/tools/import', admin, { url })).status).toBe(202)
+  })
+
+  it('validates the request', async () => {
+    const before = jobs.length
+    expect((await call(forge, BASE, 'POST', '/api/repos/alice/v1/import', alice, { url: 'ftp://x/y.git' })).status).toBe(400)
+    expect((await call(forge, BASE, 'POST', '/api/repos/alice/v2/import', alice, { url: 'https://user:pw@x/y.git' })).status).toBe(400)
+    expect((await call(forge, BASE, 'POST', '/api/repos/alice/v3/import', alice, { url: 'https://x/y.git', commitsPerStep: -1 })).status).toBe(400)
+    expect((await call(forge, BASE, 'POST', '/api/repos/alice/v4/import', alice, { url: 'https://x/y.git', token: 5 })).status).toBe(400)
+    expect((await call(forge, BASE, 'POST', '/api/repos/alice/v5/import', alice, {})).status).toBe(400)
+    expect((await call(forge, BASE, 'DELETE', '/api/repos/alice/site/import', alice)).status).toBe(405)
+    expect(jobs.length).toBe(before)
+    expect((await call(forge, BASE, 'GET', '/api/repos/alice/v1/import', alice)).status).toBe(404)
+    expect(await readRefs(forge.storage, { owner: 'alice', name: 'v2' })).toBeNull()
+  })
+
+  it('needs a queue', async () => {
+    const plain = await nodeForge()
+    const token = await bootstrap(plain, BASE)
+    expect((await call(plain, BASE, 'POST', '/api/repos/admin/x/import', token, { url: 'https://x/y.git' })).status).toBe(503)
+  })
+
+  it('encodes non-ASCII credentials as UTF-8', () => {
+    expect(basicAuthorization('git', 'pässword')).toBe(`Basic ${Buffer.from('git:pässword').toString('base64')}`)
+  })
+})
+
 describe('deployment configuration', () => {
   it('gives every wrangler environment its own Worker, bucket and database with the same vars and migrations', async () => {
     const { readFileSync } = await import('node:fs')
@@ -267,6 +339,10 @@ describe('deployment configuration', () => {
     for (const [name, config] of Object.entries(env)) {
       expect(config).toEqual({
         name: `git-forge-${name}`,
+        queues: {
+          producers: [{ binding: 'IMPORTS', queue: `git-forge-${name}-imports` }],
+          consumers: [{ queue: `git-forge-${name}-imports`, max_batch_size: 1, max_batch_timeout: 1, max_retries: 3 }],
+        },
         r2_buckets: [{ binding: 'BUCKET', bucket_name: `git-forge-${name}` }],
         d1_databases: [{ binding: 'DB', database_name: `git-forge-${name}`, migrations_dir: migrations }],
         vars: app.vars,

@@ -18,6 +18,10 @@ writes into `out-dir` (default `release/dist`):
 and prints the SHA-256 of `SHA256SUMS`, which is the `sha256` an instance pins
 in `git-forge.json`.
 
+The release workflow also attaches the single executables of the `git-forge`
+CLI (`packages/cli/build-executables.sh`, built with Bun) and their checksums
+in a separate `CLI-SHA256SUMS`.
+
 `.github/workflows/release.yml` runs the script on every `v*` tag, on a push to
 `main` that changes `release/VERSION` (it then creates the tag `v<VERSION>` on
 that commit unless the release exists already) and on manual dispatch, and

@@ -106,6 +106,27 @@ collaborators, instance federation and mirrors are described in the
 To mirror private repositories of other instances, also set the secret
 `INSTANCE_KEY` and the var `PUBLIC_URL` (see there).
 
+## Imports (optional)
+
+`POST /api/admin/repos/<owner>/<name>/import` creates a repository by pulling
+it from another Git server, without the request body limit of a push. Its
+steps run on a Cloudflare Queue, which this template does not declare by
+default. To enable imports, create the queue once and add it to
+`wrangler.jsonc`:
+
+```sh
+npx wrangler queues create git-forge-imports
+```
+
+```jsonc
+"queues": {
+  "producers": [{ "binding": "IMPORTS", "queue": "git-forge-imports" }],
+  "consumers": [{ "queue": "git-forge-imports", "max_batch_size": 1, "max_batch_timeout": 1, "max_retries": 3 }]
+}
+```
+
+Without the queue the endpoint answers `503`; everything else works.
+
 ## Update
 
 An update is a change of `git-forge.json`:

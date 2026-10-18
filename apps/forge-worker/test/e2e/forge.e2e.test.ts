@@ -1,5 +1,12 @@
+import { execFile } from 'node:child_process'
+import { randomBytes } from 'node:crypto'
+import { writeFileSync } from 'node:fs'
+import { resolve } from 'node:path'
+import { promisify } from 'node:util'
+import { startServer } from '@git-forge/core/test/http-server.ts'
+import { basicAuth, chain, httpBackendHandler, requireAuthorization } from '@git-forge/core/test/mirror-helpers.ts'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { generateHistory, git, gitFails, tempDir } from './history.ts'
+import { generateHistory, git, gitEnv, gitFails, tempDir } from './history.ts'
 import { startWranglerDev, type WranglerDev } from './wrangler-dev.ts'
 
 const BOOTSTRAP_TOKEN = `e2e-${crypto.randomUUID()}`
@@ -122,6 +129,55 @@ describe('forge worker on wrangler dev', () => {
     await git(`${target}/out`, ['fetch', '-q', 'origin', archived!.split('\t')[1]!])
     expect((await git(`${target}/out`, ['rev-parse', 'FETCH_HEAD'])).trim()).toBe(previous)
     expect(await gitFails(source, ['push', pushRemote, `${rewritten}:${archived!.split('\t')[1]!}`])).toMatch(/invalid ref name|rejected/)
+  })
+
+  it('imports a repository from a git http server through the queue', async () => {
+    const root = tempDir()
+    await git(root, ['clone', '-q', '--bare', source, 'upstream.git'])
+    await git(`${root}/upstream.git`, ['config', 'uploadpack.allowFilter', 'true'])
+    const upstream = await startServer(chain(requireAuthorization(basicAuth('git', 'upstream-token')), httpBackendHandler(root)))
+    try {
+      const response = await api('/api/repos/e2e/imported/import', { url: `${upstream.url}/upstream.git`, token: 'upstream-token', commitsPerStep: 40 })
+      expect(response.status).toBe(202)
+      const status = async () =>
+        (await (await fetch(`${dev.url}/api/repos/e2e/imported/import`, { headers: { Authorization: `Bearer ${token}` } })).json()) as {
+          phase: string
+          steps: number
+          stepped: boolean
+          error?: string
+        }
+      await expect.poll(async () => (await status()).phase, { timeout: 50_000, interval: 500 }).toBe('done')
+      const final = await status()
+      expect(final.stepped).toBe(true)
+      expect(final.steps).toBeGreaterThan(4)
+      const target = tempDir()
+      await git(target, ['clone', '-q', '--mirror', `${dev.url}/e2e/imported.git`.replace('http://', `http://git:${token}@`), 'out.git'])
+      expect(await git(`${target}/out.git`, ['fsck', '--full', '--strict'])).toBe('')
+      const heads = async (dir: string) => git(dir, ['for-each-ref', '--format=%(objectname) %(refname)', 'refs/heads', 'refs/tags'])
+      expect(await heads(`${target}/out.git`)).toBe(await heads(`${root}/upstream.git`))
+    } finally {
+      await upstream.close()
+    }
+  })
+
+  it('splits a push above the worker limit with git forge push', async () => {
+    expect((await api('/api/repos', { owner: 'e2e', name: 'large' })).status).toBe(201)
+    const large = tempDir()
+    await git(large, ['init', '-q', '-b', 'main'])
+    for (let i = 0; i < 12; i++) {
+      writeFileSync(`${large}/blob-${i}.bin`, randomBytes(2 * 1024 * 1024))
+      await git(large, ['add', '-A'])
+      await git(large, ['commit', '-q', '-m', `large ${i}`])
+    }
+    const url = `${dev.url}/e2e/large.git`.replace('http://', `http://git:${token}@`)
+    expect(await gitFails(large, ['push', url, 'main'])).toMatch(/413|exceeds|RPC failed|unexpected disconnect/i)
+    const cli = resolve(import.meta.dirname, '../../../../packages/cli/src/main.ts')
+    const { stderr } = await promisify(execFile)(process.execPath, ['--no-warnings', cli, 'push', '--max-bytes', '8MiB', url, 'main'], {
+      cwd: large,
+      env: { ...process.env, ...gitEnv },
+    })
+    expect(stderr).toContain('chunk 2')
+    expect(await git(large, ['ls-remote', url, 'refs/heads/main'])).toContain((await git(large, ['rev-parse', 'main'])).trim())
   })
 
   it('runs the scheduled mirror sync', async () => {

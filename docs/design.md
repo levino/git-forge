@@ -182,8 +182,8 @@ storage. Mirrors therefore do not poll; the upstream tells them.
   `MIRROR_INTERVAL_MINUTES` = 1440 in `wrangler.jsonc`) and enqueues a sync
   and a subscription renewal for every auto mirror whose last run is older
   than the interval. `apps/forge-node` does the same from its own cron
-  schedule (`SCHEDULE`, default the same `17 3 * * *`) with an in-process job
-  queue. Without a job queue, `PUBLIC_URL` or `INSTANCE_KEY` there are no
+  schedule (`SCHEDULE`, default the same `17 3 * * *`) with its job table in
+  the SQLite file. Without a job queue, `PUBLIC_URL` or `INSTANCE_KEY` there are no
   notifications and the scheduled handler syncs inline, so a shorter interval
   is the right choice there. The rare deep check (§7) is enqueued every
   `MIRROR_DEEP_CHECK_DAYS` (default 30, 0 = off).
@@ -447,12 +447,12 @@ five failures in a row the import is `failed`, and starting it again with the
 same URL resumes at the failed phase. An import whose state has not changed
 for 30 minutes (`STALE_IMPORT_MS`; a live import writes its state at least
 every 10 minutes) counts as abandoned, for example because the process that
-drove it restarted and lost its in-memory job: starting it again with the same
+drove it lost its job: starting it again with the same
 URL takes it over at its current phase. Credentials are never written to the
 bucket: the token travels with each scheduled step. Steps are driven by the
 scheduling adapter (`ImportScheduler`): a Cloudflare Queue in the Worker
-(each message is one step in its own invocation), the in-process job queue in
-`apps/forge-node`, a simple loop (`runImport`) elsewhere.
+(each message is one step in its own invocation), the SQLite job table in
+`apps/forge-node` (so the steps survive a restart), a simple loop (`runImport`) elsewhere.
 
 **Fetch** — public: dumb HTTP directly from the bucket/CDN. Private or
 protocol v2 clients: `upload-pack` (smart HTTP protocol v2), streamed:
@@ -860,7 +860,7 @@ database.
 | Per-repository consistency | Durable Object | conditional writes (S3 CAS), single-writer process |
 | Scheduling, jobs | Cron Triggers, Queues (Workflows for long jobs) | `Deno.cron`, systemd timers, job table, in-process queue |
 | Public LFS bucket (`LfsPublisher`) | second R2 bucket (`CDN_BUCKET`) | any `Storage`: S3 bucket, local directory (`LFS_PUBLISH_DIR`) |
-| Email | Amazon SES v2 HTTP API (`@git-forge/ses`, SigV4 via `aws4fetch`, runs on Workers and Node) | SMTP for the Node deployment (later); a console adapter for development |
+| Email | Amazon SES v2 HTTP API (`@git-forge/ses`, SigV4 via `aws4fetch`, runs on Workers and Node) | SMTP for the Node deployment (`@git-forge/smtp`); a console adapter for development |
 | Compute for CI | Containers | external per-minute providers via the GHES API (WarpBuild, AWS CodeBuild, RunsOn), Fly Machines, a local process |
 
 **Jobs:** the core defines `JobQueue<J>` (`enqueue(job, { delaySeconds })`),
@@ -871,10 +871,15 @@ CPU budget); `createMemoryJobQueue` runs jobs in process (Node, tests), with
 an optional `concurrency` limit, `keepHistory: false` for long-running
 processes and an `onOutcome` callback for logging. Jobs are plain JSON
 (repository, remote, callback), so a retry re-reads current state instead of
-replaying old data. In-process jobs are not durable: whatever is queued when
-the process stops is lost. Every job kind tolerates that: mirror state is
-re-derived by the next notification or scheduled run, and an abandoned import
-is taken over after 30 minutes (§7).
+replaying old data. Memory jobs are lost when the process stops.
+
+**Durable jobs (`apps/forge-node/src/jobs.ts`).** `createSqliteJobQueue`
+implements `JobQueue<J>` on the `jobs` table (migration `0021_jobs`). A claim
+is one `UPDATE … RETURNING` that increments `attempts` and takes a lease
+(60 s, renewed while running); `attempts` fences later updates. Finished or
+finally failed jobs are deleted, failed attempts get `run_at` moved by
+`jobRetryDelaySeconds`. After a crash the lease expires and the job runs
+again (at least once delivery); the lost run counts as an attempt.
 
 **Node deployment (`apps/forge-node`).** The same router as the Worker
 (`createForge` from `apps/forge-worker/src/app.ts`, imported as
@@ -883,18 +888,23 @@ from `@git-forge/node` adapts it to `node:http` with streaming request and
 response bodies; `FsStorage` or `S3Storage` hold repository data; the SQLite
 file is opened with `@git-forge/accounts-node` (`node:sqlite`, WAL);
 `nodeDigests` hashes with `node:crypto`; background jobs and import steps run
-in two `createMemoryJobQueue`s with the Worker's job handler and retry policy;
+in two durable SQLite job queues (above) with the Worker's job handler and
+retry policy; email goes out through the configured `EmailSender` (SMTP, SES
+or console);
 a cron scheduler (five-field expressions in UTC) calls the same `scheduled`
 as the Worker's Cron Trigger. Configuration uses the Worker's variable names
 plus `PORT`, `HOST`, `TRUST_PROXY`, `DATA_DIR`, `DATABASE_PATH`, `STORAGE`,
-`STORAGE_DIR`, `S3_*`, `SCHEDULE` and `JOB_CONCURRENCY`. Like the Worker it
+`STORAGE_DIR`, `S3_*`, `SCHEDULE`, `JOB_CONCURRENCY` and `SMTP_*`
+(`EMAIL_PROVIDER=smtp`). Like the Worker it
 never migrates implicitly: `git-forge-node migrate` applies the bundled
 `MIGRATIONS` (the same SQL files as `migrations_dir`, kept in sync by a test
 in `@git-forge/accounts`), and `serve` refuses to start while
 `pendingMigrations` is not empty. It runs on Node 22 and, compiled with
 `bun build --compile`, as a single executable for `linux-x64` and
 `linux-arm64` (Bun implements `node:http`, `node:sqlite` and `node:crypto`);
-a Dockerfile builds a distroless image and `deploy/` has systemd units. The
+a Dockerfile builds a distroless image (published as
+`ghcr.io/levino/git-forge-node` for `linux/amd64` and `linux/arm64` with every
+release) and `deploy/` has systemd units. The
 E2E suite runs a Worker under `wrangler dev` and the Node instance (from
 source or the executable) side by side and mirrors in both directions with
 notifications.
@@ -1553,6 +1563,10 @@ update themselves.
   `release/VERSION`) and `NODE-SHA256SUMS`. They need no template: install the
   executable, run `migrate`, start `serve` (systemd units and a Dockerfile in
   `apps/forge-node`).
+- **Container image:** the `image` job of the release workflow pushes
+  `apps/forge-node/Dockerfile` for `linux/amd64` and `linux/arm64` to
+  `ghcr.io/levino/git-forge-node` (`<version>`; releases also
+  `<major>.<minor>` and `latest`) with `GITHUB_TOKEN`.
 
 ### Test instances
 
@@ -1619,13 +1633,15 @@ GitHub's model, per user:
 
 `EmailSender.send(message)` is the adapter (`createMemoryEmailSender` for
 tests, `createConsoleEmailSender` for development, `createSesEmailSender` for
-production). SES uses the v2 `SendEmail` API with a simple message (subject,
+production, `createSmtpEmailSender` from `@git-forge/smtp` for the Node
+deployment). SES uses the v2 `SendEmail` API with a simple message (subject,
 text, HTML, `List-Unsubscribe` and auto-reply suppression headers), signed
 with SigV4; `4xx` answers are permanent (`EmailRejectedError`), throttling
-and `5xx` are retried by the job queue. SMTP for the Node deployment is
-another adapter of the same interface, not built yet (Workers cannot open TCP
-connections to arbitrary SMTP servers without `connect()`, and SES covers
-the Cloudflare deployment).
+and `5xx` are retried by the job queue. SMTP (`@git-forge/smtp`, `node:net`
+and `node:tls`, Node only): one connection per message, STARTTLS (required),
+implicit TLS or plain without credentials, `AUTH PLAIN`/`LOGIN`, MIME with
+base64 parts. `5xx` throws `EmailRejectedError`, everything else `SmtpError`
+(retried).
 
 Digests: when a notification should be emailed, the user's
 `digest_due_at` is claimed by compare-and-swap (`… WHERE digest_due_at IS

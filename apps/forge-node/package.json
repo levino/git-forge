@@ -20,6 +20,8 @@
     "@git-forge/core": "workspace:*",
     "@git-forge/node": "workspace:*",
     "@git-forge/s3": "workspace:*",
+    "@git-forge/ses": "workspace:*",
+    "@git-forge/smtp": "workspace:*",
     "forge-worker": "workspace:*"
   },
   "devDependencies": {

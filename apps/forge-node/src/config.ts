@@ -1,5 +1,6 @@
 import type { S3StorageConfig } from '@git-forge/s3'
-import { ConfigurationError, type ForgeVars } from 'forge-worker/config'
+import type { SmtpSecurity } from '@git-forge/smtp'
+import { ConfigurationError, type EmailSettings, type ForgeVars, parseEmailSettings } from 'forge-worker/config'
 import { type CronSchedule, CronError, parseCron } from './cron.ts'
 
 export type NodeVars = ForgeVars & {
@@ -19,8 +20,27 @@ export type NodeVars = ForgeVars & {
   readonly S3_FORCE_PATH_STYLE?: string
   readonly SCHEDULE?: string
   readonly JOB_CONCURRENCY?: string
+  readonly SMTP_HOST?: string
+  readonly SMTP_PORT?: string
+  readonly SMTP_SECURITY?: string
+  readonly SMTP_USERNAME?: string
+  readonly SMTP_PASSWORD?: string
+  readonly SMTP_HELO?: string
   readonly LFS_PUBLISH_DIR?: string
 }
+
+export type SmtpSettings = {
+  readonly provider: 'smtp'
+  readonly from: string
+  readonly host: string
+  readonly port?: number
+  readonly security: SmtpSecurity
+  readonly username?: string
+  readonly password?: string
+  readonly helo?: string
+}
+
+export type NodeEmailSettings = EmailSettings | SmtpSettings
 
 export type StorageConfig = { readonly kind: 'fs'; readonly dir: string } | { readonly kind: 's3'; readonly config: S3StorageConfig }
 
@@ -32,6 +52,7 @@ export type NodeConfig = {
   readonly storage: StorageConfig
   readonly schedule: CronSchedule
   readonly jobConcurrency: number
+  readonly email: NodeEmailSettings | undefined
   readonly lfsPublishDir: string | null
 }
 
@@ -104,6 +125,44 @@ const schedule = (value: string | undefined): CronSchedule => {
   }
 }
 
+const SMTP_SECURITY: readonly SmtpSecurity[] = ['starttls', 'tls', 'none']
+
+const smtpSettings = (vars: NodeVars, from: string): SmtpSettings => {
+  const host = present(vars.SMTP_HOST)
+  if (!host) throw new ConfigurationError('SMTP_HOST is required with EMAIL_PROVIDER=smtp')
+  const security = (present(vars.SMTP_SECURITY) ?? 'starttls') as SmtpSecurity
+  if (!SMTP_SECURITY.includes(security)) throw new ConfigurationError('SMTP_SECURITY must be starttls, tls or none')
+  const username = present(vars.SMTP_USERNAME)
+  const password = vars.SMTP_PASSWORD === undefined || vars.SMTP_PASSWORD === '' ? undefined : vars.SMTP_PASSWORD
+  if ((username === undefined) !== (password === undefined)) throw new ConfigurationError('SMTP_USERNAME and SMTP_PASSWORD go together')
+  if (username !== undefined && security === 'none') throw new ConfigurationError('SMTP_USERNAME needs SMTP_SECURITY=starttls or tls')
+  const port = present(vars.SMTP_PORT) === undefined ? undefined : integer('SMTP_PORT', vars.SMTP_PORT, 0, 1, 65535)
+  const helo = present(vars.SMTP_HELO)
+  return {
+    provider: 'smtp',
+    from,
+    host,
+    security,
+    ...(port !== undefined ? { port } : {}),
+    ...(username !== undefined && password !== undefined ? { username, password } : {}),
+    ...(helo ? { helo } : {}),
+  }
+}
+
+const emailSettings = (vars: NodeVars): NodeEmailSettings | undefined => {
+  if (present(vars.EMAIL_PROVIDER) !== 'smtp') {
+    try {
+      return parseEmailSettings(vars)
+    } catch (error) {
+      if (error instanceof ConfigurationError && /EMAIL_PROVIDER must be/.test(error.message)) throw new ConfigurationError('EMAIL_PROVIDER must be none, console, ses or smtp')
+      throw error
+    }
+  }
+  const from = present(vars.EMAIL_FROM)
+  if (!from) throw new ConfigurationError('EMAIL_FROM is required when EMAIL_PROVIDER is set')
+  return smtpSettings(vars, from)
+}
+
 export const parseNodeConfig = (vars: NodeVars): NodeConfig => {
   const dataDir = present(vars.DATA_DIR) ?? DEFAULT_DATA_DIR
   return {
@@ -114,6 +173,7 @@ export const parseNodeConfig = (vars: NodeVars): NodeConfig => {
     storage: storageConfig(vars, dataDir),
     schedule: schedule(vars.SCHEDULE),
     jobConcurrency: integer('JOB_CONCURRENCY', vars.JOB_CONCURRENCY, DEFAULT_JOB_CONCURRENCY, 1, 64),
+    email: emailSettings(vars),
     lfsPublishDir: present(vars.LFS_PUBLISH_DIR) ?? null,
   }
 }

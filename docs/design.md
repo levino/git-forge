@@ -1783,19 +1783,24 @@ instance, kept somewhere that cannot be rewritten.
 - **Repository data.** The bucket is append-only by design (§6): packs, idx
   files and LFS objects are written once under their hash, only a few small
   files (`refs.json`, `objects/info/packs`, `info/refs`, `HEAD`, mirror
-  status) are rewritten. Copy it to a second bucket with Object Lock
+  status) are rewritten. Replicate it to a second bucket with Object Lock
   (compliance mode, versioning on), so every rewritten file keeps its old
   versions for the retention period and nothing can be deleted early, not
-  even with the backup credentials. `tmp/` is not needed.
+  even with the backup credentials. The target can be another R2 bucket with
+  a bucket lock rule, or B2, Hetzner or any S3 bucket with Object Lock; the
+  copy runs with `rclone` on a schedule, since R2 has no built-in
+  bucket-to-bucket replication. `tmp/` is not needed.
 - **Database.** D1 Time Travel restores any minute of the last 30 days
   (Workers Paid; 7 days on Free). For longer retention export the database
   daily and put the dump into the same locked bucket. On Node, take an online
   copy of the SQLite file.
 - **Consistency.** Copy the database first, then the bucket: every row
   refers only to objects that exist by then, and objects are never removed.
-- **Confidentiality.** The backup provider sees what the forge stores. For a
-  provider that should only see ciphertext, use an `rclone crypt` remote as
-  the target; its keys stay with the operator.
+- **No encryption.** Backups are plain copies of the bucket and the
+  database, restorable without git-forge and without keys that could be
+  lost. Encrypted full backups were built and dropped (PR #28): they added
+  key management and a restore path of their own for no gain over a locked
+  bucket at a provider the operator trusts.
 
 Commands (Cloudflare instance; `lock:` is an rclone S3 remote for B2,
 Hetzner or any S3 bucket with Object Lock, `r2:` one for the instance's R2

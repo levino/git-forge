@@ -1,5 +1,5 @@
 ---
-import { can, createPull } from '@git-forge/collaboration'
+import { can, createPull, forkNetwork } from '@git-forge/collaboration'
 import NotFound from '../../../../components/NotFound.astro'
 import RepoHeader from '../../../../components/RepoHeader.astro'
 import Layout from '../../../../layouts/Layout.astro'
@@ -9,18 +9,34 @@ import { openRepository, repoUrl } from '../../../../ui/repository.ts'
 const { forge, principal, session } = Astro.locals
 const repo = await openRepository(forge, principal, Astro.params.owner!, Astro.params.repo!)
 if (repo.kind === 'ok' && !session) return Astro.redirect(`/login?return_to=${encodeURIComponent(Astro.url.pathname + Astro.url.search)}`)
+const scope = repo.kind === 'ok' ? await scopeFor(forge, Astro.request, principal, repo) : null
+const network = scope ? await forkNetwork(scope) : { root: null, forks: [] }
+const self = repo.kind === 'ok' ? `${repo.name.owner}/${repo.name.name}` : ''
+const members = [...new Set([self, ...[network.root, ...network.forks].flatMap((member) => (member ? [`${member.owner}/${member.name}`] : []))])]
+const headRepo = members.find((member) => member.toLowerCase() === (Astro.url.searchParams.get('head_repo') ?? self).toLowerCase()) ?? self
+const [headOwner, headName] = headRepo.split('/') as [string, string]
+const headSource = repo.kind === 'ok' && headRepo !== self ? await openRepository(forge, principal, headOwner, headName) : repo
+const headBranches = headSource.kind === 'ok' ? headSource.branches : []
 let outcome: FormOutcome | null = null
 if (repo.kind === 'ok' && Astro.request.method === 'POST') {
   outcome = await runForm(forge, Astro.request, repo, async (scope, form) => {
-    const pull = await createPull(scope, { title: field(form, 'title'), body: field(form, 'body'), head: field(form, 'head'), base: field(form, 'base'), draft: form.get('draft') === 'on' })
+    const cross = headRepo !== self
+    const pull = await createPull(scope, {
+      title: field(form, 'title'),
+      body: field(form, 'body'),
+      head: cross ? `${headOwner}:${field(form, 'head')}` : field(form, 'head'),
+      ...(cross ? { headRepo: headName, maintainerCanModify: form.get('maintainer_can_modify') === 'on' } : {}),
+      base: field(form, 'base'),
+      draft: form.get('draft') === 'on',
+    })
     return repoUrl(repo.name, 'pull', String(pull.number))
   })
   if (outcome.kind === 'redirect') return Astro.redirect(outcome.location, 303)
   Astro.response.status = outcome.status
 }
-const scope = repo.kind === 'ok' ? await scopeFor(forge, Astro.request, principal, repo) : null
 const base = Astro.url.searchParams.get('base') ?? (repo.kind === 'ok' ? repo.defaultBranch : null)
-const head = Astro.url.searchParams.get('head') ?? (repo.kind === 'ok' ? repo.branches.find((branch) => branch.name !== base)?.name : null)
+const known = new Set(repo.kind === 'ok' ? repo.branches.map((branch) => branch.id) : [])
+const head = Astro.url.searchParams.get('head') ?? headBranches.find((branch) => (headRepo === self ? branch.name !== base : !known.has(branch.id)))?.name
 ---
 
 {
@@ -31,32 +47,50 @@ const head = Astro.url.searchParams.get('head') ?? (repo.kind === 'ok' ? repo.br
       <RepoHeader repo={repo} tab="pulls" />
       {outcome?.kind === 'error' && <div role="alert" class="alert alert-error mb-4">{outcome.message}</div>}
       {can(scope, 'pull:create') ? (
-        <form method="post" class="flex flex-col gap-3 max-w-3xl" aria-label="New pull request">
-          <input type="hidden" name="csrf" value={session.csrf} />
-          <div class="flex flex-wrap items-end gap-3">
-            <label class="flex flex-col gap-1 text-sm font-semibold">
-              Base
-              <select name="base" class="select select-sm font-mono">
-                {repo.branches.map((branch) => <option selected={branch.name === base}>{branch.name}</option>)}
-              </select>
+        <div class="flex flex-col gap-3 max-w-3xl">
+          {members.length > 1 && (
+            <form method="get" class="flex flex-wrap items-end gap-2" aria-label="Head repository">
+              <label class="flex flex-col gap-1 text-sm font-semibold">
+                Head repository
+                <select name="head_repo" class="select select-sm font-mono">
+                  {members.map((member) => <option selected={member === headRepo}>{member}</option>)}
+                </select>
+              </label>
+              <button class="btn btn-sm">Compare</button>
+            </form>
+          )}
+          <form method="post" class="flex flex-col gap-3" aria-label="New pull request">
+            <input type="hidden" name="csrf" value={session.csrf} />
+            <div class="flex flex-wrap items-end gap-3">
+              <label class="flex flex-col gap-1 text-sm font-semibold">
+                Base
+                <select name="base" class="select select-sm font-mono">
+                  {repo.branches.map((branch) => <option selected={branch.name === base}>{branch.name}</option>)}
+                </select>
+              </label>
+              <span class="pb-1" aria-hidden="true">←</span>
+              <label class="flex flex-col gap-1 text-sm font-semibold">
+                {headRepo === self ? 'Compare' : `Compare (${headRepo})`}
+                <select name="head" class="select select-sm font-mono">
+                  {headBranches.map((branch) => <option selected={branch.name === head}>{branch.name}</option>)}
+                </select>
+              </label>
+            </div>
+            <label class="text-sm font-semibold" for="title">Title</label>
+            <input id="title" name="title" class="input w-full" maxlength="256" required />
+            <label class="text-sm font-semibold" for="body">Description</label>
+            <textarea id="body" name="body" rows="10" class="textarea w-full font-mono" placeholder="Markdown is supported" />
+            <label class="flex items-center gap-2 text-sm">
+              <input type="checkbox" name="draft" class="checkbox checkbox-sm" /> Create as draft
             </label>
-            <span class="pb-1" aria-hidden="true">←</span>
-            <label class="flex flex-col gap-1 text-sm font-semibold">
-              Compare
-              <select name="head" class="select select-sm font-mono">
-                {repo.branches.map((branch) => <option selected={branch.name === head}>{branch.name}</option>)}
-              </select>
-            </label>
-          </div>
-          <label class="text-sm font-semibold" for="title">Title</label>
-          <input id="title" name="title" class="input w-full" maxlength="256" required />
-          <label class="text-sm font-semibold" for="body">Description</label>
-          <textarea id="body" name="body" rows="10" class="textarea w-full font-mono" placeholder="Markdown is supported" />
-          <label class="flex items-center gap-2 text-sm">
-            <input type="checkbox" name="draft" class="checkbox checkbox-sm" /> Create as draft
-          </label>
-          <button class="btn btn-primary self-start">Create pull request</button>
-        </form>
+            {headRepo !== self && (
+              <label class="flex items-center gap-2 text-sm">
+                <input type="checkbox" name="maintainer_can_modify" class="checkbox checkbox-sm" checked /> Allow edits by maintainers
+              </label>
+            )}
+            <button class="btn btn-primary self-start">Create pull request</button>
+          </form>
+        </div>
       ) : (
         <p>You cannot open pull requests in this repository.</p>
       )}

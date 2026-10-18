@@ -28,6 +28,10 @@ export const adminAction = async (forge: ForgeServices, session: UiSession, form
       case 'distrust':
         await instance.distrust(principal, text(form, 'issuer'))
         return { kind: 'ok', message: `${text(form, 'issuer')} is no longer trusted.` }
+      case 'test-email': {
+        const sent = await instance.sendTestEmail(principal, text(form, 'to') || null)
+        return { kind: 'ok', message: `Test email sent (${sent.id}).` }
+      }
       case 'backup-run':
         await instance.backup.run(principal)
         return { kind: 'ok', message: 'Backup started.' }
@@ -59,6 +63,8 @@ export const mirrorHealth = (detached: boolean, status: MirrorStatus | null): Mi
   if (status && status.alarms.length > 0) return { label: `${status.alarms.length} alarm${status.alarms.length === 1 ? '' : 's'}`, badge: 'badge-warning' }
   if (status?.lastRun?.ok === false) return { label: 'Last sync failed', badge: 'badge-error' }
   if (status?.lastDeepCheck && !status.lastDeepCheck.ok) return { label: 'Deep check failed', badge: 'badge-error' }
+  if (status?.lastRun && !status.lastRun.finishedAt) return { label: 'Syncing', badge: 'badge-info' }
+  if (status && status.lfsPending.length > 0) return { label: `${status.lfsPending.length} LFS object${status.lfsPending.length === 1 ? '' : 's'} pending`, badge: 'badge-warning' }
   if (status?.lastSuccessAt) return { label: 'Synced', badge: 'badge-success' }
   return { label: 'Not synced yet', badge: 'badge-ghost' }
 }

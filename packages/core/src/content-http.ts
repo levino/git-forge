@@ -16,7 +16,7 @@ import {
   sniffContentType,
 } from './content.ts'
 import type { Authorize } from './http.ts'
-import { lfsObjectKey } from './lfs.ts'
+import { locateLfsObject } from './lfs.ts'
 import { advertisedRefs, ObjectDatabase, readRefs, type RepositoryName } from './repository.ts'
 import type { ByteRange, Storage } from './storage.ts'
 import { commitReach, readableLfsObjects, visibleRefs } from './visibility.ts'
@@ -93,9 +93,10 @@ const serveLfs = async (
   filename: string | null,
   cacheControl: string,
 ): Promise<Response> => {
-  const key = lfsObjectKey(repo, oid)
-  const info = await storage.head(key)
-  if (!info) return text(404, 'object does not exist\n')
+  const location = await locateLfsObject(storage, repo, oid)
+  if (!location) return text(404, 'object does not exist\n')
+  const { key } = location
+  const info = { size: location.size }
   const contentType = (filename ? contentTypeForName(filename) : null) ?? (await sniffStored(storage, key, info.size))
   return serve(request, {
     size: info.size,
@@ -127,7 +128,7 @@ export const handleContentRequest = async (request: Request, options: ContentHtt
   if (target.kind === 'not-found') return text(404, view ? 'not found\n' : `${target.message}\n`)
   const cacheControl = view ? PRIVATE_CACHE : refCacheControl(target.immutable, options.refMaxAgeSeconds ?? 60)
   if (target.kind === 'lfs') {
-    if ((await storage.head(lfsObjectKey(route.repo, target.pointer.oid)))?.size !== target.pointer.size) {
+    if ((await locateLfsObject(storage, route.repo, target.pointer.oid))?.size !== target.pointer.size) {
       return text(404, `LFS object ${target.pointer.oid} is not present\n`)
     }
     return new Response(null, {

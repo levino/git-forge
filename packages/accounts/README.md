@@ -307,6 +307,19 @@ with `--atomic` the whole push fails. Rejected force pushes archive nothing.
 (`invalid ref name`) and stay governed by the mirror rules; mirror sync
 writes `refs/upstream/*` directly and is not subject to branch protection.
 
+`delegatedBranches(principal, repository)` (optional) grants access a role
+does not: when it returns refs for a principal without the required access,
+`authorize` allows reads and writes of that repository and `pushPolicy`
+rejects every ref outside the returned list (then applies the repository's
+branch protection). The Worker uses it for pull requests from forks that
+allow edits from maintainers (`maintainerPushBranches` of the collaboration
+package).
+
+Forks: `createFork`, `forkInfo`, `listForks`, `forkNetwork` and
+`findRepositoryById` keep the fork tree in `repository_forks` (parent and
+root per fork, migration `0011_forks`); `organizationRole` answers whether a
+user owns an organization.
+
 ### API
 
 `handleBranchProtectionRequest(request, { store, verifyInstance?, authenticate?, prefix = '/api' })`

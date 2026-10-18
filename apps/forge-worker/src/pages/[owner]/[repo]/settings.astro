@@ -176,7 +176,7 @@ Astro.response.headers.set('Cache-Control', 'no-store')
               <span class="font-semibold">{config.remote}</span>
               <span class="font-mono text-sm break-all">{config.url}</span>
               <span class="badge badge-sm">{config.detachedAt ? 'detached' : config.mode}</span>
-              {status?.lastRun && <span class:list={['badge badge-sm', status.lastRun.ok === false ? 'badge-error' : 'badge-success']}>{status.lastRun.ok === false ? 'last sync failed' : 'synced'}</span>}
+              {status?.lastRun && <span class:list={['badge badge-sm', !status.lastRun.finishedAt ? 'badge-info' : status.lastRun.ok === false ? 'badge-error' : 'badge-success']}>{!status.lastRun.finishedAt ? 'syncing' : status.lastRun.ok === false ? 'last sync failed' : 'synced'}</span>}
             </p>
             {status?.lastSuccessAt && <p class="text-sm text-base-content/70">Last success: {status.lastSuccessAt}</p>}
             {status?.lastRun?.error && <p class="text-sm text-error">{status.lastRun.error}</p>}

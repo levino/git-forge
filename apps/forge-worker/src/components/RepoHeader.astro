@@ -1,5 +1,5 @@
 ---
-import { listIssues } from '@git-forge/collaboration'
+import { forkInfo, listForks, listIssues } from '@git-forge/collaboration'
 import { scopeFor } from '../ui/collaboration.ts'
 import { cloneUrl, repoUrl, type OpenRepository } from '../ui/repository.ts'
 import CopyField from './CopyField.astro'
@@ -16,6 +16,7 @@ const scope = repo.view ? null : await scopeFor(Astro.locals.forge, Astro.reques
 const [issues, pulls] = scope
   ? await Promise.all((['issue', 'pull'] as const).map((kind) => listIssues(scope, { state: 'open', kind }, { page: 1, perPage: 1 }).then((list) => list.total)))
   : [undefined, undefined]
+const [fork, forks] = scope ? await Promise.all([forkInfo(scope), listForks(scope)]) : [null, []]
 const tabs: { id: Tab; label: string; icon: IconName; href: string; count?: number | undefined }[] = [
   { id: 'code', label: 'Code', icon: 'code', href: repoUrl(name) },
   ...(!scope || scope.settings.hasIssues ? [{ id: 'issues' as const, label: 'Issues', icon: 'issue' as const, href: repoUrl(name, 'issues'), count: issues }] : []),
@@ -46,7 +47,14 @@ const clone = cloneUrl(Astro.url.origin, name)
         </span>
       )
     }
-    <details class="dropdown dropdown-end ml-auto">
+    <div class="join ml-auto">
+      <a href={repoUrl(name, 'fork')} class="btn btn-sm join-item">
+        <Icon name="fork" />
+        Fork
+      </a>
+      <a href={repoUrl(name, 'forks')} class="btn btn-sm join-item" aria-label="Forks">{forks.length}</a>
+    </div>
+    <details class="dropdown dropdown-end">
       <summary class="btn btn-sm btn-primary">
         <Icon name="code" />
         Clone
@@ -67,6 +75,16 @@ const clone = cloneUrl(Astro.url.origin, name)
     )
   }
   {subject.archived && <div role="alert" class="alert alert-warning my-2">This repository is archived. It is read-only: pushes, issues and pull requests are closed.</div>}
+  {
+    fork && (
+      <p class="mt-1 text-xs text-base-content/60 break-all">
+        forked from <a href={repoUrl(fork.parent)} class="link">{fork.parent.owner}/{fork.parent.name}</a>
+        <a href={`${repoUrl(fork.parent, 'pulls', 'new')}?head_repo=${encodeURIComponent(`${name.owner}/${name.name}`)}`} class="link ml-2">
+          Contribute
+        </a>
+      </p>
+    )
+  }
   {
     mirror && (
       <p class="mt-1 text-xs text-base-content/60 break-all">

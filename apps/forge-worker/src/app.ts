@@ -113,6 +113,7 @@ import {
   detachMirror,
   type CopyBudget,
   type DigestFactory,
+  EmailRejectedError,
   type EmailSender,
   type FetchFunction,
   GitHubApiError,
@@ -155,6 +156,7 @@ import {
   repositoryStats,
   RepositoryExistsError,
   type RepositoryName,
+  type SentEmail,
   SizeLimitError,
   startImport,
   type Storage,
@@ -172,6 +174,7 @@ import {
   getPullSummary,
   openRepository as openCollaborationRepository,
   handleCollaborationApi,
+  maintainerPushBranches,
   handlePushedRefs,
   loadUsers,
   recordCheckRun,
@@ -316,6 +319,7 @@ export type BackupOperations = {
 
 export type InstanceOperations = InstanceAdministration & {
   readonly mirrors: (principal: Principal) => Promise<MirrorOverviewEntry[]>
+  readonly sendTestEmail: (principal: Principal, to: string | null) => Promise<SentEmail>
   readonly backup: BackupOperations
 }
 
@@ -879,6 +883,16 @@ export const createForge = (options: ForgeOptions): Forge => {
     return json(200, { id: principal.id, login: principal.login, admin: await store.isInstanceAdmin(principal.id), via, ceiling: principal.limits?.ceiling ?? null })
   }
 
+  const sendInviteEmail = async (sender: EmailSender, to: string, url: string, days: number): Promise<boolean> => {
+    try {
+      await sender.send({ to: [to], subject: 'Your git-forge invitation', text: `You are invited to ${new URL(url).host}. Accept within ${days} days:\n\n${url}\n` })
+      return true
+    } catch (error) {
+      console.error(JSON.stringify({ event: 'invite-email-failed', error: String(error) }))
+      return false
+    }
+  }
+
   const createInvite = async (request: Request): Promise<Response> => {
     const actor = await requireInstanceAdmin(request)
     const body = await readBody(request)
@@ -896,7 +910,9 @@ export const createForge = (options: ForgeOptions): Forge => {
     }
     if (login !== undefined && (await store.findAccount(login))) throw new HttpError(409, `${login} already exists`)
     const invite = await logins.createInvite({ login: login ?? null, userId, email: email ?? null, ttlMs: days * 24 * 60 * 60 * 1000 }, { kind: 'user', id: actor.id })
-    return json(201, { code: invite.code, url: new URL(`/login/invite/${invite.code}`, issuerFor(request)).toString(), expiresAt: invite.expiresAt })
+    const url = new URL(`/login/invite/${invite.code}`, issuerFor(request)).toString()
+    const emailed = email !== undefined && options.email !== undefined && (await sendInviteEmail(options.email, email, url, days))
+    return json(201, { code: invite.code, url, expiresAt: invite.expiresAt, emailed })
   }
 
   const instanceAdministration = createInstanceAdministration(store)
@@ -911,6 +927,18 @@ export const createForge = (options: ForgeOptions): Forge => {
         for (const config of await listMirrors(storage, repository)) overview.push({ repository, config, status: await readMirrorStatus(storage, repository, config.remote) })
       }
       return overview
+    },
+    sendTestEmail: async (principal, to) => {
+      await instanceAdministration.view(principal)
+      if (!options.email) throw new InstanceAdministrationError(422, 'no email provider is configured')
+      const address = to || (principal.kind === 'user' ? (await store.findUserById(principal.id))?.email : null)
+      if (!address) throw new InstanceAdministrationError(422, 'your account has no email address; enter one')
+      try {
+        return await options.email.send({ to: [address], subject: 'git-forge test email', text: `Email from ${options.publicUrl ?? 'your git-forge instance'} works.` })
+      } catch (error) {
+        if (error instanceof EmailRejectedError) throw new InstanceAdministrationError(422, error.message)
+        throw error
+      }
     },
     backup: {
       status: async (principal) => {
@@ -943,6 +971,9 @@ export const createForge = (options: ForgeOptions): Forge => {
   const runBackupJob = async (): Promise<void> => {
     if (options.backup && (await backupStep(backupContext(options.backup)))) await scheduleBackup()
   }
+
+  const sendTestEmailRoute = async (request: Request): Promise<Response> =>
+    json(200, await instance.sendTestEmail(await principalOf(request), optionalString(await readBody(request), 'to') ?? null))
 
   const trustInstance = async (request: Request): Promise<Response> => {
     const principal = await principalOf(request)
@@ -1911,8 +1942,8 @@ export const createForge = (options: ForgeOptions): Forge => {
             actor,
             title: pull.title,
             base: { ref: pull.baseRef, sha: pull.baseSha },
-            head: { ref: pull.headRef, sha: pull.headSha, repo: scope.repo },
-            trusted: true,
+            head: { ref: pull.headRef, sha: pull.headSha, repo: pull.headRepository ? { owner: pull.headRepository.owner, name: pull.headRepository.name } : scope.repo },
+            trusted: pull.headRepository === null,
           })
         } catch (error) {
           console.log(JSON.stringify({ event: 'pull-request-runs-failed', repository: `${scope.repo.owner}/${scope.repo.name}`, number: activity.number, error: String(error) }))
@@ -1983,6 +2014,7 @@ export const createForge = (options: ForgeOptions): Forge => {
     { method: 'POST', pattern: /^\/api\/admin\/backup$/, handler: runBackupRoute },
     { method: 'POST', pattern: /^\/api\/admin\/backup\/verify$/, handler: verifyBackupRoute },
     { method: 'POST', pattern: /^\/api\/admin\/invites$/, handler: createInvite },
+    { method: 'POST', pattern: /^\/api\/admin\/email\/test$/, handler: sendTestEmailRoute },
     { method: 'GET', pattern: /^\/api\/user$/, handler: currentUser },
     { method: 'POST', pattern: /^\/api\/orgs$/, handler: createOrganizationRoute },
     { method: 'GET', pattern: new RegExp(`^/api/orgs/${SEGMENT}$`), handler: organizationRoute },
@@ -2125,7 +2157,7 @@ export const createForge = (options: ForgeOptions): Forge => {
       if (error instanceof AccountsError) return json(400, { error: error.message })
       throw error
     }
-    const access = createGitAccess(authentication)
+    const access = createGitAccess({ ...authentication, delegatedBranches: (principal, repository) => maintainerPushBranches({ db, accounts: store }, principal, repository) })
     const authorize = withJobTokens(access.authorize)
     const content = await handleContentRequest(request, { storage, authorize: withSessionReads(authorize) })
     if (content) return content

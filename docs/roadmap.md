@@ -62,6 +62,9 @@ discussions.
 - [x] Mirror overview API: signed attestations from mirrors, ref checksum history, state/lag/alarms, spot checks (design §10); UI in M6
 - [x] Non-forge upstreams: stepped fetch shared with imports (commit ranges, split commits, across queued jobs, refs move when complete), `.lfsconfig` endpoint
 - [x] GitHub backups: push webhooks per mirror (HMAC-SHA256, optional registration via the GitHub API), sealed upstream tokens, bulk "mirror all repositories of a user/org" API and form
+- [x] Federation between two real Workers deployments (forge.levinkeller.de ↔ forge-test.levinkeller.de): trust both ways, public and private mirrors, push-notified sync in 6–30 s, force push archive and alarm, attestations and spot checks, a 4.3 GB LFS mirror
+- [x] Interrupted LFS copies resume: pointers of copied packs are pending before the first download; the deep check queues missing LFS objects
+- [x] Storage-verified LFS puts (`putVerified`, R2 `sha256`): no Worker CPU for hashing LFS objects and upload parts
 
 ## M5 — Deployment and adapters
 
@@ -157,22 +160,26 @@ Design: [design.md §17](design.md#17-collaboration).
 - [x] Discussions: categories, threads, answers
 - [x] REST API under `/api/v3` with GitHub-compatible shapes, wired into the Worker
 - [x] Web UI: issues (list, new, timeline, comment, close/reopen), pull requests (list, new, conversation with reviews, checks and merge box, commits, files with inline line comments), discussions (categories, threads, replies, answers)
-- [ ] Pull requests from forks
-- [ ] CODEOWNERS parsing for `require_code_owner_reviews`
-- [ ] Rename detection in merges (renames are reported as conflicts today)
+- [x] Forks on the same instance (object sharing through alternates, fork network listing) and pull requests from forks (head objects and their LFS objects copied into the base, maintainers can modify, untrusted CI)
+- [x] Web UI for forks: Fork button, fork list, *forked from*, pull requests from forks
+- [ ] Forks across instances (fork a mirror, pull requests between instances)
+- [ ] Forks keep resolving their upstream after it is renamed again over a reused name or deleted (alternates name the upstream by its name; private forks do not inherit upstream collaborators)
+- [x] CODEOWNERS parsing for `require_code_owner_reviews` (owners of every changed file must approve, user owners are requested as reviewers)
+- [x] Rename detection in merges (port of git's `diffcore-rename` scoring and pairing; edits follow renamed files, rename/rename and rename/delete conflicts)
+- [x] Directory renames in merges: adds into a renamed directory conflict like git's default, adds into a deleted directory merge
 - [ ] In-browser conflict resolution
 - [x] Search (FTS5): repositories, issues, pull requests, discussions with comments, users; access-filtered; `/api/search`, `/api/v3/search/*`
 - [ ] Reactions, notifications
-- [ ] Web UI for issues, pull requests and discussions (separate work package)
 - [ ] Submit via form
 
 ## Later
 
 - [x] Email adapter in the core, Amazon SES v2 implementation (`@git-forge/ses`), console adapter for development
+- [x] Cloudflare Email Service adapter (`send_email` binding, default on Workers when bound), admin test email
 - [x] SMTP email adapter for the Node deployment (`@git-forge/smtp`: STARTTLS or implicit TLS, `AUTH PLAIN`/`LOGIN`)
 - [x] Notifications: event log, watching and participating subscriptions, mentions, per-user settings, inbox API (`/api/v3/notifications`), email digests (instant, hourly, daily) via the job queue (design §16)
 - [x] Event producers: push, create/delete, mirror alarms, CI job and run completion, releases
-- [ ] Event producers: issues, pull requests, reviews, comments (builders exist; emitted by the collaboration package)
+- [x] Event producers: issues, pull requests, reviews, comments, discussions and discussion comments (emitted by the collaboration package, mapped in the Worker)
 - [x] Webhooks per repository and organization: GitHub-compatible payloads and headers, signatures, delivery log, retries, redelivery, ping
 - [ ] Webhooks: `POST …/hooks/{id}/tests`, GitHub App installations, encrypted secrets
 - [x] Releases: GitHub-compatible REST API, tags created on publish, assets stored as LFS objects behind the media URL, download redirects

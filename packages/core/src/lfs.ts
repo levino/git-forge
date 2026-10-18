@@ -1,8 +1,8 @@
 import { fromUtf8, toHex } from './bytes.ts'
 import { type DigestFactory, javascriptDigests } from './digest.ts'
 import type { GitObject } from './objects.ts'
-import { repositoryPrefix, type RepositoryName } from './repository.ts'
-import type { Storage } from './storage.ts'
+import { alternateRepositories, repositoryPrefix, type RepositoryName } from './repository.ts'
+import { ChecksumMismatchError, type PutOptions, type PutResult, type Storage } from './storage.ts'
 
 export const LFS_CONTENT_TYPE = 'application/vnd.git-lfs+json'
 
@@ -96,8 +96,22 @@ export const objectError = (object: LfsObjectSpec): string | null => {
   return null
 }
 
+export type LfsLocation = { readonly key: string; readonly size: number }
+
+export const locateLfsObject = async (storage: Storage, repo: RepositoryName, oid: string): Promise<LfsLocation | null> => {
+  const own = lfsObjectKey(repo, oid)
+  const info = await storage.head(own)
+  if (info) return { key: own, size: info.size }
+  for (const alternate of await alternateRepositories(storage, repo)) {
+    const key = lfsObjectKey(alternate, oid)
+    const found = await storage.head(key)
+    if (found) return { key, size: found.size }
+  }
+  return null
+}
+
 export const lfsObjectSize = async (storage: Storage, repo: RepositoryName, oid: string): Promise<number | null> =>
-  (await storage.head(lfsObjectKey(repo, oid)))?.size ?? null
+  (await locateLfsObject(storage, repo, oid))?.size ?? null
 
 export const hasLfsObject = async (storage: Storage, repo: RepositoryName, object: LfsObjectSpec): Promise<boolean> =>
   (await lfsObjectSize(storage, repo, object.oid)) === object.size
@@ -166,6 +180,23 @@ export const verifyingStream = (expected: LfsObjectSpec, digests: DigestFactory 
   })
 }
 
+export const putVerifiedStream = async (
+  storage: Storage,
+  key: string,
+  body: ReadableStream<Uint8Array>,
+  expected: LfsObjectSpec,
+  options: PutOptions,
+  digests?: DigestFactory,
+): Promise<PutResult> => {
+  if (!storage.putVerified) return storage.put(key, body.pipeThrough(verifyingStream(expected, digests)), expected.size, options)
+  try {
+    return await storage.putVerified(key, body, expected.size, expected.oid, options)
+  } catch (error) {
+    if (error instanceof ChecksumMismatchError) throw new LfsIntegrityError(error.message)
+    throw error
+  }
+}
+
 export const hashStream = async (
   stream: ReadableStream<Uint8Array>,
   digests: DigestFactory = javascriptDigests,
@@ -201,10 +232,7 @@ export const storeLfsObject = async (
     return existing === object.size ? { ok: true, created: false } : { ok: false, status: 422, message: `object size is ${existing}, not ${object.size}` }
   }
   try {
-    const result = await storage.put(lfsObjectKey(repo, object.oid), body.pipeThrough(verifyingStream(object)), object.size, {
-      ifNoneMatch: '*',
-      contentType: 'application/octet-stream',
-    })
+    const result = await putVerifiedStream(storage, lfsObjectKey(repo, object.oid), body, object, { ifNoneMatch: '*', contentType: 'application/octet-stream' })
     return { ok: true, created: result.ok }
   } catch (error) {
     if (error instanceof LfsIntegrityError) return { ok: false, status: 422, message: error.message }
@@ -290,3 +318,13 @@ export const lfsPushCheck =
     const [first] = missing as [LfsObjectSpec]
     return missing.length === 1 ? `missing LFS object ${first.oid}` : `missing ${missing.length} LFS objects, e.g. ${first.oid}`
   }
+
+export const copyLfsObjects = async (storage: Storage, from: RepositoryName, to: RepositoryName, pointers: readonly LfsObjectSpec[]): Promise<number> => {
+  let copied = 0
+  for (const pointer of await missingLfsPointers(storage, to, pointers)) {
+    const source = await locateLfsObject(storage, from, pointer.oid)
+    const object = source?.size === pointer.size ? await storage.get(source.key) : null
+    if (object && (await storeLfsObject(storage, to, pointer, object.body)).ok) copied++
+  }
+  return copied
+}

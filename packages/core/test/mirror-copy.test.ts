@@ -249,7 +249,42 @@ describe('copy in units of bytes', () => {
   })
 })
 
+describe('interrupted LFS copy', () => {
+  it('keeps the LFS objects of copied packs pending until they are downloaded', async () => {
+    const context = await setup()
+    const dying: typeof fetch = async (input, init) => {
+      if (new Request(input).url.includes('/info/lfs/')) throw new Error('invocation ended')
+      return fetch(input, init)
+    }
+    expect((await context.sync({ fetch: dying })).status).toBe('failed')
+    expect((await readMirrorStatus(context.downstream.storage, backup))?.lfsPending).toEqual([expect.objectContaining({ oid: lfsPointer(context.asset).oid })])
+    const retry = await context.sync()
+    expect(retry.copied).toEqual({ packs: 0, bytes: 0, reused: 0 })
+    expect(retry.lfs?.downloaded.map((pointer) => pointer.oid)).toEqual([lfsPointer(context.asset).oid])
+    expect((await readMirrorStatus(context.downstream.storage, backup))?.lfsPending).toEqual([])
+  })
+})
+
 describe('deep check', () => {
+  it('reports missing LFS objects and queues them for the next sync', async () => {
+    const context = await setup()
+    await context.sync()
+    const lost = new MemoryStorage()
+    for await (const info of context.downstream.storage.list('')) {
+      if (info.key === lfsObjectKey(backup, lfsPointer(context.asset).oid)) continue
+      const object = await context.downstream.storage.get(info.key)
+      if (object) await lost.put(info.key, await readAll(object.body), info.size)
+    }
+    const check = await deepCheckMirror(lost, backup)
+    expect(check.ok).toBe(false)
+    expect(check.problems).toEqual([`LFS object ${lfsPointer(context.asset).oid} is missing`])
+    expect((await readMirrorStatus(lost, backup))?.lfsPending).toEqual([expect.objectContaining({ oid: lfsPointer(context.asset).oid })])
+    const repaired = await syncMirror({ storage: lost, repo: backup, strategy: 'copy' })
+    expect(repaired.lfs?.downloaded.map((pointer) => pointer.oid)).toEqual([lfsPointer(context.asset).oid])
+    expect((await deepCheckMirror(lost, backup)).ok).toBe(true)
+  })
+
+
   it('recomputes every index and walks every ref', async () => {
     const context = await setup()
     await context.sync()

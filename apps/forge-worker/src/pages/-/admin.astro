@@ -130,7 +130,18 @@ const ago = (iso: string | undefined) => (iso ? relativeTime(Math.floor(Date.par
           </div>
         )}
       </section>
+      <div class="grid gap-x-6 md:grid-cols-2 items-start">
       {backup && <BackupPanel status={backup} csrf={session.csrf} />}
+      <section class="panel" aria-labelledby="email">
+        <h2 id="email" class="panel-title">Email</h2>
+        <form method="post" class="flex flex-wrap items-end gap-2" aria-label="Send a test email">
+          <input type="hidden" name="csrf" value={session.csrf} />
+          <input type="hidden" name="action" value="test-email" />
+          <label class="field">To (default: your address)<input name="to" type="email" class="input input-sm" autocomplete="email" /></label>
+          <button class="btn btn-sm">Send test email</button>
+        </form>
+      </section>
+      </div>
     </Layout>
   )
 }

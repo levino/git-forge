@@ -52,11 +52,13 @@ database, so the HTTP layer and a UI share one permission implementation.
 Every service function reports what happened through `onActivity(scope,
 activity)` after its writes: `{ kind, action, number, actor, commentId?,
 reviewId?, changes?, requestedReviewer?, before?, after? }` with `kind`
-`issues`, `issue_comment`, `pull_request`, `pull_request_review` or
-`pull_request_review_comment` and GitHub's webhook action names (`opened`,
-`edited`, `closed`, `reopened`, `labeled`, `assigned`, `locked`,
-`synchronize`, `review_requested`, `ready_for_review`, `submitted`,
-`dismissed`, `created`, …). Edits made through the issue endpoints on a pull
+`issues`, `issue_comment`, `pull_request`, `pull_request_review`,
+`pull_request_review_comment`, `discussion` or `discussion_comment` and
+GitHub's webhook action names (`opened`, `edited`, `closed`, `reopened`,
+`labeled`, `assigned`, `locked`, `synchronize`, `review_requested`,
+`ready_for_review`, `submitted`, `dismissed`, `created`,
+`category_changed`, `answered`, `unanswered`, …). For discussions `number`
+is the discussion number and `commentId` the comment (or the answer). Edits made through the issue endpoints on a pull
 request are reported as `pull_request`. The package does not depend on
 `@git-forge/notifications`; the Worker maps activities to its events
 (`apps/forge-worker/src/collaboration-events.ts`) and calls
@@ -103,8 +105,14 @@ branch do the same.
 
 ## Pull requests
 
-- Same-repository branches only (`head` may be `owner:branch` with the
-  repository owner). Forks come later.
+- `head` is a branch of the repository or `owner:branch` of another
+  repository in the same fork network (`head_repo` picks one when an owner
+  has several). The caller needs read access to the head repository. The
+  head's objects are copied into the base repository when the pull request
+  is opened and whenever its head moves, together with the LFS objects their
+  pointers name, so everything else reads only the base. `maintainer_can_modify` (author only, forks only) lets users with
+  write access to the base push to the head branch of the fork
+  (`maintainerPushBranches`, wired into the git access check by the host).
 - The head and base shas are refreshed from `refs.json` on every read and on
   every push (`handlePushedRefs`): a moved head records `synchronize` or
   `head_ref_force_pushed` and, if the base branch's protection rule has
@@ -126,14 +134,47 @@ branch do the same.
   then stores one pack and moves the base branch with compare-and-swap. A
   base that moved in between is retried. `onBranchUpdated` lets the host
   start CI and notify mirrors exactly as after a push.
-- `require_code_owner_reviews` is satisfied only when the base has no
-  `CODEOWNERS` file (`.github/`, root, `docs/`); parsing owners comes later.
+- `require_code_owner_reviews` reads `CODEOWNERS` from the base branch
+  (`.github/CODEOWNERS`, `CODEOWNERS`, `docs/CODEOWNERS`, first found wins)
+  and requires, for every changed file that has owners, an approval from one
+  of them (a user, a member of an `@org/team`, or an account whose e-mail is
+  listed; the approver needs write access and is never the author). When a
+  pull request is opened, marked ready or receives new commits, the user
+  owners of its files with write access are requested as reviewers (teams
+  are not requested; `review_requests` holds users only).
+  `GET …/pulls/{n}/codeowners` lists the owned files and who approved them.
 - Commit messages: merge `Merge pull request #N from owner/branch` + title,
   squash `title (#N)` + bullet list of the commit messages (or the single
   commit's body), rebase keeps the original messages and authors. The merger
   is the committer (and the author of merge commits); the pull request author
   is the squash author. Signatures use the account's display name and e-mail
   (fallback `login@users.noreply.invalid`, see `noreplyDomain`).
+
+## CODEOWNERS
+
+`parseCodeOwners` (pure) reads GitHub's syntax: one pattern per line followed
+by owners (`@user`, `@org/team`, an e-mail), `#` comments (also after the
+owners), `\ ` for spaces in patterns, the last matching line wins and a line
+without owners removes ownership. Patterns follow gitignore: no slash (other
+than a trailing one) matches at any depth, a leading or inner slash anchors
+to the root, a trailing slash matches directories only, `*`, `?`, `**/`,
+`/**` and `/**/`, and a pattern that matches a directory owns everything
+below it. As GitHub documents, a final `/*` (`docs/*`) does not reach into
+subdirectories. Negation (`!`) and character ranges (`[…]`) are not
+supported by GitHub and are reported as errors. The matcher is checked
+against `git check-ignore` for every pattern where GitHub follows gitignore.
+
+## Forks
+
+`createFork(scope, { organization?, name?, defaultBranchOnly? })` creates a
+fork on the same instance: core's `forkRepository` writes refs (branches and
+tags, or the default branch only) and `objects/info/alternates` pointing at
+the upstream, the accounts store records the repository and its parent and
+root (`repository_forks`). The fork has the upstream's visibility and its
+own permissions. `listForks` and `forkNetwork` only return repositories the
+caller can read; `GET /repos/{o}/{r}` adds `fork`, `parent` and `source`.
+Pushes to a fork refresh the open pull requests whose head lives there
+(`handlePushedRefs`).
 
 ## Reviews and line comments
 
@@ -182,8 +223,12 @@ repositories (accounts use UUIDs). Pagination with `page`/`per_page`
 | `GET\|POST …/pulls/{n}/reviews`, `GET\|PUT\|DELETE …/reviews/{id}`, `POST …/reviews/{id}/events`, `PUT …/reviews/{id}/dismissals`, `GET …/reviews/{id}/comments` | |
 | `GET\|POST …/pulls/{n}/comments`, `POST …/pulls/{n}/comments/{id}/replies`, `GET …/pulls/comments`, `GET\|PATCH\|DELETE …/pulls/comments/{id}` | |
 | `GET\|POST\|DELETE …/pulls/{n}/requested_reviewers` | users only |
+| `GET …/pulls/{n}/codeowners` | not in GitHub's API: `{ path, approved, files: [{ filename, owners, approved_by }] }` |
+| `GET …/codeowners/errors?ref=` | invalid lines of the `CODEOWNERS` file |
 | `POST …/statuses/{sha}`, `GET …/commits/{ref}/statuses`, `GET …/commits/{ref}/status` | |
 | `POST …/check-runs`, `GET\|PATCH …/check-runs/{id}`, `GET …/commits/{ref}/check-runs` | |
+| `GET\|POST /repos/{o}/{r}/forks` | `organization`, `name`, `default_branch_only`; `202` with the new repository |
+| `GET /repos/{o}/{r}/network` | not in GitHub's API: `{ root, forks: [{ …, parent_id }] }` |
 | `GET\|POST …/discussion-categories`, `GET\|PATCH\|DELETE …/discussion-categories/{slug}` | not in GitHub's REST API (GraphQL only there) |
 | `GET\|POST …/discussions`, `GET\|PATCH …/discussions/{n}`, `PUT\|DELETE …/discussions/{n}/lock`, `PUT\|DELETE …/discussions/{n}/answer` | |
 | `GET\|POST …/discussions/{n}/comments` (`reply_to_id`), `GET\|PATCH\|DELETE …/discussions/comments/{id}` | |

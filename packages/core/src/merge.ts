@@ -1,9 +1,10 @@
 import { concat } from './bytes.ts'
 import { type CommitDetails, type NewCommit, parseCommitDetails, serializeCommit, serializeTree, StagedObjects } from './commit.ts'
-import { isBinaryContent } from './diff.ts'
+import { diffTrees, isBinaryContent } from './diff.ts'
 import type { ObjectId } from './hash.ts'
 import { type GitObject, isSubmodule, type Signature, isTreeMode, parseCommit, parseTree, type TreeEntry } from './objects.ts'
 import { MissingObjectError, type ObjectSource } from './walk.ts'
+import { basename, detectRenames, type RenameSource, type RenameTarget } from './rename.ts'
 import { mergeLines, splitLines } from './xdiff.ts'
 
 export type ConflictReason =
@@ -107,21 +108,22 @@ export const commitsBetween = async (source: ObjectSource, exclude: ObjectId | n
   return order
 }
 
-type Slot = TreeEntry | undefined
+type Slot = (TreeEntry & { readonly node?: Node }) | undefined
+
+type Node = { readonly id: ObjectId | null; readonly path: string }
+
+type Overlay = Map<string, TreeEntry | null>
 
 const same = (x: Slot, y: Slot): boolean => (x === undefined ? y === undefined : y !== undefined && x.id === y.id && x.mode === y.mode)
 
 const isRegular = (mode: string): boolean => mode === '100644' || mode === '100755'
 
-type FileSide = { readonly path: string; readonly entry: TreeEntry }
-
 type Context = {
   readonly source: ObjectSource
   readonly staged: StagedObjects
   readonly conflicts: MergeConflict[]
-  readonly deleted: { readonly path: string; readonly entry: TreeEntry }[]
-  readonly addedOurs: FileSide[]
-  readonly addedTheirs: FileSide[]
+  readonly overlays: readonly [Overlay, Overlay, Overlay]
+  readonly dirty: readonly [Set<string>, Set<string>, Set<string>]
 }
 
 const mergeFile = async (context: Context, path: string, base: Slot, ours: TreeEntry, theirs: TreeEntry): Promise<TreeEntry | null> => {
@@ -152,96 +154,199 @@ const mergeFile = async (context: Context, path: string, base: Slot, ours: TreeE
   return { mode, name: ours.name, id }
 }
 
+const childPath = (parent: string, name: string): string => (parent === '' ? name : `${parent}/${name}`)
+
+const parentPath = (path: string): string => {
+  const slash = path.lastIndexOf('/')
+  return slash === -1 ? '' : path.slice(0, slash)
+}
+
+type Listing = { readonly entries: readonly NonNullable<Slot>[]; readonly real: readonly TreeEntry[] }
+
+const listing = async (context: Context, side: 0 | 1 | 2, node: Node | null): Promise<Listing> => {
+  if (node === null) return { entries: [], real: [] }
+  const real = await readEntries(context.source, node.id)
+  if (!context.dirty[side].has(node.path)) return { entries: real.map((entry) => (isTreeMode(entry.mode) ? { ...entry, node: { id: entry.id, path: childPath(node.path, entry.name) } } : entry)), real }
+  const overlay = context.overlays[side]
+  const entries: NonNullable<Slot>[] = []
+  const dirs = new Set<string>()
+  for (const entry of real) {
+    const path = childPath(node.path, entry.name)
+    if (isTreeMode(entry.mode)) {
+      dirs.add(entry.name)
+      entries.push({ ...entry, id: context.dirty[side].has(path) ? `virtual:${side}:${path}` : entry.id, node: { id: entry.id, path } })
+    } else if (!overlay.has(path)) entries.push(entry)
+  }
+  for (const [path, entry] of overlay) if (entry && parentPath(path) === node.path) entries.push(entry)
+  for (const path of context.dirty[side]) {
+    if (path === '' || parentPath(path) !== node.path) continue
+    const name = path.slice(path.lastIndexOf('/') + 1)
+    if (!dirs.has(name)) entries.push({ mode: '40000', name, id: `virtual:${side}:${path}`, node: { id: null, path } })
+  }
+  return { entries, real }
+}
+
 const mergeLevel = async (
   context: Context,
-  prefix: string,
-  base: ObjectId | null,
-  ours: ObjectId | null,
-  theirs: ObjectId | null,
-  gone: { readonly ours: boolean; readonly theirs: boolean },
+  path: string,
+  base: Node | null,
+  ours: Node | null,
+  theirs: Node | null,
 ): Promise<ObjectId | null> => {
-  const [b, o, t] = await Promise.all([readEntries(context.source, base), readEntries(context.source, ours), readEntries(context.source, theirs)])
-  const names = [...new Set([...b, ...o, ...t].map((entry) => entry.name))]
+  const [b, o, t] = await Promise.all([listing(context, 0, base), listing(context, 1, ours), listing(context, 2, theirs)])
+  const names = [...new Set([...b.entries, ...o.entries, ...t.entries].map((entry) => entry.name))]
   const result: TreeEntry[] = []
   for (const name of names) {
-    const path = `${prefix}${name}`
-    const pick = (entries: readonly TreeEntry[], tree: boolean) => entries.find((entry) => entry.name === name && isTreeMode(entry.mode) === tree)
-    const [bFile, oFile, tFile] = [pick(b, false), pick(o, false), pick(t, false)]
-    const [bDir, oDir, tDir] = [pick(b, true), pick(o, true), pick(t, true)]
-    if ((gone.ours && !bFile && tFile) || (gone.theirs && !bFile && oFile) || (gone.ours && !bDir && tDir) || (gone.theirs && !bDir && oDir)) {
-      context.conflicts.push({ path, reason: 'directory-rename' })
-    }
+    const full = childPath(path, name)
+    const pick = (entries: readonly NonNullable<Slot>[], tree: boolean) => entries.find((entry) => entry.name === name && isTreeMode(entry.mode) === tree)
+    const [bFile, oFile, tFile] = [pick(b.entries, false), pick(o.entries, false), pick(t.entries, false)]
+    const [bDir, oDir, tDir] = [pick(b.entries, true), pick(o.entries, true), pick(t.entries, true)]
     let file: TreeEntry | null = null
     if (same(oFile, tFile)) file = oFile ?? null
     else if (same(bFile, oFile)) file = tFile ?? null
     else if (same(bFile, tFile)) file = oFile ?? null
-    else if (oFile && tFile) file = await mergeFile(context, path, bFile, oFile, tFile)
-    else context.conflicts.push({ path, reason: 'modify/delete' })
-    if (bFile && !oFile && !tFile) context.deleted.push({ path, entry: bFile })
-    if (!bFile && oFile && !same(oFile, tFile)) context.addedOurs.push({ path, entry: oFile })
-    if (!bFile && tFile && !same(oFile, tFile)) context.addedTheirs.push({ path, entry: tFile })
+    else if (oFile && tFile) file = await mergeFile(context, full, bFile, oFile, tFile)
+    else context.conflicts.push({ path: full, reason: 'modify/delete' })
     const dir =
       same(bDir, oDir) && same(bDir, tDir)
         ? (bDir?.id ?? null)
-        : await mergeLevel(context, `${path}/`, bDir?.id ?? null, oDir?.id ?? null, tDir?.id ?? null, {
-            ours: gone.ours || (bDir !== undefined && oDir === undefined),
-            theirs: gone.theirs || (bDir !== undefined && tDir === undefined),
-          })
-    if (file && dir) context.conflicts.push({ path, reason: 'directory/file' })
-    if (file) result.push(file)
+        : await mergeLevel(context, full, bDir?.node ?? null, oDir?.node ?? null, tDir?.node ?? null)
+    if (file && dir) context.conflicts.push({ path: full, reason: 'directory/file' })
+    if (file) result.push({ mode: file.mode, name, id: file.id })
     if (dir) result.push({ mode: '40000', name, id: dir })
   }
   if (result.length === 0) return null
   return context.staged.add('tree', serializeTree(result))
 }
 
-const RENAME_SIMILARITY = 0.3
-
-const similarity = (a: Uint8Array, b: Uint8Array): number => {
-  if (a.length === 0 && b.length === 0) return 1
-  const counts = new Map<string, number>()
-  const decoder = new TextDecoder('latin1')
-  for (const line of splitLines(a)) {
-    const key = decoder.decode(line)
-    counts.set(key, (counts.get(key) ?? 0) + 1)
+const entryAt = async (source: ObjectSource, tree: ObjectId | null, path: string): Promise<TreeEntry | null> => {
+  let current = tree
+  const segments = path.split('/')
+  for (let i = 0; i < segments.length; i++) {
+    if (current === null) return null
+    const entry = (await readEntries(source, current)).find((candidate) => candidate.name === segments[i])
+    if (!entry) return null
+    if (i === segments.length - 1) return entry
+    if (!isTreeMode(entry.mode)) return null
+    current = entry.id
   }
-  let common = 0
-  for (const line of splitLines(b)) {
-    const key = decoder.decode(line)
-    const left = counts.get(key) ?? 0
-    if (left > 0) {
-      counts.set(key, left - 1)
-      common += line.length
+  return null
+}
+
+const fileAt = async (source: ObjectSource, tree: ObjectId | null, path: string): Promise<TreeEntry | null> => {
+  const entry = await entryAt(source, tree, path)
+  return entry && !isTreeMode(entry.mode) ? entry : null
+}
+
+type SideRenames = { readonly renames: ReadonlyMap<string, string>; readonly sources: ReadonlyMap<string, TreeEntry>; readonly relevant: readonly string[]; readonly ok: boolean }
+
+const ancestorsOf = (path: string): string[] => {
+  const found: string[] = []
+  for (let current = parentPath(path); current !== ''; current = parentPath(current)) found.push(current)
+  return found
+}
+
+const sideRenames = async (context: Context, base: ObjectId | null, side: ObjectId, other: ObjectId): Promise<SideRenames> => {
+  const { source } = context
+  const changes = await diffTrees(source, base, side, { renames: false })
+  const removed = new Set(changes.filter((change) => change.status === 'removed').map((change) => change.path))
+  const added = new Set(changes.filter((change) => change.status === 'added').map((change) => change.path))
+  const removedDirectories = new Map<string, boolean>()
+  const isDirectoryRemoved = async (directory: string) => {
+    if (directory === '') return false
+    if (!removedDirectories.has(directory)) {
+      const entry = await entryAt(source, side, directory)
+      const before = await entryAt(source, base, directory)
+      removedDirectories.set(directory, before !== null && isTreeMode(before.mode) && (!entry || !isTreeMode(entry.mode)))
     }
+    return removedDirectories.get(directory)!
   }
-  return common / Math.max(a.length, b.length)
+  const otherAdded = (await diffTrees(source, base, other, { renames: false })).filter((change) => change.status === 'added').map((change) => change.path)
+  const landing = new Map<string, string[]>()
+  for (const path of otherAdded) {
+    const directories: string[] = []
+    for (const directory of ancestorsOf(path)) if (await isDirectoryRemoved(directory)) directories.push(directory)
+    if (directories.length > 0) landing.set(path, directories)
+  }
+  const landingDirectories = new Set([...landing.values()].flat())
+  const sources: RenameSource[] = []
+  const entries = new Map<string, TreeEntry>()
+  for (const change of changes) {
+    if (change.status !== 'removed' || added.has(change.path)) continue
+    const entry = { mode: change.oldMode!, name: basename(change.path), id: change.oldId! }
+    const theirs = await fileAt(source, other, change.path)
+    const relevant = !theirs || theirs.id !== entry.id || theirs.mode !== entry.mode || ancestorsOf(change.path).some((directory) => landingDirectories.has(directory))
+    sources.push({ path: change.path, entry, relevant })
+    entries.set(change.path, entry)
+  }
+  const targets: RenameTarget[] = changes
+    .filter((change) => change.status === 'added' && !removed.has(change.path))
+    .map((change) => ({ path: change.path, entry: { mode: change.newMode!, name: basename(change.path), id: change.newId! } }))
+  const detection = await detectRenames(sources, targets, { read: (id) => readObject(source, id, 'blob'), isDirectoryRemoved })
+  const relevant = sources.filter((candidate) => candidate.relevant).map((candidate) => candidate.path)
+  if (!detection.ok) return { renames: new Map(), sources: entries, relevant, ok: false }
+  const renamedFrom = new Set([...detection.renames.keys()].flatMap(ancestorsOf))
+  for (const [path, directories] of landing) if (directories.some((directory) => renamedFrom.has(directory))) context.conflicts.push({ path, reason: 'directory-rename' })
+  const kept = new Map([...detection.renames].filter(([path]) => sources.find((candidate) => candidate.path === path)!.relevant))
+  return { renames: kept, sources: entries, relevant, ok: true }
 }
 
-const renameCandidates = async (context: Context, deleted: TreeEntry, added: readonly FileSide[]): Promise<FileSide[]> => {
-  if (!isRegular(deleted.mode)) return added.filter((side) => side.entry.id === deleted.id)
-  const original = await readObject(context.source, deleted.id, 'blob')
-  const similar: FileSide[] = []
-  for (const side of added) {
-    if (side.entry.id === deleted.id) similar.push(side)
-    else if (isRegular(side.entry.mode) && similarity(original, await readObject(context.source, side.entry.id, 'blob')) >= RENAME_SIMILARITY) similar.push(side)
+const markDirty = (dirty: Set<string>, path: string) => {
+  let current = parentPath(path)
+  while (true) {
+    dirty.add(current)
+    if (current === '') return
+    current = parentPath(current)
   }
-  return similar
 }
 
-const checkRenames = async (context: Context) => {
-  if (context.deleted.length === 0 || (context.addedOurs.length === 0 && context.addedTheirs.length === 0)) return
-  for (const { path, entry } of context.deleted) {
-    const ours = await renameCandidates(context, entry, context.addedOurs)
-    const theirs = await renameCandidates(context, entry, context.addedTheirs)
-    const key = (sides: readonly FileSide[]) => sides.map((side) => `${side.path}\0${side.entry.mode}\0${side.entry.id}`).sort().join('\n')
-    if (key(ours) !== key(theirs)) context.conflicts.push({ path, reason: 'rename' })
+const applyRenames = async (context: Context, base: ObjectId | null, ours: ObjectId, theirs: ObjectId): Promise<void> => {
+  const sides = [await sideRenames(context, base, ours, theirs), await sideRenames(context, base, theirs, ours)] as const
+  if (!sides[0].ok || !sides[1].ok) {
+    for (const side of sides) if (!side.ok) for (const path of side.relevant) context.conflicts.push({ path, reason: 'rename' })
+    return
+  }
+  const trees = [ours, theirs] as const
+  const move = (side: 0 | 1 | 2, from: string, to: string, entry: TreeEntry) => {
+    context.overlays[side].set(from, null)
+    context.overlays[side].set(to, { ...entry, name: basename(to) })
+    markDirty(context.dirty[side], from)
+    markDirty(context.dirty[side], to)
+  }
+  for (const index of [0, 1] as const) {
+    const mine = sides[index]
+    const other = sides[1 - index]!
+    const otherSide = (2 - index) as 1 | 2
+    const otherTargets = new Set(other.renames.values())
+    for (const [from, to] of mine.renames) {
+      const baseEntry = mine.sources.get(from)!
+      if (other.renames.has(from)) {
+        if (index === 1) continue
+        if (other.renames.get(from) !== to) context.conflicts.push({ path: from, reason: 'rename' })
+        else move(0, from, to, baseEntry)
+        continue
+      }
+      const otherEntry = await fileAt(context.source, trees[1 - index]!, from)
+      if (!otherEntry) {
+        context.conflicts.push({ path: from, reason: 'rename' })
+        continue
+      }
+      if (otherTargets.has(to) || (await fileAt(context.source, trees[1 - index]!, to))) {
+        context.conflicts.push({ path: to, reason: 'rename' })
+        continue
+      }
+      move(0, from, to, baseEntry)
+      move(otherSide, from, to, otherEntry)
+    }
   }
 }
 
 export const mergeTrees = async (staged: StagedObjects, base: ObjectId | null, ours: ObjectId, theirs: ObjectId): Promise<TreeMerge> => {
-  const context: Context = { source: staged, staged, conflicts: [], deleted: [], addedOurs: [], addedTheirs: [] }
-  const tree = (await mergeLevel(context, '', base, ours, theirs, { ours: false, theirs: false })) ?? staged.add('tree', EMPTY_TREE_DATA)
-  await checkRenames(context)
+  const context: Context = { source: staged, staged, conflicts: [], overlays: [new Map(), new Map(), new Map()], dirty: [new Set(), new Set(), new Set()] }
+  await applyRenames(context, base, ours, theirs)
+  const tree =
+    (await mergeLevel(context, '', base === null ? null : { id: base, path: '' }, { id: ours, path: '' }, { id: theirs, path: '' })) ??
+    staged.add('tree', EMPTY_TREE_DATA)
   const conflicts = [...new Map(context.conflicts.map((conflict) => [`${conflict.path}\0${conflict.reason}`, conflict])).values()]
   return { tree, conflicts }
 }

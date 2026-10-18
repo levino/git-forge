@@ -11,6 +11,7 @@ import { captureLoginPage } from './ui/login-pages.ts'
 export type Env = ForgeVars & {
   readonly BUCKET: R2Bucket
   readonly CDN_BUCKET?: R2Bucket
+  readonly BACKUP?: R2Bucket
   readonly DB: D1Database
   readonly RUNNER?: DurableObjectNamespace
   readonly IMPORTS?: Queue<ImportJob>
@@ -52,6 +53,7 @@ export const forgeFor = (env: Env): Promise<Forge> => {
         ...(env.JOBS ? { jobs: new QueueJobs(env.JOBS) } : {}),
         ...(email ? { email } : {}),
         ...(signing ? { presigner: new S3Storage({ ...signing, region: 'auto', forcePathStyle: true }) } : {}),
+        ...(env.BACKUP ? { backup: new R2Storage(env.BACKUP) } : {}),
         ...(env.CDN_BUCKET ? { lfsPublisher: storagePublisher(new R2Storage(env.CDN_BUCKET), env.LFS_PUBLISH_PREFIX?.trim() ?? '') } : {}),
         ...(actions
           ? {

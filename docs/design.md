@@ -356,6 +356,8 @@ tmp/<repo>/<timestamp>-<uuid>/part/<nnnnn>  # its parts, 1-based, five digits
   the database; a deleted asset or release leaves its bytes in place.
 - The bucket layout is a durable format and may only change
   backwards-compatibly.
+- A backup target (§19) holds the same keys plus `backups/db/<id>/` (database
+  dumps) and `backups/changed/<id>/<key>` (later versions of rewritten keys).
 
 
 ## 7. Flows
@@ -931,6 +933,7 @@ database.
 | Per-repository consistency | Durable Object | conditional writes (S3 CAS), single-writer process |
 | Scheduling, jobs | Cron Triggers, Queues (Workflows for long jobs) | `Deno.cron`, systemd timers, job table, in-process queue |
 | Public LFS bucket (`LfsPublisher`) | second R2 bucket (`CDN_BUCKET`) | any `Storage`: S3 bucket, local directory (`LFS_PUBLISH_DIR`) |
+| Backup target (§19) | second R2 bucket (`BACKUP`) with a bucket lock | any `Storage` (`BACKUP_STORAGE`): S3 bucket with Object Lock, local directory |
 | Email | Amazon SES v2 HTTP API (`@git-forge/ses`, SigV4 via `aws4fetch`, runs on Workers and Node) | SMTP for the Node deployment (`@git-forge/smtp`); a console adapter for development |
 | Compute for CI | Containers | external per-minute providers via the GHES API (WarpBuild, AWS CodeBuild, RunsOn), Fly Machines, a local process |
 
@@ -2261,64 +2264,57 @@ progress answers 409.
 
 ## 19. Backups
 
-Decision: backups are made at the bucket and database level with the
-providers' own tools; the forge has no backup code of its own. Mirrors (§4)
-are the federated copies; a backup is the operator's copy of their own
-instance, kept somewhere that cannot be rewritten.
+Mirrors (§4) are the federated copies; a backup is the operator's copy of
+their own instance, kept somewhere that cannot be rewritten. The forge backs
+itself up into a second storage target (`BACKUP` R2 binding in the Worker,
+`BACKUP_STORAGE` on Node); the built-in database dump replaces `wrangler d1
+export`, which refuses databases with FTS5 tables (§18). Backups are plain
+copies, restorable without git-forge and without keys. Encrypted full
+backups were built and dropped (PR #28).
 
-- **Repository data.** The bucket is append-only by design (§6): packs, idx
-  files and LFS objects are written once under their hash, only a few small
-  files (`refs.json`, `objects/info/packs`, `info/refs`, `HEAD`, mirror
-  status) are rewritten. Replicate it to a second bucket with Object Lock
-  (compliance mode, versioning on), so every rewritten file keeps its old
-  versions for the retention period and nothing can be deleted early, not
-  even with the backup credentials. The target can be another R2 bucket with
-  a bucket lock rule, or B2, Hetzner or any S3 bucket with Object Lock; the
-  copy runs with `rclone` on a schedule, since R2 has no built-in
-  bucket-to-bucket replication. `tmp/` is not needed.
-- **Database.** D1 Time Travel restores any minute of the last 30 days
-  (Workers Paid; 7 days on Free). For longer retention export the database
-  daily and put the dump into the same locked bucket. On Node, take an online
-  copy of the SQLite file. `wrangler d1 export` refuses databases with
-  virtual tables, so since migration `0026` (FTS5 search tables) D1 exports
-  need a workaround; the search tables are derived data
-  (`POST /api/admin/search/rebuild`).
-- **Consistency.** Copy the database first, then the bucket: every row
-  refers only to objects that exist by then, and objects are never removed.
-- **No encryption.** Backups are plain copies of the bucket and the
-  database, restorable without git-forge and without keys that could be
-  lost. Encrypted full backups were built and dropped (PR #28): they added
-  key management and a restore path of their own for no gain over a locked
-  bucket at a provider the operator trusts.
+**Run.** The scheduled run (Cron Trigger, `SCHEDULE` on Node) or "run now"
+(`POST /api/admin/backup`, admin page) starts a run if none is active and
+enqueues one `backup` job; each job does a bounded step (256 MiB or 2000
+keys, 50 dump pages) and enqueues the next. State is one JSON row in
+`backup_state`, advanced by compare-and-swap on `version`, so duplicate jobs
+stop and a failed or lost job resumes from the cursor on the next scheduled
+run. Order per run: database first, then objects, so every dumped row refers
+only to objects that exist by the time they are copied.
 
-Commands (Cloudflare instance; `lock:` is an rclone S3 remote for B2,
-Hetzner or any S3 bucket with Object Lock, `r2:` one for the instance's R2
-bucket):
+**Database dump** under `backups/db/<id>/` (`<id>` = UTC `YYYYMMDDTHHMMSSZ`):
+`0000-schema.sql` (tables), `<nnnn>-<table>-<page>.sql` (500 rows per page,
+keyset by `rowid`, tables in creation order), `9999-indexes.sql` (indexes,
+FTS5 tables, the search index rebuild, triggers, views), then
+`manifest.json` when the run is complete. One statement per line (newlines
+in strings become `char(10)`). `backup_state`, `backup_objects`, FTS5
+virtual tables and their shadow tables are not dumped; the FTS5 tables are
+recreated and rebuilt from their content after the data. The dump spans
+several steps, so it is not a single-instant snapshot.
 
-```sh
-# once: a bucket with Object Lock and 90 days default retention
-aws s3api create-bucket --bucket forge-backup --object-lock-enabled-for-bucket --endpoint-url "$S3_ENDPOINT"
-aws s3api put-object-lock-configuration --bucket forge-backup --endpoint-url "$S3_ENDPOINT" \
-  --object-lock-configuration '{"ObjectLockEnabled":"Enabled","Rule":{"DefaultRetention":{"Mode":"COMPLIANCE","Days":90}}}'
+**Objects.** All source keys except `tmp/` are listed in order after the
+cursor; `backup_objects` (source key → target key, ETag, size, SHA-256)
+skips unchanged keys. Each copy streams through SHA-256 and is re-read and
+re-hashed from the target. The target is write-once, so R2 bucket locks and
+S3 Object Lock work: a new key is copied to the same key; a rewritten key
+(`refs.json`, `objects/info/packs`, …) goes to
+`backups/changed/<id>/<key>`. An existing target key is re-hashed instead of
+overwritten. Lock the backup bucket (R2 bucket lock rule, or Object Lock in
+compliance mode) for the retention period.
 
-# daily (cron, CI): database first, then the repositories
-npx wrangler d1 export git-forge --remote --output "d1-$(date -u +%F).sql"
-rclone copy "d1-$(date -u +%F).sql" lock:forge-backup/d1/
-rclone copy r2:git-forge lock:forge-backup/bucket/ --exclude 'tmp/**' --checksum
+**Verify.** `POST /api/admin/backup/verify` (`{"sample": n}`), the admin page
+or `git-forge-node backup-verify [n]` re-hash a random sample of
+`backup_objects` in the target.
 
-# Node instance (apps/forge-node)
-sqlite3 /data/git-forge.sqlite ".backup /tmp/git-forge-$(date -u +%F).sqlite"
-rclone copy /tmp/git-forge-$(date -u +%F).sqlite lock:forge-backup/db/
-rclone copy /data/objects lock:forge-backup/bucket/ --exclude 'tmp/**' --checksum
-```
-
-Restore: `npx wrangler d1 time-travel restore git-forge --timestamp <iso>`
-within the Time Travel window, otherwise `npx wrangler d1 execute <new db>
---remote --file d1-<date>.sql` into a freshly created database; then
-`rclone copy lock:forge-backup/bucket/ r2:<new bucket>/` (an older state with
-`--s3-version-at <time>`). A repository can also be cloned straight from the
-copied bucket over dumb HTTP or after `rclone copy` to a directory, without
-any git-forge software (§2).
+**Restore.** `git-forge-node restore [id]` (latest complete backup by
+default) loads the dump into an empty `DATABASE_PATH`, copies every plain key
+and then the `backups/changed/<run>/` overlays up to `<id>` into `STORAGE`
+with verification, and applies newer migrations. For Cloudflare, run it with
+`BACKUP_STORAGE=s3` (R2's S3 API) and `STORAGE=s3` on the new bucket, and
+load the database with `git-forge-node restore-sql [id] > restore.sql` and
+`npx wrangler d1 execute <db> --remote --file restore.sql`. Without
+git-forge: execute `backups/db/<id>/*.sql` in name order with any SQLite
+client and copy the bucket with the overlays on top. D1 Time Travel (30 days
+on Paid) stays the quickest way back to a recent minute.
 
 ## 20. Pages
 

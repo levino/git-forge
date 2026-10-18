@@ -1,0 +1,40 @@
+---
+import type { BackupStatus } from '../backup.ts'
+import { formatBytes, relativeTime } from '../ui/format.ts'
+
+type Props = { status: BackupStatus; csrf: string }
+const { status, csrf } = Astro.props
+const now = Math.floor(Date.now() / 1000)
+const ago = (ms: number | undefined) => (ms === undefined ? 'never' : relativeTime(Math.floor(ms / 1000), now))
+---
+
+<section class="panel" aria-labelledby="backup">
+  <h2 id="backup" class="panel-title">Backup</h2>
+  {
+    !status.enabled ? (
+      <p class="text-base-content/70">No backup target. Bind a second bucket as <code>BACKUP</code> (or set <code>BACKUP_STORAGE</code> on Node) to back up the database and every object daily.</p>
+    ) : (
+      <>
+        <dl class="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-1 text-sm">
+          <dt>Last complete</dt><dd>{ago(status.last?.completedAt)}</dd>
+          <dt>Lag</dt><dd>{status.lagSeconds === null ? 'no complete backup yet' : relativeTime(now - status.lagSeconds, now)}</dd>
+          <dt>Size</dt><dd>{formatBytes(status.stored.bytes)} in {status.stored.objects} objects</dd>
+          <dt>Running</dt><dd>{status.run ? `since ${ago(status.run.startedAt)}, ${status.run.phase === 'dump' ? 'database' : 'objects'}, ${formatBytes(status.run.bytes)} copied` : 'no'}</dd>
+        </dl>
+        {status.error && <p role="alert" class="text-sm text-error break-words">{ago(status.error.at)}: {status.error.message}</p>}
+        <div class="flex gap-2">
+          <form method="post">
+            <input type="hidden" name="csrf" value={csrf} />
+            <input type="hidden" name="action" value="backup-run" />
+            <button class="btn btn-sm">Run now</button>
+          </form>
+          <form method="post">
+            <input type="hidden" name="csrf" value={csrf} />
+            <input type="hidden" name="action" value="backup-verify" />
+            <button class="btn btn-sm btn-outline">Verify a sample</button>
+          </form>
+        </div>
+      </>
+    )
+  }
+</section>

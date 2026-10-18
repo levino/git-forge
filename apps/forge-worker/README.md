@@ -75,6 +75,7 @@ read functions of `@git-forge/core` and check access with the same
 | `PAGES_MAX_AGE` | var | `Cache-Control` max-age of public Pages responses in seconds, default 60. |
 | `CDN_BUCKET` | R2 binding, optional | Public bucket for [LFS publish](#lfs-publish): LFS objects of public repositories are copied there on push, keyed by oid. |
 | `LFS_PUBLISH_PREFIX` | var, optional | Key prefix inside `CDN_BUCKET`, e.g. `lfs/`. Default: none. |
+| `BACKUP` | R2 binding, optional | Backup target: each cron run copies a database dump and every object into it (design §19). Give it a bucket lock rule. |
 | `RUNNER` | Durable Object + Container | `RunnerContainer` (`src/runner-container.ts`, image `runner/Dockerfile`): one container per CI job with the official `actions/runner` and a JIT config. Declared in every environment; without the binding, jobs wait for a runner registered by hand. |
 
 Repositories are **private by default**; visibility is set per repository.
@@ -110,6 +111,9 @@ There is no global "public read" switch any more.
 | `GET /api/admin/admins` | instance admin | Instance admins: `[{id, login}]`. |
 | `PUT\|DELETE /api/admin/admins/{login}` | instance admin | Makes a user an instance admin or removes them; the last admin cannot be removed (`422`). `204`. |
 | `GET /api/admin/mirrors` | instance admin | Every mirror of the instance: `[{repository, config, status}]`. |
+| `GET /api/admin/backup` | instance admin | Backup status: `{enabled, run, last, error, lagSeconds, stored: {objects, bytes}}`. |
+| `POST /api/admin/backup` | instance admin | Starts a backup run now (or continues the active one). `202`; `409` without a `BACKUP` target. |
+| `POST /api/admin/backup/verify` `{sample?}` | instance admin | Re-hashes `sample` (default 20) random backed-up objects: `{checked, failures}`, `409` on a mismatch. |
 | `POST /api/orgs` `{login}` | signed-in user (session or `repo:admin` token) | Creates an organization; the caller becomes its first owner. Reserved names (`api`, `explore`, `settings`, `orgs`, …) answer `422`. |
 | `GET /api/orgs/{org}` | members, instance admins | `{organization, membership, canAdminister, members, teams}`; `404` for everyone else. |
 | `PUT\|DELETE /api/orgs/{org}/members/{login}` `{role}` | organization owner, instance admin | Adds a member, changes the role (`member`, `owner`) or removes them; the last owner stays (`422`). `204`. |

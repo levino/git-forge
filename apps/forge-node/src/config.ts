@@ -27,6 +27,15 @@ export type NodeVars = ForgeVars & {
   readonly SMTP_PASSWORD?: string
   readonly SMTP_HELO?: string
   readonly LFS_PUBLISH_DIR?: string
+  readonly BACKUP_STORAGE?: string
+  readonly BACKUP_STORAGE_DIR?: string
+  readonly BACKUP_S3_ENDPOINT?: string
+  readonly BACKUP_S3_REGION?: string
+  readonly BACKUP_S3_BUCKET?: string
+  readonly BACKUP_S3_ACCESS_KEY_ID?: string
+  readonly BACKUP_S3_SECRET_ACCESS_KEY?: string
+  readonly BACKUP_S3_PREFIX?: string
+  readonly BACKUP_S3_FORCE_PATH_STYLE?: string
 }
 
 export type SmtpSettings = {
@@ -54,6 +63,7 @@ export type NodeConfig = {
   readonly jobConcurrency: number
   readonly email: NodeEmailSettings | undefined
   readonly lfsPublishDir: string | null
+  readonly backup: StorageConfig | null
 }
 
 export const DEFAULT_PORT = 8080
@@ -85,32 +95,37 @@ const flag = (name: string, value: string | undefined): boolean => {
   throw new ConfigurationError(`${name} must be true or false`)
 }
 
-const required = (vars: NodeVars, name: keyof NodeVars): string => {
-  const value = present(vars[name])
-  if (value === undefined) throw new ConfigurationError(`${name} is required with STORAGE=s3`)
-  return value
-}
-
-const storageConfig = (vars: NodeVars, dataDir: string): StorageConfig => {
-  const kind = present(vars.STORAGE) ?? 'fs'
-  if (kind === 'fs') return { kind, dir: present(vars.STORAGE_DIR) ?? joinPath(dataDir, 'objects') }
-  if (kind !== 's3') throw new ConfigurationError('STORAGE must be fs or s3')
-  const endpoint = required(vars, 'S3_ENDPOINT')
+const storageConfig = (vars: NodeVars, scope: '' | 'BACKUP_', defaultDir: string | null): StorageConfig | null => {
+  const value = (name: string) => present((vars as Record<string, string | undefined>)[`${scope}${name}`])
+  const required = (name: string): string => {
+    const found = value(name)
+    if (found === undefined) throw new ConfigurationError(`${scope}${name} is required with ${scope}STORAGE=s3`)
+    return found
+  }
+  const kind = value('STORAGE') ?? (defaultDir === null ? undefined : 'fs')
+  if (kind === undefined) return null
+  if (kind === 'fs') {
+    const dir = value('STORAGE_DIR') ?? defaultDir
+    if (dir === null) throw new ConfigurationError(`${scope}STORAGE_DIR is required with ${scope}STORAGE=fs`)
+    return { kind, dir }
+  }
+  if (kind !== 's3') throw new ConfigurationError(`${scope}STORAGE must be fs or s3`)
+  const endpoint = required('S3_ENDPOINT')
   try {
     new URL(endpoint)
   } catch {
-    throw new ConfigurationError('S3_ENDPOINT must be a URL')
+    throw new ConfigurationError(`${scope}S3_ENDPOINT must be a URL`)
   }
-  const prefix = present(vars.S3_PREFIX)
+  const prefix = value('S3_PREFIX')
   return {
     kind,
     config: {
       endpoint,
-      region: present(vars.S3_REGION) ?? 'us-east-1',
-      bucket: required(vars, 'S3_BUCKET'),
-      accessKeyId: required(vars, 'S3_ACCESS_KEY_ID'),
-      secretAccessKey: required(vars, 'S3_SECRET_ACCESS_KEY'),
-      forcePathStyle: flag('S3_FORCE_PATH_STYLE', vars.S3_FORCE_PATH_STYLE),
+      region: value('S3_REGION') ?? 'us-east-1',
+      bucket: required('S3_BUCKET'),
+      accessKeyId: required('S3_ACCESS_KEY_ID'),
+      secretAccessKey: required('S3_SECRET_ACCESS_KEY'),
+      forcePathStyle: flag(`${scope}S3_FORCE_PATH_STYLE`, value('S3_FORCE_PATH_STYLE')),
       ...(prefix ? { prefix } : {}),
     },
   }
@@ -170,10 +185,11 @@ export const parseNodeConfig = (vars: NodeVars): NodeConfig => {
     host: present(vars.HOST) ?? DEFAULT_HOST,
     trustProxy: flag('TRUST_PROXY', vars.TRUST_PROXY),
     databasePath: present(vars.DATABASE_PATH) ?? joinPath(dataDir, 'git-forge.sqlite'),
-    storage: storageConfig(vars, dataDir),
+    storage: storageConfig(vars, '', joinPath(dataDir, 'objects'))!,
     schedule: schedule(vars.SCHEDULE),
     jobConcurrency: integer('JOB_CONCURRENCY', vars.JOB_CONCURRENCY, DEFAULT_JOB_CONCURRENCY, 1, 64),
     email: emailSettings(vars),
     lfsPublishDir: present(vars.LFS_PUBLISH_DIR) ?? null,
+    backup: storageConfig(vars, 'BACKUP_', null),
   }
 }

@@ -46,6 +46,7 @@ export type ForgeVars = {
   readonly OIDC_NAME?: string
   readonly OIDC_SCOPES?: string
   readonly SELF_SIGNUP?: string
+  readonly PASSKEYS?: string
   readonly BREAK_GLASS_PUBLIC_KEY?: string
 }
 
@@ -53,6 +54,7 @@ export type LoginSettings = {
   readonly oidc: OidcClientConfig | undefined
   readonly selfSignup: boolean
   readonly breakGlassKey: OkpPublicJwk | undefined
+  readonly passkeys?: boolean
 }
 
 export type ForgeSettings = {
@@ -204,7 +206,7 @@ export const parseLoginSettings = (vars: ForgeVars): LoginSettings => {
     if (error instanceof BreakGlassError) throw new ConfigurationError(error.message)
     throw error
   }
-  return { oidc: parseOidcSettings(vars), selfSignup: vars.SELF_SIGNUP === 'true', breakGlassKey }
+  return { oidc: parseOidcSettings(vars), selfSignup: vars.SELF_SIGNUP === 'true', breakGlassKey, passkeys: present(vars.PASSKEYS) !== 'false' }
 }
 
 export const parseSettings = async (vars: ForgeVars): Promise<ForgeSettings> => {

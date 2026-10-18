@@ -15,6 +15,8 @@ import Explore from '../../src/pages/explore.astro'
 import Home from '../../src/pages/index.astro'
 import Login from '../../src/pages/-/login.astro'
 import Settings from '../../src/pages/settings.astro'
+import New from '../../src/pages/new.astro'
+import Import from '../../src/pages/[owner]/[repo]/import.astro'
 import Notifications from '../../src/pages/notifications.astro'
 import Releases from '../../src/pages/[owner]/[repo]/releases/index.astro'
 import ReleaseTag from '../../src/pages/[owner]/[repo]/releases/tag/[...tag].astro'
@@ -52,7 +54,7 @@ const render = async (page: Parameters<AstroContainer['renderToResponse']>[0], p
 }
 
 beforeAll(async () => {
-  forge = await nodeForge()
+  forge = await nodeForge({ scheduleImport: async () => {} })
   server = await startServer((request) => forge.fetch(request))
   const token = await bootstrap(forge, BASE, 'alice')
   admin = (await forge.services.authenticate(new Request(BASE, { headers: { Authorization: `Bearer ${token}` } })))!
@@ -210,11 +212,11 @@ describe('instance pages', () => {
 
 describe('login and account pages', () => {
   const user = () => admin as UserPrincipal
-  const session = (): UiSession => ({ principal: user(), csrf: 'csrf-token' })
+  const session = (): UiSession => ({ principal: user(), csrf: 'csrf-token', sessionId: 'session-1' })
 
   it('renders the sign-in page model from the login core', async () => {
     const page = await render(Login, '/login', {}, ANONYMOUS, {
-      loginPage: { kind: 'login', returnTo: '/alice/site', oidcName: 'Example ID', selfSignup: true, breakGlass: true, user: null },
+      loginPage: { kind: 'login', returnTo: '/alice/site', oidcName: 'Example ID', selfSignup: true, breakGlass: true, passkeys: true, user: null },
     })
     expect(page.status).toBe(200)
     expect(page.html).toContain('href="/login/oidc?return_to=%2Falice%2Fsite"')
@@ -223,6 +225,40 @@ describe('login and account pages', () => {
     expect(page.html).toContain('Create with a passkey')
     expect(page.html).toContain('href="/login/break-glass"')
     expect(page.html).toContain('"returnTo":"/alice/site"')
+  })
+
+  it('hides every passkey control and the ceremony script when passkeys are disabled', async () => {
+    const signIn = await render(Login, '/login', {}, ANONYMOUS, {
+      loginPage: { kind: 'login', returnTo: '/', oidcName: 'Example ID', selfSignup: true, breakGlass: true, passkeys: false, user: null },
+    })
+    expect(signIn.html).toContain('Sign in with Example ID')
+    expect(signIn.html).toContain('href="/login/break-glass"')
+    expect(signIn.html).not.toContain('data-passkey')
+    expect(signIn.html).not.toContain('login-config')
+    const signedIn = await render(Login, '/login', {}, user(), {
+      session: session(),
+      loginPage: { kind: 'login', returnTo: '/', oidcName: null, selfSignup: false, breakGlass: false, passkeys: false, user: { login: 'alice', csrf: 'csrf-token' } },
+    })
+    expect(signedIn.html).toContain('Signed in as')
+    expect(signedIn.html).not.toContain('data-passkey')
+    const invite = await render(Login, '/login/invite/abc', {}, ANONYMOUS, {
+      loginPage: { kind: 'invite', code: 'abc', login: 'bob', existingUser: false, oidcName: 'Example ID', passkeys: false },
+    })
+    expect(invite.html).toContain('href="/login/oidc?invite=abc"')
+    expect(invite.html).not.toContain('data-passkey')
+    expect(invite.html).not.toContain('login-config')
+    const enabled = await render(Login, '/login/invite/abc', {}, ANONYMOUS, {
+      loginPage: { kind: 'invite', code: 'abc', login: 'bob', existingUser: false, oidcName: 'Example ID', passkeys: true },
+    })
+    expect(enabled.html).toContain('data-passkey="register"')
+    const settings = await render(Settings, '/settings', {}, user(), {
+      session: session(),
+      services: { loginOptions: { ...forge.services.loginOptions, passkeys: false } },
+    })
+    expect(settings.status).toBe(200)
+    expect(settings.html).not.toContain('data-passkey')
+    expect(settings.html).not.toContain('id="passkeys"')
+    expect((await render(Settings, '/settings', {}, user(), { session: session() })).html).toContain('data-passkey="register"')
   })
 
   it('escapes device data, carries the CSRF token and keeps the security headers', async () => {
@@ -278,6 +314,66 @@ describe('login and account pages', () => {
   })
 })
 
+describe('new repository page', () => {
+  const user = () => admin as UserPrincipal
+  const session = (): UiSession => ({ principal: user(), csrf: 'csrf-token', sessionId: 'session-1' })
+  const post = (fields: Record<string, string>, verified: UiSession | null = session()) =>
+    render(New, '/new', {}, user(), {
+      session: session(),
+      request: new Request(`${BASE}/new`, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams(fields) }),
+      services: { verifySessionWrite: async () => verified },
+    })
+
+  it('sends visitors without a session to the sign-in page', async () => {
+    expect(await render(New, '/new', {})).toMatchObject({ status: 302, location: '/login?return_to=%2Fnew' })
+  })
+
+  it('offers the accounts the user may create in and the import form', async () => {
+    const page = await render(New, '/new', {}, user(), { session: session() })
+    expect(page.status).toBe(200)
+    expect(page.html).toContain('<option value="alice" selected')
+    expect(page.html).toContain('name="csrf" value="csrf-token"')
+    expect(page.html).toContain('value="import"')
+    expect(page.html).toContain('href="/new"')
+    const plain = await render(New, '/new', {}, user(), { session: session(), services: { repositories: { ...forge.services.repositories, importsEnabled: false } } })
+    expect(plain.html).toContain('Imports are not available')
+  })
+
+  it('creates a repository from the session and redirects to its empty page', async () => {
+    expect((await post({ action: 'create', owner: 'alice', name: 'fresh' }, null)).status).toBe(403)
+    const created = await post({ action: 'create', owner: 'alice', name: 'fresh', visibility: 'private', defaultBranch: 'trunk' })
+    expect(created).toMatchObject({ status: 303, location: '/alice/fresh' })
+    expect(await forge.services.store.findRepository('alice', 'fresh')).toMatchObject({ visibility: 'private' })
+    const home = await render(RepoHome, '/alice/fresh', { owner: 'alice', repo: 'fresh' }, admin)
+    expect(home.html).toContain('This repository is empty')
+    expect(home.html).toContain('https://forge.example/alice/fresh.git')
+    expect(home.html).toContain('git push -u origin trunk')
+    expect((await render(RepoHome, '/alice/fresh', { owner: 'alice', repo: 'fresh' })).status).toBe(404)
+    const again = await post({ action: 'create', owner: 'alice', name: 'fresh' })
+    expect(again.status).toBe(409)
+    expect(again.html).toContain('alice/fresh already exists')
+    expect((await post({ action: 'create', owner: 'nobody', name: 'x' })).status).toBe(404)
+    expect((await post({ action: 'create', owner: 'alice', name: 'bad name' })).status).toBe(400)
+  })
+
+  it('starts an import and shows its status to repository admins', async () => {
+    const started = await post({ action: 'import', owner: 'alice', name: 'imported', url: 'https://example.org/up.git', token: 'secret', lfs: 'on', visibility: 'public' })
+    expect(started).toMatchObject({ status: 303, location: '/alice/imported/import' })
+    expect((await post({ action: 'import', owner: 'alice', name: 'other', url: 'https://user:pw@example.org/up.git' })).status).toBe(400)
+    const status = await render(Import, '/alice/imported/import', { owner: 'alice', repo: 'imported' }, admin, { session: session() })
+    expect(status.status).toBe(200)
+    expect(status.html).toContain('Listing upstream refs')
+    expect(status.html).toContain('https://example.org/up.git')
+    expect(status.html).toContain('http-equiv="refresh"')
+    expect(status.html).not.toContain('secret')
+    const empty = await render(RepoHome, '/alice/imported', { owner: 'alice', repo: 'imported' }, admin, { session: session() })
+    expect(empty.html).toContain('href="/alice/imported/import"')
+    expect((await render(RepoHome, '/alice/fresh', { owner: 'alice', repo: 'fresh' }, admin, { session: session() })).html).not.toContain('View the import status')
+    expect((await render(Import, '/alice/site/import', { owner: 'alice', repo: 'site' }, admin, { session: session() })).status).toBe(404)
+    expect((await render(Import, '/alice/imported/import', { owner: 'alice', repo: 'imported' })).status).toBe(302)
+  })
+})
+
 describe('releases and notifications', () => {
   it('lists published releases with sanitized notes and asset downloads', async () => {
     const { status, html } = await render(Releases, '/alice/site/releases', { owner: 'alice', repo: 'site' })
@@ -301,7 +397,7 @@ describe('releases and notifications', () => {
   })
 
   it('shows the inbox of the session user and applies its actions', async () => {
-    const session: UiSession = { principal: admin as UserPrincipal, csrf: 'csrf-token' }
+    const session: UiSession = { principal: admin as UserPrincipal, csrf: 'csrf-token', sessionId: 'session-1' }
     const done: number[] = []
     const thread = {
       id: 7, user_id: 'x', repository_id: 'r', subject_key: 'k', subject_type: 'Release', subject_title: 'First release', subject_url: null, latest_comment_url: null,

@@ -66,10 +66,11 @@ describe('device flow', () => {
 
 describe('login names', () => {
   it('derives logins from OIDC claims and avoids taken ones', async () => {
-    expect(loginCandidates({ preferredUsername: 'jörg.müller@dorf.example', email: null, name: null })).toEqual(['jorg-muller', 'user'])
-    expect(loginCandidates({ preferredUsername: null, email: 'anna@x.example', name: 'Anna B' })).toEqual(['anna', 'Anna-B', 'user'])
-    const taken = new Set(['anna', 'Anna-B', 'user', 'anna-2'])
-    expect(await chooseLogin(['anna', 'Anna-B', 'user'], async (login) => taken.has(login))).toBe('anna-3')
+    expect(loginCandidates({ preferredUsername: 'jörg.müller@dorf.example', email: null, name: null })).toEqual(['jorg-muller'])
+    expect(loginCandidates({ preferredUsername: null, email: 'anna@x.example', name: 'Anna B' })).toEqual(['anna', 'Anna-B'])
+    expect(loginCandidates({ preferredUsername: '???', email: null, name: null })).toEqual(['user'])
+    const taken = new Set(['anna', 'Anna-B', 'anna-2'])
+    expect(await chooseLogin(['anna', 'Anna-B'], async (login) => taken.has(login))).toBe('anna-3')
   })
 })
 

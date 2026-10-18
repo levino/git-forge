@@ -84,7 +84,7 @@ const sanitizeLogin = (value: string): string =>
 export const loginCandidates = (claims: { readonly preferredUsername: string | null; readonly email: string | null; readonly name: string | null }): string[] => {
   const raw = [claims.preferredUsername?.split('@')[0], claims.email?.split('@')[0], claims.name].filter((value): value is string => !!value)
   const cleaned = raw.map(sanitizeLogin).filter((value) => LOGIN_PATTERN.test(value))
-  return [...new Set([...cleaned, 'user'])]
+  return cleaned.length > 0 ? [...new Set(cleaned)] : ['user']
 }
 
 export const chooseLogin = async (candidates: readonly string[], taken: (login: string) => Promise<boolean>): Promise<string> => {

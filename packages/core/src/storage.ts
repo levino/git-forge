@@ -29,10 +29,13 @@ export type PresignedPut = {
   readonly expiresAt: Date
 }
 
+export class ChecksumMismatchError extends Error {}
+
 export interface Storage {
   get(key: string, range?: ByteRange): Promise<StoredObject | null>
   head(key: string): Promise<ObjectInfo | null>
   put(key: string, body: PutBody, size: number, options?: PutOptions): Promise<PutResult>
+  putVerified?(key: string, body: ReadableStream<Uint8Array>, size: number, sha256Hex: string, options?: PutOptions): Promise<PutResult>
   list(prefix: string): AsyncIterable<ObjectInfo>
   presignGet?(key: string, expiresInSeconds: number): Promise<string>
   presignPut?(key: string, size: number, sha256Hex: string, expiresInSeconds: number): Promise<PresignedPut>
@@ -44,6 +47,7 @@ export const withPresigner = (storage: Storage, presigner: Presigner): Storage =
   get: (key, range) => storage.get(key, range),
   head: (key) => storage.head(key),
   put: (key, body, size, options) => storage.put(key, body, size, options),
+  ...(storage.putVerified ? { putVerified: storage.putVerified.bind(storage) } : {}),
   list: (prefix) => storage.list(prefix),
   presignGet: (key, expiresInSeconds) => presigner.presignGet(key, expiresInSeconds),
   presignPut: (key, size, sha256Hex, expiresInSeconds) => presigner.presignPut(key, size, sha256Hex, expiresInSeconds),

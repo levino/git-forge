@@ -2,7 +2,7 @@ import { fromUtf8, toHex } from './bytes.ts'
 import { type DigestFactory, javascriptDigests } from './digest.ts'
 import type { GitObject } from './objects.ts'
 import { repositoryPrefix, type RepositoryName } from './repository.ts'
-import type { Storage } from './storage.ts'
+import { ChecksumMismatchError, type PutOptions, type PutResult, type Storage } from './storage.ts'
 
 export const LFS_CONTENT_TYPE = 'application/vnd.git-lfs+json'
 
@@ -166,6 +166,23 @@ export const verifyingStream = (expected: LfsObjectSpec, digests: DigestFactory 
   })
 }
 
+export const putVerifiedStream = async (
+  storage: Storage,
+  key: string,
+  body: ReadableStream<Uint8Array>,
+  expected: LfsObjectSpec,
+  options: PutOptions,
+  digests?: DigestFactory,
+): Promise<PutResult> => {
+  if (!storage.putVerified) return storage.put(key, body.pipeThrough(verifyingStream(expected, digests)), expected.size, options)
+  try {
+    return await storage.putVerified(key, body, expected.size, expected.oid, options)
+  } catch (error) {
+    if (error instanceof ChecksumMismatchError) throw new LfsIntegrityError(error.message)
+    throw error
+  }
+}
+
 export const hashStream = async (
   stream: ReadableStream<Uint8Array>,
   digests: DigestFactory = javascriptDigests,
@@ -201,10 +218,7 @@ export const storeLfsObject = async (
     return existing === object.size ? { ok: true, created: false } : { ok: false, status: 422, message: `object size is ${existing}, not ${object.size}` }
   }
   try {
-    const result = await storage.put(lfsObjectKey(repo, object.oid), body.pipeThrough(verifyingStream(object)), object.size, {
-      ifNoneMatch: '*',
-      contentType: 'application/octet-stream',
-    })
+    const result = await putVerifiedStream(storage, lfsObjectKey(repo, object.oid), body, object, { ifNoneMatch: '*', contentType: 'application/octet-stream' })
     return { ok: true, created: result.ok }
   } catch (error) {
     if (error instanceof LfsIntegrityError) return { ok: false, status: 422, message: error.message }

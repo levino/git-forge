@@ -10,6 +10,9 @@ command = "V=0.8.3 S=3b1809e5f88d9330acb50a5f20dfb9370cf55c8d89e0a5ac7984b495a06
 [limits]
 cpu_ms = 60000
 
+[placement]
+mode = "smart"
+
 [observability]
 enabled = true
 

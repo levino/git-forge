@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { streamOf, utf8 } from '../src/bytes.ts'
+import { readAll, streamOf, utf8 } from '../src/bytes.ts'
 import { sha256Hex } from '../src/hash.ts'
 import {
   lfsBatch,
@@ -14,7 +14,7 @@ import {
 } from '../src/lfs.ts'
 import { MemoryStorage } from '../src/memory-storage.ts'
 import type { GitObject } from '../src/objects.ts'
-import type { PresignedPut } from '../src/storage.ts'
+import { ChecksumMismatchError, type PresignedPut } from '../src/storage.ts'
 
 const repo = { owner: 'acme', name: 'assets' }
 
@@ -122,6 +122,21 @@ describe('storing objects', () => {
     const keys: string[] = []
     for await (const info of storage.list('repos/')) keys.push(info.key)
     expect(keys).toEqual([])
+  })
+
+  it('leaves the hash to storage that verifies it', async () => {
+    const verified: string[] = []
+    const storage = new (class extends MemoryStorage {
+      async putVerified(key: string, body: ReadableStream<Uint8Array>, size: number, sha256: string) {
+        const bytes = await readAll(body)
+        if (sha256Hex(bytes) !== sha256) throw new ChecksumMismatchError('checksum differs')
+        verified.push(key)
+        return this.put(key, bytes, size, { ifNoneMatch: '*' })
+      }
+    })()
+    expect(await storeLfsObject(storage, repo, spec, streamOf(utf8('something else!!\n')))).toEqual({ ok: false, status: 422, message: 'checksum differs' })
+    expect(await storeLfsObject(storage, repo, spec, streamOf(content))).toEqual({ ok: true, created: true })
+    expect(verified).toEqual([lfsObjectKey(repo, oid)])
   })
 })
 

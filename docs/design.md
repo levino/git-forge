@@ -424,10 +424,11 @@ as a sequence of stateless steps, each persisting its progress in
    about 1 GiB at `cpu_ms` 60000.
 4. *lfs* — via the upstream's batch API, at most 100 objects and
    `maxLfsStepBytes` (512 MiB) per step, at least one object; objects are
-   streamed into storage with native SHA-256 (`DigestStream`, `node:crypto`),
-   so any size up to the storage's single `put` (5 GiB on R2) works;
-   `MAX_LFS_OBJECT_BYTES` only limits uploads. A 538 MB object costs about
-   1.7 s CPU. Missing objects are recorded, not fatal.
+   streamed into storage and verified by it (`putVerified`, §11) or with
+   native SHA-256 (`DigestStream`, `node:crypto`), so any size up to the
+   storage's single `put` (5 GiB on R2) works; `MAX_LFS_OBJECT_BYTES` only
+   limits uploads. On R2 an object costs almost no CPU. Missing objects are
+   recorded, not fatal.
    Endpoint precedence as in git-lfs: `lfsUrl`, then `.lfsconfig` of the
    default branch (other tips, then tags, only if it has none; `lfs.url`
    before `remote.origin.lfsurl`), then `<url>.git/info/lfs`. URLs are
@@ -504,7 +505,9 @@ objects via the Batch API and verify their hashes. Two strategies:
   stored. Then every upstream tip must be found in an index (otherwise the
   missing objects are fetched object by object as with any dumb remote).
   LFS pointers are found among the small blobs of the copied packs (entry
-  headers and delta result sizes, inflating only candidates ≤ 1 KiB). No
+  headers and delta result sizes, inflating only candidates ≤ 1 KiB) and
+  stored in `lfsPending` before the first download, so a sync that dies
+  half way (CPU limit, deploy) leaves them for the next one. No
   object is re-hashed and no index is recomputed, so the mirror's packs are
   byte-identical to the upstream's, down the whole chain. Copy-only trusts
   the upstream for connectivity; integrity of the bytes is verified.
@@ -515,7 +518,9 @@ objects via the Batch API and verify their hashes. Two strategies:
 - **Deep check** (`deepCheckRepository`, on demand via
   `POST /api/repos/{owner}/{repo}/mirrors/{remote}/verify` or scheduled
   rarely): inflate and hash every object of every pack, recompute every
-  index and compare it byte for byte, and walk every ref to its last object.
+  index and compare it byte for byte, walk every ref to its last object, and
+  check that the LFS object of every pointer in the packs is stored with its
+  size (missing ones go to `lfsPending`, so the next sync fetches them).
   The result is stored in the mirror status (`lastDeepCheck`). It costs
   roughly a full re-index (§12), which is why it is not part of every sync.
 
@@ -927,6 +932,14 @@ Contract every adapter must meet, checked by the shared conformance suite
   the stream errors, the call throws and the key keeps its previous state.
   Streaming adapters achieve this by withholding the last byte until the
   length is verified (`exactLength` in the core).
+- `putVerified` (optional) stores a stream only if its SHA-256 equals the
+  given one, checked by the storage itself, and throws
+  `ChecksumMismatchError` otherwise. `R2Storage` passes R2's `sha256` put
+  option (no Worker CPU; `withPresigner` keeps it). LFS objects and pack-upload
+  parts use it when present, else the hashing `verifyingStream`. On Workers a
+  `fetch` body arrives in 4 KiB chunks: hashing it in the Worker costs about
+  24 ms CPU per MiB even piped into `crypto.DigestStream`, 38 ms through a
+  `TransformStream`, so a 4 GB mirror never fit into one invocation.
 - Exactly one of several concurrent conditional writers wins.
 - ETags are unquoted and change on every write.
 - `list` yields keys in lexicographic order across pages.
@@ -1516,9 +1529,12 @@ update themselves.
   and tests. The production instance `levino/levins-git-forge` is a copy of it
   with its own names, domain and OIDC vars.
 - **Resources only from config:** every Cloudflare resource is declared in
-  `wrangler.toml` and created by Wrangler, never by hand. D1, R2 and the
-  queues have a name and no id, so the first `wrangler deploy` provisions them
-  (automatic resource provisioning) and later deploys find them by name. The
+  `wrangler.toml` by name, without id, so later deploys find it by name. The
+  first `wrangler deploy` would provision missing ones (automatic resource
+  provisioning) in an arbitrary region, so the README has them created first
+  with a location (`d1 create --location`, `r2 bucket create --location`,
+  `queues create --jurisdiction eu`); `[placement] mode = "smart"` keeps
+  requests next to them. The
   jobs queue is recognised by the suffix `-jobs`. Cron and routes (custom
   domains) are declared there as well. The `BOOTSTRAP_TOKEN` secret is
   deliberately not `secrets.required`: a secret can only be set on an existing

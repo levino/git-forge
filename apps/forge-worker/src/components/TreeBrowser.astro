@@ -27,9 +27,7 @@ const origin = Astro.url.origin
       <label class="text-sm font-semibold" for="empty-clone-url">Clone over HTTPS</label>
       <input id="empty-clone-url" class="input input-sm w-full font-mono mb-4" readonly value={cloneUrl(origin, repo.name)} />
       <p class="mb-4">Push an existing repository from the command line:</p>
-      <pre class="bg-base-200 rounded-box p-4 text-sm overflow-x-auto">
-        <code>{`git remote add origin ${cloneUrl(origin, repo.name)}\ngit push -u origin ${repo.refs.head.replace(/^refs\/heads\//, '')}`}</code>
-      </pre>
+      <pre class="bg-base-200 rounded-box p-4 text-sm overflow-x-auto"><code>{`git remote add origin ${cloneUrl(origin, repo.name)}\ngit push -u origin ${repo.refs.head.replace(/^refs\/heads\//, '')}`}</code></pre>
     </section>
   ) : (
     <>

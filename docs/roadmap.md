@@ -85,7 +85,8 @@ Design: [design.md §15](design.md#ci).
 - [x] Spike, part 1: dispatch on push, one ephemeral JIT runner per job via `RunnerLauncher`, `needs` with skip on failure; job tokens (`GITHUB_TOKEN` read over Git HTTP, runtime token per job), instance secrets
 - [x] Spike, part 1: Cloudflare Container definition for the runner (Dockerfile, `wrangler.jsonc`)
 - [x] Spike, part 2: the real-runner integration test runs in GitHub CI
-- [ ] Deploy the runner container and deploy a hello-world Worker with `wrangler` from our own CI
+- [x] Runner container on Cloudflare Containers from the instance repository: Workers Builds builds `runner/Dockerfile`, `basic` instance type by default, inactivity timeout for jobs longer than 15 minutes
+- [ ] Hello-world workflow on the production instance; deploy a Worker with `wrangler` from our own CI
 - [x] `uses:` actions: `ActionDownloadInfo` with tarballs streamed from repositories on the forge (mirrors of `actions/checkout`, …), name mapping, optional fallback to github.com tarballs; shallow fetch (`deepen`) for `actions/checkout`
 - [x] Expressions server-side: job-level `if`, `runs-on` expressions, `strategy`/`matrix` (include/exclude, fail-fast, max-parallel), job outputs across `needs`, `env`/`defaults`, step `if`/`continue-on-error`/`timeout-minutes`, workflow `concurrency`
 - [x] Cancellation (`JobCancellation`), job timeouts, reaper for expired locks, dead runners and lost launches, re-runs (all, failed, one job) as new attempts

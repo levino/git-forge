@@ -61,6 +61,7 @@ read functions of `@git-forge/core` and check access with the same
 | `OIDC_NAME` | var, optional | Name of the provider on the login page, e.g. `Dorf-ID`. |
 | `OIDC_SCOPES` | var, optional | Default `openid profile email`. |
 | `SELF_SIGNUP` | var | `true` lets unknown OIDC identities and new passkeys create accounts. Default `false`: an invite (`POST /api/admin/invites`) or an existing link is needed. |
+| `PASSKEYS` | var | `false` turns passkeys off for an OIDC-only instance: the passkey login, registration and `/api/user/passkeys` endpoints answer `404`, and the sign-in, invite and settings pages show no passkey buttons. Stored passkeys stay in the database but cannot be used. Break-glass is unaffected. Default `true`. |
 | `BREAK_GLASS_PUBLIC_KEY` | var, optional | Ed25519 public JWK of the offline break-glass key (see [Login](#login)). Empty: break-glass login is off. |
 | `RUNNER` | Durable Object + Container | `RunnerContainer` (`src/runner-container.ts`, image `runner/Dockerfile`): one container per CI job with the official `actions/runner` and a JIT config. Declared in every environment; without the binding, jobs wait for a runner registered by hand. |
 
@@ -390,13 +391,15 @@ The runner container is declared in `wrangler.jsonc` for every environment
 `wrangler deploy` builds `runner/Dockerfile` (the official
 `ghcr.io/actions/actions-runner` image plus Git and Node.js) and pushes it to
 the Cloudflare registry; Docker must be available where you deploy, and
-Containers need the Workers Paid plan. `release/build-release.sh` bundles
-with `--containers-rollout=none`, which skips the image. `RunnerContainer`
-starts the container with the entrypoint `run.sh --jitconfig <config>`; the
-runner is ephemeral and the container stops after its job. Pin
-`RUNNER_VERSION` in the Dockerfile to a runner release you have tested. This
-path has not been deployed yet. `wrangler dev` runs with
-`dev.enable_containers: false`.
+Containers need the Workers Paid plan. Workers Builds has Docker, so a
+Git-connected deploy builds the image as well. `release/build-release.sh`
+bundles with `--containers-rollout=none`, which skips the image.
+`RunnerContainer` starts the container with the entrypoint
+`run.sh --jitconfig <config>` and an inactivity timeout of 6 hours; the runner
+is ephemeral and the container stops after its job. The instance type is
+`basic` (1/4 vCPU, 1 GiB, 4 GB disk); the image does not fit `lite`. Pin
+`RUNNER_VERSION` in the Dockerfile to a runner release you have tested.
+`wrangler dev` runs with `dev.enable_containers: false`.
 
 ## Several instances: `alpha`, `beta`, `gamma`
 

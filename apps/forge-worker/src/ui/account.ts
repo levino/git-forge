@@ -36,6 +36,7 @@ export const accountAction = async (forge: ForgeServices, session: UiSession, fo
     return (await forge.account.revokeToken(user, String(form.get('id') ?? ''))) ? { kind: 'token-revoked' } : { kind: 'error', message: 'Unknown token.' }
   }
   if (action === 'remove-passkey') {
+    if (!forge.loginOptions.passkeys) return { kind: 'error', message: 'Passkeys are disabled on this instance.' }
     return (await forge.account.revokePasskey(user, String(form.get('id') ?? ''))) ? { kind: 'passkey-removed' } : { kind: 'error', message: 'Unknown passkey.' }
   }
   if (action === 'unlink-identity') {

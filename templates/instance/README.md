@@ -141,6 +141,7 @@ OIDC_NAME = "Example ID"
 | `OIDC_NAME` | | Button label, e.g. `Dorf-ID`. |
 | `OIDC_SCOPES` | `openid profile email` | Requested scopes. |
 | `SELF_SIGNUP` | `false` | `true`: anyone who can sign in at the provider (or register a passkey) gets an account. `false`: only invited people. |
+| `PASSKEYS` | `true` | `false`: passkey sign-in and registration are off (OIDC-only instance; break-glass keeps working). |
 | `BREAK_GLASS_PUBLIC_KEY` | | Public half of the offline break-glass key, see the [forge-worker README](https://github.com/levino/git-forge/tree/main/apps/forge-worker#break-glass-key). |
 | `UI` | `true` | `false` for a headless instance (for example a backup mirror): Git, LFS and the API only. |
 | `MAX_LFS_OBJECT_BYTES`, `MIRROR_INTERVAL_MINUTES`, `MIRROR_DEEP_CHECK_DAYS` | see the forge-worker README | Limits and mirror schedule. |
@@ -256,14 +257,14 @@ prints the `S` to pin (any `V` works); then
 ## CI (opt-in)
 
 CI (GitHub Actions compatible, running the official `actions/runner`) is off
-by default, because its runner container makes `wrangler deploy` build a
-Docker image, and building container images in Workers Builds is not
-verified yet. To enable it where Docker is available, add to
-`wrangler.toml`:
+by default, because it makes every deploy build the runner image (a few
+minutes; Workers Builds has Docker, so nothing else is needed). To enable it,
+add to `wrangler.toml`:
 
 ```toml
 [vars]
 ACTIONS = "true"
+ACTIONS_GITHUB_FALLBACK = "true"
 
 [triggers]
 crons = ["17 3 * * *", "*/5 * * * *"]
@@ -271,8 +272,8 @@ crons = ["17 3 * * *", "*/5 * * * *"]
 [[containers]]
 class_name = "RunnerContainer"
 image = "./runner/Dockerfile"
-instance_type = "standard-1"
-max_instances = 4
+instance_type = "basic"
+max_instances = 2
 
 [[durable_objects.bindings]]
 name = "RUNNER"
@@ -286,17 +287,24 @@ new_sqlite_classes = ["RunnerContainer"]
 enable_containers = false
 ```
 
-(merge `ACTIONS` into an existing `[vars]` table and replace the existing
-`[triggers]`). Every CI job then starts one container with the runner and a
-JIT config. With `ACTIONS` set but without the container entries, workflows
-are queued and picked up by runners you register yourself
+(merge the vars into an existing `[vars]` table and replace the existing
+`[triggers]`) and push. `wrangler deploy` builds `runner/Dockerfile`, pushes
+it to your account's Cloudflare registry and creates the container
+application. Every CI job then starts one container with the runner and a
+JIT config; the container stops when the job is done, and you pay only while
+it runs.
+
+| Setting | Meaning |
+|---|---|
+| `instance_type` | Size of each job's container: `basic` (1/4 vCPU, 1 GiB, 4 GB disk, the cheapest that holds the image), `standard-1` (1/2 vCPU, 4 GiB, 8 GB), `standard-2` (1 vCPU, 6 GiB), `standard-3` (2 vCPU, 8 GiB), `standard-4` (4 vCPU, 12 GiB). |
+| `max_instances` | Jobs that run at the same time; further jobs wait. |
+| `ACTIONS_GITHUB_FALLBACK` | `true`: `uses:` actions without a repository on the instance (for example `actions/checkout`) are downloaded from github.com. Without it, mirror them on the instance, e.g. a mirror of `github.com/actions/checkout` named `actions/checkout` (`ACTIONS_REPOSITORIES` maps other names). |
+
+With `ACTIONS` set but without the container entries, workflows are queued
+and picked up by runners you register yourself
 (`/api/v3/repos/…/actions/runners/generate-jitconfig`). The second cron runs
 scheduled workflows and cleans up timed-out jobs and dead runners.
 Instance-wide workflow secrets go into the `ACTIONS_SECRETS` secret, a JSON
 object such as `{"CLOUDFLARE_API_TOKEN": "…"}`. For repository and
 environment secrets set the `ACTIONS_SECRETS_KEY` secret to 32 random bytes
-(`openssl rand -base64 32`); they are stored encrypted with it in D1. `uses:`
-actions are served from repositories on the instance, for example a mirror of
-`github.com/actions/checkout` named `actions/checkout`
-(`ACTIONS_REPOSITORIES` maps other names, `ACTIONS_GITHUB_FALLBACK=true`
-downloads unmirrored actions from GitHub).
+(`openssl rand -base64 32`); they are stored encrypted with it in D1.

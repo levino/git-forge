@@ -64,6 +64,7 @@
     "OIDC_CLIENT_ID": "",
     "OIDC_NAME": "",
     "SELF_SIGNUP": "false",
+    "PASSKEYS": "true",
     "BREAK_GLASS_PUBLIC_KEY": "",
     "EMAIL_PROVIDER": "console",
     "EMAIL_FROM": "forge@example.org"
@@ -72,7 +73,7 @@
     {
       "class_name": "RunnerContainer",
       "image": "./runner/Dockerfile",
-      "instance_type": "standard-1",
+      "instance_type": "basic",
       "max_instances": 4
     }
   ],
@@ -147,6 +148,7 @@
         "OIDC_CLIENT_ID": "",
         "OIDC_NAME": "",
         "SELF_SIGNUP": "false",
+        "PASSKEYS": "true",
         "BREAK_GLASS_PUBLIC_KEY": "",
         "EMAIL_PROVIDER": "console",
         "EMAIL_FROM": "forge@example.org"
@@ -155,7 +157,7 @@
         {
           "class_name": "RunnerContainer",
           "image": "./runner/Dockerfile",
-          "instance_type": "standard-1",
+          "instance_type": "basic",
           "max_instances": 4
         }
       ],
@@ -227,6 +229,7 @@
         "OIDC_CLIENT_ID": "",
         "OIDC_NAME": "",
         "SELF_SIGNUP": "false",
+        "PASSKEYS": "true",
         "BREAK_GLASS_PUBLIC_KEY": "",
         "EMAIL_PROVIDER": "console",
         "EMAIL_FROM": "forge@example.org"
@@ -235,7 +238,7 @@
         {
           "class_name": "RunnerContainer",
           "image": "./runner/Dockerfile",
-          "instance_type": "standard-1",
+          "instance_type": "basic",
           "max_instances": 4
         }
       ],
@@ -307,6 +310,7 @@
         "OIDC_CLIENT_ID": "",
         "OIDC_NAME": "",
         "SELF_SIGNUP": "false",
+        "PASSKEYS": "true",
         "BREAK_GLASS_PUBLIC_KEY": "",
         "EMAIL_PROVIDER": "console",
         "EMAIL_FROM": "forge@example.org"
@@ -315,7 +319,7 @@
         {
           "class_name": "RunnerContainer",
           "image": "./runner/Dockerfile",
-          "instance_type": "standard-1",
+          "instance_type": "basic",
           "max_instances": 4
         }
       ],

@@ -137,8 +137,9 @@ Design: [design.md §18](design.md#18-web-ui).
 - [x] Repository settings (visibility, collaborators, branch protection, federation trust)
 - [x] Repository lifecycle: description, website, topics (`/api/v3` shape), rename and transfer with redirects for pages, API, Git and LFS, archive (read-only), soft delete with a 7-day grace period, account and organization renames; stable storage prefixes (migration `0024`)
 - [x] Mirror settings, status and alarms (add, sync, deep check, detach)
-- [ ] Blame, syntax highlighting in diffs and Markdown code blocks
-- [ ] Explore and profile listings without one access check per repository
+- [x] Blame, syntax highlighting in diffs and Markdown code blocks
+- [x] Explore and profile listings without one access check per repository (one SQL query, stored default branch and last commit time, sort and paging)
+- [x] Search box and results page (repositories, issues and pull requests, discussions, users)
 - [ ] Issue/PR UI: labels, assignees, milestones, reviewer requests, suggested changes, `#N` autolinks in rendered Markdown
 
 ## M7 — Collaboration
@@ -159,7 +160,8 @@ Design: [design.md §17](design.md#17-collaboration).
 - [ ] CODEOWNERS parsing for `require_code_owner_reviews`
 - [ ] Rename detection in merges (renames are reported as conflicts today)
 - [ ] In-browser conflict resolution
-- [ ] Reactions, search (FTS5), notifications
+- [x] Search (FTS5): repositories, issues, pull requests, discussions with comments, users; access-filtered; `/api/search`, `/api/v3/search/*`
+- [ ] Reactions, notifications
 - [ ] Web UI for issues, pull requests and discussions (separate work package)
 - [ ] Submit via form
 

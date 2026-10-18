@@ -113,6 +113,7 @@ export const createInstance = async (vars: NodeVars, overrides: InstanceOverride
     queue: 'imports',
     handler: async (job) => {
       const state = await continueImport(job, { storage: forge!.services.storage, digests: nodeDigests, schedule: (next, delaySeconds) => imports.enqueue(next, { delaySeconds }), scheduleLfs: (lfs) => jobs.enqueue(lfs) })
+      await forge!.refreshRepository(job)
       log({ event: 'import-step', repo: `${job.owner}/${job.name}`, phase: state.phase, steps: state.steps, error: state.error })
     },
     maxAttempts: 3,

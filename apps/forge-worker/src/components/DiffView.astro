@@ -1,5 +1,6 @@
 ---
 import type { FileDiff } from '@git-forge/core'
+import { highlightHunks } from '../ui/highlight.ts'
 
 export type LineComment = { readonly id: number; readonly author: string; readonly html: string; readonly line: number; readonly side: 'LEFT' | 'RIGHT' }
 
@@ -14,6 +15,7 @@ const range = (start: number, count: number) => (count === 1 ? `${start}` : `${s
 const text = file.kind === 'text' || file.kind === 'lfs'
 const anchorOf = (line: { kind: ' ' | '-' | '+'; oldLine: number | null; newLine: number | null }) =>
   line.kind === '-' ? { side: 'LEFT' as const, line: line.oldLine! } : { side: 'RIGHT' as const, line: line.newLine! }
+const tokens = file.kind === 'text' ? await highlightHunks(file.hunks, file.path.split('/').pop() ?? '') : []
 const commentsAt = (side: 'LEFT' | 'RIGHT', line: number) => comments.filter((comment) => comment.side === side && comment.line === line)
 ---
 
@@ -51,14 +53,14 @@ const commentsAt = (side: 'LEFT' | 'RIGHT', line: number) => comments.filter((co
     file.kind === 'text' && file.hunks.length > 0 && (
       <div class="overflow-x-auto">
         <table class="font-mono text-xs leading-5 w-full border-separate border-spacing-0">
-          {file.hunks.map((hunk) => (
+          {file.hunks.map((hunk, h) => (
             <tbody>
               <tr class="bg-info/10 text-base-content/70">
                 <td colspan="3" class="px-4 py-1">
                   {`@@ -${range(hunk.oldStart, hunk.oldLines)} +${range(hunk.newStart, hunk.newLines)} @@${hunk.section ? ` ${hunk.section}` : ''}`}
                 </td>
               </tr>
-              {hunk.lines.map((line) => {
+              {hunk.lines.map((line, l) => {
                 const anchor = anchorOf(line)
                 const here = commentsAt(anchor.side, anchor.line)
                 return (
@@ -73,12 +75,12 @@ const commentsAt = (side: 'LEFT' | 'RIGHT', line: number) => comments.filter((co
                         {line.oldLine ?? ''}
                       </td>
                       <td class="select-none text-right px-2 w-px text-base-content/50">{line.newLine ?? ''}</td>
-                      <td class="whitespace-pre pr-4">
+                      <td class="whitespace-pre pr-4 hl">
                         <span class="select-none" aria-hidden="true">
                           {line.kind}
                         </span>
                         <span class="sr-only">{spoken[line.kind]}</span>
-                        {line.text}
+                        {tokens[h]?.[l]?.map((token) => (token.style ? <span style={token.style}>{token.content}</span> : token.content)) ?? line.text}
                       </td>
                     </tr>
                     {here.length > 0 && (

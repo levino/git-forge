@@ -134,4 +134,21 @@ describe('repository lifecycle', () => {
     expect(await forge.services.redirect(new Request(`${BASE}/bob`), { kind: 'anonymous' })).toBe(`${BASE}/robert`)
     expect(await json(await call(forge, BASE, 'GET', '/api/user', bob))).toMatchObject({ login: 'robert' })
   })
+
+  it('keeps the search index and listings in step with metadata, renames and deletions', async () => {
+    const user = (await forge.services.authenticate(new Request(BASE, { headers: { Authorization: `Bearer ${alice}` } })))!
+    await call(forge, BASE, 'PATCH', '/api/repos/alicia/hidden', alice, { name: 'vault', description: 'Quarterly ledgers', topics: ['finance'] })
+    const names = async (q: string) => {
+      const results = await forge.services.search(user, { type: 'repositories', q, page: 1, perPage: 10 })
+      return results.type === 'repositories' ? results.page.items.map((repo) => `${repo.owner}/${repo.name}`) : []
+    }
+    expect(await names('ledgers')).toEqual(['alicia/vault'])
+    expect(await names('finance')).toEqual(['alicia/vault'])
+    expect(await names('vault')).toEqual(['alicia/vault'])
+    const listed = await forge.services.listRepositories(user, { owner: 'alicia' })
+    expect(listed.items.find((repo) => repo.name === 'vault')).toMatchObject({ description: 'Quarterly ledgers', topics: ['finance'], archived: false })
+    await call(forge, BASE, 'DELETE', '/api/repos/alicia/vault', alice)
+    expect(await names('ledgers')).toEqual([])
+    expect((await forge.services.listRepositories(user, { owner: 'alicia' })).items.some((repo) => repo.name === 'vault')).toBe(false)
+  })
 })

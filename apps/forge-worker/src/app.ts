@@ -92,6 +92,14 @@ import {
   ProtectionValidationError,
   BranchPatternError,
   type TokenScope,
+  listReadableRepositories,
+  type Page,
+  type RepositoryListing,
+  type RepositoryListOptions,
+  SEARCH_INDEX_REBUILD,
+  type SearchResults,
+  type SearchType,
+  setRepositoryStats,
 } from '@git-forge/accounts'
 import {
   type Authorize,
@@ -137,6 +145,7 @@ import {
   readImportState,
   readMirrorStatus,
   readRefs,
+  repositoryStats,
   RepositoryExistsError,
   type RepositoryName,
   SizeLimitError,
@@ -184,6 +193,7 @@ import {
 import { type ArtifactSource, createPages, isPagesJob, type PagesJob } from '@git-forge/pages'
 import { type AssetRow, createReleaseStore, handleReleasesRequest, type ReleaseRow } from '@git-forge/releases'
 import { activityEvent } from './collaboration-events.ts'
+import { parseSearchRequest, repositoryJson, runSearch, type SearchRequest, searchResponseJson } from './search.ts'
 import { mirrorOverview, recordChecksums, signOverview } from './mirror-verification.ts'
 import type { ForgeSettings } from './config.ts'
 import {
@@ -281,6 +291,8 @@ export type ForgeServices = {
   readonly instance: InstanceOperations
   readonly renameAccount: (principal: Principal, login: string, newLogin: string) => Promise<{ readonly id: string; readonly login: string }>
   readonly redirect: (request: Request, principal: Principal) => Promise<string | null>
+  readonly listRepositories: (principal: Principal, options: RepositoryListOptions) => Promise<Page<RepositoryListing>>
+  readonly search: (principal: Principal, request: SearchRequest) => Promise<SearchResults>
 }
 
 export type MirrorOverviewEntry = { readonly repository: RepositoryName; readonly config: MirrorConfig; readonly status: MirrorStatus | null }
@@ -421,6 +433,7 @@ export type Forge = {
   readonly scheduled: (at?: Date) => Promise<ScheduledMirrorRun[]>
   readonly actionsTick: () => Promise<ActionsTick | null>
   readonly runJob: (job: AppJob) => Promise<void>
+  readonly refreshRepository: (repo: RepositoryName) => Promise<void>
   readonly notifications: Notifications
 }
 
@@ -598,6 +611,28 @@ export const createForge = (options: ForgeOptions): Forge => {
     return { decision: check.decision, access: check.access, repository: check.repository }
   }
 
+  const refreshRepository = async (repo: RepositoryName): Promise<void> => {
+    try {
+      const subject = await store.findRepository(repo.owner, repo.name)
+      if (subject) await setRepositoryStats(db, subject.id, await repositoryStats(storage, repo), now().getTime())
+    } catch (error) {
+      console.error(JSON.stringify({ event: 'repository-stats-failed', repository: `${repo.owner}/${repo.name}`, error: String(error) }))
+    }
+  }
+
+  const listRepositories = async (principal: Principal, listOptions: RepositoryListOptions): Promise<Page<RepositoryListing>> => {
+    const page = await listReadableRepositories(db, principal, listOptions)
+    const items = await Promise.all(
+      page.items.map(async (repo) => {
+        if (repo.statsAt !== null) return repo
+        const stats = await repositoryStats(storage, repo)
+        await setRepositoryStats(db, repo.id, stats, now().getTime())
+        return { ...repo, ...stats, statsAt: now().getTime() }
+      }),
+    )
+    return { ...page, items }
+  }
+
   const repositoryAdmin = async (principal: UserPrincipal, repo: RepositoryName): Promise<RepositorySubject> => {
     const check = await repositoryAccess(principal, repo, 'admin')
     if (check.repository && check.decision === 'allow') return check.repository
@@ -743,7 +778,10 @@ export const createForge = (options: ForgeOptions): Forge => {
     ...(options.fetch ? { fetch: options.fetch } : {}),
     ...(options.digests ? { digests: options.digests } : {}),
     secrets: mirrorSecrets,
-    onSynced: emitMirrorAlarms,
+    onSynced: async (repo, config, result) => {
+      await emitMirrorAlarms(repo, config, result)
+      if (result.updates.length > 0) await refreshRepository(repo)
+    },
   })
 
   const federation: MirrorFederation | null =
@@ -1708,6 +1746,7 @@ export const createForge = (options: ForgeOptions): Forge => {
   }
 
   const afterPush = async (request: Request, repo: RepositoryName, outcome: PushOutcome, waitUntil: WaitUntil | undefined, principal: Principal | null): Promise<void> => {
+    if (outcome.results.some((result) => result.ok)) await refreshRepository(repo)
     if (federation) await notifyAfterPush(federation)(repo, outcome)
     if (outcome.results.some((result) => result.ok)) {
       await recordChecksums(verification, storage, repo).catch((error: unknown) =>
@@ -1774,6 +1813,35 @@ export const createForge = (options: ForgeOptions): Forge => {
 
   const health = async () => json(200, { ok: true, service: 'git-forge' })
 
+  const urlsOf = (request: Request) => {
+    const web = options.publicUrl ?? new URL(request.url).origin
+    return { web, api: `${web}/api/v3` }
+  }
+
+  const listRepositoriesRoute = async (request: Request): Promise<Response> => {
+    const url = new URL(request.url)
+    const owner = url.searchParams.get('owner')
+    const page = await listRepositories(await principalOf(request), {
+      sort: url.searchParams.get('sort') === 'name' ? 'name' : 'updated',
+      page: Number(url.searchParams.get('page') ?? '1'),
+      perPage: Number(url.searchParams.get('per_page') ?? '30'),
+      ...(owner ? { owner } : {}),
+    })
+    return json(200, { total_count: page.total, items: page.items.map((repo) => repositoryJson(urlsOf(request), repo)) })
+  }
+
+  const searchRoute = async (request: Request, params: string[]): Promise<Response> => {
+    const parsed = parseSearchRequest(new URL(request.url))
+    const results = await runSearch(db, await principalOf(request), { ...parsed, type: (params[0] as SearchType | undefined) ?? parsed.type })
+    return json(200, await searchResponseJson(db, urlsOf(request), results))
+  }
+
+  const rebuildSearchRoute = async (request: Request): Promise<Response> => {
+    await requireInstanceAdmin(request)
+    await db.batch(SEARCH_INDEX_REBUILD)
+    return new Response(null, { status: 204 })
+  }
+
   const SEGMENT = '([^/]+)'
   const REPO = `/api/repos/${SEGMENT}/${SEGMENT}`
   const routes: Route[] = [
@@ -1802,6 +1870,10 @@ export const createForge = (options: ForgeOptions): Forge => {
     { method: 'PUT', pattern: new RegExp(`^/api/orgs/${SEGMENT}/teams/${SEGMENT}/repos/${SEGMENT}$`), handler: setTeamRepositoryRoute },
     { method: 'DELETE', pattern: new RegExp(`^/api/orgs/${SEGMENT}/teams/${SEGMENT}/repos/${SEGMENT}$`), handler: removeTeamRepositoryRoute },
     { method: 'POST', pattern: /^\/api\/repos$/, handler: createRepositoryRoute },
+    { method: 'GET', pattern: /^\/api\/repos$/, handler: listRepositoriesRoute },
+    { method: 'GET', pattern: /^\/api\/search$/, handler: searchRoute },
+    { method: 'GET', pattern: /^\/api\/v3\/search\/(repositories|issues|users)$/, handler: searchRoute },
+    { method: 'POST', pattern: /^\/api\/admin\/search\/rebuild$/, handler: rebuildSearchRoute },
     { method: 'PATCH', pattern: new RegExp(`^${REPO}$`), handler: updateRepository },
     { method: 'DELETE', pattern: new RegExp(`^${REPO}$`), handler: deleteRepository },
     { method: 'POST', pattern: new RegExp(`^${REPO}/transfer$`), handler: transferRepository },
@@ -2003,6 +2075,8 @@ export const createForge = (options: ForgeOptions): Forge => {
       },
       organizations,
       instance,
+      listRepositories,
+      search: (principal, request) => runSearch(db, principal, request),
       repositories: {
         owners: repositoryOwners,
         create: createRepositoryFor,
@@ -2065,6 +2139,7 @@ export const createForge = (options: ForgeOptions): Forge => {
       if (!federation) throw new Error('jobs need PUBLIC_URL, INSTANCE_KEY and a job queue')
       await runJob(federation, job)
     },
+    refreshRepository,
     notifications,
   }
 }

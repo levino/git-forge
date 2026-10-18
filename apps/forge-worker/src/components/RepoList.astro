@@ -1,24 +1,34 @@
 ---
-import type { RepositorySubject } from '@git-forge/accounts'
 import { isoTime, relativeTime } from '../ui/format.ts'
-import { repositorySummaries } from '../ui/listing.ts'
+import { pageHref, type RepositoryPage } from '../ui/listing.ts'
 import { repoUrl } from '../ui/repository.ts'
 import EmptyState from './EmptyState.astro'
 import Icon from './Icon.astro'
+import Pager from './Pager.astro'
 
-type Props = { repositories: readonly RepositorySubject[]; showOwner?: boolean; empty?: string }
+type Props = { listing: RepositoryPage; showOwner?: boolean; empty?: string; controls?: boolean }
 
-const { repositories, showOwner = true, empty = 'No repositories yet.' } = Astro.props
-const summaries = await repositorySummaries(Astro.locals.forge, repositories)
+const { listing, showOwner = true, empty = 'No repositories yet.', controls = true } = Astro.props
 const now = Math.floor(Date.now() / 1000)
 ---
 
 {
-  summaries.length === 0 ? (
+  controls && listing.total > 1 && (
+    <div class="flex justify-end mb-2 text-xs gap-1" aria-label="Sort">
+      {(['updated', 'name'] as const).map((sort) => (
+        <a href={pageHref(Astro.url, { sort: sort === 'updated' ? null : sort, page: null })} class:list={['btn btn-xs', listing.sort === sort ? 'btn-active' : 'btn-ghost']} aria-current={listing.sort === sort ? 'true' : undefined}>
+          {sort === 'updated' ? 'Last updated' : 'Name'}
+        </a>
+      ))}
+    </div>
+  )
+}
+{
+  listing.items.length === 0 ? (
     <EmptyState icon="repo" title={empty} />
   ) : (
     <ul class="border border-base-300 rounded-box divide-y divide-base-300 bg-base-100" aria-label="Repositories">
-      {summaries.map((repo) => (
+      {listing.items.map((repo) => (
         <li class="flex items-start gap-3 px-4 py-3">
           <Icon name={repo.visibility === 'public' ? 'repo' : 'lock'} class="size-4 mt-0.5 text-base-content/50" />
           <div class="min-w-0 flex-1">
@@ -38,9 +48,9 @@ const now = Math.floor(Date.now() / 1000)
                   {repo.defaultBranch}
                 </span>
               )}
-              {repo.updatedAt !== null ? (
+              {repo.lastCommitAt !== null ? (
                 <span>
-                  Updated <time datetime={isoTime(repo.updatedAt)}>{relativeTime(repo.updatedAt, now)}</time>
+                  Updated <time datetime={isoTime(Math.floor(repo.lastCommitAt / 1000))}>{relativeTime(Math.floor(repo.lastCommitAt / 1000), now)}</time>
                 </span>
               ) : (
                 <span>Empty</span>
@@ -52,3 +62,4 @@ const now = Math.floor(Date.now() / 1000)
     </ul>
   )
 }
+{controls && <Pager page={listing.page} more={listing.page * listing.perPage < listing.total} />}

@@ -331,8 +331,23 @@ export const startRunAttempt = async (db: Database, id: number, attempt: number)
 export const activeRunsInGroup = async (db: Database, owner: string, repo: string, group: string): Promise<RunRow[]> =>
   db.all<RunRow>(sql('SELECT * FROM actions_runs WHERE owner = ? AND repo = ? AND concurrency_group = ? AND completed_at IS NULL ORDER BY id', owner, repo, group))
 
-export const listRuns = async (db: Database, owner: string, repo: string, limit = 30): Promise<RunRow[]> =>
-  db.all<RunRow>(sql('SELECT * FROM actions_runs WHERE owner = ? AND repo = ? ORDER BY id DESC LIMIT ?', owner, repo, limit))
+export const listRuns = async (db: Database, owner: string, repo: string, limit = 30, workflowPath: string | null = null): Promise<RunRow[]> =>
+  db.all<RunRow>(
+    workflowPath === null
+      ? sql('SELECT * FROM actions_runs WHERE owner = ? AND repo = ? ORDER BY id DESC LIMIT ?', owner, repo, limit)
+      : sql('SELECT * FROM actions_runs WHERE owner = ? AND repo = ? AND workflow_path = ? ORDER BY id DESC LIMIT ?', owner, repo, workflowPath, limit),
+  )
+
+export type RunWorkflow = { readonly path: string; readonly name: string }
+
+export const listRunWorkflows = async (db: Database, owner: string, repo: string): Promise<RunWorkflow[]> =>
+  db.all<RunWorkflow>(
+    sql(
+      'SELECT r.workflow_path AS path, r.workflow_name AS name FROM actions_runs r WHERE r.owner = ? AND r.repo = ? AND r.id = (SELECT MAX(id) FROM actions_runs WHERE owner = r.owner AND repo = r.repo AND workflow_path = r.workflow_path) ORDER BY r.workflow_name, r.workflow_path',
+      owner,
+      repo,
+    ),
+  )
 
 export const getRun = async (db: Database, id: number): Promise<RunRow | null> => first<RunRow>(db, sql('SELECT * FROM actions_runs WHERE id = ?', id))
 

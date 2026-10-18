@@ -1,0 +1,58 @@
+---
+import NotFound from '../../../components/NotFound.astro'
+import Layout from '../../../layouts/Layout.astro'
+import { formatBytes } from '../../../ui/format.ts'
+import { IMPORT_PHASES, importRunning, importStateFor } from '../../../ui/new-repository.ts'
+import { cloneUrl, repoUrl } from '../../../ui/repository.ts'
+
+const { forge, session } = Astro.locals
+const repo = { owner: Astro.params.owner!, name: Astro.params.repo! }
+if (!session) return Astro.redirect(`/login?return_to=${encodeURIComponent(Astro.url.pathname)}`)
+const state = await importStateFor(forge, session, repo)
+Astro.response.headers.set('Cache-Control', 'no-store')
+const running = state ? importRunning(state) : false
+---
+
+{
+  !state ? (
+    <NotFound message="There is no import for this repository, or you cannot manage it." />
+  ) : (
+    <Layout title={`Import · ${repo.owner}/${repo.name}`} {...(running ? { refresh: 5 } : {})}>
+      <h1 class="text-xl font-semibold mb-2">
+        Import into <a class="link" href={repoUrl(repo)}>{repo.owner}/{repo.name}</a>
+      </h1>
+      <p class="text-sm text-base-content/70 mb-6 font-mono break-all">from {state.url}</p>
+      <section aria-label="Import status" class="card bg-base-200 max-w-xl">
+        <div class="card-body gap-2">
+          <p>
+            <span
+              class:list={['badge', state.phase === 'done' ? 'badge-success' : state.phase === 'failed' ? 'badge-error' : 'badge-info']}
+              role="status"
+            >
+              {IMPORT_PHASES[state.phase]}
+            </span>
+          </p>
+          <dl class="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">
+            <dt class="font-semibold">Steps</dt>
+            <dd>{state.steps}</dd>
+            <dt class="font-semibold">Commits</dt>
+            <dd>{state.commits > 0 ? `${state.position} of ${state.commits}` : 'unknown yet'}</dd>
+            <dt class="font-semibold">Fetched</dt>
+            <dd>{state.fetched.objects} objects, {formatBytes(state.fetched.bytes)}</dd>
+            {state.lfs && <dt class="font-semibold">LFS objects left</dt>}
+            {state.lfs && <dd>{state.lfsQueue.length}</dd>}
+            <dt class="font-semibold">Started</dt>
+            <dd>{state.createdAt}</dd>
+            {state.finishedAt && <dt class="font-semibold">Finished</dt>}
+            {state.finishedAt && <dd>{state.finishedAt}</dd>}
+          </dl>
+          {state.error && <div role="alert" class="alert alert-error">{state.error}</div>}
+          {running && <p class="text-sm text-base-content/70">This page refreshes every few seconds.</p>}
+          {state.phase === 'done' && <a class="btn btn-primary self-start" href={repoUrl(repo)}>Open the repository</a>}
+          <label class="text-sm font-semibold mt-2" for="import-clone-url">Clone over HTTPS</label>
+          <input id="import-clone-url" class="input input-sm w-full font-mono" readonly value={cloneUrl(Astro.url.origin, repo)} />
+        </div>
+      </section>
+    </Layout>
+  )
+}

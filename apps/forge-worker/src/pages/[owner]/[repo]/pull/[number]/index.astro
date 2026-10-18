@@ -1,0 +1,175 @@
+---
+import Avatar from '../../../../../components/Avatar.astro'
+import { can, createComment, createReview, getIssue, getPull, mergePull, timeline, updatePull } from '@git-forge/collaboration'
+import NotFound from '../../../../../components/NotFound.astro'
+import PullHeader from '../../../../../components/PullHeader.astro'
+import RepoHeader from '../../../../../components/RepoHeader.astro'
+import Timeline from '../../../../../components/Timeline.astro'
+import Layout from '../../../../../layouts/Layout.astro'
+import { field, type FormOutcome, parseNumber, renderBody, renderTimeline, runForm, safeUrl, scopeFor, unlessMissing } from '../../../../../ui/collaboration.ts'
+import { checkBadge, checksFor, MERGE_LABELS } from '../../../../../ui/pulls.ts'
+import { openRepository, repoUrl } from '../../../../../ui/repository.ts'
+
+const { forge, principal, session } = Astro.locals
+const repo = await openRepository(forge, principal, Astro.params.owner!, Astro.params.repo!)
+const number = parseNumber(Astro.params.number)
+let outcome: FormOutcome | null = null
+if (repo.kind === 'ok' && number !== null && Astro.request.method === 'POST') {
+  const here = repoUrl(repo.name, 'pull', String(number))
+  outcome = await runForm(forge, Astro.request, repo, async (scope, form) => {
+    const action = field(form, 'action')
+    const body = field(form, 'body').trim()
+    if (action === 'merge') {
+      await mergePull(scope, number, { method: field(form, 'method') || 'merge', sha: field(form, 'sha') || undefined })
+      return here
+    }
+    if (action === 'review') {
+      const review = await createReview(scope, number, { event: field(form, 'event'), body })
+      return `${here}#review-${review.id}`
+    }
+    if (action === 'ready') {
+      await updatePull(scope, number, { draft: false })
+      return here
+    }
+    if (body !== '') {
+      const comment = await createComment(scope, number, body)
+      if (action === 'comment') return `${here}#comment-${comment.id}`
+    }
+    if (action === 'close') await updatePull(scope, number, { state: 'closed' })
+    if (action === 'reopen') await updatePull(scope, number, { state: 'open' })
+    return here
+  })
+  if (outcome.kind === 'redirect') return Astro.redirect(outcome.location, 303)
+  Astro.response.status = outcome.status
+}
+const scope = repo.kind === 'ok' ? await scopeFor(forge, Astro.request, principal, repo) : null
+const pull = scope && number !== null ? await unlessMissing(getPull(scope, number)) : null
+if (repo.kind === 'ok' && scope && number !== null && !pull) {
+  const issue = await unlessMissing(getIssue(scope, number))
+  if (issue && !issue.isPull) return Astro.redirect(repoUrl(repo.name, 'issues', String(number)))
+}
+const items = repo.kind === 'ok' && scope && pull ? await renderTimeline(repo, await timeline(scope, pull.number)) : []
+const body = repo.kind === 'ok' && pull ? await renderBody(repo, pull.body) : null
+const checks = scope && pull ? await checksFor(scope, pull.headSha) : null
+const canComment = scope && pull ? can(scope, 'comment:create', { locked: pull.locked }) : false
+const canClose = scope && pull ? can(scope, 'pull:close', { author: pull.authorRef }) : false
+const canReview = scope && pull ? can(scope, 'review:submit', { locked: pull.locked }) && !pull.merged && pull.state === 'open' : false
+const canMerge = scope && pull ? can(scope, 'pull:merge') && !pull.merged && pull.state === 'open' : false
+const methods = scope ? (['merge', 'squash', 'rebase'] as const).filter((method) => scope.settings[method === 'merge' ? 'allowMergeCommit' : method === 'squash' ? 'allowSquashMerge' : 'allowRebaseMerge']) : []
+---
+
+{
+  repo.kind !== 'ok' || !scope || !pull || !checks ? (
+    <NotFound />
+  ) : (
+    <Layout title={`${pull.title} · Pull request #${pull.number} · ${repo.name.owner}/${repo.name.name}`}>
+      <RepoHeader repo={repo} tab="pulls" />
+      <PullHeader repo={repo} pull={pull} tab="conversation" />
+      {outcome?.kind === 'error' && <div role="alert" class="alert alert-error mb-4">{outcome.message}</div>}
+      <article class="border border-base-300 rounded-box mb-4 overflow-hidden" aria-label="Description">
+        <header class="px-4 py-2 text-sm bg-base-200 border-b border-base-300 flex items-center gap-1.5">
+          <Avatar name={pull.author.login} size={20} />
+          <span class="font-semibold">{pull.author.login}</span> wrote
+        </header>
+        {body ? <div class="markdown-body p-4 overflow-x-auto" set:html={body} /> : <p class="p-4 text-sm text-base-content/70">No description provided.</p>}
+      </article>
+      <Timeline items={items} />
+
+      {(checks.runs.length > 0 || checks.statuses) && (
+        <section class="mt-6 border border-base-300 rounded-box" aria-labelledby="checks">
+          <h3 id="checks" class="px-4 py-2 font-semibold border-b border-base-300">Checks</h3>
+          <ul class="divide-y divide-base-300">
+            {checks.runs.map((run) => (
+              <li class="flex flex-wrap items-center gap-2 px-4 py-2 text-sm">
+                <span class:list={['badge badge-sm', checkBadge(run.status, run.conclusion).badge]}>{checkBadge(run.status, run.conclusion).label}</span>
+                <span class="font-semibold">{run.name}</span>
+                {run.output.title && <span class="text-base-content/70">{run.output.title}</span>}
+                {safeUrl(run.detailsUrl) && <a class="link ml-auto" href={safeUrl(run.detailsUrl)!} rel="nofollow noopener">Details</a>}
+              </li>
+            ))}
+            {checks.statuses?.statuses.map((status) => (
+              <li class="flex flex-wrap items-center gap-2 px-4 py-2 text-sm">
+                <span class:list={['badge badge-sm', checkBadge('completed', status.state === 'pending' ? null : status.state).badge]}>{status.state}</span>
+                <span class="font-semibold">{status.context}</span>
+                {status.description && <span class="text-base-content/70">{status.description}</span>}
+                {safeUrl(status.targetUrl) && <a class="link ml-auto" href={safeUrl(status.targetUrl)!} rel="nofollow noopener">Details</a>}
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+
+      <section class="mt-6 border border-base-300 rounded-box p-4" aria-labelledby="merge">
+        <h3 id="merge" class="font-semibold mb-2">
+          {pull.merged ? `Merged by ${pull.mergedBy?.login ?? 'someone'}` : pull.state === 'closed' ? 'Closed' : pull.mergeableState === 'clean' ? 'This branch can be merged' : pull.mergeableState === 'dirty' ? 'This branch has conflicts' : pull.mergeableState === 'draft' ? 'This pull request is still a draft' : 'Merging is blocked'}
+        </h3>
+        {pull.conflicts.length > 0 && (
+          <ul class="list-disc pl-6 text-sm mb-2">
+            {pull.conflicts.map((conflict) => <li class="font-mono">{conflict.path}</li>)}
+          </ul>
+        )}
+        {pull.blockers.length > 0 && (
+          <ul class="list-disc pl-6 text-sm mb-2">
+            {pull.blockers.map((blocker) => <li>{blocker}</li>)}
+          </ul>
+        )}
+        {session && canMerge && pull.draft && (
+          <form method="post">
+            <input type="hidden" name="csrf" value={session.csrf} />
+            <button class="btn btn-sm" name="action" value="ready">Ready for review</button>
+          </form>
+        )}
+        {session && canMerge && !pull.draft && methods.length > 0 && (
+          <form method="post" class="flex flex-wrap gap-2 items-center" aria-label="Merge">
+            <input type="hidden" name="csrf" value={session.csrf} />
+            <input type="hidden" name="sha" value={pull.headSha} />
+            <select name="method" class="select select-sm w-auto" aria-label="Merge method">
+              {methods.map((method) => <option value={method}>{MERGE_LABELS[method]}</option>)}
+            </select>
+            <button class="btn btn-sm btn-success" name="action" value="merge" disabled={pull.mergeableState !== 'clean'}>Merge pull request</button>
+          </form>
+        )}
+      </section>
+
+      {session && canReview && (
+        <form method="post" class="mt-6 border border-base-300 rounded-box p-4 flex flex-col gap-2" aria-label="Review changes">
+          <input type="hidden" name="csrf" value={session.csrf} />
+          <input type="hidden" name="action" value="review" />
+          <h3 class="font-semibold">Review changes</h3>
+          <label class="sr-only" for="review-body">Review summary</label>
+          <textarea id="review-body" name="body" rows="4" class="textarea w-full font-mono" placeholder="Leave a review summary" />
+          <fieldset class="flex flex-wrap gap-4 text-sm">
+            <legend class="sr-only">Review result</legend>
+            <label class="flex items-center gap-2"><input type="radio" class="radio radio-sm" name="event" value="COMMENT" checked /> Comment</label>
+            <label class="flex items-center gap-2"><input type="radio" class="radio radio-sm" name="event" value="APPROVE" /> Approve</label>
+            <label class="flex items-center gap-2"><input type="radio" class="radio radio-sm" name="event" value="REQUEST_CHANGES" /> Request changes</label>
+          </fieldset>
+          <button class="btn btn-sm self-start">Submit review</button>
+        </form>
+      )}
+
+      {session && (canComment || canClose) ? (
+        <form method="post" class="mt-6 flex flex-col gap-2" aria-label="Add a comment">
+          <input type="hidden" name="csrf" value={session.csrf} />
+          {canComment && (
+            <>
+              <label class="text-sm font-semibold" for="body">Add a comment</label>
+              <textarea id="body" name="body" rows="5" class="textarea w-full font-mono" placeholder="Markdown is supported" />
+            </>
+          )}
+          <div class="flex flex-wrap gap-2 justify-end">
+            {canClose && !pull.merged && pull.state === 'open' && <button class="btn btn-sm" name="action" value="close">Close pull request</button>}
+            {canClose && !pull.merged && pull.state === 'closed' && <button class="btn btn-sm" name="action" value="reopen">Reopen pull request</button>}
+            {canComment && <button class="btn btn-sm btn-primary" name="action" value="comment">Comment</button>}
+          </div>
+        </form>
+      ) : (
+        !session && (
+          <p class="mt-6 text-sm">
+            <a class="link link-primary" href={`/login?return_to=${encodeURIComponent(Astro.url.pathname)}`}>Sign in</a> to join the conversation.
+          </p>
+        )
+      )}
+    </Layout>
+  )
+}

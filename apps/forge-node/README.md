@@ -3,8 +3,8 @@
 git-forge without Cloudflare: one process that serves the same router as the
 Worker (`createForge` from `apps/forge-worker/src/app.ts`) over `node:http`,
 with an SQLite file for accounts, a local directory or any S3 bucket for
-repository data, an in-process job runner and a cron schedule for the mirror
-safety net. Made for a backup mirror on a Raspberry Pi, but it is a full
+repository data, a job runner whose queue lives in the SQLite file, SMTP for
+email and a cron schedule for the mirror safety net. Made for a backup mirror on a Raspberry Pi, but it is a full
 instance: push, clone, LFS, federation, imports and the JSON API all work as
 on the Worker.
 
@@ -17,7 +17,7 @@ release, checksums in `NODE-SHA256SUMS`).
 
 | Command | Does |
 |---|---|
-| `git-forge-node serve` (default) | HTTP server, job runner and mirror schedule. Refuses to start while the database has pending migrations. Stops on `SIGTERM`/`SIGINT`: closes the listener, lets running jobs finish (up to 10 s) and closes the database. |
+| `git-forge-node serve` (default) | HTTP server, job runner and mirror schedule. Refuses to start while the database has pending migrations. Stops on `SIGTERM`/`SIGINT`: closes the listener, lets running jobs finish (up to 10 s) and closes the database; queued jobs stay in the database for the next start. |
 | `git-forge-node migrate` | Applies pending migrations to the database and exits. These are the SQL files from `packages/accounts/migrations` that `wrangler d1 migrations apply` uses for the Worker, bundled into the executable. Migrations are never applied implicitly. |
 | `git-forge-node instance-key` | Prints a new Ed25519 private JWK for `INSTANCE_KEY` (key id on stderr). |
 | `git-forge-node version` | Prints the version. |
@@ -38,7 +38,10 @@ Environment variables. The names shared with the Worker mean the same
 `ACTIONS_ARTIFACT_RETENTION_DAYS`, `ACTIONS_CACHE_LIMIT_BYTES`,
 `ACTIONS_CACHE_UNUSED_DAYS`, `ACTIONS_CACHE_MAX_DAYS`, and the login settings `OIDC_ISSUER`,
 `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`, `OIDC_NAME`, `OIDC_SCOPES`,
-`SELF_SIGNUP`, `BREAK_GLASS_PUBLIC_KEY`. Push notifications need `PUBLIC_URL` and
+`SELF_SIGNUP`, `PASSKEYS`, `BREAK_GLASS_PUBLIC_KEY`, and the Pages settings
+`PAGES_HOST`, `PAGES_DOMAINS`, `PAGES_MAX_AGE` (point the Pages hosts at the
+same process; behind a proxy keep the `Host` header). Email: `EMAIL_PROVIDER`
+(`none`, `console`, `ses`, `smtp`), `EMAIL_FROM`, `SES_*`. Push notifications need `PUBLIC_URL` and
 `INSTANCE_KEY`; without them mirrors sync only on the schedule. With
 `ACTIONS=true` CI is served, but there is no runner launcher: jobs wait for a
 runner registered by hand. Every five minutes the instance runs scheduled
@@ -50,7 +53,7 @@ Only for this app:
 |---|---|---|
 | `PORT` | `8080` | Listening port. |
 | `HOST` | `0.0.0.0` | Listening address. Use `127.0.0.1` behind a reverse proxy on the same host. |
-| `TRUST_PROXY` | `false` | `true` takes the request origin from `X-Forwarded-Proto` and `X-Forwarded-Host`. Only behind a proxy that sets them. |
+| `TRUST_PROXY` | `false` | `true` takes the request origin from `X-Forwarded-Proto` and `X-Forwarded-Host` and the client address for login rate limits from the last `X-Forwarded-For` hop (otherwise the socket address). Only behind a proxy that sets them. |
 | `DATA_DIR` | `./data` | Base directory for the defaults below. |
 | `DATABASE_PATH` | `$DATA_DIR/git-forge.sqlite` | SQLite file (WAL mode). |
 | `STORAGE` | `fs` | `fs` (local directory, `FsStorage`) or `s3` (`S3Storage`). |
@@ -59,7 +62,13 @@ Only for this app:
 | `S3_PREFIX` | none | Key prefix inside the bucket, e.g. `git-forge/`. |
 | `S3_FORCE_PATH_STYLE` | `false` | `true` for `https://host/bucket/key` URLs (most self-hosted S3 servers). |
 | `SCHEDULE` | `17 3 * * *` | Cron expression (five fields, UTC; `@hourly`, `@daily` also work) for the safety-net run: enqueues a sync for every auto mirror whose last run is older than `MIRROR_INTERVAL_MINUTES`, plus the periodic deep checks. Same as the Worker's Cron Trigger. |
-| `JOB_CONCURRENCY` | `2` | Background jobs (mirror syncs, notifications, deep checks) running at once. Imports run one step at a time. |
+| `JOB_CONCURRENCY` | `2` | Background jobs (mirror syncs, notifications, deep checks, Pages deployments, LFS publish) running at once. Imports run one step at a time. |
+| `LFS_PUBLISH_DIR` | none | Directory that receives the LFS objects of public repositories on push, one file per oid (`LFS_PUBLISH_PREFIX` prepends a path), for a web server or CDN to serve. The Worker's `CDN_BUCKET` counterpart. |
+| `SMTP_HOST` | none | SMTP server, required with `EMAIL_PROVIDER=smtp`. |
+| `SMTP_SECURITY` | `starttls` | `starttls` (STARTTLS required), `tls` (implicit TLS, "SMTPS") or `none` (plain, only for a relay on the same host or network, without credentials). |
+| `SMTP_PORT` | `587`, `465` or `25` | Port; the default follows `SMTP_SECURITY`. |
+| `SMTP_USERNAME`, `SMTP_PASSWORD` | none | Credentials for `AUTH PLAIN` or `AUTH LOGIN` (whichever the server offers, PLAIN first). Both or neither; not with `SMTP_SECURITY=none`. |
+| `SMTP_HELO` | host name | Name sent with `EHLO`. |
 
 Invalid values stop the process with exit code 2 and a message instead of
 falling back to a default.
@@ -68,15 +77,14 @@ falling back to a default.
 
 Jobs run in the process, with the same handler, retry policy (exponential
 backoff from 10 s, at most 8 attempts, `PermanentJobError` stops at once)
-and job format as the Worker's Queue consumer. They live in memory: a job
-that was queued or waiting for a retry when the process stopped is gone. For
-mirrors this is safe: the upstream retries an undelivered notification with
-backoff (eight attempts within about 20 minutes), a repeated notification of
-an unchanged state is a no-op, and the next scheduled run catches up on
-anything missed, including pushes made while the Pi was offline for longer. An import
-interrupted by a restart is taken over by starting it again with the same URL
-(`POST /api/repos/{owner}/{name}/import`) once it has made no progress for 30
-minutes; it continues from its last completed step.
+and job format as the Worker's Queue consumer. Jobs live in the `jobs` table
+of the SQLite file and survive restarts; a job interrupted by a crash runs
+again once its 60 s lease has expired.
+
+## Email
+
+`EMAIL_PROVIDER=smtp` with `EMAIL_FROM` and `SMTP_*` sends notification
+digests over SMTP; `5xx` replies are permanent, everything else is retried.
 
 ## A backup mirror on a Raspberry Pi
 
@@ -124,10 +132,10 @@ notifications; without that it still catches up on the schedule.
 
    With S3 the Pi only holds the SQLite file; repository data and LFS objects
    live in the bucket, and LFS clients upload and download directly from it
-   through presigned URLs. The bucket must honour `If-None-Match: *` and
+   through presigned URLs, as do `git-remote-forge` pack parts. The bucket must honour `If-None-Match: *` and
    `If-Match` on `PutObject`, since refs are updated by compare-and-swap. Run
    the conformance suite against it once (`packages/s3/README.md`) before
-   relying on a provider.
+   relying on a provider. Expire `tmp/` with a lifecycle rule (a day or more).
 
 4. Install the units [deploy/git-forge-node.service](deploy/git-forge-node.service)
    and [deploy/git-forge-node-migrate.service](deploy/git-forge-node-migrate.service)
@@ -183,10 +191,13 @@ running. Repository data in the bucket or directory is append-only.
 
 ## Container image
 
+Every release publishes `ghcr.io/levino/git-forge-node` (`linux/amd64`,
+`linux/arm64`):
+
 ```sh
+docker run --rm -v git-forge:/data ghcr.io/levino/git-forge-node:0.8.0 migrate
+docker run -d -p 8080:8080 -v git-forge:/data --env-file git-forge.env ghcr.io/levino/git-forge-node:0.8.0
 docker build -f apps/forge-node/Dockerfile -t git-forge-node .
-docker run --rm -v git-forge:/data git-forge-node migrate
-docker run -d -p 8080:8080 -v git-forge:/data --env-file git-forge.env git-forge-node
 ```
 
 Multi-stage: Node and pnpm install the workspace, Bun compiles the executable
@@ -204,8 +215,9 @@ pnpm --filter forge-node test               # unit tests and the E2E suite
 ```
 
 The unit tests cover configuration parsing, cron expressions, the scheduler,
-the migrate/serve contract and the storage conformance suite on the `fs`
-storage as configured here. The E2E suite (`test/e2e`) starts a Worker under
+the SQLite job queue, the migrate/serve contract and the storage conformance
+suite on
+the `fs` storage as configured here. The E2E suite (`test/e2e`) starts a Worker under
 `wrangler dev` and this app as a separate process, then: pushes and clones
 with Git LFS (protocol v2 and dumb HTTP) on the Node instance; mirrors a
 Worker repository on the Node instance including LFS objects; follows a push

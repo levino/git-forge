@@ -16,11 +16,23 @@ import {
   parseBreakGlassPublicKey,
   parseCookies,
   safeReturnTo,
+  sameOrigin,
   signBreakGlassToken,
   verifyBreakGlassToken,
 } from '../src/index.ts'
 
 describe('sessions and CSRF', () => {
+  it('accepts same-origin form posts that carry Origin: null', () => {
+    const origin = 'https://forge.example'
+    const post = (headers: Record<string, string>) => new Request(`${origin}/login/device`, { method: 'POST', headers })
+    expect(sameOrigin(post({ Origin: origin }), origin)).toBe(true)
+    expect(sameOrigin(post({ Origin: 'https://evil.example' }), origin)).toBe(false)
+    expect(sameOrigin(post({ Origin: 'null', 'Sec-Fetch-Site': 'same-origin' }), origin)).toBe(true)
+    expect(sameOrigin(post({ Origin: 'null', 'Sec-Fetch-Site': 'cross-site' }), origin)).toBe(false)
+    expect(sameOrigin(post({ Origin: 'null' }), origin)).toBe(false)
+    expect(sameOrigin(post({ 'Sec-Fetch-Site': 'cross-site' }), origin)).toBe(false)
+  })
+
   it('derives a CSRF token only the session holder can compute', async () => {
     const token = generateSessionToken()
     expect(isSessionToken(token)).toBe(true)

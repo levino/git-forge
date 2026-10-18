@@ -1,4 +1,4 @@
-import type { LoginPage, LoginPageRenderer } from '@git-forge/accounts'
+import { type LoginPage, type LoginPageRenderer, loginFormAction } from '@git-forge/accounts'
 
 export const LOGIN_PAGE_HEADER = 'X-Forge-Login-Page'
 
@@ -28,6 +28,10 @@ export const loginPageTitle = (page: LoginPage): string => {
       return 'Connect a device'
     case 'device-result':
       return page.approved ? 'Device connected' : 'Request denied'
+    case 'cli':
+      return 'Authorize the command line'
+    case 'cli-code':
+      return 'Paste this code'
     case 'break-glass':
       return 'Break-glass login'
     case 'error':
@@ -35,5 +39,5 @@ export const loginPageTitle = (page: LoginPage): string => {
   }
 }
 
-export const LOGIN_CONTENT_SECURITY_POLICY =
-  "default-src 'none'; script-src 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
+export const loginContentSecurityPolicy = (page: LoginPage): string =>
+  `default-src 'none'; script-src 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; form-action ${loginFormAction(page)}; frame-ancestors 'none'; base-uri 'none'`

@@ -1,0 +1,13 @@
+---
+import { hue } from '../ui/format.ts'
+
+type Props = { name: string; size?: number; square?: boolean }
+
+const { name, size = 20, square = false } = Astro.props
+---
+
+<span
+  class:list={['inline-grid place-items-center shrink-0 font-semibold text-white select-none', square ? 'rounded-box' : 'rounded-full']}
+  style={`width:${size}px;height:${size}px;font-size:${Math.round(size * 0.45)}px;background-color:oklch(0.58 0.12 ${hue(name)})`}
+  aria-hidden="true">{name.slice(0, 1).toUpperCase()}</span
+>

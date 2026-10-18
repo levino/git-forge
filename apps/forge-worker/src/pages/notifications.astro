@@ -1,4 +1,5 @@
 ---
+import EmptyState from '../components/EmptyState.astro'
 import Layout from '../layouts/Layout.astro'
 import { isoTime, relativeTime } from '../ui/format.ts'
 import { parsePage } from '../ui/history.ts'
@@ -33,9 +34,9 @@ const now = Math.floor(Date.now() / 1000)
 const query = (next: number) => `?${all ? 'all=1&' : ''}page=${next}`
 ---
 
-<Layout title="Notifications">
+<Layout title="Notifications" narrow>
   <div class="flex flex-wrap items-center gap-3 mb-4">
-    <h1 class="text-2xl font-semibold">Notifications</h1>
+    <h1 class="text-xl font-semibold">Notifications</h1>
     <nav class="join" aria-label="Filter">
       <a class:list={['join-item btn btn-sm', { 'btn-active': !all }]} href="/notifications" aria-current={!all ? 'page' : undefined}>Unread</a>
       <a class:list={['join-item btn btn-sm', { 'btn-active': all }]} href="/notifications?all=1" aria-current={all ? 'page' : undefined}>All</a>
@@ -49,7 +50,7 @@ const query = (next: number) => `?${all ? 'all=1&' : ''}page=${next}`
   {error && <div role="alert" class="alert alert-error mb-4">{error}</div>}
   {
     threads.length === 0 ? (
-      <p class="text-base-content/70">{all ? 'No notifications.' : 'All caught up.'}</p>
+      <EmptyState icon="inbox" title={all ? 'No notifications.' : 'All caught up.'} />
     ) : (
       <ul class="border border-base-300 rounded-box divide-y divide-base-300" aria-label="Notifications">
         {threads.map((thread) => (

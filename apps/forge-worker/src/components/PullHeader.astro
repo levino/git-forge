@@ -1,0 +1,38 @@
+---
+import type { PullRequest } from '@git-forge/collaboration'
+import { repoUrl, type OpenRepository } from '../ui/repository.ts'
+import Icon from './Icon.astro'
+import IssueHeader from './IssueHeader.astro'
+
+type Props = { repo: OpenRepository; pull: PullRequest; tab: 'conversation' | 'commits' | 'files' }
+
+const { repo, pull, tab } = Astro.props
+const state = pull.merged
+  ? { label: 'Merged', badge: 'badge-secondary', icon: 'merge' as const }
+  : pull.state === 'closed'
+    ? { label: 'Closed', badge: 'badge-error', icon: 'pull-closed' as const }
+    : pull.draft
+      ? { label: 'Draft', badge: 'badge-ghost', icon: 'pull' as const }
+      : { label: 'Open', badge: 'badge-success', icon: 'pull' as const }
+const base = repoUrl(repo.name, 'pull', String(pull.number))
+const tabs = [
+  { id: 'conversation', label: 'Conversation', icon: 'comment', href: base },
+  { id: 'commits', label: 'Commits', icon: 'commit', href: `${base}/commits` },
+  { id: 'files', label: 'Files changed', icon: 'file', href: `${base}/files` },
+] as const
+---
+
+<IssueHeader issue={pull} state={state} />
+<p class="-mt-3 mb-4 text-sm text-base-content/70 flex flex-wrap items-center gap-1.5">
+  wants to merge <code class="badge badge-sm font-mono text-primary">{pull.headRef}</code> into <code class="badge badge-sm font-mono text-primary">{pull.baseRef}</code>
+</p>
+<nav class="tabs tabs-border mb-5 overflow-x-auto flex-nowrap border-b border-base-300" aria-label="Pull request">
+  {
+    tabs.map((item) => (
+      <a href={item.href} class:list={['tab whitespace-nowrap px-3', { 'tab-active font-semibold': item.id === tab }]} aria-current={item.id === tab ? 'page' : undefined}>
+        <Icon name={item.icon} class="size-4 opacity-70" />
+        {item.label}
+      </a>
+    ))
+  }
+</nav>

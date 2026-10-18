@@ -2,6 +2,8 @@
 import type { CommitInfo, RepositoryName } from '@git-forge/core'
 import { isoTime, relativeTime, shortId } from '../ui/format.ts'
 import { commitUrl } from '../ui/repository.ts'
+import Avatar from './Avatar.astro'
+import Icon from './Icon.astro'
 
 type Props = { repo: RepositoryName; commit: CommitInfo; historyHref?: string }
 
@@ -9,10 +11,18 @@ const { repo, commit, historyHref } = Astro.props
 const now = Math.floor(Date.now() / 1000)
 ---
 
-<div class="flex flex-wrap items-center gap-x-3 gap-y-1 px-4 py-3 bg-base-200 text-sm">
+<div class="flex flex-wrap items-center gap-x-3 gap-y-1 px-4 py-2.5 bg-base-200 border-b border-base-300 text-sm">
+  <Avatar name={commit.author.name || '?'} size={20} />
   <span class="font-semibold">{commit.author.name}</span>
-  <a href={commitUrl(repo, commit.id)} class="link link-hover truncate min-w-0 flex-1">{commit.summary}</a>
-  <a href={commitUrl(repo, commit.id)} class="font-mono link link-hover text-base-content/70">{shortId(commit.id)}</a>
-  <time datetime={isoTime(commit.committer.timestamp)} class="text-base-content/70">{relativeTime(commit.committer.timestamp, now)}</time>
-  {historyHref && <a href={historyHref} class="link link-hover font-semibold">History</a>}
+  <a href={commitUrl(repo, commit.id)} class="hover:underline hover:text-primary truncate min-w-0 flex-1 text-base-content/80">{commit.summary}</a>
+  <a href={commitUrl(repo, commit.id)} class="font-mono text-xs hover:underline text-base-content/60">{shortId(commit.id)}</a>
+  <time datetime={isoTime(commit.committer.timestamp)} class="text-xs text-base-content/60">{relativeTime(commit.committer.timestamp, now)}</time>
+  {
+    historyHref && (
+      <a href={historyHref} class="btn btn-ghost btn-xs gap-1">
+        <Icon name="history" class="size-3.5" />
+        History
+      </a>
+    )
+  }
 </div>

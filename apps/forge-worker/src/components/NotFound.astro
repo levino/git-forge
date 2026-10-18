@@ -1,5 +1,6 @@
 ---
 import Layout from '../layouts/Layout.astro'
+import Icon from './Icon.astro'
 
 type Props = { message?: string }
 
@@ -9,11 +10,12 @@ Astro.response.status = 404
 ---
 
 <Layout title="Not found">
-  <div class="hero py-16">
-    <div class="hero-content text-center">
-      <div class="max-w-md">
-        <h1 class="text-4xl font-bold">404</h1>
-        <p class="py-4">{message}</p>
+  <div class="py-16 flex justify-center">
+    <div class="text-center max-w-md flex flex-col items-center gap-3">
+      <Icon name="search" class="size-8 text-base-content/40" />
+      <div>
+        <h1 class="text-3xl font-semibold">404</h1>
+        <p class="py-3 text-base-content/70">{message}</p>
         {anonymous && <a class="btn btn-primary" href={`/login?return_to=${encodeURIComponent(Astro.url.pathname)}`}>Sign in</a>}
       </div>
     </div>

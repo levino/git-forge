@@ -1,0 +1,45 @@
+---
+import { can, createIssue } from '@git-forge/collaboration'
+import NotFound from '../../../../components/NotFound.astro'
+import RepoHeader from '../../../../components/RepoHeader.astro'
+import Layout from '../../../../layouts/Layout.astro'
+import { field, type FormOutcome, runForm, scopeFor } from '../../../../ui/collaboration.ts'
+import { openRepository, repoUrl } from '../../../../ui/repository.ts'
+
+const { forge, principal, session } = Astro.locals
+const repo = await openRepository(forge, principal, Astro.params.owner!, Astro.params.repo!)
+if (repo.kind === 'ok' && !session) return Astro.redirect(`/login?return_to=${encodeURIComponent(Astro.url.pathname)}`)
+let outcome: FormOutcome | null = null
+if (repo.kind === 'ok' && Astro.request.method === 'POST') {
+  outcome = await runForm(forge, Astro.request, repo, async (scope, form) => {
+    const issue = await createIssue(scope, { title: field(form, 'title'), body: field(form, 'body') })
+    return repoUrl(repo.name, 'issues', String(issue.number))
+  })
+  if (outcome.kind === 'redirect') return Astro.redirect(outcome.location, 303)
+  Astro.response.status = outcome.status
+}
+const scope = repo.kind === 'ok' ? await scopeFor(forge, Astro.request, principal, repo) : null
+---
+
+{
+  repo.kind !== 'ok' || !scope || !session ? (
+    <NotFound />
+  ) : (
+    <Layout title={`New issue · ${repo.name.owner}/${repo.name.name}`}>
+      <RepoHeader repo={repo} tab="issues" />
+      {outcome?.kind === 'error' && <div role="alert" class="alert alert-error mb-4">{outcome.message}</div>}
+      {can(scope, 'issue:create') ? (
+        <form method="post" class="flex flex-col gap-3 max-w-3xl" aria-label="New issue">
+          <input type="hidden" name="csrf" value={session.csrf} />
+          <label class="text-sm font-semibold" for="title">Title</label>
+          <input id="title" name="title" class="input w-full" maxlength="256" required />
+          <label class="text-sm font-semibold" for="body">Description</label>
+          <textarea id="body" name="body" rows="10" class="textarea w-full font-mono" placeholder="Markdown is supported" />
+          <button class="btn btn-primary self-start">Create issue</button>
+        </form>
+      ) : (
+        <p>You cannot open issues in this repository.</p>
+      )}
+    </Layout>
+  )
+}

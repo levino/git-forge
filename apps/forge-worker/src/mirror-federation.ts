@@ -1,4 +1,5 @@
 import {
+  ATTESTATIONS_PATH,
   authorizeSubscription,
   createInstanceVerifier,
   type InstancePrincipal,
@@ -6,6 +7,7 @@ import {
   type JwksSource,
   mintInstanceToken,
   mintMirrorNotification,
+  type MirrorVerificationStore,
   NOTIFICATION_MEDIA_TYPE,
   NOTIFY_PATH_PREFIX,
   parseUpstreamUrl,
@@ -36,6 +38,7 @@ import {
   SizeLimitError,
   type SyncResult,
 } from '@git-forge/core'
+import { handleAttestation, recordChecksums, runSpotCheck, sendAttestation } from './mirror-verification.ts'
 import { type MirrorContext, mirrorUnitOptions, runMirrorSync, type ScheduledMirrorRun } from './mirrors.ts'
 
 export type ForgeJob =
@@ -45,12 +48,15 @@ export type ForgeJob =
   | { readonly kind: 'mirror-notify'; readonly repository: string; readonly issuer: string; readonly callback: string }
   | { readonly kind: 'mirror-subscribe'; readonly repository: string; readonly remote: string }
   | { readonly kind: 'mirror-deep-check'; readonly repository: string; readonly remote: string }
+  | { readonly kind: 'mirror-attest'; readonly repository: string; readonly remote: string }
+  | { readonly kind: 'mirror-spot-check'; readonly repository: string; readonly issuer: string }
 
 export type MirrorFederation = MirrorContext & {
   readonly issuer: string
   readonly instanceKey: SigningKey
   readonly jwks: JwksSource
   readonly jobs: JobQueue<ForgeJob>
+  readonly verification: MirrorVerificationStore
   readonly canRead: (principal: InstancePrincipal, repo: RepositoryName) => Promise<boolean>
   readonly deepCheckDays: number
   readonly unitBytes: number
@@ -116,9 +122,16 @@ const deliverNotification = async (federation: MirrorFederation, job: Extract<Fo
   throw new Error(message)
 }
 
+const afterSync = async (federation: MirrorFederation, repo: RepositoryName, config: MirrorConfig, result: SyncResult): Promise<void> => {
+  if (result.status !== 'ok') return
+  if (result.updates.length > 0) await enqueueNotifications(federation, repo)
+  await recordChecksums(federation.verification, federation.storage, repo)
+  if (config.auth === 'instance' && !config.detachedAt) await federation.jobs.enqueue({ kind: 'mirror-attest', repository: nameOf(repo), remote: config.remote })
+}
+
 export const syncAndNotify = async (federation: MirrorFederation, repo: RepositoryName, config: MirrorConfig): Promise<SyncResult> => {
   const result = await runMirrorSync(federation, repo, config)
-  if (result.status === 'ok' && result.updates.length > 0) await enqueueNotifications(federation, repo)
+  await afterSync(federation, repo, config, result)
   return result
 }
 
@@ -134,7 +147,7 @@ const syncInUnits = async (federation: MirrorFederation, repo: RepositoryName, c
   }
   const result = await runMirrorSync(federation, repo, config, { deferLfs: true })
   if (result.status !== 'ok') return result
-  if (result.updates.length > 0) await enqueueNotifications(federation, repo)
+  await afterSync(federation, repo, config, result)
   for (const pointer of (await readMirrorStatus(federation.storage, repo, config.remote))?.lfsPending ?? []) {
     if (pointer.size > federation.unitBytes) continue
     await federation.jobs.enqueue({ kind: 'mirror-lfs', repository: nameOf(repo), remote: config.remote, oid: pointer.oid, size: pointer.size })
@@ -172,6 +185,10 @@ export const runJob = async (federation: MirrorFederation, job: ForgeJob): Promi
       return deliverNotification(federation, job)
     case 'mirror-subscribe':
       return subscribeUpstream(federation, repositoryOf(job.repository), job.remote)
+    case 'mirror-attest':
+      return sendAttestation(federation, job.repository, job.remote)
+    case 'mirror-spot-check':
+      return runSpotCheck(federation, job.repository, job.issuer)
     case 'mirror-deep-check': {
       const check = await deepCheckMirror(federation.storage, repositoryOf(job.repository), job.remote, federation.now?.() ?? new Date())
       if (!check.ok) console.log(JSON.stringify({ event: 'mirror-deep-check', repository: job.repository, remote: job.remote, problems: check.problems }))
@@ -299,6 +316,7 @@ export const handleFederationRequest = async (federation: MirrorFederation, requ
   if (!pathname.startsWith(base)) return null
   const path = pathname.slice(base.length)
   if (path === SUBSCRIPTIONS_PATH) return handleSubscription(federation, request)
+  if (path === ATTESTATIONS_PATH) return handleAttestation(federation, request)
   if (path.startsWith(NOTIFY_PATH_PREFIX)) return handleNotification(federation, request, path.slice(NOTIFY_PATH_PREFIX.length - 1))
   return null
 }

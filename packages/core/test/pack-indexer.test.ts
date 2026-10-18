@@ -7,7 +7,7 @@ import { hashObject } from '../src/hash.ts'
 import { MemoryStorage } from '../src/memory-storage.ts'
 import type { GitObject, ObjectType } from '../src/objects.ts'
 import { PackError } from '../src/pack.ts'
-import { indexPack, type ObjectLookup } from '../src/pack-indexer.ts'
+import { indexPack, type ObjectLookup, ObjectTooLargeError } from '../src/pack-indexer.ts'
 import { createRepository, ObjectDatabase, packKey } from '../src/repository.ts'
 import { git, gitBytes, initRepo, sampleHistory, tempDir, writeFile, commitAll } from './git-helpers.ts'
 
@@ -164,10 +164,11 @@ describe('indexPack limits', () => {
     commitAll(dir, 'one big blob')
     const plain = gitBytes(dir, ['pack-objects', '--stdout', '--revs', '--all'], '')
     await expect(index(plain, nothing, { memoryBudget: 16 * 1024, maxObjectBytes: 4096 }).indexed).resolves.toMatchObject({ objectCount: 3 })
+    await expect(index(plain, nothing, { maxObjectBytes: 4096 }).indexed).resolves.toMatchObject({ objectCount: 3 })
     for (let i = 0; i < 40; i++) writeFile(dir, `dir/file-${i}-${'x'.repeat(60)}.txt`, `${i}\n`)
     commitAll(dir, 'wide tree')
     const wide = gitBytes(dir, ['pack-objects', '--stdout', '--revs', '--all'], '')
-    await expect(index(wide, nothing, { maxObjectBytes: 2048 }).indexed).rejects.toThrow(/too large/)
+    await expect(index(wide, nothing, { maxObjectBytes: 2048 }).indexed).rejects.toBeInstanceOf(ObjectTooLargeError)
   })
 })
 

@@ -48,7 +48,8 @@ The server must support conditional writes on `PutObject` and
 `x-amz-checksum-sha256`; refs rely on the former, LFS uploads on the latter.
 Servers that silently ignore `If-Match`/`If-None-Match` are not safe to use.
 Cloudflare R2's S3 API can be used through this adapter when presigned URLs
-are needed (the `R2Storage` binding adapter cannot sign).
+are needed (the `R2Storage` binding adapter cannot sign); the Worker uses it
+only as presigner (`withPresigner`).
 
 ## Tests
 
@@ -58,6 +59,8 @@ server. With a server, the shared storage conformance suite from
 small list page size, and without a prefix over 1005 keys), plus presigned-URL
 tests: GET, tampered signature, exact PUT, same-length forged content,
 different length, missing checksum header, replaced checksum header, expiry.
+`test/lfs-presigned.test.ts` pushes and clones a 3 MiB object with the real
+`git-lfs` through a 1 MiB body limit via presigned URLs.
 
 ```sh
 pnpm --filter @git-forge/s3 test:s3

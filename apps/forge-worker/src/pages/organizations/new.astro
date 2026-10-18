@@ -1,0 +1,26 @@
+---
+import Layout from '../../layouts/Layout.astro'
+import { handleOrganizationPost, type OrganizationOutcome } from '../../ui/organizations.ts'
+
+const { forge, session } = Astro.locals
+if (!session) return Astro.redirect(`/login?return_to=${encodeURIComponent('/organizations/new')}`)
+let outcome: OrganizationOutcome | null = null
+if (Astro.request.method === 'POST') {
+  outcome = await handleOrganizationPost(forge, Astro.request, '')
+  if (outcome.kind === 'redirect') return Astro.redirect(outcome.location, 303)
+  if (outcome.kind === 'error') Astro.response.status = outcome.status
+}
+---
+
+<Layout title="New organization" narrow>
+  <h1 class="text-xl font-semibold mb-5">New organization</h1>
+  {outcome?.kind === 'error' && <div role="alert" class="alert alert-error mb-4">{outcome.message}</div>}
+  <form method="post" class="panel max-w-2xl" aria-label="New organization">
+    <input type="hidden" name="csrf" value={session.csrf} />
+    <input type="hidden" name="action" value="create" />
+    <label class="text-sm font-semibold" for="login">Organization name</label>
+    <input id="login" name="login" class="input w-full" required pattern="[A-Za-z0-9][A-Za-z0-9-]*" autocomplete="off" />
+    <p class="text-sm text-base-content/70">You become its first owner.</p>
+    <button class="btn btn-primary self-start">Create organization</button>
+  </form>
+</Layout>

@@ -84,14 +84,12 @@ issues, pull requests and discussions.
 - Reactions, search in issues and discussions.
 - Edit and upload files in the browser (commit via form).
 - Releases (§16).
-- `gh auth login`-style device flow for the command line.
+- Browser login for the command line (`git forge auth login`, §8).
 
 **Later / maybe**
 
-- Pages.
+- Pages (first version implemented, §20).
 - Partial visibility within a repository (levels, derived views).
-- Encrypted full backups for mirrors without read access to plaintext.
-- External verification of mirrors (§10).
 - SSH-to-HTTPS gateway (§9).
 
 ## 4. Instances and mirrors
@@ -142,7 +140,8 @@ example on a Raspberry Pi.
   disappear, the mirror stays usable with its own users and can simply be
   detached and continue as the primary.
 - **Mirror overview:** each instance shows for its repositories which mirrors
-  it knows of (§10).
+  it knows of, whether they hold the current state and whether their bytes
+  match (signed attestations and spot checks, §10).
 
 ### Push notifications
 
@@ -183,8 +182,8 @@ storage. Mirrors therefore do not poll; the upstream tells them.
   `MIRROR_INTERVAL_MINUTES` = 1440 in `wrangler.jsonc`) and enqueues a sync
   and a subscription renewal for every auto mirror whose last run is older
   than the interval. `apps/forge-node` does the same from its own cron
-  schedule (`SCHEDULE`, default the same `17 3 * * *`) with an in-process job
-  queue. Without a job queue, `PUBLIC_URL` or `INSTANCE_KEY` there are no
+  schedule (`SCHEDULE`, default the same `17 3 * * *`) with its job table in
+  the SQLite file. Without a job queue, `PUBLIC_URL` or `INSTANCE_KEY` there are no
   notifications and the scheduled handler syncs inline, so a shorter interval
   is the right choice there. The rare deep check (§7) is enqueued every
   `MIRROR_DEEP_CHECK_DAYS` (default 30, 0 = off).
@@ -262,8 +261,12 @@ the [accounts README](../packages/accounts/README.md#branch-protection).
   `refs/upstream/*` itself. Branch protection applies only to the
   repository's own branches.
 - **Storage:** rules live in the accounts database (migration
-  `0002_branch_protection`), not in the bucket, so a plain clone of a bucket
-  carries no rules. Changes are audited.
+  `0002_branch_protection`; D1 on Cloudflare, an SQLite file on Node), not in
+  the bucket, so a plain clone of a bucket carries no rules. Changes are
+  audited.
+- **API authentication:** repository admins manage rules with `repo:admin`
+  tokens or a browser session; session writes need the CSRF token and the
+  instance's origin (§8), like every other JSON API.
 
 ## 6. Bucket layout
 
@@ -276,15 +279,19 @@ the [accounts README](../packages/accounts/README.md#branch-protection).
     objects/pack/pack-<sha>.pack
     objects/pack/pack-<sha>.idx
   lfs/
-    objects/<oid[0:2]>/<oid[2:4]>/<oid>   # LFS objects and release assets
+    objects/<oid[0:2]>/<oid[2:4]>/<oid>   # LFS objects, release assets and Pages files
+  pages/deployments/<sha256>.json   # immutable Pages manifest, keyed by its own hash (§20)
   import/status.json                # progress of the last import
   import/commits.txt                # commit order of the last import
+  import/blobs.txt                  # blobs of the commit an import is splitting
   actions/jobs/<jobId>/…            # CI logs, console lines, attachments (§15)
   actions/caches/<blobId>/blocks/<uuid>     # parts of a cache archive (§15)
   actions/artifacts/<blobId>/blocks/<uuid>  # parts of an artifact (§15)
   README.txt                        # plain text: what this is, how to read it
 tmp/<repo>/<timestamp>-<uuid>/<n>   # staging chunks of a push or fetch, expired by the bucket
 tmp/<repo>/<timestamp>-<uuid>/asset # a release asset upload without a declared SHA-256 (§16)
+tmp/<repo>/<timestamp>-<uuid>/upload.json   # an upload session of git-remote-forge (§7)
+tmp/<repo>/<timestamp>-<uuid>/part/<nnnnn>  # its parts, 1-based, five digits
 ```
 
 - `<sha>` is the pack's trailing SHA-1 checksum, as with `git index-pack`.
@@ -305,12 +312,17 @@ tmp/<repo>/<timestamp>-<uuid>/asset # a release asset upload without a declared 
   which is only known at the end, and `put` needs a key and a size. The chunks
   are read back once to write the final pack and never again. The `Storage`
   interface has no delete; operators expire `tmp/` with a bucket lifecycle
-  rule (e.g. one day). Pushes up to one chunk never touch `tmp/`.
-- **CI caches and artifacts** are stored as the parts the client uploaded
-  (Azure blocks or `Content-Range` chunks), each under a fresh key; which
-  parts in which order make up a cache entry or artifact lives only in the
-  database (§15). Evicting a cache or deleting an artifact only stops
-  referencing the parts.
+  rule (e.g. one day). Pushes up to one chunk never touch `tmp/`. Fetched
+  packs are staged the same way; chunks of failed attempts and unlisted packs
+  are never reused and stay until expired.
+- **Upload sessions** (§7) live under `tmp/`: one session record, one object
+  per part, written once; unfinished uploads expire with the `tmp/` rule.
+- **Pages files** are stored the same way, under the SHA-256 of their
+  content, and each deployment is one manifest that maps paths to those
+  hashes (§20). Which deployment is active lives only in the database.
+- **CI caches and artifacts** are stored as the uploaded parts, each under a
+  fresh key; which parts make up an entry lives only in the database (§15).
+  Evicting or deleting only stops referencing them.
 - **Release assets** are content-addressed like LFS objects
   (`lfs/objects/…`, §16). Which asset belongs to which release lives only in
   the database; a deleted asset or release leaves its bytes in place.
@@ -353,6 +365,7 @@ large files belong in LFS. The Worker sets no push size limit of its own
 **Large pushes** — a push is one HTTP request, and Cloudflare caps request
 bodies at 100 MB (Free/Pro), 200 MB (Business) and 500 MB (Enterprise). Three ways around it, none of which changes git:
 
+- *Remote helper* `git-remote-forge` (below): resumable upload in parts.
 - *Chunked push helper* `git forge push` (`packages/cli`, a single executable
   built with `bun build --compile`): splits the history not yet on the remote
   into pushes below a byte budget (default 80 MB, measured with
@@ -364,8 +377,20 @@ bodies at 100 MB (Free/Pro), 200 MB (Business) and 500 MB (Enterprise). Three wa
   a rerun: what landed is on the remote. Details in `packages/cli/README.md`.
 - *Server-side import* (below): the forge pulls from a URL, so no request
   body is involved at all.
-- Later: a remote helper uploading packs directly to object storage
-  (roadmap M5a).
+
+**Remote helper** — `git-remote-forge` (same executable as `git forge`)
+serves `forge::https://host/owner/repo`. Fetch is relayed to
+`git remote-https`. Push packs locally into `.git/forge-upload/<key>/`, then
+uses `/{owner}/{repo}.git/forge/uploads`: `GET` limits, `POST {parts}`
+creates the session (per part a presigned `PUT` bound to length and SHA-256,
+or `PUT …/{id}/parts/{n}` through the function), `GET …/{id}` lists missing
+parts with fresh URLs (resume), `POST …/{id}/finalize {commands, atomic}` runs
+`receivePack` on the commands plus the parts, so policy, LFS check and
+`onPush` are those of `git-receive-pack`, with the finalize request's token.
+Every call needs `write`. A server without the API gets plain receive-pack.
+Parts are separate objects, not S3 multipart: the indexer reads every byte
+anyway, no Complete/Abort (abort would be a delete), no 5 MiB minimum, every
+adapter works. Finalize indexes in one request, bounded by `cpu_ms`.
 
 **Import** — create or update a repository by pulling from any Git URL
 (smart HTTP v2 or dumb HTTP, optional token). It reuses the mirror client
@@ -387,11 +412,42 @@ as a sequence of stateless steps, each persisting its progress in
    `want` the last commit of the range, `have` every earlier range end and all
    local tips, so the server sends exactly the new objects; store the pack,
    check connectivity, collect LFS pointers. A step whose pack exceeds
-   `maxStepBytes` (32 MiB) is retried with a quarter of the commits; small
-   packs double the range. A final fetch picks up tag objects. Servers without
-   `filter`, and dumb servers, are fetched in one step.
-4. *lfs* — 100 LFS objects per step via the upstream's batch API; missing
-   objects are recorded, not fatal.
+   `maxStepBytes` (32 MiB), or with a delta result above 64 MiB, is retried
+   with a quarter of the commits; small packs double the range. A final fetch
+   without byte limit picks up tag objects. Servers without `filter`, and dumb
+   servers, are fetched in one step.
+
+   *Split* — a one-commit range that is still too large is spread over steps
+   (`split` in the state): fetch it with `filter blob:none` into a pack that
+   stays unlisted, write the missing blobs of its new trees to
+   `import/blobs.txt`, then `want` them by id in batches (halved on overflow,
+   doubled after small packs); a batch of one blob has no byte limit and
+   arrives undeltified (no `thin-pack`), so the indexer only streams it. After
+   the last batch the tree pack is listed and the commit becomes a cut.
+   Unlisted until complete, an abandoned split never exposes a commit without
+   its blobs. github.com supports both (no `object-info`). Bound: one blob per
+   invocation, about 6 s CPU per 100 MiB (JavaScript inflate and SHA-1), so
+   about 1 GiB at `cpu_ms` 60000.
+4. *lfs* — via the upstream's batch API, at most 100 objects and
+   `maxLfsStepBytes` (512 MiB) per step, at least one object; objects are
+   streamed into storage with native SHA-256 (`DigestStream`, `node:crypto`),
+   so any size up to the storage's single `put` (5 GiB on R2) works;
+   `MAX_LFS_OBJECT_BYTES` only limits uploads. A 538 MB object costs about
+   1.7 s CPU. Missing objects are recorded, not fatal.
+   Endpoint precedence as in git-lfs: `lfsUrl`, then `.lfsconfig` of the
+   default branch (other tips, then tags, only if it has none; `lfs.url`
+   before `remote.origin.lfsurl`), then `<url>.git/info/lfs`. URLs are
+   normalized (http(s), no credentials, trailing `/objects/batch` removed);
+   other keys are ignored. The token goes to a `.lfsconfig` endpoint only if
+   it has the import URL's origin.
+   With a job queue (`scheduleLfs`), each pointer becomes an `import-lfs` job
+   as soon as a fetch step finds it (`lfsPending`), carrying the token and the
+   endpoint known so far (provisionally the setting or `<url>.git/info/lfs`;
+   jobs are re-queued once `.lfsconfig` names another); *lfs* then only checks
+   presence, re-queues after 10 minutes without progress (doubling,
+   `lfsRound`), and after three rounds hands the rest to the sequential path
+   above, which records them as missing. States without `lfsPending` and
+   runtimes without a queue use the sequential path.
 5. *refs* — update refs via compare-and-swap and rewrite `info/refs`; an
    empty repository adopts the upstream `HEAD`.
 
@@ -405,12 +461,12 @@ five failures in a row the import is `failed`, and starting it again with the
 same URL resumes at the failed phase. An import whose state has not changed
 for 30 minutes (`STALE_IMPORT_MS`; a live import writes its state at least
 every 10 minutes) counts as abandoned, for example because the process that
-drove it restarted and lost its in-memory job: starting it again with the same
+drove it lost its job: starting it again with the same
 URL takes it over at its current phase. Credentials are never written to the
 bucket: the token travels with each scheduled step. Steps are driven by the
 scheduling adapter (`ImportScheduler`): a Cloudflare Queue in the Worker
-(each message is one step in its own invocation), the in-process job queue in
-`apps/forge-node`, a simple loop (`runImport`) elsewhere.
+(each message is one step in its own invocation), the SQLite job table in
+`apps/forge-node` (so the steps survive a restart), a simple loop (`runImport`) elsewhere.
 
 **Fetch** — public: dumb HTTP directly from the bucket/CDN. Private or
 protocol v2 clients: `upload-pack` (smart HTTP protocol v2), streamed:
@@ -531,8 +587,34 @@ there is no upload or publish step.
   Push); LFS bytes are always streamed from the bucket, ranges via ranged
   bucket reads.
 
-Optional later: a "publish" setting that copies public LFS objects into a
-public CDN bucket on push.
+**LFS publish (optional)** — copy the LFS objects of public repositories
+into a public bucket on push, keyed by oid alone, for a CDN that should be
+refillable from hashes and never reach the Worker.
+
+- Adapter in the core (`packages/core/src/lfs-publish.ts`): `LfsPublisher`
+  with `has(oid, size)` and `publish(oid, size, body)`; `storagePublisher`
+  implements it on any `Storage` (key `<prefix><oid>`, written with
+  `If-None-Match: *`, never deleted). `publishLfsObjects` copies the given
+  oids that exist in the repository and are not yet published;
+  `listLfsOids` lists a repository's LFS objects for a backfill.
+- `receivePack` reports the LFS pointers of the pushed pack in
+  `PushOutcome.lfsPointers`. After a push with at least one accepted ref to a
+  **public** repository, the app enqueues `lfs-publish` jobs of 100 oids
+  (inline without a job queue). The visibility is checked again when the job
+  runs; private repositories are never published, and objects published
+  while a repository was public stay published.
+  `POST /api/repos/{owner}/{repo}/lfs/publish` (repository admin) backfills
+  all objects of a public repository.
+- Targets: `CDN_BUCKET` (a second R2 binding) on Cloudflare,
+  `LFS_PUBLISH_DIR` (`FsStorage`) on Node; an S3 bucket works through
+  `S3Storage`.
+- Versus a pull-zone CDN: with Bunny (or any pull zone) in front of the media
+  URLs nothing has to be published; the zone pulls
+  `/{owner}/{repo}/media/{oid}` on a miss and keeps it forever because it is
+  immutable. Publishing is the push alternative: the bytes leave the forge
+  once, the CDN or static host never talks to the Worker, and the public
+  bucket keeps working without it. Both can be combined (a Bunny pull zone
+  whose origin is the public bucket).
 
 **Submit via form** — the server creates blob, tree and commit on a proposal
 branch.
@@ -555,7 +637,7 @@ SQLite database. A new instance works without an external identity provider.
 | Passkeys (WebAuthn) | Default, built in; passkey-only accounts need no IdP |
 | OIDC (ZITADEL, Keycloak, Authentik, Pocket ID, Google, …) | Connect existing identities; one provider per instance; groups → teams later |
 | Personal access tokens | Git over HTTPS (as HTTP Basic password), JSON API |
-| Device flow (`git forge auth login`, like `gh auth login`) | Command line: issues a `repo:write` token, git uses it through the credential helper |
+| Command-line login (`git forge auth login`) | Paste a one-time code from the browser (PKCE), optionally a loopback redirect or the RFC 8628 device flow; issues a token with the chosen scope, git uses it through the credential helper |
 | Break-glass key | Offline Ed25519 key, opens a short admin session when the IdP is down |
 | SAML, SCIM | Later, for organizations that require them |
 
@@ -611,6 +693,11 @@ existing user or creates a new account (fixed login or chosen), and with
 the login is refused with a hint to ask for an invite. Logins are derived from
 `preferred_username`, the email's local part or the name, with `-2`, `-3`, …
 when taken.
+With an identity provider the first admin comes from a one-time claim instead
+of the bootstrap token: the operator inserts a verified email address or
+OIDC subject into `instance_admin_claims` (migration 0010) with
+`wrangler d1 execute` (the command is in the instance template's README); the first matching OIDC sign-in creates the account
+(even without self-signup), makes it an instance admin and deletes the claim.
 
 **Passkeys.** Registration asks for a discoverable credential, user
 verification and attestation `none`; attestation statements are never
@@ -620,18 +707,45 @@ cross-origin, the RP ID hash (the host of `PUBLIC_URL`), UP and UV, and the
 signature; the counter must increase unless both sides are zero (synced
 passkeys report 0), and it is updated with compare-and-swap. The user handle
 is random and shared by all passkeys of a user. Public keys are stored as
-JWKs.
+JWKs. `PASSKEYS=false` makes an instance OIDC-only: the passkey functions in
+`login.ts` refuse with `not_configured` (404 on every passkey endpoint,
+including `/api/user/passkeys`), and the login page model carries
+`passkeys: false`, so the sign-in, invite and settings pages render no passkey
+buttons and no ceremony script. Stored credentials are kept, not deleted.
+Break-glass and the device flow are unaffected.
 
-**Device flow.** RFC 8628 with the fixed client id `git-forge-cli`. The user
-code (8 letters without vowels and look-alikes) is entered or confirmed at
-`/login/device` in a signed-in browser, which shows the client name and the
-scope before approval. The first successful poll consumes the authorization
-and issues a personal access token with `repo:write`, 90 days; a poll faster
-than the interval gets `slow_down`. The CLI stores the token per host in
-`~/.config/git-forge/hosts.json` (0600) and configures
-`credential.<host>.helper = !git-forge auth git-credential` (after an empty
-helper, which resets others), so plain `git` and `git-lfs` authenticate
-without tokens in URLs.
+**Access levels.** `repo:read` < `repo:write` < `repo:admin` are cumulative
+ceilings; forms offer one radio choice (`accessChoices`). Effective rights are
+the minimum of ceiling and repository role.
+
+**Command-line login.** `git forge auth login [--scopes …]` gets a 90-day
+token for client id `git-forge-cli`. Consent pages (session + CSRF) show
+client, reported host, request IP, time and a phishing warning; the user may
+lower the requested scope, never raise it.
+
+1. *Paste (default).* `POST /login/cli/start` stores the PKCE challenge (S256)
+   and scope under a random id (`cli_authorizations`, 10 minutes) and returns
+   `/login/cli/{id}`. After approval the page shows a one-time code; the CLI
+   redeems it with the verifier at `POST /login/cli/token`.
+2. *Loopback (`--browser-redirect`, RFC 8252).* Same, but approval redirects
+   to `http://127.0.0.1|[::1]|localhost:{port}` with `code` and `state`; that
+   consent page's CSP `form-action` allows loopback origins.
+3. *Device flow (`--device`, RFC 8628),* for compatibility; the CLI prints
+   `verification_uri_complete`.
+
+All three are phishable the same way (whoever starts the request and sends
+the link gets the token), hence the consent details. Paste works over SSH and
+in containers and a leaked code is useless without the verifier; loopback
+needs a local browser; the device code is the only secret of the device flow.
+The token goes to `hosts.json` (0600) and the git credential helper.
+`git forge repo create` uses it against `POST /api/repos` (needs `repo:admin`).
+
+**Rate limits and purging.** Login, consent and token endpoints are limited
+per client address (`LOGIN_RATE_LIMITS`, sliding window in `rate_limits`,
+`429` with `Retry-After`). The address is `CF-Connecting-IP` on Cloudflare and
+the socket (or last `X-Forwarded-For` hop with `TRUST_PROXY`) on Node. The
+scheduled handler deletes challenges, device and CLI authorizations an hour
+after expiry and stale rate-limit windows.
 
 **Break-glass.** An Ed25519 key pair generated offline
 (`pnpm --filter forge-worker break-glass keygen`); only the public JWK is
@@ -649,23 +763,74 @@ switch.
 **Size limits.** Git pushes are only limited by the platform's request body
 limit unless `MAX_PUSH_BYTES` is set; single LFS
 objects by `MAX_LFS_OBJECT_BYTES` (default 100 MiB, the request body limit of
-Cloudflare's Free and Pro plans), enforced in the batch API and on `PUT`.
+Cloudflare's Free and Pro plans), enforced in the batch API and on `PUT`;
+with presigned R2 URLs (§11) it can be raised to about 5 GiB.
 
 ## 9. Git over SSH
 
 Not supported, by decision. Serverless functions accept only HTTP; SSH would
 need an always-on host or a TCP-capable container platform, and SSH over
 WebSocket needs client-side configuration. Git uses HTTPS with tokens, made
-convenient by `git forge auth login` (credential helper, device flow, §8).
+convenient by `git forge auth login` (credential helper, browser login, §8).
 
 ## 10. Mirror overview and verification
 
-- Each instance lists, per repository, the mirrors it has granted access to
-  and when they last synced.
-- Later: external verification of public data via range requests on random
-  blocks compared to known hashes, with signed results. Redirecting and Sybil
-  mirrors cannot be fully excluded; only count confirmed mirrors with
-  different providers or known operators.
+Each instance can tell, per repository, which mirrors hold it, whether they
+hold the current state, how far behind they are and whether their bytes are
+what the upstream has. Nothing here trusts a claim alone (§2.4): attestations
+are signed and checked against the upstream's own history, bytes are
+sampled and compared.
+
+- **Ref checksum.** XOR over `SHA-1(refname ‖ value)` of all `refs/heads/*`
+  and `refs/tags/*` (the advertised refs, §4), as in GitHub Spokes
+  (`refsChecksum`, `namespacedChecksum` in core). Order-independent and
+  incremental; the value is 40 hex characters, so `name ‖ value` is
+  unambiguous. A mirror computes it over what it *holds* in
+  `refs/upstream/{remote}/` mapped back through its namespace, so a mirror of
+  a mirror compares with its upstream's `refs/upstream/{remote}/` view.
+- **History.** The upstream records every checksum it has had
+  (`ref_checksums`: repository, namespace, checksum, first seen) after
+  pushes, mirror syncs, received attestations and overview requests.
+- **Attestations.** After every successful sync, a mirror with
+  `auth: "instance"` signs a JWT with its instance key (`sub:
+  mirror-attestation`, `aud` = upstream, ≤ 300 s) with repository, checksum,
+  ref count, namespace, last sync time, number of alarms, pending units, last
+  deep check and its own Git URL, and POSTs it to
+  `/api/federation/attestations` (job `mirror-attest`). The upstream verifies
+  it like a notification (trust table, JWKS, optional pinned thumbprint),
+  requires that the issuer may read the repository (instance grant or
+  public), and keeps the latest per mirror including the token, so the
+  signed claim can be shown to anyone (`mirror_attestations`).
+- **Evaluation** (`evaluateMirror`, pure): the attested checksum equals the
+  current one → `current`; equals an older one → `behind`, lag = time since
+  the upstream moved past that state; unknown to a non-empty history →
+  `diverged` (the mirror holds a state the upstream never had: tampering or
+  rewritten history); no attestation for three days → `stale`. Alarms:
+  `stale`, `diverged`, `lagging` (behind for more than 26 h), `mirror-alarms`
+  (the mirror reported rewritten upstream history), `deep-check-failed`,
+  `pending-units` (oversized packs or LFS objects not copied, §12),
+  `spot-check-failed`.
+- **Spot checks.** At most once a day per mirror, after an attestation, the
+  upstream samples eight random 4 KiB ranges of its current packs and LFS
+  objects and fetches the same ranges from the mirror (dumb HTTP
+  `objects/pack/*` with `Range`, media URLs), with an instance token. Copy-only
+  mirrors (§7) store packs byte-identically, so every sample must match; a
+  pack the mirror does not have (fetch strategy) is skipped, as is a mirror
+  that does not let the upstream read. Differing bytes or failing requests
+  fail the check.
+- **Overview API.** `GET /api/repos/{owner}/{name}/mirrors/overview` (read
+  access) returns the repository's checksum, the mirrors known from
+  subscriptions and attestations with state, lag, alarms, last attestation
+  (with its token) and spot check, and the repository's own upstreams (sync
+  status, held checksum). With an instance key it adds `signed`, a JWT of
+  the summary signed by this instance (`sub: mirror-overview`), so a third
+  party can archive the upstream's view of its mirrors. The web UI (M6) will
+  render this.
+- **Limits.** Redirecting and Sybil mirrors cannot be fully excluded: a
+  mirror could proxy the upstream's bytes. Count only confirmed mirrors with
+  different providers or known operators. Anonymous mirrors (no trust) can
+  neither attest nor be spot-checked; anyone can still compare the public
+  `info/refs` of two instances.
 
 ## 11. Building blocks and provider adapters
 
@@ -681,7 +846,7 @@ dev environments) need real machines, started on demand via API.
 | Live updates | Durable Objects with WebSockets, polling as fallback |
 | Search in issues | SQLite FTS5 |
 | Web UI | Astro SSR |
-| Releases, Pages | Bucket + CDN (release assets are LFS objects behind the media URL, §16) |
+| Releases, Pages | Bucket + CDN (release assets and Pages files are content-addressed like LFS objects, §16, §20) |
 | CI | Actions service emulating GHES for the official `actions/runner`; compute adapter starts one runner per job (§15) |
 
 Every building block is an interface; Cloudflare is the first implementation.
@@ -689,10 +854,15 @@ Every building block is an interface; Cloudflare is the first implementation.
 **Cloudflare deployment.** One Worker serves the web UI (§18), Git, LFS, media
 and raw URLs, the JSON API and the well-known federation documents, and runs
 mirror sync from a Cron Trigger. It binds one R2 bucket (`BUCKET`) and one D1 database (`DB`).
-The Worker never migrates its database: `wrangler d1 migrations apply` does,
-from `packages/accounts/migrations` (`migrations_dir` in
-`apps/forge-worker/wrangler.jsonc`, the release's `dist/migrations` in the
-instance template; see §15). Several instances on one account are Wrangler
+The Worker migrates its database itself: when it first builds the forge in an
+isolate, `migrateOnStart` adopts migrations that `wrangler d1 migrations
+apply` recorded in `d1_migrations` into `schema_migrations` and then applies
+the pending ones of the bundled `MIGRATIONS` (from
+`packages/accounts/migrations`). A concurrent isolate that loses the race
+finds nothing pending and goes on. `wrangler d1 migrations apply` with
+`migrations_dir` in `apps/forge-worker/wrangler.jsonc` still works for
+development and is adopted on the next start; the instance template has no
+migration step (§15). Several instances on one account are Wrangler
 environments (`alpha`, `beta`, `gamma`), each with its own Worker, bucket and
 database.
 
@@ -703,7 +873,8 @@ database.
 | Database | D1 / SQLite in Durable Objects | libSQL/Turso, SQLite file (Pi) |
 | Per-repository consistency | Durable Object | conditional writes (S3 CAS), single-writer process |
 | Scheduling, jobs | Cron Triggers, Queues (Workflows for long jobs) | `Deno.cron`, systemd timers, job table, in-process queue |
-| Email | Amazon SES v2 HTTP API (`@git-forge/ses`, SigV4 via `aws4fetch`, runs on Workers and Node) | SMTP for the Node deployment (later); a console adapter for development |
+| Public LFS bucket (`LfsPublisher`) | second R2 bucket (`CDN_BUCKET`) | any `Storage`: S3 bucket, local directory (`LFS_PUBLISH_DIR`) |
+| Email | Amazon SES v2 HTTP API (`@git-forge/ses`, SigV4 via `aws4fetch`, runs on Workers and Node) | SMTP for the Node deployment (`@git-forge/smtp`); a console adapter for development |
 | Compute for CI | Containers | external per-minute providers via the GHES API (WarpBuild, AWS CodeBuild, RunsOn), Fly Machines, a local process |
 
 **Jobs:** the core defines `JobQueue<J>` (`enqueue(job, { delaySeconds })`),
@@ -714,10 +885,15 @@ CPU budget); `createMemoryJobQueue` runs jobs in process (Node, tests), with
 an optional `concurrency` limit, `keepHistory: false` for long-running
 processes and an `onOutcome` callback for logging. Jobs are plain JSON
 (repository, remote, callback), so a retry re-reads current state instead of
-replaying old data. In-process jobs are not durable: whatever is queued when
-the process stops is lost. Every job kind tolerates that: mirror state is
-re-derived by the next notification or scheduled run, and an abandoned import
-is taken over after 30 minutes (§7).
+replaying old data. Memory jobs are lost when the process stops.
+
+**Durable jobs (`apps/forge-node/src/jobs.ts`).** `createSqliteJobQueue`
+implements `JobQueue<J>` on the `jobs` table (migration `0021_jobs`). A claim
+is one `UPDATE … RETURNING` that increments `attempts` and takes a lease
+(60 s, renewed while running); `attempts` fences later updates. Finished or
+finally failed jobs are deleted, failed attempts get `run_at` moved by
+`jobRetryDelaySeconds`. After a crash the lease expires and the job runs
+again (at least once delivery); the lost run counts as an attempt.
 
 **Node deployment (`apps/forge-node`).** The same router as the Worker
 (`createForge` from `apps/forge-worker/src/app.ts`, imported as
@@ -726,18 +902,23 @@ from `@git-forge/node` adapts it to `node:http` with streaming request and
 response bodies; `FsStorage` or `S3Storage` hold repository data; the SQLite
 file is opened with `@git-forge/accounts-node` (`node:sqlite`, WAL);
 `nodeDigests` hashes with `node:crypto`; background jobs and import steps run
-in two `createMemoryJobQueue`s with the Worker's job handler and retry policy;
+in two durable SQLite job queues (above) with the Worker's job handler and
+retry policy; email goes out through the configured `EmailSender` (SMTP, SES
+or console);
 a cron scheduler (five-field expressions in UTC) calls the same `scheduled`
 as the Worker's Cron Trigger. Configuration uses the Worker's variable names
 plus `PORT`, `HOST`, `TRUST_PROXY`, `DATA_DIR`, `DATABASE_PATH`, `STORAGE`,
-`STORAGE_DIR`, `S3_*`, `SCHEDULE` and `JOB_CONCURRENCY`. Like the Worker it
+`STORAGE_DIR`, `S3_*`, `SCHEDULE`, `JOB_CONCURRENCY` and `SMTP_*`
+(`EMAIL_PROVIDER=smtp`). Like the Worker it
 never migrates implicitly: `git-forge-node migrate` applies the bundled
 `MIGRATIONS` (the same SQL files as `migrations_dir`, kept in sync by a test
 in `@git-forge/accounts`), and `serve` refuses to start while
 `pendingMigrations` is not empty. It runs on Node 22 and, compiled with
 `bun build --compile`, as a single executable for `linux-x64` and
 `linux-arm64` (Bun implements `node:http`, `node:sqlite` and `node:crypto`);
-a Dockerfile builds a distroless image and `deploy/` has systemd units. The
+a Dockerfile builds a distroless image (published as
+`ghcr.io/levino/git-forge-node` for `linux/amd64` and `linux/arm64` with every
+release) and `deploy/` has systemd units. The
 E2E suite runs a Worker under `wrangler dev` and the Node instance (from
 source or the executable) side by side and mirrors in both directions with
 notifications.
@@ -771,6 +952,17 @@ plain directory per key, lock files for conditional writes), `R2Storage`
 (`@git-forge/s3`, any S3 API including R2's, with presigning). Presigned LFS
 uploads bind `Content-Length` and `x-amz-checksum-sha256` into the signature,
 so the bucket rejects any other content.
+
+**Presigned R2.** With `R2_S3_ENDPOINT`, `R2_BUCKET_NAME`,
+`R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` the Worker wraps the binding with
+`withPresigner(R2Storage, S3Storage)`: the binding does all I/O, the S3
+adapter only signs (LFS and pack-upload URLs) on the same keys. Verify re-hashes through the
+binding (`crypto.DigestStream`, ~2 s CPU for 600 MB). Without the key LFS is
+proxied, and the size error carries `oversizeHint`. The key is an account API
+token with "Workers R2 Storage Bucket Item Read/Write"
+(`6a018a9f2fc74eb6b293b0c548f38b39`, `2efd5506f9c8494dacb1fa10a3e7d5b6`) on
+`com.cloudflare.edge.r2.bucket.<account_id>_default_<bucket>`; access key id =
+token id, secret = hex SHA-256 of the token value.
 
 **Local S3 test environment:** MinIO is discontinued. versitygw (posix
 backend) is used; it passed the full suite, as did RustFS. SeaweedFS lists in
@@ -889,8 +1081,6 @@ What was done about it:
   suite against them; see `packages/s3/README.md`.)
 - Signed append-only log of ref/pack/LFS changes (e.g. C2SP tlog-tiles with
   cosigning instances as witnesses): still useful as audit trail, format open.
-- Ref checksum à la GitHub Spokes (XOR over `hash(refname, value)`) for cheap
-  mirror comparison.
 - Name.
 
 ## 14. Prior art and references
@@ -981,7 +1171,7 @@ Pieces and where they live:
 | Secrets and environments | `@git-forge/actions` (`secrets.ts`) | AES-256-GCM under the instance key `ACTIONS_SECRETS_KEY`. |
 | Action downloads | `@git-forge/actions` (`actions-download.ts`) | `owner/repo@ref` → repository on the forge (usually a mirror) → tarball URL plus a scoped token. |
 | Results service: cache (v1 REST and v2 twirp), artifacts v4, blob URLs, ID tokens | `@git-forge/actions` (`results.ts`, `cache.ts`, `artifacts.ts`, `blobs.ts`, `oidc.ts`) | Mounted at `/twirp/`, `/_services/cache/`, `/_services/results/` and `/_services/token/`. See "Results service" below. |
-| Runner container | `apps/forge-worker` (`runner-container.ts`, `runner-launcher.ts`, `runner/Dockerfile`), declared in `apps/forge-worker/wrangler.jsonc` (opt-in snippet in `templates/instance`) | Cloudflare Containers; the only Cloudflare-specific part. A plain Durable Object class on `ctx.container`, so the release bundle stays one module without imports. |
+| Runner container | `apps/forge-worker` (`runner-container.ts`, `runner-launcher.ts`, `runner/Dockerfile`), declared in `apps/forge-worker/wrangler.jsonc` (opt-in snippet in the README of `templates/instance`) | Cloudflare Containers; the only Cloudflare-specific part. A plain Durable Object class on `ctx.container`, so the release bundle stays one module without imports. |
 
 #### Runner protocol
 
@@ -1319,25 +1509,40 @@ adapter. The dispatcher creates one ephemeral JIT runner per queued job, binds
 the job to it and calls the launcher; if the launch fails, the job is unbound
 and stays queued for any registered runner with matching labels.
 
-- **Cloudflare Containers (first backend):** billed per 10 ms, scale to
-  zero, up to 4 vCPU / 12 GiB, rootless Docker-in-Docker (needed later for
+- **Cloudflare Containers (first backend):** billed per 10 ms while
+  running, scale to zero, from `lite` (1/16 vCPU, 256 MiB) up to
+  `standard-4` (4 vCPU, 12 GiB), rootless Docker-in-Docker (needed later for
   `container:` and `services:`). `RunnerContainer` is a Durable Object
   container class, one instance per job (`env.RUNNER.idFromName(jobId)`),
-  that starts its container with the entrypoint `run.sh --jitconfig <config>`
-  and keeps the object alive until the container exits. The image
-  (`runner/Dockerfile`, in the app and in the instance template) is the
-  official `ghcr.io/actions/actions-runner` image plus Git and Node.js. Like
-  every other resource it comes from the wrangler config (`containers`, the
-  `RUNNER` Durable Object binding and its migration, in every environment of
-  `apps/forge-worker`; in the instance template it is a documented opt-in and
-  `ACTIONS` is off by default until image builds in Workers Builds are
-  verified): `wrangler deploy` builds the image and pushes it to the
-  Cloudflare registry, so the deploy environment needs Docker. Durable Object
-  containers cannot pull external images by reference, only digest-pinned
-  images from the Cloudflare registry or a local Dockerfile. The release
-  bundle is built with `wrangler deploy --dry-run --containers-rollout=none`,
-  which skips the image. The runner is ephemeral: it exits after one job, the
-  container stops and is discarded. Deployment is untested so far.
+  that starts its container with the entrypoint `run.sh --jitconfig <config>`.
+  A pending `monitor()` keeps the object in memory for at most 15 minutes, so
+  it also sets the container's inactivity timeout to 6 hours (GitHub's job
+  limit, the platform maximum) and watches the container again when the
+  object is recreated (after a deploy or an eviction); the runner exits after
+  its one job and the container stops then. The image (`runner/Dockerfile`,
+  in the app and in the instance template, 2.4 GB unpacked) is the official
+  `ghcr.io/actions/actions-runner` image plus Git and Node.js. Like every other
+  resource it comes from the wrangler config (`containers`, the `RUNNER`
+  Durable Object binding and its migration, in every environment of
+  `apps/forge-worker`; in the instance template a documented opt-in, because
+  every deploy then builds the image). The default instance type is `basic`
+  (1/4 vCPU, 1 GiB, 4 GB disk): the smallest one whose disk holds the image,
+  enough for the runner and small jobs; an instance picks a bigger one in its
+  `wrangler.toml`.
+  **Image source (decision, 18 Oct 2026):** the instance repository carries
+  the Dockerfile and `wrangler deploy` builds it and pushes it to the account's
+  Cloudflare registry; Workers Builds has Docker, so this works with the
+  Deploy button and without a shell (verified on the production instance).
+  Pre-built images are no alternative today: a `containers` entry with a
+  single `image` accepts the Cloudflare registry, Docker Hub (public images
+  without setup), Amazon ECR and Google Artifact Registry, not `ghcr.io`, so
+  an image published with the release on GHCR cannot be referenced, and
+  publishing to Docker Hub would need a Docker Hub account and credentials in
+  the release workflow. If that becomes worth it (faster deploys), the
+  release publishes `docker.io/<namespace>/git-forge-runner:<version>` and the
+  template references it by tag. The release bundle is built with
+  `wrangler deploy --dry-run --containers-rollout=none`, which skips the
+  image.
 - **Local process:** the integration test copies the downloaded runner into a
   temporary directory per job and starts it with `--jitconfig`. The same works
   on a Pi or against `wrangler dev`.
@@ -1377,9 +1582,8 @@ same functions (`reviewDeployment`).
 #### Data
 
 - SQLite, migrations `packages/accounts/migrations/0005_actions.sql`,
-  `0009_actions_workflows.sql` and `0013_actions_results.sql` (blobs,
-  blocks, parts, blob grants, caches, artifacts; only new tables), applied by `wrangler d1 migrations apply`
-  like every other migration and shipped in the release's
+  `0009_actions_workflows.sql` and `0013_actions_results.sql`, applied by the
+  Worker on start like every other migration and shipped in the release bundle and its
   `migrations.tar.gz`: `actions_runners`, `actions_tokens`,
   `actions_sessions`, `actions_runs` (plus definition, attempt, trusted,
   concurrency group, cancellation, completion), `actions_jobs` (plus
@@ -1402,12 +1606,11 @@ same functions (`reviewDeployment`).
   `actions/checkout@v4` from a mirror of `github.com/actions/checkout` on
   the forge, a matrix with job outputs through `needs`, a masked secret,
   `wrangler deploy --dry-run`, the cancellation of a running job,
-  `actions/cache@v4` over the v1 protocol (miss, save, exact hit, restore-key
-  hit), an ES256 ID token requested from a step and verified against the
-  published JWKS, and on a `forge.localhost` server
-  `actions/upload-artifact@v4` → `actions/download-artifact@v4` plus
-  `actions/cache` over the v2 protocol.
-- Not deployed on Cloudflare Containers yet.
+  `actions/cache@v4` (v1 and v2), an ES256 ID token verified against the
+  JWKS, and `upload-artifact@v4` → `download-artifact@v4` on `forge.localhost`.
+- Deployed on Cloudflare Containers on the production instance (image
+  built by Workers Builds, `basic` instances, `ACTIONS_GITHUB_FALLBACK` for
+  `actions/checkout`).
 - Not supported yet: `container:`, `services:`, reusable workflows,
   job-level `concurrency`, `paths` filters, `vars` (configuration
   variables, the context is empty), `hashFiles` server-side, wait timers and
@@ -1464,58 +1667,69 @@ update themselves.
   - `migrations.tar.gz`: the D1 migrations (`migrations/*.sql`, currently from
     `packages/accounts`), built reproducibly.
   - `SHA256SUMS`: `sha256sum` output for both files.
-  - The release notes contain the `git-forge.json` to pin. Tags with a `-` are
-    pre-releases.
-- **One pin covers everything:** `git-forge.json` holds `version` and the
-  SHA-256 of `SHA256SUMS`. The build script checks `SHA256SUMS` against the
-  pin and then every asset against `SHA256SUMS`; any mismatch fails the build
-  before anything is deployed. Asset names and the archive layout are a durable
-  format: later releases may add assets, never rename or remove these.
-- **Instance template** (`templates/instance`, synced to its own repository
-  `levino/git-forge-instance`): `wrangler.jsonc` (own bindings, vars, domain,
-  `main: dist/git-forge-worker.mjs`, `build.command: sh build.sh`,
-  `migrations_dir: dist/migrations`), `git-forge.json`, `build.sh` (POSIX sh,
-  `curl`, `sha256sum`, `tar`), `deploy.sh`, `renovate.json`, a checksum
-  workflow and a README. No `package.json`, no lockfile, nothing from npm in the Worker.
-  `GIT_FORGE_RELEASE_URL` overrides the download base for mirrors and tests.
+  - The release notes contain the pin `V=<version> S=<sha256 of SHA256SUMS>`
+    and the complete `[build]` command line of the template with it. Tags
+    with a `-` are pre-releases.
+- **One pin covers everything:** `V` and `S` at the start of the instance's
+  `[build]` command. The command downloads `SHA256SUMS` and
+  `git-forge-worker.mjs`, checks `SHA256SUMS` against `S` and the bundle
+  against `SHA256SUMS` (`sha256sum -c --ignore-missing`, so assets the
+  instance does not download are skipped); any mismatch fails the build
+  before anything is deployed. Asset names and the archive layout are a
+  durable format: later releases may add assets, never rename or remove
+  these. `migrations.tar.gz` is no longer needed by Workers instances (the
+  bundle embeds the migrations) but stays published.
+- **Instance template** (`templates/instance`, deployed straight from this
+  monorepo): a single `wrangler.toml` (Worker name, `main =
+  "dist/git-forge-worker.mjs"`, `no_bundle`, the pinned `[build]` command,
+  bindings by name, queues, cron, `limits.cpu_ms`), `.dev.vars.example`
+  (`BOOTSTRAP_TOKEN`), the optional `runner/Dockerfile` for CI and a README.
+  No `package.json`, no lockfile, no scripts, nothing from npm in the Worker;
+  the command needs only `sh`, `curl` and `sha256sum`. All vars (OIDC,
+  `PUBLIC_URL`, email, …) are optional and documented in the README, not
+  declared. `GIT_FORGE_RELEASE_URL` overrides the download base for mirrors
+  and tests. The production instance `levino/levins-git-forge` is a copy of it
+  with its own names, domain and OIDC vars.
 - **Resources only from config:** every Cloudflare resource is declared in
-  `wrangler.jsonc` and created by Wrangler, never by hand. D1 and R2 have a
-  name and no id, so the first `wrangler deploy` provisions them (automatic
-  resource provisioning) and later commands find them by name. Cron, vars,
-  routes (custom domains) and the required `BOOTSTRAP_TOKEN` secret
-  (`secrets.required`) are declared there as well; only the secret's value is
-  set outside the repository.
-- **Build on Cloudflare (Workers Builds):** build command `sh build.sh`,
-  deploy command `sh deploy.sh`. `deploy.sh` applies the D1 migrations before
-  the upload so new code never sees an old schema; migrations are therefore
-  additive and compatible with the previous release, which keeps a rollback
-  (reverting the pin) safe. When the database does not exist yet (first
-  deploy), it deploys first, which provisions the database, and migrates right
-  after. `build.sh` is idempotent, so the second run through `build.command` is
-  a no-op.
-- **First install:** "Deploy to Cloudflare" button (copies the template and
-  connects Workers Builds) or "Use this template" plus importing the
-  repository in the dashboard. The setup page asks for `BOOTSTRAP_TOKEN`
-  (from `.dev.vars.example`); one call of `POST /api/bootstrap` with it
-  creates the first instance admin (§8).
-- **Update:** bump `version` and `sha256` in `git-forge.json` and push.
-  Renovate proposes the version via a regex manager on the GitHub releases of
-  `levino/git-forge`. It cannot compute the checksum (the `github-releases`
-  datasource's digest is the tag's commit, not a file hash, and
-  `postUpgradeTasks` exist only for self-hosted Renovate), so the template's
-  `Pin checksum` workflow fills in `sha256` on Renovate's pull requests from
-  the new `SHA256SUMS` and runs `build.sh`; a human reviews and merges.
-- **Template sync:** `.github/workflows/sync-instance-template.yml` copies
-  `templates/instance` to `levino/git-forge-instance` with `git-forge.json`
-  pinned to the latest release, after every release and on template changes on
-  `main`. It pushes with the deploy key `INSTANCE_TEMPLATE_DEPLOY_KEY` and is
-  skipped while that secret is missing. The copy in this repository carries an
-  all-zero placeholder pin that fails the build on purpose.
-- **Test:** `release/test/instance.test.ts` builds a release, runs the
-  template's `build.sh` against it via `file://`, checks that wrong pins and
-  tampered assets are refused, checks the order of `deploy.sh` with a stub
-  Wrangler, applies the migrations and does a push/clone
-  smoke test and a page request against `wrangler dev` running the template.
+  `wrangler.toml` and created by Wrangler, never by hand. D1, R2 and the
+  queues have a name and no id, so the first `wrangler deploy` provisions them
+  (automatic resource provisioning) and later deploys find them by name. The
+  jobs queue is recognised by the suffix `-jobs`. Cron and routes (custom
+  domains) are declared there as well. The `BOOTSTRAP_TOKEN` secret is
+  deliberately not `secrets.required`: a secret can only be set on an existing
+  Worker, so requiring it would block a first deploy without the button. Until
+  it is set `/api/bootstrap` answers `503`.
+- **Build on Cloudflare (Workers Builds):** no build command in Workers
+  Builds, the default deploy command `npx wrangler deploy`, which runs the
+  `[build]` command from `wrangler.toml` and uploads the verified bundle. There
+  is no migration step: the Worker migrates itself on start (§11), so
+  migrations are additive and compatible with the previous release, which
+  keeps a rollback (reverting the pin) safe.
+- **First install:** the "Deploy to Cloudflare" button points at the
+  subdirectory `https://github.com/levino/git-forge/tree/main/templates/instance`.
+  Cloudflare copies that directory (it is self-contained) as the root of a new
+  repository in the user's account, offers to rename the resources from
+  `wrangler.toml`, asks for `BOOTSTRAP_TOKEN` (from `.dev.vars.example`),
+  connects Workers Builds and deploys. Without OIDC one call of
+  `POST /api/bootstrap` with the token creates the first instance admin (§8);
+  with OIDC a one-time `instance_admin_claims` row inserted with
+  `wrangler d1 execute` does.
+- **Update:** change `V` and `S` and push. There is no Renovate integration:
+  Renovate could bump `V` but cannot compute `S` (the `github-releases`
+  datasource's digest is the tag's commit, not a file hash), and a
+  half-updated pin only fails the build.
+- **Template pin:** the template must always pin a published release, because
+  the Deploy button deploys it as is. After every release that is not a
+  pre-release the `pin-template` job of `.github/workflows/release.yml` writes
+  the new `V` and `S` into `templates/instance/wrangler.toml` and pushes that
+  commit to `main` with `GITHUB_TOKEN`.
+- **Test:** `release/test/instance.test.ts` builds a release, checks the
+  template's shape (one pin, resources by name only, `BOOTSTRAP_TOKEN` as the
+  only secret), runs the `[build]` command from `wrangler.toml` against the
+  release via `file://`, checks that a wrong pin and a tampered bundle are
+  refused, then starts `wrangler dev` on the template (which runs the build
+  command too), checks that the Worker migrated its database by inserting an
+  admin claim, and does a push/clone smoke test and a page request.
 - The same bundle may additionally be published to npm later; the template
   never depends on it.
 - **Without Cloudflare:** every release also carries
@@ -1524,6 +1738,10 @@ update themselves.
   `release/VERSION`) and `NODE-SHA256SUMS`. They need no template: install the
   executable, run `migrate`, start `serve` (systemd units and a Dockerfile in
   `apps/forge-node`).
+- **Container image:** the `image` job of the release workflow pushes
+  `apps/forge-node/Dockerfile` for `linux/amd64` and `linux/arm64` to
+  `ghcr.io/levino/git-forge-node` (`<version>`; releases also
+  `<major>.<minor>` and `latest`) with `GITHUB_TOKEN`.
 
 ### Test instances
 
@@ -1590,13 +1808,15 @@ GitHub's model, per user:
 
 `EmailSender.send(message)` is the adapter (`createMemoryEmailSender` for
 tests, `createConsoleEmailSender` for development, `createSesEmailSender` for
-production). SES uses the v2 `SendEmail` API with a simple message (subject,
+production, `createSmtpEmailSender` from `@git-forge/smtp` for the Node
+deployment). SES uses the v2 `SendEmail` API with a simple message (subject,
 text, HTML, `List-Unsubscribe` and auto-reply suppression headers), signed
 with SigV4; `4xx` answers are permanent (`EmailRejectedError`), throttling
-and `5xx` are retried by the job queue. SMTP for the Node deployment is
-another adapter of the same interface, not built yet (Workers cannot open TCP
-connections to arbitrary SMTP servers without `connect()`, and SES covers
-the Cloudflare deployment).
+and `5xx` are retried by the job queue. SMTP (`@git-forge/smtp`, `node:net`
+and `node:tls`, Node only): one connection per message, STARTTLS (required),
+implicit TLS or plain without credentials, `AUTH PLAIN`/`LOGIN`, MIME with
+base64 parts. `5xx` throws `EmailRejectedError`, everything else `SmtpError`
+(retried).
 
 Digests: when a notification should be emailed, the user's
 `digest_due_at` is claimed by compare-and-swap (`… WHERE digest_due_at IS
@@ -1791,8 +2011,16 @@ bundle.
   `/-/login`, which renders the model with the site layout. Without the UI
   (or on Node) the plain built-in pages are used. The passkey ceremony script
   is the one exported by `@git-forge/accounts` (`PASSKEY_SCRIPT`).
-- Reserved first path segments: `api`, `explore`, `login`, `settings`, `-`
-  (assets) and the other page routes. Account names must not use them.
+- Pages hosts (§20) never reach Astro: `worker.ts` hands every request whose
+  host matches `PAGES_HOST` or `PAGES_DOMAINS` to `createForge` directly.
+  `/_pages/` (the Pages session handoff) is a forge path on the forge host.
+- Reserved first path segments: `api`, `explore`, `login`, `logout`,
+  `settings`, `notifications`, `organizations`, `orgs`, `new`, `-` (assets,
+  login and admin pages) and the other page routes. Account names must not
+  use them: `RESERVED_LOGINS` of `@git-forge/accounts` is checked when an
+  organization is created and when an instance admin creates a user (names
+  with characters outside `LOGIN_PATTERN`, such as `-` or `.well-known`, are
+  invalid anyway).
 
 ### Permissions
 
@@ -1820,6 +2048,18 @@ access, as in the releases API. Media and raw URLs also accept a browser
 session for reads (`GET`/`HEAD`, checked with `repositoryAccess`), so LFS
 previews work in private repositories.
 
+Repositories are created and imported through `services.repositories`
+(`owners`, `create`, `startImport`, `importStatus`), the same functions the
+API routes `POST /api/repos` and `POST|GET /api/repos/{owner}/{repo}/import`
+call; the API additionally requires a session or a token with `repo:admin`
+(`requireManager`), the page `/new` a session write. A user may create
+repositories in their own account and in organizations they own; instance
+admins in any account. The import status page `/{owner}/{repo}/import` needs
+repository admin and refreshes itself while the import runs; an empty
+repository links to it for repository admins while an import exists. The
+access token entered for an import goes only into the queued job, never into
+the stored import state or a page.
+
 All UI writes must also come from the same origin:
 `isCrossSiteWrite` rejects UI requests whose `Origin` or `Sec-Fetch-Site`
 says otherwise (Astro's own `checkOrigin` is off because it would also apply
@@ -1838,10 +2078,108 @@ They read through `ObjectDatabase` like the Git endpoints. The UI layer
 (`src/ui/*.ts`) only composes them into view models; `.astro` files only
 render.
 
+### Collaboration pages
+
+Issues, pull requests and discussions call the service functions of
+`@git-forge/collaboration` directly with a scope from `services.collaboration`
+(its `openRepository` with the same options as the `/api/v3` handler, so
+activity reaches notifications, webhooks and CI the same way). Buttons and
+forms are shown with the package's `can(scope, permission)`; every write
+goes through the service function, which checks the permission again, after
+`verifySessionWrite`. Collaboration errors are shown on the page with their
+status. Links that come from the API (check run `details_url`, status
+`target_url`) are rendered only for `http(s)` URLs.
+
+Inline review comments on the *Files changed* tab use the only client script
+of these pages: a click on a line's `+` clones a `<template>` form below the
+row with path, line and side filled in; the form posts to the page like every
+other form.
+
+### Repository settings
+
+`/{owner}/{repo}/settings` (repository admins) changes visibility,
+collaborators, branch protection, mirrors and federation grants. The JSON
+API routes and the page call the same principal-based operations in
+`createForge` (`services.settings`: `read`, `setVisibility`,
+`setCollaborator`, `removeCollaborator`, `grantInstance`, `revokeInstance`,
+`addMirror`, `syncMirror`, `verifyMirror`, `detachMirror`,
+`branchProtection`, `setBranchProtection`, `deleteBranchProtection`); each
+starts with the same admin check (`adminOf`: authenticated user, token with
+`repo:admin`, `repositoryAccess(…, 'admin')`). Branch protection forms are
+translated into the GitHub-shaped JSON body and parsed by
+`parseBranchProtectionSettings` of `@git-forge/accounts`, the parser of the
+protection API. Errors carry the API's status (`ForgeError`) and are shown
+on the page.
+
+### Organizations and accounts
+
+Organizations are managed through `createOrganizationOperations` of
+`@git-forge/accounts`: any signed-in user (session, or a token with
+`repo:admin`) may create one and becomes its first owner; owners and instance
+admins (`canAdministerOrganization`) add and remove members, change roles
+(the last owner cannot be demoted or removed), create teams, and set team
+members and team repository roles; members see people and teams, everyone
+else gets 404. `/organizations/new`, `/orgs/{org}` and
+`/orgs/{org}/teams/{slug}` call these operations, and so does the JSON API
+under `/api/orgs/{org}` (members, teams, team members, team repositories;
+`OrganizationError` carries the status). The account page `/settings` also
+lists linked OIDC identities (unlinking the last way to sign in is refused)
+and active sessions (ending any but the current one); both operations take
+the session's user and only touch that user's rows.
+
+### Instance administration
+
+`/-/admin` (instance admins only, 404 for everyone else; linked from the
+account menu) lists and changes instance admins (the last admin cannot be
+removed), trusted instances (issuer normalized by `normalizeIssuer`, optional
+pinned key thumbprint) and shows every mirror of the instance with its
+health (alarms, failed sync, failed deep check, last success), linking to the
+repository's mirror settings. The page and the admin API (`GET|POST
+/api/admin/instances`, `DELETE /api/admin/instances/{issuer}`, `GET
+/api/admin/admins`, `PUT|DELETE /api/admin/admins/{login}`, `GET
+/api/admin/mirrors`) call the same operations: `createInstanceAdministration`
+of `@git-forge/accounts` (`view`, `setAdmin`, `trust`, `distrust`, each
+starting with `canAdministerInstance`: a user principal without a token
+ceiling below `admin` who is an instance admin) and `services.instance.mirrors`
+in `createForge`, which runs the same check before reading the mirror configs
+and statuses from storage. The mirror overview reads one config and one status
+object per mirror; it is meant for the admin page, not for public listings.
+
+### Actions pages
+
+`/{owner}/{repo}/actions` lists workflow runs, filtered by workflow
+(`?workflow=<path>`; the side list holds every workflow that has runs, named
+after its latest run). A run page lists the jobs of the current attempt
+(refreshing every five seconds while the run is active), and a job page shows
+the job log. Pages read through `services.actions`, which only returns runs
+and jobs of the repository the page already checked with
+`repositoryAccess(…, 'read')`; logs come from `readJobLog` of
+`@git-forge/actions`, the same function as the GHES job log endpoint (stored
+log chunks, or the live console lines while the job runs). The job page
+strips ANSI escapes, shows at most the last 2 MiB and, while the job is not
+done, polls `…/jobs/{job}/log.txt` every three seconds with a small inline
+script; the response header `X-Job-Done` makes the page reload into its final
+state.
+
+Writers see *Cancel run* while a run is active and *Re-run all jobs*,
+*Re-run failed jobs* and per-job *Re-run* once it completed. The forms post
+to the run page with the session's CSRF token and call
+`services.actions.cancel` and `services.actions.rerun`, which check read
+access, that the run belongs to the repository, and write access through
+`canWriteActions` (`repositoryAccess(…, 'write')`), then call `cancelRun`
+and `rerunRun` of `@git-forge/actions`, the functions behind the GHES
+`…/cancel`, `…/rerun`, `…/rerun-failed-jobs` and `…/jobs/{id}/rerun`
+endpoints. The GHES write check uses the same `canWriteActions`, so instance
+admins may cancel and re-run there too. A re-run while the run is still in
+progress answers 409.
+
 ### Rendering
 
-- Tailwind CSS with daisyUI, themes `light` (default) and `dark`
-  (`prefers-color-scheme`). The stylesheet is compiled at build time
+- Tailwind CSS with daisyUI, own themes `forge` (default) and `forge-dark`
+  (`prefers-color-scheme`) in `src/styles/global.css`: neutral base, one blue
+  accent, flat buttons, system font stack. Icons are inline Lucide paths
+  (MIT) in `src/components/Icon.astro`; avatars are initials coloured from a
+  hash of the name. The stylesheet is compiled at build time
   (`?inline`) and served by the Worker at `/-/style.css?v=<hash>` with an
   immutable cache header, so pages stay small and the release needs no asset
   directory.
@@ -1854,9 +2192,12 @@ render.
   relative images to the raw endpoint.
 - LFS files are previewed through the media URL (images, video, audio, PDF),
   binary files through the raw URL at the commit id.
+- Repository lists read each repository's `refs.json` and head commit for
+  the default branch and the last update time. Tree views mark LFS files by
+  the `filter=lfs` patterns of the `.gitattributes` files on the path.
 - No client-side framework. Interactive bits use native elements
   (`<details>` dropdowns); islands are added only where a page needs them
-  (passkey ceremonies, diff line comments).
+  (passkey ceremonies, diff line comments, copy buttons).
 
 ### Tests
 
@@ -1871,7 +2212,194 @@ render.
   against `wrangler dev` running the built bundle, with a repository pushed by
   the real `git` and `git-lfs` clients, and a passkey sign-up from an invite
   with Chromium's virtual WebAuthn authenticator (settings, token create and
-  revoke, sign-out, passkey sign-in).
+  revoke, sign-out, passkey sign-in), organizations and teams, repository
+  settings, cancelling and re-running a workflow run (the runner launch fails
+  under `wrangler dev`, so jobs stay queued), and the instance admin page.
 - `apps/forge-worker/test/e2e/headless.e2e.test.ts`: the same bundle with
   `UI=false` serves only the forge.
 - The release test requests a page from the template instance.
+
+## 19. Backups
+
+Decision: backups are made at the bucket and database level with the
+providers' own tools; the forge has no backup code of its own. Mirrors (§4)
+are the federated copies; a backup is the operator's copy of their own
+instance, kept somewhere that cannot be rewritten.
+
+- **Repository data.** The bucket is append-only by design (§6): packs, idx
+  files and LFS objects are written once under their hash, only a few small
+  files (`refs.json`, `objects/info/packs`, `info/refs`, `HEAD`, mirror
+  status) are rewritten. Replicate it to a second bucket with Object Lock
+  (compliance mode, versioning on), so every rewritten file keeps its old
+  versions for the retention period and nothing can be deleted early, not
+  even with the backup credentials. The target can be another R2 bucket with
+  a bucket lock rule, or B2, Hetzner or any S3 bucket with Object Lock; the
+  copy runs with `rclone` on a schedule, since R2 has no built-in
+  bucket-to-bucket replication. `tmp/` is not needed.
+- **Database.** D1 Time Travel restores any minute of the last 30 days
+  (Workers Paid; 7 days on Free). For longer retention export the database
+  daily and put the dump into the same locked bucket. On Node, take an online
+  copy of the SQLite file.
+- **Consistency.** Copy the database first, then the bucket: every row
+  refers only to objects that exist by then, and objects are never removed.
+- **No encryption.** Backups are plain copies of the bucket and the
+  database, restorable without git-forge and without keys that could be
+  lost. Encrypted full backups were built and dropped (PR #28): they added
+  key management and a restore path of their own for no gain over a locked
+  bucket at a provider the operator trusts.
+
+Commands (Cloudflare instance; `lock:` is an rclone S3 remote for B2,
+Hetzner or any S3 bucket with Object Lock, `r2:` one for the instance's R2
+bucket):
+
+```sh
+# once: a bucket with Object Lock and 90 days default retention
+aws s3api create-bucket --bucket forge-backup --object-lock-enabled-for-bucket --endpoint-url "$S3_ENDPOINT"
+aws s3api put-object-lock-configuration --bucket forge-backup --endpoint-url "$S3_ENDPOINT" \
+  --object-lock-configuration '{"ObjectLockEnabled":"Enabled","Rule":{"DefaultRetention":{"Mode":"COMPLIANCE","Days":90}}}'
+
+# daily (cron, CI): database first, then the repositories
+npx wrangler d1 export git-forge --remote --output "d1-$(date -u +%F).sql"
+rclone copy "d1-$(date -u +%F).sql" lock:forge-backup/d1/
+rclone copy r2:git-forge lock:forge-backup/bucket/ --exclude 'tmp/**' --checksum
+
+# Node instance (apps/forge-node)
+sqlite3 /data/git-forge.sqlite ".backup /tmp/git-forge-$(date -u +%F).sqlite"
+rclone copy /tmp/git-forge-$(date -u +%F).sqlite lock:forge-backup/db/
+rclone copy /data/objects lock:forge-backup/bucket/ --exclude 'tmp/**' --checksum
+```
+
+Restore: `npx wrangler d1 time-travel restore git-forge --timestamp <iso>`
+within the Time Travel window, otherwise `npx wrangler d1 execute <new db>
+--remote --file d1-<date>.sql` into a freshly created database; then
+`rclone copy lock:forge-backup/bucket/ r2:<new bucket>/` (an older state with
+`--s3-version-at <time>`). A repository can also be cloned straight from the
+copied bucket over dumb HTTP or after `rclone copy` to a directory, without
+any git-forge software (§2).
+
+## 20. Pages
+
+Static sites per repository, like GitHub Pages, served by the same Worker.
+Package `@git-forge/pages`, tables from migration `0012_pages.sql`
+(`pages_sites`, `pages_deployments`, `pages_grants`, `pages_sessions`).
+
+### Sources
+
+- **Branch** (`build_type: legacy`, `source: {branch, path}` with path `/`
+  or `/docs`): enabling Pages, changing the source and every push that moves
+  the branch create a deployment of that commit. Files are served as they
+  are; there is no Jekyll build (use a workflow for generators). Symlinks and
+  submodules are skipped.
+- **Workflow** (`build_type: workflow`): `POST
+  /api/v3/repos/{owner}/{repo}/pages/deployments`. With `artifact_id` or
+  `artifact_url` (what `actions/deploy-pages` sends) the deployment reads the
+  artifact through the `ArtifactSource` adapter, which returns the tar of
+  the `github-pages` artifact (`actions/upload-pages-artifact`). The forge
+  does not store workflow artifacts yet (§15), so without an adapter these
+  requests answer `422`; until then any CI uploads the same tar (or tar.gz)
+  as the request body (`Content-Type: application/x-tar`), deployed while it
+  streams. The `GITHUB_TOKEN` of a trusted, non-`pull_request` run of the
+  same repository may create deployments, like `pages: write` on GitHub; so
+  may users with write access. `GET …/deployments/{id}` reports GitHub's
+  status strings (`deployment_queued`, `deployment_in_progress`, `succeed`,
+  `deployment_failed`, `deployment_cancelled`), which `deploy-pages` polls.
+
+### Deployments
+
+- Building a deployment is a pure function of its input
+  (`buildFromTree`, `buildFromTar`): every file is stored under
+  `lfs/objects/<sha256>` (the LFS key space, so identical files, LFS objects
+  and release assets share bytes), and a manifest
+  `{"version":1,"files":{"<path>":{"oid","size","lfs"?}}}` with sorted keys
+  is written to `pages/deployments/<sha256 of the manifest>.json` with
+  `If-None-Match: *`. Deployments are therefore immutable and
+  content-addressed; nothing is ever overwritten. Files that are LFS
+  pointers (in the branch, or in an artifact checked out without LFS) are
+  recorded as `lfs: true` with the pointer's oid. Limits: 50 000 files and
+  1 GiB per site. Tar entries up to 4 MiB are hashed in memory, larger ones
+  are staged under `tmp/` while hashing and then copied, like release
+  assets.
+- **Atomic switch:** the deployment row moves to `succeed` and
+  `pages_sites.active_deployment_id` to its id in one database batch, and
+  only forward (`active_deployment_id < id`), so a slow older build never
+  replaces a newer one. Readers see either the old or the new manifest,
+  never a mix. A failed deployment leaves the active one in place.
+- Deployments run as `pages-deploy` jobs on the job queue (one invocation
+  each) or inline without one; uploads run in the request that streams them.
+  Cancelling marks a queued or running deployment `cancelled`; it is then
+  never activated.
+
+### Serving
+
+- `PAGES_HOST` is a pattern `{owner}.<suffix>` (scheme `https` unless given,
+  optional port for development). `https://<owner>.<suffix>/<repo>/` serves
+  the project site of `<owner>/<repo>`; a repository named exactly like the
+  host (`<owner>.<suffix>`) is the owner's site at the root, as with
+  `<owner>.github.io`. Project sites win over paths of the owner site.
+  Owners whose names are not DNS labels (dots, underscores) have no Pages
+  host. `PAGES_DOMAINS` maps custom domains to repositories
+  (`{"docs.example.com": "acme/handbook"}`); on Cloudflare each is also a
+  Workers custom domain and the wildcard a zone route, all declared in the
+  Wrangler configuration. The API reports the domain as `cname` and refuses
+  to change it (`422`): domains are instance configuration, not repository
+  data.
+- Path resolution (pure, `resolvePagesPath`): `/repo` → `301 /repo/`;
+  `dir/` → `dir/index.html`; `dir` → `301 dir/` when `dir/index.html`
+  exists; `page` → `page.html`; anything else → `404.html` with status 404 if
+  the site has one. `..` never resolves.
+- Responses: `Content-Type` by extension (`text/html; charset=utf-8` for
+  HTML, unlike raw URLs, because these hosts are not the forge origin),
+  `X-Content-Type-Options: nosniff`, `ETag` = the file's SHA-256,
+  `If-None-Match`, single `Range` and `HEAD`. Public sites are
+  `Cache-Control: public, max-age=<PAGES_MAX_AGE>` (default 60 s), so a
+  pull-zone CDN can front the Pages hosts; the content behind a path changes
+  only on a switch, and the short max-age plus ETag revalidation bounds the
+  staleness. Private responses are `private, no-cache` with
+  `Vary: Cookie, Authorization`.
+- **LFS files** of public repositories answer `302` to the absolute media
+  URL on `PUBLIC_URL` (`/{owner}/{repo}/media/{oid}/{name}`, immutable), so
+  large files are cached once however many deployments reference them. For
+  private repositories the bytes are streamed on the Pages host, because the
+  media URL needs a forge session or token the browser does not send there.
+- Manifests are cached per isolate (LRU, 32 MiB), which is safe because
+  they are immutable; each request still reads the repository, the site row
+  and the active deployment from the database, so a switch is visible
+  immediately.
+
+### Private sites
+
+Access is the repository's `read` check (`checkRepositoryAccess`), with the
+principal taken from a Pages session cookie or an `Authorization` header,
+never from the request otherwise. Pages hosts are other origins than the
+forge, so the forge session cookie is not sent there; the handoff:
+
+1. A visitor without access and without credentials gets `302` to
+   `<PUBLIC_URL>/_pages/authorize?redirect=<page URL>`.
+2. The forge accepts only redirect URLs on its own Pages hosts (scheme,
+   host pattern or configured domain, no credentials). Without a forge
+   session it sends the visitor to `/login?return_to=…` and comes back after
+   sign-in. With a session it stores a random one-time code (hash only, two
+   minutes, bound to the target host) and redirects to
+   `https://<pages host>/__pages/callback?code=…&path=…`.
+3. The Pages host redeems the code once, creates a Pages session (hash in
+   `pages_sessions`, twelve hours, bound to the host) and sets an
+   `HttpOnly; SameSite=Lax` cookie without `Domain` (host-only; `__Host-`
+   prefixed and `Secure` on https), then redirects to the path (same host
+   only).
+
+Readers without access get `404` like private repositories elsewhere. Pages
+sessions are not revoked by signing out of the forge; they expire. All
+repositories of one owner share an origin (as on GitHub): their scripts
+can read each other's pages with the visitor's cookie, but only what that
+visitor may read anyway. Use a registrable domain of its own for Pages so
+that site scripts cannot set cookies for the forge.
+
+### Not yet
+
+- Reading workflow artifacts (`ArtifactSource` on top of the CI artifact
+  storage, §15), so `actions/deploy-pages` works unchanged.
+- Repository settings page in the UI; custom domains set per repository
+  (today: instance configuration), HTTPS certificates for them beyond
+  Workers custom domains.
+- Preview deployments, the `pages/health` endpoint, `pages_build_version`
+  validation against the repository.

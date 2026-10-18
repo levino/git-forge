@@ -1,0 +1,44 @@
+---
+import { isoTime, relativeTime } from '../ui/format.ts'
+import type { RenderedItem } from '../ui/collaboration.ts'
+import Avatar from './Avatar.astro'
+
+type Props = { items: readonly RenderedItem[] }
+
+const { items } = Astro.props
+const now = Math.floor(Date.now() / 1000)
+const seconds = (ms: number) => Math.floor(ms / 1000)
+const reviewText: Record<string, string> = {
+  APPROVED: 'approved these changes',
+  CHANGES_REQUESTED: 'requested changes',
+  COMMENTED: 'reviewed',
+  DISMISSED: 'reviewed (dismissed)',
+}
+---
+
+<ol class="flex flex-col gap-4" aria-label="Timeline">
+  {
+    items.map((item) =>
+      item.kind === 'event' ? (
+        <li id={`event-${item.id}`} class="text-xs text-base-content/60 ml-4 pl-4 py-1 border-l-2 border-base-300">
+          <span class="font-semibold text-base-content">{item.actor}</span> {item.text}{' '}
+          <time datetime={isoTime(seconds(item.at))}>{relativeTime(seconds(item.at), now)}</time>
+        </li>
+      ) : (
+        <li id={item.kind === 'comment' ? `comment-${item.id}` : `review-${item.id}`} class="border border-base-300 rounded-box overflow-hidden">
+          <header
+            class:list={[
+              'px-4 py-2 text-sm border-b border-base-300 flex flex-wrap items-center gap-1.5',
+              item.kind === 'review' && item.state === 'APPROVED' ? 'bg-success/15' : item.kind === 'review' && item.state === 'CHANGES_REQUESTED' ? 'bg-error/15' : 'bg-base-200',
+            ]}
+          >
+            <Avatar name={item.author} size={20} />
+            <span class="font-semibold">{item.author}</span> {item.kind === 'review' ? (reviewText[item.state] ?? 'reviewed') : 'commented'}{' '}
+            <time datetime={isoTime(seconds(item.at))}>{relativeTime(seconds(item.at), now)}</time>
+          </header>
+          {item.html ? <div class="markdown-body p-4 overflow-x-auto" set:html={item.html} /> : <p class="p-4 text-sm text-base-content/70">No description.</p>}
+        </li>
+      ),
+    )
+  }
+</ol>

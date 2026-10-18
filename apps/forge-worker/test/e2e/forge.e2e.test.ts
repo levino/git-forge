@@ -212,6 +212,31 @@ describe('forge worker on wrangler dev', () => {
     expect(await git(large, ['ls-remote', url, 'refs/heads/main'])).toContain((await git(large, ['rev-parse', 'main'])).trim())
   }, 240_000)
 
+  it('pushes above the worker limit in parts with git-remote-forge and clones back', async () => {
+    expect((await api('/api/repos', { owner: 'e2e', name: 'helper' })).status).toBe(201)
+    const large = tempDir()
+    await git(large, ['init', '-q', '-b', 'main'])
+    for (let i = 0; i < 12; i++) {
+      writeFileSync(`${large}/blob-${i}.bin`, randomBytes(2 * 1024 * 1024))
+      await git(large, ['add', '-A'])
+      await git(large, ['commit', '-q', '-m', `large ${i}`])
+    }
+    const bin = tempDir()
+    const cli = resolve(import.meta.dirname, '../../../../packages/cli/src/main.ts')
+    writeFileSync(`${bin}/git-remote-forge`, `#!/bin/sh\nexec "${process.execPath}" --no-warnings "${cli}" remote-helper "$@"\n`, { mode: 0o755 })
+    const env = { ...process.env, ...gitEnv, PATH: `${bin}:${process.env.PATH ?? ''}` }
+    const url = `forge::${dev.url.replace('http://', `http://git:${token}@`)}/e2e/helper`
+    const mark = dev.output().length
+    const { stderr } = await promisify(execFile)('git', ['push', '--progress', url, 'main'], { cwd: large, env, timeout: 150_000 })
+    expect(stderr).toMatch(/uploaded part 2\/2 \(/)
+    expect(stderr).toContain('[new branch]')
+    expect(requestsSince(mark).some((line) => line.includes('/git-receive-pack'))).toBe(false)
+    const clone = tempDir()
+    await promisify(execFile)('git', ['clone', '-q', url, 'out'], { cwd: clone, env, timeout: 60_000 })
+    expect((await git(`${clone}/out`, ['rev-parse', 'HEAD'])).trim()).toBe((await git(large, ['rev-parse', 'main'])).trim())
+    expect(await git(`${clone}/out`, ['fsck', '--strict'])).toBe('')
+  }, 240_000)
+
   it('runs the scheduled mirror sync', async () => {
     const response = await fetch(`${dev.url}/__scheduled?cron=${encodeURIComponent('*/30 * * * *')}`)
     expect(response.status).toBe(200)

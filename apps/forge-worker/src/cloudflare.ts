@@ -1,14 +1,16 @@
-import { d1Database } from '@git-forge/accounts'
+import { d1Database, MIGRATIONS, migrateOnStart } from '@git-forge/accounts'
 import { consumeJobs, digestStreams, QueueJobs, R2Storage } from '@git-forge/cloudflare'
-import { continueImport, createConsoleEmailSender, type EmailSender, type ImportJob, type ImportScheduler } from '@git-forge/core'
+import { continueImport, createConsoleEmailSender, type EmailSender, type ImportJob, type ImportScheduler, storagePublisher } from '@git-forge/core'
+import { S3Storage } from '@git-forge/s3'
 import { createSesEmailSender } from '@git-forge/ses'
 import { type AppJob, createForge, type Forge } from './app.ts'
-import { ACTIONS_CRON, type EmailSettings, type ForgeVars, loadIdTokenKeys, loadSecretsKey, parseActionsSettings, parseEmailSettings, parseSettings, uiEnabled } from './config.ts'
+import { ACTIONS_CRON, type EmailSettings, type ForgeVars, loadIdTokenKeys, loadSecretsKey, parseActionsSettings, parseEmailSettings, parseR2Signing, parseSettings, uiEnabled } from './config.ts'
 import { containerLauncher } from './runner-launcher.ts'
 import { captureLoginPage } from './ui/login-pages.ts'
 
 export type Env = ForgeVars & {
   readonly BUCKET: R2Bucket
+  readonly CDN_BUCKET?: R2Bucket
   readonly DB: D1Database
   readonly RUNNER?: DurableObjectNamespace
   readonly IMPORTS?: Queue<ImportJob>
@@ -32,19 +34,24 @@ let forge: Promise<Forge> | undefined
 export const forgeFor = (env: Env): Promise<Forge> => {
   forge ??= parseSettings(env)
     .then(async (settings) => {
+      await migrateOnStart(d1Database(env.DB), MIGRATIONS)
       const actions = parseActionsSettings(env)
       const secretsKey = await loadSecretsKey(actions)
       const idTokenKeys = await loadIdTokenKeys(actions, settings.instanceKey)
       const email = emailSender(parseEmailSettings(env))
+      const signing = parseR2Signing(env)
       return createForge({
         ...settings,
         storage: new R2Storage(env.BUCKET),
         db: d1Database(env.DB),
         digests: digestStreams,
+        clientAddress: (request) => request.headers.get('CF-Connecting-IP'),
         ...(uiEnabled(env) ? { renderLoginPage: captureLoginPage } : {}),
         ...(env.IMPORTS ? { scheduleImport: importScheduler(env.IMPORTS) } : {}),
         ...(env.JOBS ? { jobs: new QueueJobs(env.JOBS) } : {}),
         ...(email ? { email } : {}),
+        ...(signing ? { presigner: new S3Storage({ ...signing, region: 'auto', forcePathStyle: true }) } : {}),
+        ...(env.CDN_BUCKET ? { lfsPublisher: storagePublisher(new R2Storage(env.CDN_BUCKET), env.LFS_PUBLISH_PREFIX?.trim() ?? '') } : {}),
         ...(actions
           ? {
               actions: {
@@ -69,7 +76,7 @@ export const forgeFor = (env: Env): Promise<Forge> => {
   return forge
 }
 
-const isJobQueue = (name: string): boolean => name === 'git-forge-jobs' || /^git-forge-[a-z0-9-]+-jobs$/.test(name)
+const isJobQueue = (name: string): boolean => name.endsWith('-jobs')
 
 export const backgroundHandlers = {
   async scheduled(controller, env): Promise<void> {
@@ -91,7 +98,13 @@ export const backgroundHandlers = {
     const queue = env.IMPORTS
     if (!queue) throw new Error('IMPORTS queue binding is missing')
     for (const message of (batch as MessageBatch<ImportJob>).messages) {
-      const state = await continueImport(message.body, { storage: new R2Storage(env.BUCKET), schedule: importScheduler(queue) })
+      const jobs = env.JOBS ? new QueueJobs(env.JOBS) : null
+      const state = await continueImport(message.body, {
+        storage: new R2Storage(env.BUCKET),
+        digests: digestStreams,
+        schedule: importScheduler(queue),
+        ...(jobs ? { scheduleLfs: (job) => jobs.enqueue(job) } : {}),
+      })
       console.log(JSON.stringify({ event: 'import-step', repo: `${message.body.owner}/${message.body.name}`, phase: state.phase, steps: state.steps, error: state.error }))
       message.ack()
     }

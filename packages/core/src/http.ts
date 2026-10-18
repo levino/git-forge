@@ -1,7 +1,9 @@
 import { readAll, SizeLimitError } from './bytes.ts'
+import { parseRange } from './content.ts'
 import { advertiseReceivePack, type PushOutcome, receivePack, type ReceiveOptions, type RefPolicy } from './receive-pack.ts'
 import { handleLfsRequest, type LfsHttpOptions } from './lfs-http.ts'
 import { lfsPushCheck } from './lfs.ts'
+import { handleUploadRequest, type UploadHttpOptions, uploadLimits } from './pack-upload-http.ts'
 import { gitPrefix, isValidName, readRefs, type RepositoryName } from './repository.ts'
 import type { Storage } from './storage.ts'
 import { advertiseUploadPackV2, type PackfileUri, uploadPackV2 } from './upload-pack.ts'
@@ -23,6 +25,7 @@ export type GitHttpOptions = {
   readonly receive?: Omit<ReceiveOptions, 'storage' | 'repo'>
   readonly onPush?: (repo: RepositoryName, outcome: PushOutcome) => Promise<void>
   readonly lfs?: LfsHttpOptions | false
+  readonly uploads?: UploadHttpOptions | false
   readonly packfileUris?: (request: Request, repo: RepositoryName) => PackfileUri | undefined | Promise<PackfileUri | undefined>
 }
 
@@ -91,7 +94,29 @@ const limited = (stream: ReadableStream<Uint8Array>, limit: number): ReadableStr
   )
 }
 
-const serveStored = async (storage: Storage, key: string, contentType: string, cache: Record<string, string>): Promise<Response> => {
+const serveStored = async (storage: Storage, key: string, contentType: string, cache: Record<string, string>, rangeHeader: string | null = null): Promise<Response> => {
+  if (rangeHeader !== null) {
+    const info = await storage.head(key)
+    if (!info) return text(404, 'not found\n')
+    const range = parseRange(rangeHeader, info.size)
+    if (range.kind === 'unsatisfiable') return new Response(null, { status: 416, headers: { 'Content-Range': `bytes */${info.size}` } })
+    if (range.kind === 'partial') {
+      const object = await storage.get(key, range.range)
+      if (!object) return text(404, 'not found\n')
+      const { offset, length } = range.range
+      return new Response(object.body, {
+        status: 206,
+        headers: {
+          'Content-Type': contentType,
+          'Content-Length': String(length),
+          'Content-Range': `bytes ${offset}-${offset + length - 1}/${info.size}`,
+          'Accept-Ranges': 'bytes',
+          ETag: `"${object.etag}"`,
+          ...cache,
+        },
+      })
+    }
+  }
   const object = await storage.get(key)
   if (!object) return text(404, 'not found\n')
   return new Response(object.body, {
@@ -137,6 +162,25 @@ export const handleGitRequest = async (request: Request, options: GitHttpOptions
     if (lfs) return lfs
   }
   const limit = options.maxRequestBytes ?? 64 * 1024 * 1024
+  if (options.uploads !== false) {
+    const uploads = await handleUploadRequest(request, repo, path, {
+      storage,
+      ...(options.authorize ? { authorize: options.authorize } : {}),
+      limits: uploadLimits(options.uploads, options.maxPushBytes ?? options.maxRequestBytes ?? Number.POSITIVE_INFINITY),
+      presignExpiresInSeconds: options.uploads?.presignExpiresInSeconds ?? 3600,
+      ...(options.uploads?.presignPut ? { presignPut: options.uploads.presignPut } : {}),
+      receive: async (incoming) => ({
+        ...options.receive,
+        storage,
+        repo,
+        policy: combinePolicies(options.receive?.policy, await options.pushPolicy?.(incoming, repo)),
+        beforeUpdate: withLfsCheck(options, repo),
+      }),
+      ...(options.onPush ? { onPush: options.onPush } : {}),
+      ...(options.receive?.now ? { now: options.receive.now } : {}),
+    })
+    if (uploads) return uploads
+  }
   const service = url.searchParams.get('service')
   const isReceive = service === 'git-receive-pack' || path === '/git-receive-pack'
   const isGitPath = path === '/git-upload-pack' || path === '/git-receive-pack' || DUMB_PATHS.some((pattern) => pattern.test(path))
@@ -162,7 +206,7 @@ export const handleGitRequest = async (request: Request, options: GitHttpOptions
   }
   if ((request.method === 'GET' || request.method === 'HEAD') && DUMB_PATHS.some((pattern) => pattern.test(path))) {
     const cache = path.startsWith('/objects/pack/') ? immutable : noCache
-    return serveStored(storage, `${gitPrefix(repo)}${path.slice(1)}`, dumbContentType(path), cache)
+    return serveStored(storage, `${gitPrefix(repo)}${path.slice(1)}`, dumbContentType(path), cache, path.startsWith('/objects/pack/') ? request.headers.get('Range') : null)
   }
   if (request.method === 'POST' && path === '/git-upload-pack') {
     if (!isProtocolV2(request)) return text(400, 'only git protocol v2 is supported for smart fetch\n')

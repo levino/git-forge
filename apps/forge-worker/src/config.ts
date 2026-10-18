@@ -12,6 +12,7 @@ import {
   type PrivateJwk,
   type SigningKey,
 } from '@git-forge/accounts'
+import { PagesConfigError, type PagesHosts, parsePagesHosts } from '@git-forge/pages'
 
 export { generateEs256Key, importEs256Key } from '@git-forge/actions'
 
@@ -54,13 +55,35 @@ export type ForgeVars = {
   readonly OIDC_NAME?: string
   readonly OIDC_SCOPES?: string
   readonly SELF_SIGNUP?: string
+  readonly PASSKEYS?: string
   readonly BREAK_GLASS_PUBLIC_KEY?: string
+  readonly R2_S3_ENDPOINT?: string
+  readonly R2_BUCKET_NAME?: string
+  readonly R2_ACCESS_KEY_ID?: string
+  readonly R2_SECRET_ACCESS_KEY?: string
+  readonly PAGES_HOST?: string
+  readonly PAGES_DOMAINS?: string
+  readonly PAGES_MAX_AGE?: string
+  readonly LFS_PUBLISH_PREFIX?: string
+}
+
+export type R2SigningSettings = {
+  readonly endpoint: string
+  readonly bucket: string
+  readonly accessKeyId: string
+  readonly secretAccessKey: string
+}
+
+export type PagesSettings = {
+  readonly hosts: PagesHosts | null
+  readonly maxAgeSeconds: number
 }
 
 export type LoginSettings = {
   readonly oidc: OidcClientConfig | undefined
   readonly selfSignup: boolean
   readonly breakGlassKey: OkpPublicJwk | undefined
+  readonly passkeys?: boolean
 }
 
 export type ForgeSettings = {
@@ -77,6 +100,7 @@ export type ForgeSettings = {
   readonly mirrorUnitBytes: number
   readonly allowInsecureWebhooks?: boolean
   readonly login?: LoginSettings
+  readonly pages?: PagesSettings
 }
 
 export type EmailSettings =
@@ -216,7 +240,18 @@ export const parseLoginSettings = (vars: ForgeVars): LoginSettings => {
     if (error instanceof BreakGlassError) throw new ConfigurationError(error.message)
     throw error
   }
-  return { oidc: parseOidcSettings(vars), selfSignup: vars.SELF_SIGNUP === 'true', breakGlassKey }
+  return { oidc: parseOidcSettings(vars), selfSignup: vars.SELF_SIGNUP === 'true', breakGlassKey, passkeys: present(vars.PASSKEYS) !== 'false' }
+}
+
+export const DEFAULT_PAGES_MAX_AGE = 60
+
+export const parsePagesSettings = (vars: ForgeVars): PagesSettings => {
+  try {
+    return { hosts: parsePagesHosts(vars.PAGES_HOST, vars.PAGES_DOMAINS), maxAgeSeconds: positiveInteger(vars.PAGES_MAX_AGE, DEFAULT_PAGES_MAX_AGE, true) }
+  } catch (error) {
+    if (error instanceof PagesConfigError) throw new ConfigurationError(error.message)
+    throw error
+  }
 }
 
 export const parseSettings = async (vars: ForgeVars): Promise<ForgeSettings> => {
@@ -235,7 +270,20 @@ export const parseSettings = async (vars: ForgeVars): Promise<ForgeSettings> => 
     mirrorUnitBytes: positiveInteger(vars.MIRROR_UNIT_BYTES, 0, true),
     allowInsecureWebhooks: vars.ALLOW_INSECURE_WEBHOOKS === 'true',
     login: parseLoginSettings(vars),
+    pages: parsePagesSettings(vars),
   }
+}
+
+export const parseR2Signing = (vars: ForgeVars): R2SigningSettings | undefined => {
+  const endpoint = present(vars.R2_S3_ENDPOINT)
+  const bucket = present(vars.R2_BUCKET_NAME)
+  const accessKeyId = present(vars.R2_ACCESS_KEY_ID)
+  const secretAccessKey = present(vars.R2_SECRET_ACCESS_KEY)
+  if (!endpoint && !bucket && !accessKeyId && !secretAccessKey) return undefined
+  if (!endpoint || !bucket || !accessKeyId || !secretAccessKey) {
+    throw new ConfigurationError('presigned R2 uploads need R2_S3_ENDPOINT, R2_BUCKET_NAME, R2_ACCESS_KEY_ID and R2_SECRET_ACCESS_KEY')
+  }
+  return { endpoint, bucket, accessKeyId, secretAccessKey }
 }
 
 export const parseEmailSettings = (vars: ForgeVars): EmailSettings | undefined => {

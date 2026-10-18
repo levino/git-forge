@@ -50,21 +50,30 @@ export class BlockCache {
   readonly #read: (offset: number, length: number) => Promise<Uint8Array>
   readonly #size: number
   readonly #blockSize: number
-  readonly #blocks: ByteLru<number, Uint8Array>
+  readonly #blocks: ByteLru<string, Uint8Array>
+  readonly #prefix: string
 
-  constructor(read: (offset: number, length: number) => Promise<Uint8Array>, size: number, blockSize: number, budget: number) {
+  constructor(
+    read: (offset: number, length: number) => Promise<Uint8Array>,
+    size: number,
+    blockSize: number,
+    blocks: ByteLru<string, Uint8Array> | number,
+    prefix = '',
+  ) {
     this.#read = read
     this.#size = size
     this.#blockSize = blockSize
-    this.#blocks = new ByteLru(budget)
+    this.#blocks = typeof blocks === 'number' ? new ByteLru(blocks) : blocks
+    this.#prefix = prefix
   }
 
   async #block(index: number): Promise<Uint8Array> {
-    const cached = this.#blocks.get(index)
+    const key = `${this.#prefix}${index}`
+    const cached = this.#blocks.get(key)
     if (cached) return cached
     const offset = index * this.#blockSize
     const block = await this.#read(offset, Math.min(this.#blockSize, this.#size - offset))
-    this.#blocks.set(index, block, block.length)
+    this.#blocks.set(key, block, block.length)
     return block
   }
 

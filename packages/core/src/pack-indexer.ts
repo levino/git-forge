@@ -1,6 +1,6 @@
 import { concat, fromHex, fromUtf8, readUint32, toHex, uint32, utf8 } from './bytes.ts'
 import type { ByteCursor } from './cursor.ts'
-import { applyDelta } from './delta.ts'
+import { applyDelta, deltaResultSize } from './delta.ts'
 import { crc32, createSha1, hashObject, type ObjectId } from './hash.ts'
 import { ID_BYTES, IdIndex, IdSet } from './id-table.ts'
 import { LFS_POINTER_MAX_SIZE, type LfsObjectSpec, parseLfsPointer } from './lfs.ts'
@@ -24,10 +24,12 @@ export type IndexPackOptions = {
   readonly checkReferences?: boolean
   readonly memoryBudget?: number
   readonly chunkSize?: number
+  readonly maxObjectBytes?: number
 }
 
-export const DEFAULT_MEMORY_BUDGET = 32 * 1024 * 1024
-export const DEFAULT_CHUNK_SIZE = 8 * 1024 * 1024
+export const DEFAULT_MAX_OBJECT_BYTES = 64 * 1024 * 1024
+export const DEFAULT_MEMORY_BUDGET = 16 * 1024 * 1024
+export const DEFAULT_CHUNK_SIZE = 4 * 1024 * 1024
 
 class Entries {
   count = 0
@@ -113,6 +115,9 @@ export const indexPack = async (cursor: ByteCursor, options: IndexPackOptions): 
   const budget = options.memoryBudget ?? DEFAULT_MEMORY_BUDGET
   const keepLimit = Math.max(LFS_POINTER_MAX_SIZE, Math.floor(budget / 16))
   const checkReferences = options.checkReferences ?? true
+  const maxObject = options.maxObjectBytes ?? DEFAULT_MAX_OBJECT_BYTES
+  const tooLarge = (size: number): PackError =>
+    new PackError(`object of ${size} bytes is too large to resolve in memory (limit ${maxObject}); store large files in Git LFS`)
   const entries = new Entries()
   const idIndex = new IdIndex(() => entries.ids)
   const cache = new ByteLru<number, Uint8Array>(budget)
@@ -199,6 +204,7 @@ export const indexPack = async (cursor: ByteCursor, options: IndexPackOptions): 
       if (entry.typeCode !== OFS_DELTA && entry.typeCode !== REF_DELTA) {
         const type = typeFromCode(entry.typeCode)
         if (entry.size <= keepLimit || entry.typeCode !== 3) {
+          if (entry.size > maxObject) throw tooLarge(entry.size)
           const data = (await cursor.inflate(entry.size, { keep: true, scratch })) as Uint8Array
           resolveWithData(index, entry.typeCode, data)
         } else {
@@ -212,6 +218,7 @@ export const indexPack = async (cursor: ByteCursor, options: IndexPackOptions): 
         const baseData = baseIndex === -1 || entries.types[baseIndex] === 0 ? undefined : cache.get(baseIndex)
         if (baseData && entry.size <= budget / 2) {
           const delta = (await cursor.inflate(entry.size, { keep: true, scratch })) as Uint8Array
+          if (deltaResultSize(delta) > maxObject) throw tooLarge(deltaResultSize(delta))
           resolveWithData(index, entries.types[baseIndex] as number, applyDelta(baseData, delta))
         } else {
           await cursor.inflate(entry.size, { scratch })
@@ -254,8 +261,10 @@ export const indexPack = async (cursor: ByteCursor, options: IndexPackOptions): 
     const cached = cache.get(index)
     if (cached) return cached
     const start = dataStart(index)
+    if ((entries.sizes[index] as number) > maxObject) throw tooLarge(entries.sizes[index] as number)
     const raw = inflateExact(await source.read(start, entryEnd(index) - start), entries.sizes[index] as number)
     const kind = entries.kinds[index] as number
+    if ((kind === OFS_DELTA || kind === REF_DELTA) && deltaResultSize(raw) > maxObject) throw tooLarge(deltaResultSize(raw))
     let data = raw
     if (kind === OFS_DELTA) data = applyDelta(await materialize(entries.bases[index] as number), raw)
     else if (kind === REF_DELTA) {

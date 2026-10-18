@@ -106,6 +106,7 @@ export type IngestOptions = {
   readonly checkReferences?: boolean
   readonly memoryBudget?: number
   readonly chunkSize?: number
+  readonly maxObjectBytes?: number
 }
 
 export const stagingPrefix = (repo: RepositoryName, at = new Date()): string =>
@@ -124,12 +125,14 @@ export class ObjectDatabase {
   #packs: LoadedPack[] | undefined
   readonly #indexes = new Map<string, PackIndex>()
   readonly #cache: ByteLru<string, GitObject>
+  readonly #blocks: ByteLru<string, Uint8Array>
 
   constructor(storage: Storage, repo: RepositoryName, options: ObjectDatabaseOptions = {}) {
     this.#storage = storage
     this.#repo = repo
     this.#options = options
-    this.#cache = new ByteLru(options.cacheBytes ?? 16 * 1024 * 1024)
+    this.#cache = new ByteLru(options.cacheBytes ?? 8 * 1024 * 1024)
+    this.#blocks = new ByteLru(options.blockCacheBytes ?? 4 * 1024 * 1024)
   }
 
   get storage(): Storage {
@@ -183,7 +186,8 @@ export class ObjectDatabase {
         (from, count) => readStorageRange(this.#storage, pack.key, from, count),
         size,
         this.#options.blockSize ?? 64 * 1024,
-        this.#options.blockCacheBytes ?? 2 * 1024 * 1024,
+        this.#blocks,
+        `${pack.name}:`,
       )
     }
     return pack.blocks.read(offset, length)

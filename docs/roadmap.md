@@ -9,12 +9,12 @@ discussions.
 - [x] Pack parsing and writing, including thin packs
 - [x] Pack index v2, byte-identical to `git index-pack`
 - [x] Refs via compare-and-swap
-- [x] `receive-pack` (smart HTTP), push size limit (default 64 MB)
-- [x] `upload-pack` protocol v2
+- [x] `receive-pack` (smart HTTP), streamed; size bounded by the platform's request body limit
+- [x] `upload-pack` protocol v2, streaming stored packs; `packfile-uris`
 - [x] Dumb HTTP
 - [x] Archive under `refs/archive/{timestamp}/...` on force push and deletion
-- [ ] Streaming pack indexing (packs are processed in memory in v1)
-- [ ] Pack compaction
+- [x] Streaming pack indexing with bounded memory (staging chunks, LRU cache, range reads)
+- [x] Geometric pack compaction (append-only, swaps the current pack set)
 
 ## M2 — Git LFS
 

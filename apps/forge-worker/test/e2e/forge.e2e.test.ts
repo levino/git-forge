@@ -112,6 +112,33 @@ describe('forge worker on wrangler dev', () => {
     expect(await gitFails(source, ['push', pushRemote, `${rewritten}:${archived!.split('\t')[1]!}`])).toMatch(/invalid ref name|rejected/)
   })
 
+  it('streams a push larger than a staging chunk, compacts its packs and serves packfile URIs', async () => {
+    expect((await admin({ owner: 'e2e', name: 'large' })).status).toBe(201)
+    const large = tempDir()
+    await git(large, ['init', '-q', '-b', 'main'])
+    generateHistory(large, { commits: 40, files: 20, binaryBytes: 3 * 1024 * 1024, seed: 5 })
+    const largeRemote = `${dev.url}/e2e/large.git`
+    const largePush = largeRemote.replace('http://', `http://git:${ADMIN_TOKEN}@`)
+    const started = performance.now()
+    await git(large, ['push', '-q', largePush, 'main'])
+    console.log(`push of a 12 MiB pack took ${Math.round(performance.now() - started)} ms wall time`)
+    for (let round = 0; round < 3; round++) {
+      generateHistory(large, { commits: 5, files: 20, binaryBytes: 1024, seed: 6 + round, from: 'refs/heads/main^0' })
+      await git(large, ['push', '-q', largePush, 'main'])
+    }
+    const packCount = async () => (await (await fetch(`${largeRemote}/objects/info/packs`)).text()).split('\n').filter((line) => line.startsWith('P ')).length
+    await expect.poll(packCount, { timeout: 20_000 }).toBeLessThan(4)
+    const mark = dev.output().length
+    const target = tempDir()
+    await git(target, ['-c', 'fetch.uriProtocols=http', 'clone', '-q', largeRemote, 'out'])
+    expect(await log(`${target}/out`)).toBe(await log(large))
+    expect(await git(`${target}/out`, ['fsck', '--full', '--strict'])).toBe('')
+    expect(requestsSince(mark).some((line) => /GET \/e2e\/large\.git\/objects\/pack\/pack-[0-9a-f]{40}\.pack/.test(line))).toBe(true)
+    const dumb = tempDir()
+    await git(dumb, ['-c', 'protocol.version=0', 'clone', '-q', largeRemote, 'out'])
+    expect(await git(`${dumb}/out`, ['fsck', '--full', '--strict'])).toBe('')
+  }, 120_000)
+
   it('runs the scheduled handler stub', async () => {
     const response = await fetch(`${dev.url}/__scheduled?cron=${encodeURIComponent('*/30 * * * *')}`)
     expect(response.status).toBe(200)

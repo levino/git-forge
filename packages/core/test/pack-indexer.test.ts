@@ -66,7 +66,7 @@ const bigHistory = (dir: string): void => {
   }
 }
 
-const index = (pack: Uint8Array, objects: ObjectLookup, options: { memoryBudget?: number; chunkSize?: number; piece?: number } = {}) => {
+const index = (pack: Uint8Array, objects: ObjectLookup, options: { memoryBudget?: number; chunkSize?: number; piece?: number; maxObjectBytes?: number } = {}) => {
   const storage = new MemoryStorage()
   return {
     storage,
@@ -76,6 +76,7 @@ const index = (pack: Uint8Array, objects: ObjectLookup, options: { memoryBudget?
       objects,
       ...(options.memoryBudget ? { memoryBudget: options.memoryBudget } : {}),
       ...(options.chunkSize ? { chunkSize: options.chunkSize } : {}),
+      ...(options.maxObjectBytes ? { maxObjectBytes: options.maxObjectBytes } : {}),
     }),
   }
 }
@@ -153,6 +154,20 @@ describe('indexPack', () => {
     const incomplete = gitBytes(dir, ['pack-objects', '--stdout', '--revs'], `HEAD\n^${ids[2]}\n`)
     await expect(index(incomplete, nothing).indexed).rejects.toThrow(/missing object/)
     await expect(index(incomplete, fromRepo(dir)).indexed).resolves.toBeTruthy()
+  })
+})
+
+describe('indexPack limits', () => {
+  it('streams large plain blobs but refuses to materialize oversized objects', async () => {
+    const dir = initRepo()
+    writeFile(dir, 'big.bin', new Uint8Array(256 * 1024).map((_, i) => (i * 7919) % 251))
+    commitAll(dir, 'one big blob')
+    const plain = gitBytes(dir, ['pack-objects', '--stdout', '--revs', '--all'], '')
+    await expect(index(plain, nothing, { memoryBudget: 16 * 1024, maxObjectBytes: 4096 }).indexed).resolves.toMatchObject({ objectCount: 3 })
+    for (let i = 0; i < 40; i++) writeFile(dir, `dir/file-${i}-${'x'.repeat(60)}.txt`, `${i}\n`)
+    commitAll(dir, 'wide tree')
+    const wide = gitBytes(dir, ['pack-objects', '--stdout', '--revs', '--all'], '')
+    await expect(index(wide, nothing, { maxObjectBytes: 2048 }).indexed).rejects.toThrow(/too large/)
   })
 })
 

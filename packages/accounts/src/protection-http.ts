@@ -101,6 +101,7 @@ export type ProtectionStore = ProtectionDirectory &
 export type BranchProtectionApiOptions = {
   readonly store: ProtectionStore
   readonly verifyInstance?: AuthenticateOptions['verifyInstance']
+  readonly authenticate?: (request: Request) => Promise<Principal | null>
   readonly prefix?: string
 }
 
@@ -312,7 +313,9 @@ export const handleBranchProtectionRequest = async (request: Request, options: B
   const { store } = options
   const allowed = route.pattern === null ? ['GET'] : ['GET', 'PUT', 'DELETE']
   if (!allowed.includes(request.method)) return json(405, { message: 'Method Not Allowed' }, { Allow: allowed.join(', ') })
-  const principal = await authenticateRequest(request, { directory: store, ...(options.verifyInstance ? { verifyInstance: options.verifyInstance } : {}) })
+  const principal = options.authenticate
+    ? await options.authenticate(request)
+    : await authenticateRequest(request, { directory: store, ...(options.verifyInstance ? { verifyInstance: options.verifyInstance } : {}) })
   if (!principal) return json(401, { message: 'Bad credentials' }, { 'WWW-Authenticate': `Basic realm="${REALM}"` })
   const check = await checkRepositoryAccess(store, principal, route.repo, 'admin')
   const { decision } = check

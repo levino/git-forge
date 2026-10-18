@@ -104,6 +104,7 @@ export const backgroundHandlers = {
         storage: new R2Storage(env.BUCKET),
         digests: digestStreams,
         schedule: importScheduler(queue),
+        metadata: async (job, state) => (await forgeFor(env)).importMetadata(job, state),
         ...(jobs ? { scheduleLfs: (job) => jobs.enqueue(job) } : {}),
       })
       await (await forgeFor(env)).refreshRepository(message.body)

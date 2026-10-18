@@ -113,7 +113,9 @@ import {
   handleGitRequest,
   type JobQueue,
   importLfsObject,
+  type ImportJob,
   type ImportLfsJob,
+  type ImportMetadataResult,
   type ImportScheduler,
   type ImportState,
   ImportRunningError,
@@ -190,6 +192,7 @@ import { type ArtifactSource, createPages, isPagesJob, type PagesJob } from '@gi
 import { type AssetRow, createReleaseStore, handleReleasesRequest, type ReleaseRow } from '@git-forge/releases'
 import { activityEvent } from './collaboration-events.ts'
 import { parseSearchRequest, repositoryJson, runSearch, type SearchRequest, searchResponseJson } from './search.ts'
+import { type GithubProgress, githubImportStep, githubRepository } from './github-import.ts'
 import { mirrorOverview, recordChecksums, signOverview } from './mirror-verification.ts'
 import type { ForgeSettings } from './config.ts'
 import {
@@ -364,6 +367,7 @@ export type NewImport = NewRepository & {
   readonly lfs?: boolean
   readonly lfsUrl?: string
   readonly commitsPerStep?: number
+  readonly metadata?: boolean
 }
 
 export type StartedImport = RepositoryName & { readonly state: ImportState }
@@ -424,6 +428,7 @@ export type Forge = {
   readonly actionsTick: () => Promise<ActionsTick | null>
   readonly runJob: (job: AppJob) => Promise<void>
   readonly refreshRepository: (repo: RepositoryName) => Promise<void>
+  readonly importMetadata: (job: ImportJob, state: ImportState) => Promise<ImportMetadataResult>
   readonly notifications: Notifications
 }
 
@@ -1004,6 +1009,7 @@ export const createForge = (options: ForgeOptions): Forge => {
     if (!options.scheduleImport) throw new HttpError(503, 'imports need a queue (IMPORTS binding)')
     const { url, lfsUrl, token, commitsPerStep } = input
     if (!isValidImportUrl(url) || (lfsUrl !== undefined && !isValidImportUrl(lfsUrl))) throw new HttpError(400, 'url and lfsUrl must be http(s) URLs without credentials; pass a token instead')
+    if (input.metadata && !githubRepository(url)) throw new HttpError(400, 'importing issues, pull requests and releases needs a GitHub repository URL (https://github.com/owner/repo)')
     let target: RepositoryName
     if (await store.findRepository(input.owner, input.name)) {
       const repository = await repositoryAdmin(actor, input)
@@ -1019,12 +1025,13 @@ export const createForge = (options: ForgeOptions): Forge => {
         ...(input.lfs !== undefined ? { lfs: input.lfs } : {}),
         ...(lfsUrl ? { lfsUrl } : {}),
         ...(commitsPerStep ? { commitsPerStep } : {}),
+        ...(input.metadata ? { metadata: true } : {}),
       })
     } catch (error) {
       if (error instanceof ImportRunningError) throw new HttpError(409, error.message)
       throw new HttpError(400, (error as Error).message)
     }
-    await options.scheduleImport({ ...target, ...(token ? { authorization: basicAuthorization(input.username ?? 'git', token) } : {}) }, 0)
+    await options.scheduleImport({ ...target, ...(token ? { authorization: basicAuthorization(input.username ?? 'git', token) } : {}), ...(input.metadata ? { actor: actor.id } : {}) }, 0)
     return { ...target, state }
   }
 
@@ -1044,6 +1051,7 @@ export const createForge = (options: ForgeOptions): Forge => {
     const commitsPerStep = optionalCount(body, 'commitsPerStep')
     if (body.lfs !== undefined && typeof body.lfs !== 'boolean') throw new HttpError(400, 'lfs must be a boolean')
     const actor = await requireManager(request)
+    if (body.metadata !== undefined && typeof body.metadata !== 'boolean') throw new HttpError(400, 'metadata must be a boolean')
     const started = await importRepositoryFor(actor, {
       ...newRepository(body, repo.owner, repo.name),
       url,
@@ -1052,6 +1060,7 @@ export const createForge = (options: ForgeOptions): Forge => {
       ...(lfsUrl !== undefined ? { lfsUrl } : {}),
       ...(commitsPerStep !== undefined ? { commitsPerStep } : {}),
       ...(body.lfs !== undefined ? { lfs: body.lfs as boolean } : {}),
+      ...(body.metadata === true ? { metadata: true } : {}),
     })
     const statusUrl = new URL(`/api/repos/${started.owner}/${started.name}/import`, request.url).toString()
     const cloneUrl = new URL(`/${started.owner}/${started.name}.git`, request.url).toString()
@@ -1062,6 +1071,25 @@ export const createForge = (options: ForgeOptions): Forge => {
     const state = await importStatusFor(await requireManager(request), repoName(params))
     if (!state) throw new HttpError(404, 'no import for this repository')
     return json(200, state)
+  }
+
+  const importMetadata = async (job: ImportJob, state: ImportState): Promise<ImportMetadataResult> => {
+    const user = job.actor ? await store.findUserById(job.actor) : null
+    if (!user) throw new Error('the user who started the import no longer exists')
+    const principal: UserPrincipal = { kind: 'user', id: user.id, login: user.login, limits: null, tokenId: null }
+    const scope = await openCollaborationRepository({ db, storage, accounts: store, now: () => now().getTime() }, principal, job.owner, job.name)
+    const basic = job.authorization?.startsWith('Basic ') ? atob(job.authorization.slice(6)) : ''
+    return githubImportStep(
+      {
+        scope,
+        releases: releaseStore,
+        url: state.url,
+        token: basic.slice(basic.indexOf(':') + 1) || null,
+        ...(options.fetch ? { fetch: options.fetch } : {}),
+        ...(options.digests ? { digests: options.digests } : {}),
+      },
+      (state.metadata?.progress as GithubProgress | null | undefined) ?? null,
+    )
   }
 
   const settings: RepositorySettingsOperations = {
@@ -1969,6 +1997,7 @@ export const createForge = (options: ForgeOptions): Forge => {
       await runJob(federation, job)
     },
     refreshRepository,
+    importMetadata,
     notifications,
   }
 }

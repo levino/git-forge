@@ -609,4 +609,38 @@ describe('server-side import', () => {
     expect([0, 1, 2, 3, 10].map(retryDelaySeconds)).toEqual([0, 15, 30, 60, 600])
     await expectIdentical(storage, source.bare)
   })
+
+  it('runs the metadata phase after the refs, waits for rate limits and fails without a handler', async () => {
+    const source = await sourceRepo(10)
+    const remote = await serve(httpBackendHandler(source.root))
+    const storage = new MemoryStorage()
+    await startImport(storage, target, { url: `${remote.url}/source.git`, metadata: true })
+    const now = new Date('2026-10-18T12:00:00Z')
+    const queue: { job: ImportJob; delay: number }[] = [{ job: { owner: target.owner, name: target.name, actor: 'u1' }, delay: 0 }]
+    const seen: { job: ImportJob; progress: unknown; refs: boolean }[] = []
+    while (queue.length > 0) {
+      const { job } = queue.shift() as { job: ImportJob }
+      await continueImport(job, {
+        storage,
+        now: () => now,
+        schedule: async (next, delay) => void queue.push({ job: next, delay }),
+        metadata: async (current, state) => {
+          seen.push({ job: current, progress: state.metadata?.progress, refs: (await readRefs(storage, target))?.state.refs['refs/heads/main'] !== undefined })
+          const step = seen.length
+          return step === 1 ? { progress: { page: 1 }, done: false, waitUntil: '2026-10-18T12:10:00Z' } : { progress: { page: step }, done: step === 2 }
+        },
+      })
+      if (seen.length === 1 && queue.length === 1) expect(queue[0]!.delay).toBe(600)
+    }
+    expect(seen).toEqual([
+      { job: { owner: target.owner, name: target.name, actor: 'u1' }, progress: null, refs: true },
+      { job: { owner: target.owner, name: target.name, actor: 'u1' }, progress: { page: 1 }, refs: true },
+    ])
+    expect(await readImportState(storage, target)).toMatchObject({ phase: 'done', metadata: { progress: { page: 2 } } })
+
+    const other: RepositoryName = { owner: 'village', name: 'other' }
+    await startImport(storage, other, { url: `${remote.url}/source.git`, metadata: true })
+    const failed = await runImport({ storage, repo: other, maxFailures: 1 })
+    expect(failed).toMatchObject({ phase: 'failed', failedIn: 'metadata', error: 'this runtime cannot import issues, pull requests and releases' })
+  })
 })

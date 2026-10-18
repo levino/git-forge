@@ -57,6 +57,7 @@ export type LoginContext = {
   readonly oidc: OidcProvider | null
   readonly selfSignup: boolean
   readonly breakGlassKey: OkpPublicJwk | null
+  readonly passkeys?: boolean
   readonly fetch: FetchLike
   readonly now: () => number
 }
@@ -68,6 +69,12 @@ export type LoggedInUser = {
 }
 
 export const relyingParty = (origin: string, name = 'git-forge'): RelyingParty => ({ id: new URL(origin).hostname, name, origins: [origin] })
+
+export const passkeysEnabled = (context: Pick<LoginContext, 'passkeys'>): boolean => context.passkeys !== false
+
+const requirePasskeys = (context: LoginContext): void => {
+  if (!passkeysEnabled(context)) throw new LoginError('not_configured', 'passkeys are disabled on this instance')
+}
 
 export const sessionTtl = (method: SessionMethod): number => (method === 'break-glass' ? BREAK_GLASS_SESSION_TTL_MS : SESSION_TTL_MS)
 
@@ -276,6 +283,7 @@ export type CeremonyStart<T> = {
 }
 
 export const beginPasskeyRegistration = async (context: LoginContext, subject: RegistrationSubject): Promise<CeremonyStart<ReturnType<typeof creationOptions>>> => {
+  requirePasskeys(context)
   const target = await registrationTarget(context, subject)
   const userHandle = (target.create ? null : await context.logins.userHandleFor(target.userId)) ?? base64UrlEncode(randomBytes(32))
   const challenge = randomBytes(32)
@@ -303,6 +311,7 @@ export const completePasskeyRegistration = async (
   context: LoginContext,
   input: { readonly handle: string; readonly credential: unknown; readonly name?: string | null; readonly sessionUserId?: string | null },
 ): Promise<LoggedInUser> => {
+  requirePasskeys(context)
   const data = await context.logins.takeChallenge('passkey-register', input.handle)
   if (!data) throw new LoginError('expired', 'this registration has expired; start again')
   const target = data as unknown as RegistrationTarget & { readonly userHandle: string; readonly challenge: string }
@@ -330,12 +339,14 @@ export const completePasskeyRegistration = async (
 }
 
 export const beginPasskeyLogin = async (context: LoginContext): Promise<CeremonyStart<ReturnType<typeof requestOptions>>> => {
+  requirePasskeys(context)
   const challenge = randomBytes(32)
   const handle = await context.logins.putChallenge('passkey-login', { challenge: base64UrlEncode(challenge) }, LOGIN_CHALLENGE_TTL_MS)
   return { handle, options: requestOptions({ rp: context.rp, challenge }) }
 }
 
 export const completePasskeyLogin = async (context: LoginContext, input: { readonly handle: string; readonly credential: unknown }): Promise<LoggedInUser> => {
+  requirePasskeys(context)
   const data = await context.logins.takeChallenge('passkey-login', input.handle)
   if (!data) throw new LoginError('expired', 'this login has expired; start again')
   const presented = await verifying(async () => assertionCredential(input.credential))

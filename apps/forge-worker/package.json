@@ -33,6 +33,7 @@
     "@git-forge/collaboration": "workspace:*",
     "@git-forge/core": "workspace:*",
     "@git-forge/notifications": "workspace:*",
+    "@git-forge/pages": "workspace:*",
     "@git-forge/releases": "workspace:*",
     "@git-forge/s3": "workspace:*",
     "@git-forge/ses": "workspace:*",

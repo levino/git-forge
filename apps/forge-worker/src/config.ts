@@ -13,6 +13,7 @@ import {
   type SigningKey,
 } from '@git-forge/accounts'
 import type { S3StorageConfig } from '@git-forge/s3'
+import { PagesConfigError, type PagesHosts, parsePagesHosts } from '@git-forge/pages'
 
 export type ForgeVars = {
   readonly PUBLIC_URL?: string
@@ -52,13 +53,24 @@ export type ForgeVars = {
   readonly OIDC_NAME?: string
   readonly OIDC_SCOPES?: string
   readonly SELF_SIGNUP?: string
+  readonly PASSKEYS?: string
   readonly BREAK_GLASS_PUBLIC_KEY?: string
+  readonly PAGES_HOST?: string
+  readonly PAGES_DOMAINS?: string
+  readonly PAGES_MAX_AGE?: string
+  readonly LFS_PUBLISH_PREFIX?: string
+}
+
+export type PagesSettings = {
+  readonly hosts: PagesHosts | null
+  readonly maxAgeSeconds: number
 }
 
 export type LoginSettings = {
   readonly oidc: OidcClientConfig | undefined
   readonly selfSignup: boolean
   readonly breakGlassKey: OkpPublicJwk | undefined
+  readonly passkeys?: boolean
 }
 
 export type ForgeSettings = {
@@ -75,6 +87,7 @@ export type ForgeSettings = {
   readonly mirrorUnitBytes: number
   readonly allowInsecureWebhooks?: boolean
   readonly login?: LoginSettings
+  readonly pages?: PagesSettings
 }
 
 export type EmailSettings =
@@ -210,7 +223,18 @@ export const parseLoginSettings = (vars: ForgeVars): LoginSettings => {
     if (error instanceof BreakGlassError) throw new ConfigurationError(error.message)
     throw error
   }
-  return { oidc: parseOidcSettings(vars), selfSignup: vars.SELF_SIGNUP === 'true', breakGlassKey }
+  return { oidc: parseOidcSettings(vars), selfSignup: vars.SELF_SIGNUP === 'true', breakGlassKey, passkeys: present(vars.PASSKEYS) !== 'false' }
+}
+
+export const DEFAULT_PAGES_MAX_AGE = 60
+
+export const parsePagesSettings = (vars: ForgeVars): PagesSettings => {
+  try {
+    return { hosts: parsePagesHosts(vars.PAGES_HOST, vars.PAGES_DOMAINS), maxAgeSeconds: positiveInteger(vars.PAGES_MAX_AGE, DEFAULT_PAGES_MAX_AGE, true) }
+  } catch (error) {
+    if (error instanceof PagesConfigError) throw new ConfigurationError(error.message)
+    throw error
+  }
 }
 
 export const parseR2PresignSettings = (vars: ForgeVars): S3StorageConfig | undefined => {
@@ -242,6 +266,7 @@ export const parseSettings = async (vars: ForgeVars): Promise<ForgeSettings> => 
     mirrorUnitBytes: positiveInteger(vars.MIRROR_UNIT_BYTES, 0, true),
     allowInsecureWebhooks: vars.ALLOW_INSECURE_WEBHOOKS === 'true',
     login: parseLoginSettings(vars),
+    pages: parsePagesSettings(vars),
   }
 }
 

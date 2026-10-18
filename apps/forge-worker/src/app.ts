@@ -1095,7 +1095,7 @@ export const createForge = (options: ForgeOptions): Forge => {
     const login = await createLoginHandler(loginOptions(request))(request)
     if (login) return login
     const authentication = authenticateOptions(request)
-    const protection = await handleBranchProtectionRequest(request, { store, verifyInstance: authentication.verifyInstance })
+    const protection = await handleBranchProtectionRequest(request, { store, authenticate: apiPrincipal })
     if (protection) return protection
     const notificationsResponse = await handleNotificationsRequest(request, {
       notifications,

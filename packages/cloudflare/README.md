@@ -18,7 +18,7 @@ const storage = new R2Storage(env.BUCKET, { prefix: 'optional/prefix/' })
 | `get(key)` | `bucket.get(key)`; the ETag is R2's unquoted `etag`. |
 | `get(key, range)` | `bucket.head` first, then the range is clamped to the object size and read with `bucket.get(key, { range, onlyIf: { etagMatches } })`, so the bytes and the reported size belong to the same version. A range starting at or beyond the end yields an empty body, as in `MemoryStorage`, instead of relying on how R2 treats such ranges. |
 | `head(key)` | `bucket.head(key)` |
-| `put(key, body, size)` | `bucket.put`; a `Uint8Array` is checked against `size`, a stream is piped through `FixedLengthStream(size)` because R2 needs the length up front and must not buffer. A stream that ends early or runs long makes the put fail and nothing is stored. |
+| `put(key, body, size)` | `bucket.put`; a `Uint8Array` is checked against `size`. A stream is piped through `exactLength(size)` from the core, which withholds the last byte until the source has ended at exactly `size` bytes, and then through `FixedLengthStream(size)` because R2 needs the length up front and must not buffer. A stream that ends early, runs long or errors never delivers all bytes, so the put fails and nothing is stored. (`FixedLengthStream` alone lets R2 commit the first `size` bytes of a body that runs long.) |
 | `put(…, { ifNoneMatch: '*' })` | `onlyIf: { etagDoesNotMatch: '*' }`: written only if the key does not exist. |
 | `put(…, { ifMatch })` | `onlyIf: { etagMatches }`: written only if the current ETag matches; fails if the key does not exist. |
 | failed condition | R2 returns `null`, mapped to `{ ok: false, reason: 'precondition-failed' }`. |
@@ -26,17 +26,12 @@ const storage = new R2Storage(env.BUCKET, { prefix: 'optional/prefix/' })
 | `list(prefix)` | `bucket.list({ prefix, limit, cursor })`, following `truncated`/`cursor` until the end; keys come back in lexicographic order. |
 
 `presignGet` and `presignPut` are not implemented: a binding cannot sign URLs.
-Presigned URLs for LFS need R2's S3 API with an access key and belong in a
-separate S3 adapter.
+Presigned URLs for LFS need R2's S3 API with an access key; use `S3Storage`
+from [`@git-forge/s3`](../s3) for that.
 
 ## Tests
 
 `pnpm --filter @git-forge/cloudflare test` runs the tests inside workerd with
-a Miniflare R2 bucket through `@cloudflare/vitest-plugin`. The storage
-conformance suite in `test/storage-conformance.ts` runs against both
-`MemoryStorage` and `R2Storage` (with a small list page size to exercise
-pagination); it covers missing keys, streamed multi-MiB puts, length
-mismatches, ranges, both conditional writes, racing conditional writers and
-listing. Once the shared suite lands in
-`packages/core/test/storage-conformance.ts`, this file should be replaced by
-it.
+a Miniflare R2 bucket through `@cloudflare/vitest-plugin`. The shared storage
+conformance suite from `@git-forge/core/test/storage-conformance.ts` runs
+against `R2Storage` with a list page size of 7 to exercise pagination.

@@ -46,8 +46,10 @@ discussions.
 ## M5 — Deployment and adapters
 
 - [ ] Cloudflare Worker app (in progress)
-- [ ] S3 storage adapter (in progress)
-- [ ] Local S3 test environment (in progress; MinIO discontinued — Garage, SeaweedFS, RustFS, versitygw evaluated)
+- [x] S3 storage adapter (`@git-forge/s3`, presigned PUTs bound to length and SHA-256)
+- [x] File system storage adapter (`@git-forge/node`)
+- [x] Shared storage conformance suite for all adapters
+- [x] Local S3 test environment (versitygw; Garage, SeaweedFS, RustFS evaluated)
 - [ ] Headless deployment on a Raspberry Pi (Bun/Node + SQLite file + filesystem or S3)
 
 ## M6 — Web UI (Astro SSR)

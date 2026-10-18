@@ -1,22 +1,23 @@
-import type { Principal, RepositorySubject } from '@git-forge/accounts'
-import { defaultBranch, ObjectDatabase, readCommit, readRefs } from '@git-forge/core'
+import type { Page, Principal, RepositoryListing, RepositorySort } from '@git-forge/accounts'
 import type { ForgeServices } from '../app.ts'
+import { parsePage } from './history.ts'
 
-export type RepositorySummary = RepositorySubject & { readonly defaultBranch: string | null; readonly updatedAt: number | null }
+export type RepositoryPage = Page<RepositoryListing> & { readonly sort: RepositorySort }
 
-export const visibleRepositories = async (forge: ForgeServices, principal: Principal, owner?: string): Promise<RepositorySubject[]> => {
-  const all = await forge.store.listRepositories()
-  const candidates = owner === undefined ? all : all.filter((repo) => repo.owner.toLowerCase() === owner.toLowerCase())
-  const checks = await Promise.all(candidates.map(async (repo) => ((await forge.repositoryAccess(principal, repo, 'read')).decision === 'allow' ? repo : null)))
-  return checks.filter((repo): repo is RepositorySubject => repo !== null).sort((a, b) => `${a.owner}/${a.name}`.localeCompare(`${b.owner}/${b.name}`))
+export const REPOSITORIES_PER_PAGE = 30
+
+export const repositoryPage = async (forge: ForgeServices, principal: Principal, url: URL, owner?: string, perPage = REPOSITORIES_PER_PAGE): Promise<RepositoryPage> => {
+  const sort: RepositorySort = url.searchParams.get('sort') === 'name' ? 'name' : 'updated'
+  const page = await forge.listRepositories(principal, { sort, page: parsePage(url.searchParams.get('page')), perPage, ...(owner !== undefined ? { owner } : {}) })
+  return { ...page, sort }
 }
 
-const summarize = async (forge: ForgeServices, repo: RepositorySubject): Promise<RepositorySummary> => {
-  const state = (await readRefs(forge.storage, repo))?.state
-  const head = state?.refs[state.head]
-  const commit = head ? await readCommit(new ObjectDatabase(forge.storage, repo), head).catch(() => null) : null
-  return { ...repo, defaultBranch: state ? defaultBranch(state) : null, updatedAt: commit?.committer.timestamp ?? null }
+export const pageHref = (url: URL, changes: Readonly<Record<string, string | number | null>>): string => {
+  const params = new URLSearchParams(url.search)
+  for (const [key, value] of Object.entries(changes)) {
+    if (value === null) params.delete(key)
+    else params.set(key, String(value))
+  }
+  const query = params.toString()
+  return query ? `?${query}` : url.pathname
 }
-
-export const repositorySummaries = async (forge: ForgeServices, repositories: readonly RepositorySubject[]): Promise<RepositorySummary[]> =>
-  (await Promise.all(repositories.map((repo) => summarize(forge, repo)))).sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0))

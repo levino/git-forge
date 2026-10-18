@@ -3,7 +3,7 @@ import { uiEnabled } from '../../src/config.ts'
 import { isCrossSiteWrite, isForgePath, isLoginPath } from '../../src/routing.ts'
 import { previewKind } from '../../src/ui/browse.ts'
 import { formatBytes, relativeTime } from '../../src/ui/format.ts'
-import { highlightLines, languageFor } from '../../src/ui/highlight.ts'
+import { highlightHunks, highlightLines, languageFor } from '../../src/ui/highlight.ts'
 import { parsePage } from '../../src/ui/history.ts'
 import { renderMarkdown, resolveRelative } from '../../src/ui/markdown.ts'
 
@@ -112,6 +112,23 @@ describe('highlighting', () => {
     expect(lines[0]![0]!.style).toMatch(/--shiki-light:#[0-9A-F]{6};--shiki-dark:#[0-9A-F]{6}/i)
     expect(lines[1]).toEqual([])
     expect(await highlightLines('<b>\n', 'notes')).toEqual([[{ content: '<b>', style: '' }]])
+  })
+
+  it('highlights fenced Markdown code after sanitizing and leaves unknown fences plain', async () => {
+    const base = { blob: '/a/b/blob/main', raw: '/a/b/raw/main', directory: '' }
+    const html = await renderMarkdown('```ts\nconst a = "<script>"\n```\n\n```nope\nx\n```\n\n<span style="color:red">y</span>', base)
+    expect(html).toMatch(/<pre class="hl"><code class="language-ts"><span style="--shiki-light:[^"]+">const<\/span>/)
+    expect(html).toContain('&#x3C;script>')
+    expect(html).not.toContain('<script>')
+    expect(html).toContain('<pre><code class="language-nope">x')
+    expect(html).not.toContain('color:red')
+  })
+
+  it('highlights both sides of diff hunks line by line', async () => {
+    const line = (kind: ' ' | '-' | '+', text: string) => ({ kind, text, oldLine: null, newLine: null, noNewline: false })
+    const [hunk] = await highlightHunks([{ oldStart: 1, oldLines: 2, newStart: 1, newLines: 2, section: '', lines: [line(' ', 'let a = 1'), line('-', 'a = 2'), line('+', 'a = 3')] }], 'x.ts')
+    expect(hunk!.map((tokens) => tokens.map((token) => token.content).join(''))).toEqual(['let a = 1', 'a = 2', 'a = 3'])
+    expect(hunk![0]![0]!.style).toContain('--shiki-light')
   })
 })
 

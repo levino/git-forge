@@ -18,9 +18,11 @@ import Settings from '../../src/pages/settings.astro'
 import New from '../../src/pages/new.astro'
 import Import from '../../src/pages/[owner]/[repo]/import.astro'
 import Notifications from '../../src/pages/notifications.astro'
+import Search from '../../src/pages/search.astro'
+import Blame from '../../src/pages/[owner]/[repo]/blame/[...path].astro'
 import Releases from '../../src/pages/[owner]/[repo]/releases/index.astro'
 import ReleaseTag from '../../src/pages/[owner]/[repo]/releases/tag/[...tag].astro'
-import type { LoginPage, UserPrincipal } from '@git-forge/accounts'
+import { type LoginPage, sql, type UserPrincipal } from '@git-forge/accounts'
 import type { UiSession } from '../../src/app.ts'
 import { git, tempDir } from '../e2e/history.ts'
 import { bootstrap, call, type NodeForge, nodeForge } from '../support/node-forge.ts'
@@ -33,6 +35,7 @@ let container: AstroContainer
 let admin: Principal
 let head: string
 let first: string
+let adminToken: string
 
 const write = (root: string, path: string, content: string | Uint8Array) => {
   mkdirSync(dirname(join(root, path)), { recursive: true })
@@ -57,6 +60,7 @@ beforeAll(async () => {
   forge = await nodeForge({ scheduleImport: async () => {} })
   server = await startServer((request) => forge.fetch(request))
   const token = await bootstrap(forge, BASE, 'alice')
+  adminToken = token
   admin = (await forge.services.authenticate(new Request(BASE, { headers: { Authorization: `Bearer ${token}` } })))!
   for (const [name, visibility] of [
     ['site', 'public'],
@@ -180,7 +184,8 @@ describe('repository pages', () => {
     expect(status).toBe(200)
     expect(html).toContain('Fix the answer')
     expect(html).toContain('@@ -1 +1,2 @@')
-    expect(html).toContain('export const answer = 42')
+    expect(html).toMatch(/<span style="--shiki-light:[^"]+">export<\/span>/)
+    expect(html.replace(/<[^>]+>/g, '')).toContain('export const answer = 42')
     expect(html).toContain(`href="/alice/site/commit/${first}"`)
     expect((await render(Commit, '/alice/site/commit/abc', { owner: 'alice', repo: 'site', id: 'abc' })).status).toBe(404)
   })
@@ -193,6 +198,16 @@ describe('instance pages', () => {
     expect(anonymous.html).not.toContain('alice/secret')
     const owner = await render(Explore, '/explore', {}, admin)
     expect(owner.html).toContain('alice/secret')
+  })
+
+  it('lists from stored columns, sorted by last commit or name', async () => {
+    const rows = await forge.db.all<{ name: string; default_branch: string | null; last_commit_at: number | null }>(sql('SELECT name, default_branch, last_commit_at FROM repositories ORDER BY name'))
+    expect(rows.find((row) => row.name === 'site')).toMatchObject({ default_branch: 'main', last_commit_at: expect.any(Number) })
+    const order = (html: string) => [...html.matchAll(/href="\/alice\/(site|secret|empty)"/g)].map((match) => match[1])
+    expect(order((await render(Explore, '/explore', {}, admin)).html)).toEqual(['secret', 'site', 'empty'])
+    const byName = await render(Explore, '/explore?sort=name', {}, admin)
+    expect(order(byName.html)).toEqual(['empty', 'secret', 'site'])
+    expect(byName.html).toContain('href="?sort=name"')
   })
 
   it('shows the signed-in user their repositories on the home page', async () => {
@@ -493,5 +508,41 @@ describe('releases and notifications', () => {
     })
     expect(post.status).toBe(200)
     expect(done).toEqual([7])
+  })
+})
+
+describe('blame and search pages', () => {
+  it('blames every line of a file with bounded history', async () => {
+    const { status, html } = await render(Blame, '/alice/site/blame/main/src/main.ts', { owner: 'alice', repo: 'site', path: 'main/src/main.ts' })
+    expect(status).toBe(200)
+    expect(html).toContain('Fix the answer')
+    expect(html).toContain('href="#L2"')
+    expect(html).toContain('--shiki-light')
+    expect((await render(Blame, '/alice/site/blame/main/README.md', { owner: 'alice', repo: 'site', path: 'main/README.md' })).html).toContain('Initial commit')
+    expect((await render(Blame, '/alice/secret/blame/main/README.md', { owner: 'alice', repo: 'secret', path: 'main/README.md' })).status).toBe(404)
+    expect((await render(Blame, '/alice/site/blame/main/image.png', { owner: 'alice', repo: 'site', path: 'main/image.png' })).status).toBe(404)
+  })
+
+  it('searches repositories, issues and users without leaking private repositories', async () => {
+    for (const repo of ['site', 'secret']) {
+      expect((await call(forge, BASE, 'POST', `/api/v3/repos/alice/${repo}/issues`, adminToken, { title: `Zebra in ${repo}`, body: 'Stripes everywhere' })).status).toBe(201)
+    }
+    const titles = (html: string) => [...html.matchAll(/>\s*(Zebra in \w+)\s*</g)].map((match) => match[1]).sort()
+    expect(titles((await render(Search, '/search?q=zebra&type=issues', {})).html)).toEqual(['Zebra in site'])
+    expect(titles((await render(Search, '/search?q=stripes&type=issues', {}, admin)).html)).toEqual(['Zebra in secret', 'Zebra in site'])
+    expect((await render(Search, '/search?q=secret', {})).html).toContain('No repositories match.')
+    expect((await render(Search, '/search?q=secret', {}, admin)).html).toContain('href="/alice/secret"')
+    expect((await render(Search, '/search?q=ali&type=users', {})).html).toContain('href="/alice"')
+    const api = await call(forge, BASE, 'GET', '/api/v3/search/issues?q=zebra')
+    expect(api.status).toBe(200)
+    const body = (await api.json()) as { total_count: number; items: { title: string; html_url: string; user: { login: string } }[] }
+    expect(body).toMatchObject({ total_count: 1, items: [{ title: 'Zebra in site', html_url: 'https://forge.example/alice/site/issues/1', user: { login: 'alice' } }] })
+    const repos = (await (await call(forge, BASE, 'GET', '/api/search?type=repositories&q=s', adminToken)).json()) as { total_count: number }
+    expect(repos.total_count).toBe(2)
+    const listed = (await (await call(forge, BASE, 'GET', '/api/repos?sort=name')).json()) as { items: { full_name: string }[] }
+    const names = listed.items.map((item) => item.full_name)
+    expect(names).toEqual([...names].sort())
+    expect(names).toContain('alice/site')
+    expect(names).not.toContain('alice/secret')
   })
 })

@@ -6,7 +6,7 @@ import { bootstrap, call, nodeForge } from '../test/support/node-forge.ts'
 
 type Sample = { label: string; cpuMs: number; wallMs: number; requests: number; maxRequestCpuMs: number; peakMemoryMiB: number }
 
-const forge = nodeForge({ maxPushBytes: 64 * 1024 * 1024 })
+const forge = await nodeForge({ maxPushBytes: 64 * 1024 * 1024 })
 let current: Sample | null = null
 
 const server = createServer((incoming, outgoing) => {

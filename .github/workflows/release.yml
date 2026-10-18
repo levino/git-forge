@@ -1,0 +1,67 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag to create on the selected commit, e.g. v0.1.0
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  TAG: ${{ inputs.tag || github.ref_name }}
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run typecheck
+      - id: build
+        run: echo "sha256=$(sh release/build-release.sh "$RUNNER_TEMP/release")" >> "$GITHUB_OUTPUT"
+      - name: Publish release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA256: ${{ steps.build.outputs.sha256 }}
+        run: |
+          version=${TAG#v}
+          {
+            echo "Pin this release in your instance's \`git-forge.json\`:"
+            echo
+            echo '```json'
+            printf '{\n  "version": "%s",\n  "sha256": "%s"\n}\n' "$version" "$SHA256"
+            echo '```'
+            echo
+            echo '`sha256` is the SHA-256 of the `SHA256SUMS` asset, which lists the checksums of all other assets.'
+          } > "$RUNNER_TEMP/notes.md"
+          prerelease=""
+          case "$version" in *-*) prerelease="--prerelease" ;; esac
+          verify="--verify-tag"
+          [ "$GITHUB_EVENT_NAME" = workflow_dispatch ] && verify="--target $GITHUB_SHA"
+          gh release create "$TAG" \
+            "$RUNNER_TEMP/release/git-forge-worker.mjs" \
+            "$RUNNER_TEMP/release/migrations.tar.gz" \
+            "$RUNNER_TEMP/release/SHA256SUMS" \
+            $verify --title "$TAG" --notes-file "$RUNNER_TEMP/notes.md" $prerelease
+
+  sync-template:
+    needs: release
+    uses: ./.github/workflows/sync-instance-template.yml
+    with:
+      tag: ${{ inputs.tag || github.ref_name }}
+    secrets: inherit

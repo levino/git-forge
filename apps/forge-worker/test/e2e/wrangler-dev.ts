@@ -1,8 +1,11 @@
-import { type ChildProcess, spawn } from 'node:child_process'
+import { type ChildProcess, execFile, spawn } from 'node:child_process'
 import { mkdtempSync } from 'node:fs'
 import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
+import { promisify } from 'node:util'
+
+const run = promisify(execFile)
 
 export type WranglerDev = {
   readonly url: string
@@ -31,9 +34,15 @@ export type WranglerDevOptions = {
 export const startWranglerDev = async (options: WranglerDevOptions): Promise<WranglerDev> => {
   const port = options.port ?? (await freePort())
   const persist = mkdtempSync(join(tmpdir(), 'git-forge-wrangler-'))
+  const environment = { ...process.env, WRANGLER_SEND_METRICS: 'false', CI: '1', NO_COLOR: '1' }
+  const envArgs = options.env ? ['--env', options.env] : []
+  await run(join(appRoot, 'node_modules/.bin/wrangler'), ['d1', 'migrations', 'apply', 'DB', '--local', '--persist-to', persist, ...envArgs], {
+    cwd: appRoot,
+    env: environment,
+  })
   const args = [
     'dev',
-    ...(options.env ? ['--env', options.env] : []),
+    ...envArgs,
     '--inspector-port',
     String(await freePort()),
     '--ip',
@@ -49,7 +58,7 @@ export const startWranglerDev = async (options: WranglerDevOptions): Promise<Wra
   const child: ChildProcess = spawn(join(appRoot, 'node_modules/.bin/wrangler'), args, {
     cwd: appRoot,
     detached: true,
-    env: { ...process.env, WRANGLER_SEND_METRICS: 'false', CI: '1', NO_COLOR: '1' },
+    env: environment,
     stdio: ['ignore', 'pipe', 'pipe'],
   })
   let log = ''

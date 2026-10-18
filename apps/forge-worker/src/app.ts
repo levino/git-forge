@@ -1,20 +1,19 @@
 import {
   type AccountsStore,
   AccountsError,
-  applyMigrations,
   authenticateRequest,
   checkRepositoryAccess,
   createAccountsStore,
-  createGitAuthorizer,
+  createGitAccess,
   createInstanceVerifier,
   createJwksCache,
   type Database,
   type Decision,
+  handleBranchProtectionRequest,
   handleWellKnownRequest,
   isRole,
   isTokenScope,
   type JwksSource,
-  MIGRATIONS,
   normalizeIssuer,
   type Principal,
   type RepositorySubject,
@@ -25,6 +24,7 @@ import {
   createRepository,
   detachMirror,
   type FetchFunction,
+  handleContentRequest,
   handleGitRequest,
   isValidName,
   listMirrors,
@@ -131,16 +131,6 @@ export const createForge = (options: ForgeOptions): Forge => {
     allowInsecureHttp: options.allowInsecureFederation,
     ...(options.fetch ? { fetch: (input, init) => options.fetch!(new Request(input, init)) } : {}),
   })
-  let migrated: Promise<unknown> | undefined
-
-  const ready = async () => {
-    migrated ??= applyMigrations(db, MIGRATIONS).catch((error: unknown) => {
-      migrated = undefined
-      throw error
-    })
-    await migrated
-  }
-
   const issuerFor = (request: Request): string => options.publicUrl ?? normalizeIssuer(new URL(request.url).origin)
 
   const authenticateOptions = (request: Request) => ({
@@ -396,7 +386,9 @@ export const createForge = (options: ForgeOptions): Forge => {
   const handle = async (request: Request): Promise<Response> => {
     const wellKnown = options.instanceKey ? handleWellKnownRequest(request, { issuer: issuerFor(request), keys: [options.instanceKey.publicJwk] }) : null
     if (wellKnown) return wellKnown
-    await ready()
+    const authentication = authenticateOptions(request)
+    const protection = await handleBranchProtectionRequest(request, { store, verifyInstance: authentication.verifyInstance })
+    if (protection) return protection
     try {
       const api = await route(request)
       if (api) return api
@@ -405,9 +397,13 @@ export const createForge = (options: ForgeOptions): Forge => {
       if (error instanceof AccountsError) return json(400, { error: error.message })
       throw error
     }
+    const access = createGitAccess(authentication)
+    const content = await handleContentRequest(request, { storage, authorize: access.authorize })
+    if (content) return content
     const git = await handleGitRequest(request, {
       storage,
-      authorize: createGitAuthorizer(authenticateOptions(request)),
+      authorize: access.authorize,
+      pushPolicy: access.pushPolicy,
       maxRequestBytes: options.maxPushBytes,
       lfs: { maxObjectBytes: options.maxLfsObjectBytes },
     })
@@ -416,9 +412,6 @@ export const createForge = (options: ForgeOptions): Forge => {
 
   return {
     fetch: handle,
-    scheduled: async (at = now()) => {
-      await ready()
-      return syncDueMirrors(mirrorContext(options.publicUrl), at, options.mirrorIntervalMinutes)
-    },
+    scheduled: (at = now()) => syncDueMirrors(mirrorContext(options.publicUrl), at, options.mirrorIntervalMinutes),
   }
 }

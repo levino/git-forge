@@ -3,6 +3,7 @@ import { defineConfig } from 'vitest/config'
 
 const SIMULATOR_NOISE = [
   /^uncaught exception; source = Uncaught \(in promise\); stack = Error: Network connection lost\.$/,
+  /^uncaught exception; source = Uncaught \(in promise\); stack = TypeError: Can't read from request stream because client disconnected\.$/,
   /^exception = kj\/async-io\.c\+\+:\d+: disconnected: fixed-length pipe ended prematurely$/,
   /^stack: (\S+workerd@[0-9a-f]+ ?)+$/,
 ]

@@ -56,14 +56,14 @@ the pointer. Nothing else is written; there are no marker or staging keys.
 
 ## Uploads
 
-**With presigning** (`Storage.presignPut` implemented, e.g. S3/R2): the batch
+**With presigning** (`Storage.presignPut` implemented: `S3Storage`, also for R2 through its S3 API): the batch
 response hands out a presigned `PUT` for the final key. The adapter must bind
 the URL to the declared size and SHA-256 (e.g. `Content-Length` plus
 `x-amz-checksum-sha256`), so the bucket itself refuses wrong content. Because
 the forge did not see the bytes, `verify` re-reads the object and hashes it
 before answering `200`.
 
-**Without presigning** (`MemoryStorage`, file system): the upload goes to
+**Without presigning** (`MemoryStorage`, `FsStorage`, `R2Storage`): the upload goes to
 `PUT .../info/lfs/objects/{oid}` and is streamed into `Storage.put` for the
 final key through a `TransformStream` that counts and hashes the bytes. If the
 body is longer than `Content-Length`, shorter, or hashes to something other
@@ -72,9 +72,10 @@ than the oid, the stream errors before it ends and the upload answers `422`.
 
 Why no staging key: the storage is append-only, so a staging copy could never
 be removed and every object would be stored twice. Instead this relies on one
-contract for `Storage.put`, which S3, R2 and `MemoryStorage` already fulfil and
-which every other adapter must fulfil (file system: write to a temporary file,
-rename on success):
+contract for `Storage.put`, which every adapter fulfils and the shared
+conformance suite (`test/storage-conformance.ts`) checks (S3 and R2 withhold
+the last byte via `exactLength`, `FsStorage` writes to a temporary file and
+renames on success):
 
 > `put` is atomic. If the body stream errors, nothing is stored under the key.
 

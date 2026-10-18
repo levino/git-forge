@@ -1,0 +1,23 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended"],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Pinned git-forge release in git-forge.json",
+      "managerFilePatterns": ["/^git-forge\\.json$/"],
+      "matchStrings": ["\"version\"\\s*:\\s*\"(?<currentValue>[^\"]+)\""],
+      "depNameTemplate": "levino/git-forge",
+      "datasourceTemplate": "github-releases",
+      "extractVersionTemplate": "^v(?<version>.+)$",
+      "versioningTemplate": "semver"
+    }
+  ],
+  "packageRules": [
+    {
+      "matchDepNames": ["levino/git-forge"],
+      "automerge": false,
+      "commitMessageTopic": "git-forge"
+    }
+  ]
+}

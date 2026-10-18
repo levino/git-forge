@@ -54,8 +54,8 @@ describe('settings', () => {
 
 describe('bootstrap and admin API', () => {
   it('bootstraps the first admin exactly once', async () => {
-    expect((await call(nodeForge({ bootstrapToken: undefined }), BASE, 'POST', '/api/bootstrap', 'x', { login: 'root' })).status).toBe(503)
-    const forge = nodeForge()
+    expect((await call(await nodeForge({ bootstrapToken: undefined }), BASE, 'POST', '/api/bootstrap', 'x', { login: 'root' })).status).toBe(503)
+    const forge = await nodeForge()
     expect((await call(forge, BASE, 'POST', '/api/bootstrap', 'wrong', { login: 'root' })).status).toBe(401)
     expect((await call(forge, BASE, 'POST', '/api/bootstrap', BOOTSTRAP_TOKEN, { login: 'bad login' })).status).toBe(400)
     const created = await call(forge, BASE, 'POST', '/api/bootstrap', BOOTSTRAP_TOKEN, { login: 'root' })
@@ -66,7 +66,7 @@ describe('bootstrap and admin API', () => {
   })
 
   it('lets only instance admins create users and tokens', async () => {
-    const forge = nodeForge()
+    const forge = await nodeForge()
     const admin = await bootstrap(forge, BASE)
     expect((await call(forge, BASE, 'POST', '/api/admin/users', undefined, { login: 'alice' })).status).toBe(401)
     expect((await call(forge, BASE, 'POST', '/api/admin/users', admin, { login: 'alice' })).status).toBe(201)
@@ -88,7 +88,7 @@ describe('repositories with accounts', () => {
   let bob: string
 
   beforeAll(async () => {
-    forge = nodeForge({ maxLfsObjectBytes: 10 })
+    forge = await nodeForge({ maxLfsObjectBytes: 10 })
     admin = await bootstrap(forge, BASE)
     for (const login of ['alice', 'bob']) await call(forge, BASE, 'POST', '/api/admin/users', admin, { login })
     const token = async (login: string, scopes: string[]) =>
@@ -148,6 +148,29 @@ describe('repositories with accounts', () => {
     expect(put.status).toBe(413)
   })
 
+  it('lets a read-only token read but not push, for example for a CDN pull zone', async () => {
+    const reader = (await json<{ token: string }>(await call(forge, BASE, 'POST', '/api/admin/users/bob/tokens', admin, { scopes: ['repo:read'] }))).token
+    expect((await advertise(forge, 'bob/tools', 'git-upload-pack', basic(reader))).status).toBe(200)
+    expect((await advertise(forge, 'bob/tools', 'git-receive-pack', basic(reader))).status).toBe(403)
+    const media = (authorization?: string) =>
+      forge.fetch(new Request(`${BASE}/bob/tools/media/${'0'.repeat(64)}`, authorization ? { headers: { Authorization: authorization } } : {}))
+    expect((await media()).status).toBe(401)
+    expect((await media(`Bearer ${aliceRead}`)).status).toBe(404)
+    const missing = await media(`Bearer ${reader}`)
+    expect(missing.status).toBe(404)
+    expect(await missing.text()).toBe('object does not exist\n')
+    const raw = await forge.fetch(new Request(`${BASE}/bob/tools/raw/main/README.md`, { headers: { Authorization: `Bearer ${reader}` } }))
+    expect(raw.status).toBe(404)
+    expect(await raw.text()).toBe('unknown ref\n')
+  })
+
+  it('serves the branch protection API to repository admins', async () => {
+    const path = '/api/repos/alice/notes/branches/main/protection'
+    expect((await call(forge, BASE, 'PUT', path, bob, { allow_force_pushes: false })).status).toBe(403)
+    expect((await call(forge, BASE, 'PUT', path, alice, { allow_force_pushes: false })).status).toBe(200)
+    expect((await call(forge, BASE, 'GET', '/api/repos/alice/notes/branch-protection', alice)).status).toBe(200)
+  })
+
   it('answers health checks and unknown paths', async () => {
     expect((await call(forge, BASE, 'GET', '/api/health')).status).toBe(200)
     expect((await call(forge, BASE, 'GET', '/alice/notes/blob/main')).status).toBe(404)
@@ -171,8 +194,8 @@ describe('federation between two instances', () => {
     upstreamServer = await startServer((request) => upstreamHandler(request))
     downstreamServer = await startServer((request) => downstreamHandler(request))
     downstreamKey = (await generateSigningKey()).key
-    upstream = nodeForge({ publicUrl: upstreamServer.url, allowInsecureFederation: true })
-    downstream = nodeForge({ publicUrl: downstreamServer.url, instanceKey: downstreamKey, allowInsecureFederation: true })
+    upstream = await nodeForge({ publicUrl: upstreamServer.url, allowInsecureFederation: true })
+    downstream = await nodeForge({ publicUrl: downstreamServer.url, instanceKey: downstreamKey, allowInsecureFederation: true })
     upstreamHandler = upstream.fetch
     downstreamHandler = downstream.fetch
     upstreamAdmin = await bootstrap(upstream, upstreamServer.url)
@@ -232,20 +255,19 @@ describe('federation between two instances', () => {
 })
 
 describe('deployment configuration', () => {
-  it('keeps the root wrangler config for the Deploy to Cloudflare button in sync with the app config', async () => {
+  it('gives every wrangler environment its own Worker, bucket and database with the same vars and migrations', async () => {
     const { readFileSync } = await import('node:fs')
-    const read = (path: string) => JSON.parse(readFileSync(new URL(path, import.meta.url), 'utf8')) as Record<string, unknown>
-    const { env, main, ...app } = read('../../wrangler.jsonc')
-    const { main: rootMain, ...root } = read('../../../../wrangler.jsonc')
-    expect(main).toBe('src/index.ts')
-    expect(rootMain).toBe('apps/forge-worker/src/index.ts')
-    expect(root).toEqual(app)
-    expect(Object.keys(env as object)).toEqual(['alpha', 'beta', 'gamma'])
-    for (const [name, config] of Object.entries(env as Record<string, Record<string, unknown>>)) {
+    const { env, ...app } = JSON.parse(readFileSync(new URL('../../wrangler.jsonc', import.meta.url), 'utf8')) as Record<string, unknown> & {
+      env: Record<string, Record<string, unknown>>
+    }
+    const migrations = '../../packages/accounts/migrations'
+    expect(app.d1_databases).toEqual([{ binding: 'DB', database_name: 'git-forge', migrations_dir: migrations }])
+    expect(Object.keys(env)).toEqual(['alpha', 'beta', 'gamma'])
+    for (const [name, config] of Object.entries(env)) {
       expect(config).toEqual({
         name: `git-forge-${name}`,
         r2_buckets: [{ binding: 'BUCKET', bucket_name: `git-forge-${name}` }],
-        d1_databases: [{ binding: 'DB', database_name: `git-forge-${name}` }],
+        d1_databases: [{ binding: 'DB', database_name: `git-forge-${name}`, migrations_dir: migrations }],
         vars: app.vars,
       })
     }

@@ -8,26 +8,9 @@
   "scripts": {
     "typecheck": "pnpm -r run typecheck",
     "test": "pnpm -r --workspace-concurrency=1 run test",
-    "check": "pnpm run typecheck && pnpm run test",
-    "deploy": "wrangler deploy"
+    "check": "pnpm run typecheck && pnpm run test"
   },
   "engines": {
     "node": ">=22.12.0"
-  },
-  "devDependencies": {
-    "wrangler": "4.151.1"
-  },
-  "cloudflare": {
-    "bindings": {
-      "BOOTSTRAP_TOKEN": {
-        "description": "Long random secret that allows exactly one call of `POST /api/bootstrap`, which creates the first instance admin and returns a personal access token. Generate it with `openssl rand -base64 32`."
-      },
-      "INSTANCE_KEY": {
-        "description": "Optional. Ed25519 private JWK of this instance, needed only to mirror private repositories from other instances. Generate it with `pnpm --filter forge-worker instance-key`."
-      },
-      "PUBLIC_URL": {
-        "description": "Optional. Base URL of this instance (e.g. `https://git-forge.<account>.workers.dev`); used as its federation issuer and required for scheduled mirror sync with instance tokens."
-      }
-    }
   }
 }

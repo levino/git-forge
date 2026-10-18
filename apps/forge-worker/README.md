@@ -16,7 +16,7 @@ tests and the benchmark.
 | Name | Kind | Purpose |
 |---|---|---|
 | `BUCKET` | R2 binding | Repository data in the bucket layout of `docs/design.md` (`repos/<owner>/<name>/…`). |
-| `DB` | D1 binding | Accounts, tokens, repository roles, instance trust, audit log (`@git-forge/accounts`). Migrations are applied by the Worker itself on first use. |
+| `DB` | D1 binding | Accounts, tokens, repository roles, branch protection, instance trust, audit log (`@git-forge/accounts`). Migrations come from `packages/accounts/migrations` (`migrations_dir`) and are applied with `wrangler d1 migrations apply`. |
 | Cron `*/30 * * * *` | trigger | Syncs every due mirror with `mode: "auto"`. |
 | `BOOTSTRAP_TOKEN` | secret | Allows exactly one successful `POST /api/bootstrap`, which creates the first instance admin. |
 | `INSTANCE_KEY` | secret, optional | Ed25519 private JWK of this instance. Needed to mirror private repositories from other instances; also publishes `/.well-known/openid-configuration` and `/.well-known/jwks.json`. Generate with `pnpm --filter forge-worker instance-key`. |
@@ -61,24 +61,61 @@ There is no global "public read" switch any more.
 
 Instance admins count as admins of every repository.
 
+Branch protection rules use the GitHub-style API of `@git-forge/accounts`
+(`GET /api/repos/{owner}/{name}/branch-protection`,
+`GET|PUT|DELETE /api/repos/{owner}/{name}/branches/{pattern}/protection`) and
+are enforced on every push.
+
+## Media and raw URLs
+
+- `GET|HEAD /<owner>/<name>/media/<oid>[/<filename>]` serves an LFS object by
+  its SHA-256 oid, immutable and with Range support (authorized as LFS read).
+- `GET|HEAD /<owner>/<name>/raw/<ref>/<path>` serves a file from a branch, tag,
+  `HEAD` or full commit id; LFS pointers redirect to the media URL (authorized
+  as Git read). Details in `docs/design.md` §7.
+
+### Putting a CDN in front (e.g. Bunny)
+
+The media and raw URLs are made for a pull-zone CDN; it fetches from the
+Worker on a cache miss, nothing is uploaded.
+
+1. Create a pull zone with the Worker URL (or its custom domain) as origin.
+2. Leave caching to the origin headers: media URLs and raw URLs with a full
+   commit id are `immutable` for a year, raw URLs on branches and tags are
+   cached for 60 seconds. Query strings are not used, so the cache may ignore
+   them.
+3. For private repositories, create a user for the CDN (`POST
+   /api/admin/users`), give it the `read` role on the repositories
+   (`PUT /api/repos/{owner}/{name}/collaborators/{login}`), issue it a token
+   with the scope `repo:read`, and let the pull zone send it with every origin
+   request. In Bunny add an Edge Rule with the action "Set Request Header"
+   (applied to origin requests) `Authorization: Bearer <token>`. The token can
+   read but cannot push. Whatever the CDN has cached is readable by anyone who
+   can reach the pull zone, so protect the pull zone itself (Bunny token
+   authentication) unless the content is meant to be public.
+
+Then `https://<zone>.b-cdn.net/acme/site/raw/main/photos/a.jpg` redirects to
+`https://<zone>.b-cdn.net/acme/site/media/<oid>/a.jpg`, which the CDN keeps.
+
 ## Deploying to Cloudflare
 
-[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/levino/git-forge)
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/levino/git-forge-instance)
 
-The button points at the repository root: Cloudflare requires a Worker in a
-subdirectory to be fully self-contained, and this one uses the workspace
-packages. The root `wrangler.jsonc` is the default configuration of this
-directory with `main` pointing here (a unit test keeps both in sync), the
-root `package.json` describes the secrets, and `.dev.vars.example` makes the
-setup page ask for `BOOTSTRAP_TOKEN`. The R2 bucket and the D1 database are
-created during deployment from the binding names; no IDs need to be filled
-in.
+New instances are deployed from the
+[instance template](../../templates/instance): the button copies it (as
+`levino/git-forge-instance`), connects Workers Builds, asks for
+`BOOTSTRAP_TOKEN` and creates the R2 bucket and the D1 database from its
+`wrangler.jsonc`. The template deploys a pinned, checksummed release bundle of
+this Worker and applies the D1 migrations before every upload
+(`docs/design.md` §15). A button pointing at this directory would not work:
+Cloudflare requires a subdirectory to be self-contained, and this Worker
+builds from the workspace packages.
 
 A Workers **Paid** plan is required: the Free plan allows 10 ms of CPU per
 request, which is not enough to index even a small push (see the measurements
 below), and `limits.cpu_ms` cannot be set on it.
 
-By hand:
+From a checkout of this repository (for development instances):
 
 ```sh
 pnpm install
@@ -86,9 +123,13 @@ cd apps/forge-worker
 npx wrangler login
 openssl rand -base64 32 | npx wrangler secret put BOOTSTRAP_TOKEN
 npx wrangler deploy
+npx wrangler d1 migrations apply DB --remote
 ```
 
-`wrangler deploy` creates the bucket and database on first deployment.
+The first `wrangler deploy` creates the bucket and the database from the
+binding names; no IDs need to be filled in. Later deployments apply new
+migrations first (`wrangler d1 migrations apply DB --remote`, then
+`wrangler deploy`). The Worker never migrates the database itself.
 
 ### First admin
 
@@ -137,6 +178,8 @@ federation, locally or on one account:
 
 ```sh
 npx wrangler deploy --env alpha
+npx wrangler d1 migrations apply DB --remote --env alpha
+npx wrangler d1 migrations apply DB --local --env beta
 npx wrangler dev --env beta --port 8788
 ```
 
@@ -146,6 +189,7 @@ Each needs its own `BOOTSTRAP_TOKEN`, `INSTANCE_KEY` and `PUBLIC_URL`.
 
 ```sh
 cp .dev.vars.example .dev.vars
+npx wrangler d1 migrations apply DB --local
 pnpm --filter forge-worker dev
 ```
 
@@ -154,13 +198,15 @@ database (Miniflare), persisted under `.wrangler/`. `.dev.vars` is gitignored.
 
 ## Tests
 
-- `pnpm --filter forge-worker test` runs the unit tests and then both
-  end-to-end suites.
+- `pnpm --filter forge-worker test` runs the unit tests and then the
+  end-to-end suites (about 25 seconds, part of the root `pnpm test`). Each
+  `wrangler dev` start applies the D1 migrations with
+  `wrangler d1 migrations apply --local` first, as a deployment does.
 - Unit tests (`test/unit`) run the app in Node with `MemoryStorage` and
-  `node:sqlite`: settings, bootstrap, admin API, PAT authorization, private
+  `node:sqlite`: settings, media/raw authorization, branch protection API, bootstrap, admin API, PAT authorization, private
   defaults, visibility and collaborators, the LFS size limit, federation and
   scheduled sync between two in-process instances over real HTTP, and the
-  consistency of both wrangler configs.
+  shape of the wrangler environments.
 - `test/e2e/forge.e2e.test.ts` starts `wrangler dev` with a fresh local R2
   bucket and D1 database, bootstraps an admin, creates repositories, pushes a
   generated history of 120 commits with the real `git` client, clones it with
@@ -177,6 +223,10 @@ database (Miniflare), persisted under `.wrangler/`. `.dev.vars` is gitignored.
   force push on alpha must be archived on alpha, beta and gamma, raise a
   `history-rewritten` alarm on both mirrors, and bring its new LFS object down
   the chain. All syncs on beta and gamma run from the Cron Trigger.
+- `test/e2e/media.e2e.test.ts` starts an instance, issues a `repo:read`
+  token, uploads a JPEG to a private repository with the real `git lfs push`
+  and reads it back through the media and raw URLs (headers, Range, HEAD,
+  `304`, redirect).
 - `pnpm --filter forge-worker bench` measures CPU time and memory per
   operation (below).
 

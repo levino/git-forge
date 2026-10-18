@@ -1,3 +1,4 @@
+import { applyMigrations, MIGRATIONS } from '@git-forge/accounts'
 import { openSqliteDatabase } from '@git-forge/accounts-node'
 import { MemoryStorage } from '@git-forge/core'
 import { createForge, type Forge, type ForgeOptions } from '../../src/app.ts'
@@ -7,11 +8,13 @@ export const BOOTSTRAP_TOKEN = 'bootstrap-secret'
 
 export type NodeForge = Forge & { readonly storage: MemoryStorage }
 
-export const nodeForge = (overrides: Partial<ForgeOptions> = {}): NodeForge => {
+export const nodeForge = async (overrides: Partial<ForgeOptions> = {}): Promise<NodeForge> => {
   const storage = new MemoryStorage()
+  const { db } = openSqliteDatabase()
+  await applyMigrations(db, MIGRATIONS)
   const forge = createForge({
     storage,
-    db: openSqliteDatabase().db,
+    db,
     publicUrl: undefined,
     instanceKey: undefined,
     bootstrapToken: BOOTSTRAP_TOKEN,

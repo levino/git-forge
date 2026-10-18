@@ -26,7 +26,7 @@ const tables = (db: Database) => db.all<{ name: string }>(sql("SELECT name FROM 
 describe('migrations on node:sqlite', () => {
   it('creates the schema once and is idempotent', async () => {
     const { db } = openSqliteDatabase()
-    expect(await applyMigrations(db, MIGRATIONS)).toEqual(['0001_initial', '0002_branch_protection', '0003_instance_admins', '0004_actions'])
+    expect(await applyMigrations(db, MIGRATIONS)).toEqual(['0001_initial', '0002_branch_protection', '0003_instance_admins', '0004_mirror_subscriptions', '0005_actions'])
     expect(await applyMigrations(db, MIGRATIONS)).toEqual([])
     expect((await tables(db)).map((row) => row.name)).toEqual(
       expect.arrayContaining([
@@ -244,6 +244,24 @@ describe('accounts store', () => {
     expect((await store.listRepositories()).map((repo) => repo.name)).toEqual(['archive', 'site'])
   })
 
+  it('stores mirror subscriptions only for trusted instances', async () => {
+    const { store } = await fresh()
+    const subscription = { issuer: 'https://beta.example/', repository: 'Village/Archive', callback: 'https://beta.example/api/federation/notify/b/a/origin' }
+    await expect(store.subscribeMirror(subscription)).rejects.toThrow()
+    await store.trustInstance({ issuer: 'https://beta.example' })
+    await store.subscribeMirror(subscription)
+    await store.subscribeMirror(subscription)
+    const expected = { issuer: 'https://beta.example', repository: 'village/archive', callback: subscription.callback }
+    expect(await store.mirrorSubscriptions('village/ARCHIVE')).toEqual([expected])
+    await store.distrustInstance('https://beta.example')
+    expect(await store.mirrorSubscriptions('village/archive')).toEqual([])
+    await store.trustInstance({ issuer: 'https://beta.example' })
+    expect(await store.unsubscribeMirror(subscription)).toBe(true)
+    expect(await store.unsubscribeMirror(subscription)).toBe(false)
+    expect(await store.mirrorSubscriptions('village/archive')).toEqual([])
+    expect((await store.auditLog()).map((entry) => entry.action)).toEqual(expect.arrayContaining(['mirror.subscribe', 'mirror.unsubscribe']))
+  })
+
   it('writes every change and its audit entry atomically', async () => {
     const { store } = await fresh()
     const { archive, alice } = await seed(store)
@@ -295,7 +313,7 @@ describe('D1 adapter', () => {
     const handle = new DatabaseSync(':memory:')
     handle.exec('PRAGMA foreign_keys = ON')
     const db = d1Database(fakeD1(handle))
-    expect(await applyMigrations(db, MIGRATIONS)).toEqual(['0001_initial', '0002_branch_protection', '0003_instance_admins', '0004_actions'])
+    expect(await applyMigrations(db, MIGRATIONS)).toEqual(['0001_initial', '0002_branch_protection', '0003_instance_admins', '0004_mirror_subscriptions', '0005_actions'])
     const store = createAccountsStore(db)
     const { alice } = await seed(store)
     const { token } = await store.createPersonalAccessToken(alice.id, { name: 'd1', scopes: ['repo:admin'], expiresAt: null })

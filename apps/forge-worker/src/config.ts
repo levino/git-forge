@@ -11,6 +11,7 @@ export type ForgeVars = {
   readonly ACTIONS?: string
   readonly ACTIONS_INSTANCE_ID?: string
   readonly ACTIONS_SECRETS?: string
+  readonly MIRROR_DEEP_CHECK_DAYS?: string
 }
 
 export type ForgeSettings = {
@@ -21,6 +22,7 @@ export type ForgeSettings = {
   readonly maxLfsObjectBytes: number
   readonly mirrorIntervalMinutes: number
   readonly allowInsecureFederation: boolean
+  readonly deepCheckDays: number
 }
 
 export type ActionsSettings = {
@@ -52,6 +54,8 @@ export const DEFAULT_MAX_PUSH_BYTES = 16 * 1024 * 1024
 export const DEFAULT_MAX_LFS_OBJECT_BYTES = 100 * 1024 * 1024
 
 export const DEFAULT_MIRROR_INTERVAL_MINUTES = 30
+
+export const DEFAULT_DEEP_CHECK_DAYS = 30
 
 export class ConfigurationError extends Error {}
 
@@ -89,6 +93,7 @@ export const parseSettings = async (vars: ForgeVars): Promise<ForgeSettings> => 
     maxLfsObjectBytes: positiveInteger(vars.MAX_LFS_OBJECT_BYTES, DEFAULT_MAX_LFS_OBJECT_BYTES),
     mirrorIntervalMinutes: positiveInteger(vars.MIRROR_INTERVAL_MINUTES, DEFAULT_MIRROR_INTERVAL_MINUTES, true),
     allowInsecureFederation: vars.ALLOW_INSECURE_FEDERATION === 'true',
+    deepCheckDays: positiveInteger(vars.MIRROR_DEEP_CHECK_DAYS, DEFAULT_DEEP_CHECK_DAYS, true),
   }
 }
 

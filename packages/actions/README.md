@@ -25,7 +25,7 @@ handleGitRequest(request, { storage, onPush: (repo, outcome) => queueRunsForPush
 ```
 
 Both handlers return `null` for paths they do not own. The tables are part of
-the D1 schema in `packages/accounts/migrations` (`0004_actions.sql`), applied
+the D1 schema in `packages/accounts/migrations` (`0005_actions.sql`), applied
 by `wrangler d1 migrations apply` (tests: `applyMigrations(db, MIGRATIONS)`).
 
 ## Adapters

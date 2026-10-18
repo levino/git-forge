@@ -327,7 +327,7 @@ describe('import endpoint', () => {
 })
 
 describe('deployment configuration', () => {
-  it('gives every wrangler environment its own Worker, bucket and database with the same vars, migrations and runner container', async () => {
+  it('gives every wrangler environment its own Worker, bucket, database, job queue and runner container with the same vars and migrations', async () => {
     const { readFileSync } = await import('node:fs')
     const { env, ...app } = JSON.parse(readFileSync(new URL('../../wrangler.jsonc', import.meta.url), 'utf8')) as Record<string, unknown> & {
       env: Record<string, Record<string, unknown>>
@@ -335,14 +335,22 @@ describe('deployment configuration', () => {
     const migrations = '../../packages/accounts/migrations'
     expect(app.d1_databases).toEqual([{ binding: 'DB', database_name: 'git-forge', migrations_dir: migrations }])
     expect(app.secrets).toEqual({ required: ['BOOTSTRAP_TOKEN'] })
+    const queues = (prefix: string) => ({
+      producers: [
+        { binding: 'IMPORTS', queue: `${prefix}-imports` },
+        { binding: 'JOBS', queue: `${prefix}-jobs` },
+      ],
+      consumers: [
+        { queue: `${prefix}-imports`, max_batch_size: 1, max_batch_timeout: 1, max_retries: 3 },
+        { queue: `${prefix}-jobs`, max_batch_size: 1, max_batch_timeout: 1, max_retries: 10 },
+      ],
+    })
+    expect(app.queues).toEqual(queues('git-forge'))
     expect(Object.keys(env)).toEqual(['alpha', 'beta', 'gamma'])
     for (const [name, config] of Object.entries(env)) {
       expect(config).toEqual({
         name: `git-forge-${name}`,
-        queues: {
-          producers: [{ binding: 'IMPORTS', queue: `git-forge-${name}-imports` }],
-          consumers: [{ queue: `git-forge-${name}-imports`, max_batch_size: 1, max_batch_timeout: 1, max_retries: 3 }],
-        },
+        queues: queues(`git-forge-${name}`),
         r2_buckets: [{ binding: 'BUCKET', bucket_name: `git-forge-${name}` }],
         d1_databases: [{ binding: 'DB', database_name: `git-forge-${name}`, migrations_dir: migrations }],
         vars: app.vars,

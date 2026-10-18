@@ -28,6 +28,7 @@ tests and the benchmark.
 | `MAX_PUSH_BYTES` | var | Largest accepted push request, default 16 MiB. Larger files belong in Git LFS. |
 | `MAX_LFS_OBJECT_BYTES` | var | Largest accepted LFS object, default 100 MiB (Cloudflare's request body limit on the Free and Pro plans). Larger objects get a per-object error in the batch API and `413` on `PUT`. |
 | `MIRROR_INTERVAL_MINUTES` | var | Minimum time between two scheduled syncs of a mirror, default 30; `wrangler.jsonc` sets 1440 (daily) because notifications carry the real-time updates; `0` syncs on every cron tick. |
+| `MIRROR_UNIT_BYTES` | var | `0` (default): a mirror sync copies all new packs and LFS objects in one job. Otherwise a byte budget per invocation: one job per pack and per LFS object, a final job moves the refs, units above the budget stay pending (`docs/design.md` §12). For a mirror on the Workers Free plan. |
 | `MIRROR_DEEP_CHECK_DAYS` | var | Every how many days a mirror gets the full re-verification (re-hash every object, recompute every index), default 30, `0` = only on demand. |
 | `ALLOW_INSECURE_FEDERATION` | var | `true` lets the instance fetch other instances' JWKS over plain HTTP. Only for local tests. |
 | `ACTIONS` | var | `true` (default in every environment): CI is on. Pushes queue workflow runs, `/_services/actions` (Actions service for `actions/runner`) and `/api/v3` (GHES-style runner, run and job API, repository admins) are served. The CI tables come from `packages/accounts/migrations/0005_actions.sql`. |
@@ -180,7 +181,11 @@ the mirror's URL (`POST /api/admin/instances`), and a repository admin grants
 it the repository (`POST /api/repos/{owner}/{name}/instances`). The mirror then
 configures `POST /api/repos/{owner}/{name}/mirrors` with
 `{"url": "https://upstream.example/owner/name.git", "auth": "instance"}`.
-Upstream refs land under `refs/upstream/origin/*`. To mirror a mirror, use
+Upstream refs land under `refs/upstream/origin/*`; clients additionally see
+them as `refs/heads/*` and `refs/tags/*` with `HEAD` on the upstream default
+branch, so a plain `git clone` of the mirror checks out what the upstream
+would (own branches pushed to the mirror take precedence, detach turns the
+view into real branches; `docs/design.md` §4). To mirror a mirror, use
 `"namespace": "upstream/origin/"`. For push notifications the mirror must
 also trust the upstream (`POST /api/admin/instances` on the mirror), because
 it verifies the upstream's signature; the subscription itself is made by the
@@ -375,47 +380,58 @@ Conclusions for the configuration:
 `pnpm --filter forge-worker bench:mirror` runs an upstream instance in a
 child process and a mirror in the measuring process (`createForge` with
 SQLite, the in-memory job queue and an in-memory bucket that, like R2, spends
-no JavaScript CPU on ETags). It pushes generated histories to the upstream
-with the real `git` client and records, for every invocation on the mirror,
-process CPU time, storage operations and outbound fetches. Each push leads to
-one notification request, one copy-only sync job and one delivery job to a
-subscriber of the mirror. The "replay" rows repeat the notification
-handling, the sync job and the delivery in process against a snapshot of the
-mirror's bucket and the recorded upstream responses. They exclude Node's
-JavaScript HTTP client and server (workerd's `fetch` is native) and SQLite
-(D1 is remote I/O, not CPU) and are the better estimate for the Worker; the
-live rows are upper bounds. Median and range of three runs on the
-development container, Node 22.22:
+no JavaScript CPU on ETags or on joining chunks). It pushes generated
+histories to the upstream with the real `git` client and records, for every
+invocation on the mirror, process CPU time, storage operations and outbound
+fetches. Each push leads to one notification request, one copy-only sync job
+and one delivery job to a subscriber of the mirror. The "replay" rows repeat
+the notification handling, the sync job and the delivery in process against
+a snapshot of the mirror's bucket and the recorded upstream responses. They
+exclude Node's JavaScript HTTP client and server (workerd's `fetch` is
+native) and SQLite (D1 is remote I/O, not CPU) and are the better estimate
+for the Worker; the live rows are upper bounds. The sync job is replayed
+twice: with the JavaScript hashes and with a native streaming hash
+(`node:crypto` in the benchmark, standing in for `crypto.DigestStream`,
+which the Worker uses). Median and range of three runs on the development
+container, Node 22.22:
 
 | scenario | invocation | CPU ms, median | range | storage ops | fetches |
 |---|---|---|---|---|---|
-| small repo, initial push (120 commits, 1047 objects, 0.9 MiB pack) | notification request | 6.8 | 6.6–7.1 | 3 | 2 (JWKS, cold) |
-| | sync job | 33.7 | 31.7–37.0 | 23 | 5 |
-| | delivery job | 3.6 | 3.2–3.9 | 1 | 1 |
-| | replay: notification handler | 1.7 | 1.6–1.8 | | |
-| | replay: copy-only sync job | 21.8 | 20.1–27.1 | | 5 |
-| | replay: delivery job | 0.9 | 0.8–1.0 | | 1 |
-| small repo, incremental push (1 commit, 2 files), 3 pushes | notification request | 4.5–4.6 | 4.1–6.1 | 3 | 0 |
-| | sync job | 8.7–14.0 | 7.9–16.8 | 24–26 | 5 |
-| | delivery job | 1.7–2.0 | 1.5–6.2 | 1 | 1 |
-| | replay: notification handler | 1.4–2.1 | 1.3–2.2 | | |
-| | replay: copy-only sync job | 4.6–5.4 | 3.6–5.8 | | 5 |
-| | replay: delivery job | 0.6–0.7 | 0.6–0.7 | | 1 |
-| medium repo, initial push (500 commits, 4382 objects, 14.1 MiB pack) | notification request | 3.6 | 3.5–3.6 | 3 | 0 |
-| | sync job | 210.0 | 196.0–237.3 | 22 | 5 |
-| | replay: copy-only sync job | 156.9 | 138.0–165.3 | | 5 |
-| medium repo, incremental push (1 commit, 2 files), 3 pushes | notification request | 6.4–10.0 | 6.3–12.9 | 3 | 0 |
-| | sync job | 8.9–13.3 | 8.1–17.1 | 23–25 | 5 |
-| | replay: notification handler | 1.3–1.5 | 1.2–2.0 | | |
-| | replay: copy-only sync job | 4.1–5.6 | 3.3–6.1 | | 5 |
-| | replay: delivery job | 0.6–3.1 | 0.5–3.5 | | 1 |
-| for comparison: re-indexing sync (fetch strategy, protocol v2) into an empty mirror | small / medium | 195 / 858 | | | |
-| deep check | small / medium | 606 / 2 624 | | | |
-| hashing in JavaScript (`@noble/hashes`) | SHA-1 / SHA-256 per MiB | 6.3 / 7.7 | 6.2–10.4 | | |
-| hashing natively (WebCrypto) | SHA-1 / SHA-256 per MiB | 1.8 / 1.3 | 1.1–1.8 | | |
+| small repo, initial push (120 commits, 1047 objects, 0.9 MiB pack) | notification request | 8.6 | 8.1–10.4 | 3 | 2 (JWKS, cold) |
+| | sync job | 38.6 | 32.4–42.0 | 23 | 5 |
+| | delivery job | 3.1 | 3.0–5.0 | 1 | 1 |
+| | replay: notification handler | 1.7 | 1.4–1.8 | | |
+| | replay: copy-only sync job | 19.7 | 19.0–21.4 | | 5 |
+| | replay: the same, native streaming hash | 10.2 | 8.5–10.6 | | 5 |
+| | replay: delivery job | 1.1 | 1.0–1.6 | | 1 |
+| small repo, incremental push (1 commit, 2 files), 3 pushes | notification request | 4.3–4.8 | 3.9–6.3 | 3 | 0 |
+| | sync job | 8.9–14.1 | 8.4–17.4 | 24–26 | 5 |
+| | delivery job | 1.6–2.1 | 1.3–7.2 | 1 | 1 |
+| | replay: notification handler | 1.3–1.5 | 1.1–2.2 | | |
+| | replay: copy-only sync job | 4.7–10.2 | 4.6–11.8 | | 5 |
+| | replay: the same, native streaming hash | 4.5–5.7 | 3.3–9.5 | | 5 |
+| | replay: delivery job | 0.7 | 0.5–0.8 | | 1 |
+| medium repo, initial push (500 commits, 4382 objects, 14.1 MiB pack) | notification request | 4.1 | 3.3–5.0 | 3 | 0 |
+| | sync job | 178.5 | 165.2–192.0 | 22 | 5 |
+| | replay: copy-only sync job | 140.0 | 105.6–217.5 | | 5 |
+| | replay: the same, native streaming hash | 64.9 | 64.3–80.2 | | 5 |
+| medium repo, incremental push (1 commit, 2 files), 3 pushes | notification request | 7.0–10.0 | 6.7–10.4 | 3 | 0 |
+| | sync job | 10.6–14.9 | 8.4–17.1 | 23–25 | 5 |
+| | replay: notification handler | 1.1–2.5 | 1.1–2.7 | | |
+| | replay: copy-only sync job | 4.1–5.0 | 3.2–8.4 | | 5 |
+| | replay: the same, native streaming hash | 3.5–5.0 | 2.6–6.7 | | 5 |
+| | replay: delivery job | 0.6–0.8 | 0.5–0.8 | | 1 |
+| for comparison: re-indexing sync (fetch strategy, protocol v2) into an empty mirror | small / medium | 215 / 851 | | | |
+| deep check | small / medium | 574 / 2 651 | | | |
+| hashing in JavaScript (`@noble/hashes`) | SHA-1 / SHA-256 per MiB | 5.9 / 6.7 | 5.5–12.4 | | |
+| hashing natively (WebCrypto) | SHA-1 / SHA-256 per MiB | 1.8 / 1.2 | 1.2–1.9 | | |
 
 Process CPU time includes V8's garbage-collector threads, and the container
 is noisy (single values vary by up to ±50 %); read these as estimates.
+A profile of the native replay of the 14 MiB copy shows the remaining
+~4 ms per MiB mostly in Node's JavaScript implementation of web streams and
+`Blob` reads, which workerd implements natively, so the Worker should do
+better; Workers Logs show the real CPU time per invocation.
 
 **Does a pure mirror fit the Free plan?** Workers Free allows 10 ms CPU per
 invocation, 50 subrequests per invocation (calls to R2, KV and D1 count),
@@ -427,16 +443,16 @@ Workflows with 10 ms CPU per step (sources in `docs/design.md` §12).
   for the notification, 5 ms for the copy-only sync and under 1 ms per
   delivery to its own subscribers, each in its own invocation, with about 30
   subrequests per sync. Idle, the mirror runs one cron invocation per day.
-- **No for bulk data:** the initial copy of a repository, pushes with more
-  than about 0.8 MiB of new pack data and LFS objects above about 1 MiB
-  exceed 10 ms, because every byte is hashed in JavaScript (SHA-1 for the
-  pack trailer, SHA-256 for LFS). The deep check and the re-indexing sync
-  need Workers Paid (or a Node instance).
-- **Nearly there:** native streaming hashes (`crypto.DigestStream`), one job
-  per pack and per LFS object, and ranged object reads would raise the limit
-  to packs of ~3 MiB and LFS objects of ~5 MiB per invocation; seeding a
-  mirror once on a larger runtime covers the rest. The list of proposed
-  changes is in `docs/design.md` §12. A Free-plan deployment must drop
+- **Bulk data in units:** set `MIRROR_UNIT_BYTES` (start with `1048576`).
+  Every pack and every LFS object is then copied in its own invocation,
+  hashed natively with `crypto.DigestStream`; the refs move in a final job
+  once all packs are present. Packs and LFS objects above the budget stay
+  pending (`pendingPacks` with `oversized: true`, `lfsPending`) and the refs
+  are not moved past a missing pack, so the mirror stays consistent; a
+  sync on Workers Paid, a Node instance or a Pi with the same bucket picks
+  them up (seed large repositories there once).
+- The deep check and the re-indexing sync (mirrors of non-forge servers)
+  need Workers Paid or a Node instance. A Free-plan deployment must drop
   `limits.cpu_ms` from `wrangler.jsonc`.
 
 ## Cost notes

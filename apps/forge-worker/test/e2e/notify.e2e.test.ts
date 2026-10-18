@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { generateSigningKey, mintMirrorNotification } from '@git-forge/accounts'
@@ -231,6 +231,54 @@ describe('push notifications when the job queue is down', () => {
       expect((await refs(solo))['refs/heads/main']).toBe((await git(work, ['rev-parse', 'main'])).trim())
     } finally {
       await solo.close()
+    }
+  })
+})
+
+describe('mirroring in units of bytes', () => {
+  it('copies each pack and LFS object in its own job and leaves oversized units pending', async () => {
+    const upstream = await startInstance('alpha-units')
+    const mirror = await startInstance('beta-units', { unitBytes: 200_000 })
+    try {
+      await expectStatus(upstream.api('POST', '/api/repos', { owner: repo.owner, name: repo.name }), 201)
+      await expectStatus(mirror.api('POST', '/api/repos', { owner: repo.owner, name: repo.name }), 201)
+      await expectStatus(upstream.api('POST', '/api/admin/instances', { issuer: mirror.url }), 200)
+      await expectStatus(upstream.api('POST', `/api/repos/${repository}/instances`, { issuer: mirror.url }), 200)
+      await expectStatus(mirror.api('POST', '/api/admin/instances', { issuer: upstream.url }), 200)
+      await expectStatus(mirror.api('POST', `/api/repos/${repository}/mirrors`, { url: repoUrl(upstream), auth: 'instance' }), 201)
+      await quiesce([upstream, mirror])
+
+      const work = tempDir()
+      await git(work, ['init', '-q', '-b', 'main'])
+      await lfsGit(work, ['lfs', 'track', '*.bin'])
+      const small = randomBlob(50_000, 3)
+      const large = randomBlob(300_000, 4)
+      writeFileSync(join(work, 'small.bin'), small)
+      writeFileSync(join(work, 'large.bin'), large)
+      await lfsGit(work, ['add', '-A'])
+      await lfsGit(work, ['commit', '-q', '-m', 'two scans'])
+      await lfsGit(work, ['push', '-q', pushUrl(upstream), 'main'])
+      const first = (await git(work, ['rev-parse', 'main'])).trim()
+      await quiesce([upstream, mirror])
+
+      expect((await refs(mirror))['refs/upstream/origin/heads/main']).toBe(first)
+      expect(jobsOf(mirror, 'mirror-pack')).toBe(1)
+      expect(jobsOf(mirror, 'mirror-lfs')).toBe(1)
+      expect(await mirror.storage.head(lfsObjectKey(repo, sha256(small)))).not.toBeNull()
+      expect(await mirror.storage.head(lfsObjectKey(repo, sha256(large)))).toBeNull()
+      expect((await readMirrorStatus(mirror.storage, repo))?.lfsPending).toEqual([{ oid: sha256(large), size: large.length, reason: 'deferred' }])
+      expect(mirror.jobs.failed).toEqual([])
+
+      writeFileSync(join(work, 'noise.dat'), randomBytes(400_000))
+      await git(work, ['add', '-A'])
+      await git(work, ['commit', '-q', '-m', 'incompressible'])
+      await lfsGit(work, ['push', '-q', pushUrl(upstream), 'main'])
+      await quiesce([upstream, mirror])
+      expect((await refs(mirror))['refs/upstream/origin/heads/main']).toBe(first)
+      expect((await readMirrorStatus(mirror.storage, repo))?.pendingPacks).toEqual([expect.objectContaining({ oversized: true })])
+      expect(jobsOf(mirror, 'mirror-pack')).toBe(1)
+    } finally {
+      await Promise.all([upstream.close(), mirror.close()])
     }
   })
 })

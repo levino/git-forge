@@ -1,5 +1,5 @@
 import { d1Database } from '@git-forge/accounts'
-import { consumeJobs, QueueJobs, R2Storage } from '@git-forge/cloudflare'
+import { consumeJobs, digestStreams, QueueJobs, R2Storage } from '@git-forge/cloudflare'
 import { continueImport, type ImportJob, type ImportScheduler } from '@git-forge/core'
 import { createForge, type Forge } from './app.ts'
 import { type ForgeVars, parseActionsSettings, parseSettings } from './config.ts'
@@ -32,6 +32,7 @@ const forgeFor = (env: Env): Promise<Forge> => {
         ...settings,
         storage: new R2Storage(env.BUCKET),
         db: d1Database(env.DB),
+        digests: digestStreams,
         ...(env.IMPORTS ? { scheduleImport: importScheduler(env.IMPORTS) } : {}),
         ...(env.JOBS ? { jobs: new QueueJobs(env.JOBS) } : {}),
         ...(actions

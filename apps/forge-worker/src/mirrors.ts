@@ -1,6 +1,7 @@
 import { type AccountsStore, mintInstanceToken, normalizeIssuer, type SigningKey } from '@git-forge/accounts'
 import {
   type AuthorizationSupplier,
+  type DigestFactory,
   type FetchFunction,
   isMirrorDue,
   isValidName,
@@ -10,7 +11,9 @@ import {
   type RepositoryName,
   type Storage,
   syncMirror,
+  type SyncOptions,
   type SyncResult,
+  type UnitOptions,
 } from '@git-forge/core'
 
 export type MirrorContext = {
@@ -19,6 +22,7 @@ export type MirrorContext = {
   readonly issuer: string | undefined
   readonly instanceKey: SigningKey | undefined
   readonly fetch?: FetchFunction
+  readonly digests?: DigestFactory
 }
 
 const UPSTREAM_PATH = /^\/([^/]+)\/([^/]+?)(?:\.git)?\/?$/
@@ -42,17 +46,25 @@ export const mirrorAuthorization = (context: MirrorContext, config: MirrorConfig
   return async () => `Bearer ${await mintInstanceToken({ key: instanceKey, issuer, audience, repositories: [repository] })}`
 }
 
-export const runMirrorSync = async (context: MirrorContext, repo: RepositoryName, config: MirrorConfig): Promise<SyncResult> => {
+export const mirrorUnitOptions = (context: MirrorContext, repo: RepositoryName, config: MirrorConfig, maxUnitBytes?: number): UnitOptions => {
   const getAuthorization = mirrorAuthorization(context, config)
-  return syncMirror({
+  return {
     storage: context.storage,
     repo,
     remote: config.remote,
-    strategy: 'auto',
     ...(context.fetch ? { fetch: context.fetch } : {}),
     ...(getAuthorization ? { getAuthorization } : {}),
-  })
+    ...(context.digests ? { digests: context.digests } : {}),
+    ...(maxUnitBytes ? { maxUnitBytes } : {}),
+  }
 }
+
+export const runMirrorSync = async (
+  context: MirrorContext,
+  repo: RepositoryName,
+  config: MirrorConfig,
+  extra: Pick<SyncOptions, 'deferLfs'> = {},
+): Promise<SyncResult> => syncMirror({ ...mirrorUnitOptions(context, repo, config), strategy: 'auto', ...extra })
 
 export type ScheduledMirrorRun = {
   readonly repository: string

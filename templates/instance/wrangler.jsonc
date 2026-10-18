@@ -16,10 +16,16 @@
     }
   ],
   "queues": {
-    "producers": [{ "binding": "IMPORTS", "queue": "git-forge-imports" }],
-    "consumers": [{ "queue": "git-forge-imports", "max_batch_size": 1, "max_batch_timeout": 1, "max_retries": 3 }]
+    "producers": [
+      { "binding": "IMPORTS", "queue": "git-forge-imports" },
+      { "binding": "JOBS", "queue": "git-forge-jobs" }
+    ],
+    "consumers": [
+      { "queue": "git-forge-imports", "max_batch_size": 1, "max_batch_timeout": 1, "max_retries": 3 },
+      { "queue": "git-forge-jobs", "max_batch_size": 1, "max_batch_timeout": 1, "max_retries": 10 }
+    ]
   },
-  "triggers": { "crons": ["*/30 * * * *"] },
-  "vars": { "MAX_PUSH_BYTES": "16777216", "MAX_LFS_OBJECT_BYTES": "104857600", "MIRROR_INTERVAL_MINUTES": "30" },
+  "triggers": { "crons": ["17 3 * * *"] },
+  "vars": { "MAX_PUSH_BYTES": "16777216", "MAX_LFS_OBJECT_BYTES": "104857600", "MIRROR_INTERVAL_MINUTES": "1440", "MIRROR_DEEP_CHECK_DAYS": "30" },
   "secrets": { "required": ["BOOTSTRAP_TOKEN"] }
 }

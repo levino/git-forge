@@ -23,7 +23,8 @@ Paid plan is required. After deploying, create the first admin with the
 
 Status: Git core, Git LFS, accounts with personal access tokens, instance
 federation and mirrors work on Cloudflare Workers; the web UI and
-collaboration features are next. See [docs/design.md](docs/design.md) and
+collaboration features are next. Pushes too large for one request go through
+`git forge push` ([packages/cli](packages/cli)) or a server-side import. See [docs/design.md](docs/design.md) and
 [docs/roadmap.md](docs/roadmap.md).
 
 To run an instance, start from the instance template in

@@ -18,6 +18,7 @@ tests and the benchmark.
 | `BUCKET` | R2 binding | Repository data in the bucket layout of `docs/design.md` (`repos/<owner>/<name>/…`). |
 | `DB` | D1 binding | Accounts, tokens, repository roles, branch protection, instance trust, audit log (`@git-forge/accounts`). Migrations come from `packages/accounts/migrations` (`migrations_dir`) and are applied with `wrangler d1 migrations apply`. |
 | Cron `*/30 * * * *` | trigger | Syncs every due mirror with `mode: "auto"`. |
+| `IMPORTS` | Queue binding, optional | Queue `git-forge-imports` (`git-forge-<env>-imports` per environment), produced and consumed by this Worker. Each message is one step of a server-side import in its own invocation. Without it the import endpoint answers `503`. |
 | `BOOTSTRAP_TOKEN` | secret | Allows exactly one successful `POST /api/bootstrap`, which creates the first instance admin. |
 | `INSTANCE_KEY` | secret, optional | Ed25519 private JWK of this instance. Needed to mirror private repositories from other instances; also publishes `/.well-known/openid-configuration` and `/.well-known/jwks.json`. Generate with `pnpm --filter forge-worker instance-key`. |
 | `PUBLIC_URL` | var, optional | Base URL of the instance, used as its issuer (when minting) and audience (when verifying instance tokens). Defaults to the origin of the request; scheduled sync with instance tokens needs it set. |
@@ -57,6 +58,8 @@ There is no global "public read" switch any more.
 | `POST /api/repos/{owner}/{name}/mirrors` `{url, remote?, mode?, namespace?, lfs?, lfsUrl?, auth?}` | repository admin | Configures a mirror. `auth: "instance"` presents an instance token to the upstream. |
 | `POST /api/repos/{owner}/{name}/mirrors/{remote}/sync` | repository admin | Syncs now; `502` with the error if the sync failed. |
 | `POST /api/repos/{owner}/{name}/mirrors/{remote}/detach` | repository admin | Stops syncing. |
+| `POST /api/repos/{owner}/{name}/import` `{url, token?, username?, lfs?, lfsUrl?, commitsPerStep?, visibility?, defaultBranch?}` | repository admin or instance admin; for a new repository the owner or an instance admin | Imports from a Git URL (smart HTTP v2 or dumb HTTP) without a request body limit, creating the repository first if needed (as `POST /api/repos`). `token` is sent as HTTP Basic password with `username` (default `git`), travels only in the queue messages and is never stored. Refs land in `refs/heads/*` and `refs/tags/*`; rewritten refs are archived, local refs missing upstream are kept. `202` with the state and a `Location`, `409` while an import runs. |
+| `GET /api/repos/{owner}/{name}/import` | repository admin | Import state: `phase` (`discover`, `graph`, `fetch`, `lfs`, `refs`, `done`, `failed`), progress, ref updates, missing LFS objects, last error. Starting a failed import again with the same URL resumes it. |
 | `GET /api/health` | anyone | `{"ok": true}` |
 
 Instance admins count as admins of every repository.
@@ -126,8 +129,8 @@ npx wrangler deploy
 npx wrangler d1 migrations apply DB --remote
 ```
 
-The first `wrangler deploy` creates the bucket and the database from the
-binding names; no IDs need to be filled in. Later deployments apply new
+The first `wrangler deploy` creates the bucket, the database and the import
+queue from the binding names; no IDs need to be filled in. Later deployments apply new
 migrations first (`wrangler d1 migrations apply DB --remote`, then
 `wrangler deploy`). The Worker never migrates the database itself.
 
@@ -175,8 +178,8 @@ To use your own domain, add a `routes` entry with `custom_domain: true` to
 `wrangler.jsonc` defines three environments, each with its own Worker name,
 R2 bucket and D1 database (`git-forge-alpha`, …). Every Cloudflare resource
 comes from the config, nothing is created in the dashboard: buckets and
-databases have names but no IDs, so the first `wrangler deploy` provisions
-them; migrations come from `migrations_dir`; cron, vars and the required
+databases have names but no IDs and queues are declared by name, so the
+first `wrangler deploy` provisions them; migrations come from `migrations_dir`; cron, vars and the required
 secret (`secrets.required`) are declared as well. An environment goes from
 nothing to running with:
 
@@ -193,6 +196,19 @@ environment also needs `INSTANCE_KEY` (secret) and `PUBLIC_URL` (var). Locally:
 npx wrangler d1 migrations apply DB --env beta --local
 npx wrangler dev --env beta --port 8788
 ```
+
+## Large pushes
+
+The Worker rejects pushes above `MAX_PUSH_BYTES`, and Cloudflare rejects
+request bodies above 100 MB on Free/Pro. Two ways around it:
+
+- `git forge push` from `packages/cli` splits a push into several pushes
+  below a budget: `git forge push --max-bytes 16MiB <url> main`.
+- Import the repository from where it already lives with
+  `POST /api/repos/{owner}/{name}/import`. Each step runs as one queue
+  message with its own CPU budget (`limits.cpu_ms`) and fetches about
+  `commitsPerStep` commits and at most 32 MiB of pack (`docs/design.md` §7,
+  Import).
 
 ## Local development
 
@@ -213,7 +229,8 @@ database (Miniflare), persisted under `.wrangler/`. `.dev.vars` is gitignored.
   `wrangler d1 migrations apply --local` first, as a deployment does.
 - Unit tests (`test/unit`) run the app in Node with `MemoryStorage` and
   `node:sqlite`: settings, media/raw authorization, branch protection API, bootstrap, admin API, PAT authorization, private
-  defaults, visibility and collaborators, the LFS size limit, federation and
+  defaults, visibility and collaborators, the LFS size limit, the import
+  endpoint's authorization and validation, federation and
   scheduled sync between two in-process instances over real HTTP, and the
   shape of the wrangler environments.
 - `test/e2e/forge.e2e.test.ts` starts `wrangler dev` with a fresh local R2
@@ -221,8 +238,10 @@ database (Miniflare), persisted under `.wrangler/`. `.dev.vars` is gitignored.
   generated history of 120 commits with the real `git` client, clones it with
   protocol v2 and with `git -c protocol.version=0` (dumb HTTP), checks that
   repositories are private by default, pushes incrementally, force-pushes and
-  checks the previous tip under `refs/archive/`, and fires the Cron Trigger
-  through `/__scheduled`.
+  checks the previous tip under `refs/archive/`, imports the generated
+  repository from a local token-protected `git http-backend` server stepped
+  through the local queue, pushes 24 MiB with `git forge push` against the
+  16 MiB limit, and fires the Cron Trigger through `/__scheduled`.
 - `test/e2e/federation.e2e.test.ts` starts the `alpha`, `beta` and `gamma`
   environments as three `wrangler dev` processes with their own keys. It
   pushes a private repository with Git LFS objects to alpha with the real

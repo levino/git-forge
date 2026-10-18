@@ -61,6 +61,11 @@ jobs:
       - run: pnpm run typecheck
       - id: build
         run: echo "sha256=$(sh release/build-release.sh "$RUNNER_TEMP/release")" >> "$GITHUB_OUTPUT"
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - name: Build the git-forge CLI executables
+        run: sh packages/cli/build-executables.sh "$RUNNER_TEMP/cli"
       - name: Publish release assets
         env:
           GH_TOKEN: ${{ github.token }}
@@ -74,7 +79,9 @@ jobs:
             printf '{\n  "version": "%s",\n  "sha256": "%s"\n}\n' "$version" "$SHA256"
             echo '```'
             echo
-            echo '`sha256` is the SHA-256 of the `SHA256SUMS` asset, which lists the checksums of all other assets.'
+            echo '`sha256` is the SHA-256 of the `SHA256SUMS` asset, which lists the checksums of the Worker bundle and the migrations.'
+            echo
+            echo 'The `git-forge-<os>-<arch>` assets are single executables of the `git-forge` CLI (`git forge push`); `CLI-SHA256SUMS` lists their checksums.'
           } > "$RUNNER_TEMP/notes.md"
           prerelease=""
           case "$version" in *-*) prerelease="--prerelease" ;; esac
@@ -84,6 +91,7 @@ jobs:
             "$RUNNER_TEMP/release/git-forge-worker.mjs" \
             "$RUNNER_TEMP/release/migrations.tar.gz" \
             "$RUNNER_TEMP/release/SHA256SUMS" \
+            "$RUNNER_TEMP"/cli/* \
             $verify --title "$TAG" --notes-file "$RUNNER_TEMP/notes.md" $prerelease
 
   sync-template:

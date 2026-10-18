@@ -53,6 +53,12 @@ type AuditInput = {
 
 export class AccountsError extends Error {}
 
+export type MirrorSubscription = {
+  readonly issuer: string
+  readonly repository: string
+  readonly callback: string
+}
+
 export const LOGIN_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/
 
 export const TEAM_SLUG_PATTERN = LOGIN_PATTERN
@@ -591,6 +597,63 @@ export const createAccountsStore = (db: Database, options: AccountsStoreOptions 
       )
       return row ? { issuer: row.issuer, pinnedThumbprint: row.pinned_thumbprint } : null
     },
+
+    subscribeMirror: async (input: MirrorSubscription, actor: AuditActor = SYSTEM): Promise<void> => {
+      const issuer = normalizeIssuer(input.issuer)
+      const repository = input.repository.toLowerCase()
+      await write(actor, { action: 'mirror.subscribe', subjectKind: 'instance', subjectId: issuer, data: { repository, callback: input.callback } }, [
+        sql(
+          `INSERT INTO mirror_subscriptions (issuer, repository, callback, created_at) VALUES (?, ?, ?, ?)
+           ON CONFLICT (issuer, repository, callback) DO NOTHING`,
+          issuer,
+          repository,
+          input.callback,
+          now(),
+        ),
+      ])
+    },
+
+    unsubscribeMirror: async (input: MirrorSubscription, actor: AuditActor = SYSTEM): Promise<boolean> => {
+      const issuer = normalizeIssuer(input.issuer)
+      const repository = input.repository.toLowerCase()
+      const existing = await first(
+        db,
+        sql('SELECT 1 AS found FROM mirror_subscriptions WHERE issuer = ? AND repository = ? AND callback = ?', issuer, repository, input.callback),
+      )
+      if (!existing) return false
+      await write(actor, { action: 'mirror.unsubscribe', subjectKind: 'instance', subjectId: issuer, data: { repository, callback: input.callback } }, [
+        sql('DELETE FROM mirror_subscriptions WHERE issuer = ? AND repository = ? AND callback = ?', issuer, repository, input.callback),
+      ])
+      return true
+    },
+
+    mirrorSubscriptions: async (repository: string): Promise<MirrorSubscription[]> =>
+      (
+        await db.all<{ issuer: string; repository: string; callback: string }>(
+          sql(
+            `SELECT s.issuer, s.repository, s.callback FROM mirror_subscriptions s
+             JOIN trusted_instances t ON t.issuer = s.issuer AND t.disabled_at IS NULL
+             WHERE s.repository = ? ORDER BY s.issuer, s.callback`,
+            repository.toLowerCase(),
+          ),
+        )
+      ).map((row) => ({ issuer: row.issuer, repository: row.repository, callback: row.callback })),
+
+    registerLocalMirror: async (repository: string, remote: string, actor: AuditActor = SYSTEM): Promise<void> => {
+      await write(actor, { action: 'mirror.register', data: { repository: repository.toLowerCase(), remote } }, [
+        sql(
+          'INSERT INTO local_mirrors (repository, remote, created_at) VALUES (?, ?, ?) ON CONFLICT (repository, remote) DO NOTHING',
+          repository.toLowerCase(),
+          remote,
+          now(),
+        ),
+      ])
+    },
+
+    localMirrors: async (): Promise<{ readonly repository: string; readonly remote: string }[]> =>
+      (await db.all<{ repository: string; remote: string }>(sql('SELECT repository, remote FROM local_mirrors ORDER BY repository, remote'))).map(
+        (row) => ({ repository: row.repository, remote: row.remote }),
+      ),
 
     grantsFor: async (principal: Principal, repo: RepositorySubject): Promise<Grants> => {
       switch (principal.kind) {

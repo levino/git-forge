@@ -90,14 +90,14 @@ export const createGitAccess = (
       const principal = await principalOf(request)
       if (!principal) return challenge('invalid credentials\n')
       const check = await checkRepositoryAccess(options.directory, principal, repo, access === 'write' ? 'write' : 'read', surface)
-      if (check.decision !== 'allow' && check.repository && options.delegatedBranches && (await options.delegatedBranches(principal, check.repository)).length > 0) return null
-      return decisionResponse(check.decision, principal)
+      if (check.decision !== 'allow' && check.repository && !check.repository.archived && options.delegatedBranches && (await options.delegatedBranches(principal, check.repository)).length > 0) return null
+      return decisionResponse(check.decision, principal, check.repository)
     },
     pushPolicy: async (request, repo) => {
       const principal = await principalOf(request)
       if (!principal) return denyAll
       const check = await checkRepositoryAccess(options.directory, principal, repo, 'write')
-      if (!check.repository) return denyAll
+      if (!check.repository || (check.decision !== 'allow' && check.repository.archived)) return denyAll
       const delegated = check.decision === 'allow' || !options.delegatedBranches ? null : await options.delegatedBranches(principal, check.repository)
       if (check.decision !== 'allow' && (!delegated || delegated.length === 0)) return denyAll
       const rules = await options.directory.branchProtectionRules(check.repository.id)

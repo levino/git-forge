@@ -99,6 +99,18 @@ try {
             </form>
           )}
         </section>
+        {view.canAdminister && session && (
+          <section aria-labelledby="rename">
+            <h2 id="rename" class="text-xl font-semibold mb-2">Rename</h2>
+            <form method="post" class="flex flex-wrap items-end gap-2">
+              <input type="hidden" name="csrf" value={session.csrf} />
+              <input type="hidden" name="action" value="rename" />
+              <label class="flex flex-col gap-1 text-sm">New name<input name="login" class="input input-sm font-mono" required value={view.organization.login} /></label>
+              <button class="btn btn-sm btn-warning btn-outline">Rename</button>
+            </form>
+            <p class="text-sm text-base-content/70 mt-2">Old URLs redirect to the new name.</p>
+          </section>
+        )}
       </div>
     </Layout>
   )

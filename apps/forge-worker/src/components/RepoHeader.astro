@@ -38,6 +38,7 @@ const clone = cloneUrl(Astro.url.origin, name)
       <a href={repoUrl(name)} class="text-primary hover:underline font-semibold">{name.name}</a>
     </h1>
     <span class="badge badge-sm">{subject.visibility === 'public' ? 'Public' : 'Private'}</span>
+    {subject.archived && <span class="badge badge-warning badge-sm">Archived</span>}
     {
       mirror && (
         <span class="badge badge-sm gap-1">
@@ -64,6 +65,16 @@ const clone = cloneUrl(Astro.url.origin, name)
       </div>
     </details>
   </div>
+  {subject.description && <p class="text-base-content/80">{subject.description}</p>}
+  {
+    (subject.homepage || subject.topics.length > 0) && (
+      <div class="flex flex-wrap items-center gap-2 mt-1">
+        {subject.homepage && /^https?:\/\//i.test(subject.homepage) && <a href={subject.homepage} rel="nofollow noopener" class="link link-primary text-sm break-all">{subject.homepage}</a>}
+        {subject.topics.map((topic) => <span class="badge badge-primary badge-soft badge-sm">{topic}</span>)}
+      </div>
+    )
+  }
+  {subject.archived && <div role="alert" class="alert alert-warning my-2">This repository is archived. It is read-only: pushes, issues and pull requests are closed.</div>}
   {
     fork && (
       <p class="mt-1 text-xs text-base-content/60 break-all">

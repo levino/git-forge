@@ -192,7 +192,9 @@ export const search = async (db: Database, principal: Principal, type: SearchTyp
 
 export const SEARCH_INDEX_REBUILD: readonly Statement[] = [
   sql('DELETE FROM search_repositories'),
-  sql("INSERT INTO search_repositories (repository_id, owner, name, description, topics) SELECT r.id, a.login, r.name, '', '' FROM repositories r JOIN accounts a ON a.id = r.owner_id"),
+  sql(
+    "INSERT INTO search_repositories (repository_id, owner, name, description, topics) SELECT r.id, a.login, r.name, coalesce(r.description, ''), coalesce((SELECT group_concat(value, ' ') FROM json_each(r.topics)), '') FROM repositories r JOIN accounts a ON a.id = r.owner_id",
+  ),
   sql('DELETE FROM search_accounts'),
   sql("INSERT INTO search_accounts (account_id, login, display_name) SELECT id, login, coalesce(display_name, '') FROM accounts"),
   ...['issues', 'issue_comments', 'discussions', 'discussion_comments'].map((table) => sql(`INSERT INTO search_${table} (search_${table}) VALUES ('rebuild')`)),

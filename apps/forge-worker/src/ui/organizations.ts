@@ -1,5 +1,5 @@
 import { OrganizationError } from '@git-forge/accounts'
-import type { ForgeServices, UiSession } from '../app.ts'
+import { ForgeError, type ForgeServices, type UiSession } from '../app.ts'
 
 export type OrganizationOutcome = { readonly kind: 'ok'; readonly message: string } | { readonly kind: 'redirect'; readonly location: string } | { readonly kind: 'error'; readonly status: number; readonly message: string }
 
@@ -13,6 +13,10 @@ export const organizationAction = async (forge: ForgeServices, session: UiSessio
       case 'create': {
         const created = await operations.create(principal, text(form, 'login'))
         return { kind: 'redirect', location: `/orgs/${encodeURIComponent(created.login)}` }
+      }
+      case 'rename': {
+        const renamed = await forge.renameAccount(principal, org, text(form, 'login'))
+        return { kind: 'redirect', location: `/orgs/${encodeURIComponent(renamed.login)}` }
       }
       case 'member':
         await operations.setMember(principal, org, text(form, 'login'), text(form, 'role'))
@@ -40,6 +44,7 @@ export const organizationAction = async (forge: ForgeServices, session: UiSessio
     }
   } catch (error) {
     if (error instanceof OrganizationError) return { kind: 'error', status: error.status, message: error.message }
+    if (error instanceof ForgeError) return { kind: 'error', status: error.status, message: error.message }
     throw error
   }
 }

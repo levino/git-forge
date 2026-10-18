@@ -79,6 +79,7 @@ discussions.
 
 - [x] Streaming receive-pack and upload-pack with bounded memory, `packfile-uris`, geometric compaction
 - [x] Server-side import: create or update a repository by pulling from a URL (no request body limit), in resumable steps driven by a queue
+- [x] Import from GitHub (opt-in): issues, pull requests, comments, reviews, review comments, labels, milestones, releases and assets with their numbers, authors and times (migration `0023_imports`, design §7 *metadata*)
 - [x] Chunked push helper: `git forge push` splits history into pushes below the platform body limit, using the unmodified git client; single executables per platform from the release workflow
 - [x] Import and mirror sync: stream fetched packs into the streaming indexer (via `ingestPack`)
 - [x] Import commits, blobs and LFS objects of any size; LFS endpoint from `.lfsconfig` (#51)
@@ -135,6 +136,7 @@ Design: [design.md §18](design.md#18-web-ui).
 - [x] Instance admin page and API (admins, trusted instances, list of this instance's mirrors with their sync state and alarms, `GET /api/admin/mirrors`)
 - [ ] Mirror overview UI on top of the attestation API of design §10 (lag, ref checksum history, spot checks)
 - [x] Repository settings (visibility, collaborators, branch protection, federation trust)
+- [x] Repository lifecycle: description, website, topics (`/api/v3` shape), rename and transfer with redirects for pages, API, Git and LFS, archive (read-only), soft delete with a 7-day grace period, account and organization renames; stable storage prefixes (migration `0024`)
 - [x] Mirror settings, status and alarms (add, sync, deep check, detach)
 - [x] Blame, syntax highlighting in diffs and Markdown code blocks
 - [x] Explore and profile listings without one access check per repository (one SQL query, stored default branch and last commit time, sort and paging)
@@ -158,6 +160,7 @@ Design: [design.md §17](design.md#17-collaboration).
 - [x] Forks on the same instance (object sharing through alternates, fork network listing) and pull requests from forks (head objects and their LFS objects copied into the base, maintainers can modify, untrusted CI)
 - [x] Web UI for forks: Fork button, fork list, *forked from*, pull requests from forks
 - [ ] Forks across instances (fork a mirror, pull requests between instances)
+- [ ] Forks keep resolving their upstream after it is renamed again over a reused name or deleted (alternates name the upstream by its name; private forks do not inherit upstream collaborators)
 - [x] CODEOWNERS parsing for `require_code_owner_reviews` (owners of every changed file must approve, user owners are requested as reviewers)
 - [x] Rename detection in merges (port of git's `diffcore-rename` scoring and pairing; edits follow renamed files, rename/rename and rename/delete conflicts)
 - [x] Directory renames in merges: adds into a renamed directory conflict like git's default, adds into a deleted directory merge
@@ -177,7 +180,7 @@ Design: [design.md §17](design.md#17-collaboration).
 - [ ] Webhooks: `POST …/hooks/{id}/tests`, GitHub App installations, encrypted secrets
 - [x] Releases: GitHub-compatible REST API, tags created on publish, assets stored as LFS objects behind the media URL, download redirects
 - [ ] Releases: source archives (`tarball_url`, `zipball_url`), generated release notes, web UI
-- [x] Backups at the bucket level (design §19): bucket replication to an Object-Lock bucket, D1 Time Travel and exports; documented, no code
+- [x] Built-in backups (design §19): scheduled bounded `backup` jobs copy a database dump and every object into a write-once `BACKUP` target (R2 bucket lock, S3 Object Lock) with SHA-256 verification; admin panel and API (status, run now, verify); `git-forge-node restore`, `restore-sql`, `backup-verify` (migration `0029_backups`)
 - [ ] Partial visibility
 - [x] External mirror verification: ref checksums, signed attestations, byte-range spot checks of packs and LFS objects, signed overview (design §10)
 - [x] Pages (design §20): branch source (`/` or `/docs`, redeploy on push), tar upload deployments, GitHub's Pages REST API, `PAGES_HOST` pattern and `PAGES_DOMAINS` from config, immutable content-addressed deployments with atomic switch, LFS files via media URLs, content types, `404.html`, CDN cache headers, private sites via a session handoff to a host-only cookie

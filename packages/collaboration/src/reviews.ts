@@ -177,7 +177,7 @@ export type CommentAnchor = {
   readonly startSide?: unknown
 }
 
-type ValidAnchor = { path: string; line: number; side: Side; startLine: number | null; startSide: Side | null }
+export type ValidAnchor = { path: string; line: number; side: Side; startLine: number | null; startSide: Side | null }
 
 const sideOf = (value: unknown, fallback: Side): Side => {
   if (value === undefined || value === null) return fallback
@@ -185,7 +185,7 @@ const sideOf = (value: unknown, fallback: Side): Side => {
   return value
 }
 
-const validateAnchor = async (scope: Scope, pull: PullRow, commit: ObjectId, anchor: CommentAnchor): Promise<ValidAnchor> => {
+export const validateAnchor = async (scope: Scope, pull: PullRow, commit: ObjectId, anchor: CommentAnchor): Promise<ValidAnchor> => {
   if (typeof anchor.path !== 'string' || anchor.path === '') throw invalid('path is required')
   if (typeof anchor.line !== 'number' || !Number.isSafeInteger(anchor.line) || anchor.line < 1) throw invalid('line must be a positive integer')
   const side = sideOf(anchor.side, 'RIGHT')

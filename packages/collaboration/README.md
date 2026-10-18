@@ -83,7 +83,7 @@ collaboration settings.
 | `issue:triage` (labels, assignees, milestone), `issue:lock`, `discussion:lock`, `review:request` | triage | | |
 | `label:manage`, `milestone:manage`, `pull:merge`, `review:dismiss`, `status:write` | write | | |
 | `discussion:category` (also needed to post in *Announcements*) | maintain | | |
-| `settings:manage` | admin | | |
+| `settings:manage`, `import` | admin | | |
 
 Locked conversations accept comments and reviews from `write` and above
 only. `has_issues: false` disables creating issues, `has_discussions: false`

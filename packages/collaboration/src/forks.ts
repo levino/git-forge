@@ -35,15 +35,20 @@ export const createFork = async (scope: Scope, input: ForkInput): Promise<Reposi
     owner = { id: principal.id, login: principal.login }
   }
   if (owner.id === scope.repository.ownerId && name.toLowerCase() === scope.repository.name.toLowerCase()) throw invalid('A repository cannot be forked into itself')
-  if (await scope.accounts.findRepository(owner.login, name)) throw new CollaborationError(422, `${owner.login}/${name} already exists`)
-  const target = { owner: owner.login, name }
+  const block = await scope.accounts.repositoryNameBlock(owner.id, name)
+  if (block) throw new CollaborationError(422, block)
+  const claimed = await scope.accounts.storagePathClaimed(`${owner.login}/${name}`)
+  const target = { owner: owner.login, name: claimed ? `${name.slice(0, 90)}.${crypto.randomUUID().slice(0, 8)}` : name }
   try {
     await forkRepository(scope.storage, scope.repo, target, { defaultBranchOnly: input.defaultBranchOnly === true })
   } catch (error) {
     if (error instanceof RepositoryExistsError) throw new CollaborationError(422, `${owner.login}/${name} already exists`)
     throw error
   }
-  await scope.accounts.createFork({ ownerId: owner.id, name, visibility: scope.repository.visibility, parentId: scope.repository.id }, { kind: 'user', id: principal.id })
+  await scope.accounts.createFork(
+    { ownerId: owner.id, name, visibility: scope.repository.visibility, parentId: scope.repository.id, storagePath: `${target.owner}/${target.name}` },
+    { kind: 'user', id: principal.id },
+  )
   const created = await scope.accounts.findRepository(owner.login, name)
   if (!created) throw new CollaborationError(422, `${owner.login}/${name} could not be created`)
   return created

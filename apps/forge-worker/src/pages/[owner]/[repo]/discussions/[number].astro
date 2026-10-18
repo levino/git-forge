@@ -1,0 +1,147 @@
+---
+import { can, createDiscussionComment, getDiscussion, listDiscussionComments, setAnswer, updateDiscussion } from '@git-forge/collaboration'
+import NotFound from '../../../../components/NotFound.astro'
+import RepoHeader from '../../../../components/RepoHeader.astro'
+import Layout from '../../../../layouts/Layout.astro'
+import { field, type FormOutcome, parseNumber, renderBody, runForm, scopeFor, unlessMissing } from '../../../../ui/collaboration.ts'
+import { isoTime, relativeTime } from '../../../../ui/format.ts'
+import { openRepository, repoUrl } from '../../../../ui/repository.ts'
+
+const { forge, principal, session } = Astro.locals
+const repo = await openRepository(forge, principal, Astro.params.owner!, Astro.params.repo!)
+const number = parseNumber(Astro.params.number)
+let outcome: FormOutcome | null = null
+if (repo.kind === 'ok' && number !== null && Astro.request.method === 'POST') {
+  const here = repoUrl(repo.name, 'discussions', String(number))
+  outcome = await runForm(forge, Astro.request, repo, async (scope, form) => {
+    const action = field(form, 'action')
+    if (action === 'answer' || action === 'unanswer') {
+      await setAnswer(scope, number, action === 'answer' ? Number(field(form, 'comment')) : null)
+      return here
+    }
+    if (action === 'close') {
+      await updateDiscussion(scope, number, { state: 'closed', stateReason: 'resolved' })
+      return here
+    }
+    if (action === 'reopen') {
+      await updateDiscussion(scope, number, { state: 'open' })
+      return here
+    }
+    const parent = parseNumber(field(form, 'parent'))
+    const comment = await createDiscussionComment(scope, number, { body: field(form, 'body'), ...(parent !== null ? { parentId: parent } : {}) })
+    return `${here}#comment-${comment.id}`
+  })
+  if (outcome.kind === 'redirect') return Astro.redirect(outcome.location, 303)
+  Astro.response.status = outcome.status
+}
+const scope = repo.kind === 'ok' ? await scopeFor(forge, Astro.request, principal, repo) : null
+const discussion = scope && number !== null && scope.settings.hasDiscussions ? await unlessMissing(getDiscussion(scope, number)) : null
+const comments = scope && discussion ? await listDiscussionComments(scope, discussion.number) : []
+const html = new Map<number, string>()
+if (repo.kind === 'ok') for (const comment of comments) html.set(comment.id, (await renderBody(repo, comment.body)) ?? '')
+const rendered = comments
+  .filter((comment) => comment.parentId === null)
+  .map((comment) => ({
+    comment,
+    html: html.get(comment.id) ?? '',
+    replies: comments.filter((reply) => reply.parentId === comment.id).map((reply) => ({ reply, html: html.get(reply.id) ?? '' })),
+  }))
+const body = repo.kind === 'ok' && discussion ? await renderBody(repo, discussion.body) : null
+const canComment = scope && discussion ? can(scope, 'comment:create', { locked: discussion.locked }) : false
+const canAnswer = scope && discussion ? discussion.category.answerable && can(scope, 'discussion:answer', { author: discussion.authorRef }) : false
+const canClose = scope && discussion ? can(scope, 'discussion:close', { author: discussion.authorRef }) : false
+const now = Math.floor(Date.now() / 1000)
+const seconds = (ms: number) => Math.floor(ms / 1000)
+---
+
+{
+  repo.kind !== 'ok' || !scope || !discussion ? (
+    <NotFound />
+  ) : (
+    <Layout title={`${discussion.title} · Discussion #${discussion.number} · ${repo.name.owner}/${repo.name.name}`}>
+      <RepoHeader repo={repo} tab="discussions" />
+      <header class="mb-6 pb-4 border-b border-base-300">
+        <h2 class="text-2xl break-words">
+          {discussion.title} <span class="text-base-content/50">#{discussion.number}</span>
+        </h2>
+        <p class="mt-2 flex flex-wrap items-center gap-2 text-sm">
+          <span class="badge badge-ghost">{discussion.category.emoji} {discussion.category.name}</span>
+          {discussion.answerCommentId !== null && <span class="badge badge-success">Answered</span>}
+          {discussion.state === 'closed' && <span class="badge badge-neutral">Closed</span>}
+          <span>
+            <span class="font-semibold">{discussion.author.login}</span> started this discussion{' '}
+            <time datetime={isoTime(seconds(discussion.createdAt))}>{relativeTime(seconds(discussion.createdAt), now)}</time>
+          </span>
+        </p>
+      </header>
+      {outcome?.kind === 'error' && <div role="alert" class="alert alert-error mb-4">{outcome.message}</div>}
+      <article class="border border-base-300 rounded-box mb-6" aria-label="Discussion">
+        {body ? <div class="markdown-body p-4 overflow-x-auto" set:html={body} /> : <p class="p-4 text-sm text-base-content/70">No description.</p>}
+      </article>
+      <ol class="flex flex-col gap-4" aria-label="Comments">
+        {rendered.map(({ comment, html, replies }) => (
+          <li id={`comment-${comment.id}`} class:list={['border rounded-box', comment.isAnswer ? 'border-success' : 'border-base-300']}>
+            <header class="flex flex-wrap items-center gap-2 px-4 py-2 text-sm bg-base-200 border-b border-base-300 rounded-t-box">
+              <span class="font-semibold">{comment.author.login}</span>
+              <time datetime={isoTime(seconds(comment.createdAt))}>{relativeTime(seconds(comment.createdAt), now)}</time>
+              {comment.isAnswer && <span class="badge badge-success badge-sm">Answer</span>}
+              {session && canAnswer && (
+                <form method="post" class="ml-auto">
+                  <input type="hidden" name="csrf" value={session.csrf} />
+                  <input type="hidden" name="comment" value={String(comment.id)} />
+                  <button class="btn btn-xs" name="action" value={comment.isAnswer ? 'unanswer' : 'answer'}>
+                    {comment.isAnswer ? 'Unmark as answer' : 'Mark as answer'}
+                  </button>
+                </form>
+              )}
+            </header>
+            <div class="markdown-body p-4 overflow-x-auto" set:html={html} />
+            {replies.length > 0 && (
+              <ol class="border-t border-base-300 pl-6 divide-y divide-base-300" aria-label="Replies">
+                {replies.map(({ reply, html: replyHtml }) => (
+                  <li id={`comment-${reply.id}`} class="p-3 text-sm">
+                    <p class="font-semibold">{reply.author.login}</p>
+                    <div class="markdown-body" set:html={replyHtml} />
+                  </li>
+                ))}
+              </ol>
+            )}
+            {session && canComment && (
+              <details class="border-t border-base-300">
+                <summary class="px-4 py-2 text-sm cursor-pointer">Reply</summary>
+                <form method="post" class="px-4 pb-4 flex flex-col gap-2">
+                  <input type="hidden" name="csrf" value={session.csrf} />
+                  <input type="hidden" name="parent" value={String(comment.id)} />
+                  <textarea name="body" rows="3" class="textarea w-full font-mono text-sm" required aria-label={`Reply to ${comment.author.login}`} />
+                  <button class="btn btn-sm self-end" name="action" value="comment">Reply</button>
+                </form>
+              </details>
+            )}
+          </li>
+        ))}
+      </ol>
+      {session && (canComment || canClose) ? (
+        <form method="post" class="mt-6 flex flex-col gap-2" aria-label="Add a comment">
+          <input type="hidden" name="csrf" value={session.csrf} />
+          {canComment && (
+            <>
+              <label class="text-sm font-semibold" for="body">Add a comment</label>
+              <textarea id="body" name="body" rows="5" class="textarea w-full font-mono" placeholder="Markdown is supported" />
+            </>
+          )}
+          <div class="flex flex-wrap gap-2 justify-end">
+            {canClose && discussion.state === 'open' && <button class="btn btn-sm" name="action" value="close" formnovalidate>Close discussion</button>}
+            {canClose && discussion.state === 'closed' && <button class="btn btn-sm" name="action" value="reopen" formnovalidate>Reopen discussion</button>}
+            {canComment && <button class="btn btn-sm btn-primary" name="action" value="comment">Comment</button>}
+          </div>
+        </form>
+      ) : (
+        !session && (
+          <p class="mt-6 text-sm">
+            <a class="link" href={`/login?return_to=${encodeURIComponent(Astro.url.pathname)}`}>Sign in</a> to comment.
+          </p>
+        )
+      )}
+    </Layout>
+  )
+}

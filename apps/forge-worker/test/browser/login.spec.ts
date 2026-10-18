@@ -1,17 +1,5 @@
+import { base, invite } from './support.ts'
 import { expect, test } from '@playwright/test'
-
-const base = (): string => process.env.FORGE_URL!.replace('127.0.0.1', 'localhost')
-
-const invite = async (login: string): Promise<string> => {
-  const response = await fetch(`${process.env.FORGE_URL}/api/admin/invites`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${process.env.FORGE_ADMIN_TOKEN}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ login }),
-  })
-  expect(response.status).toBe(201)
-  const { url } = (await response.json()) as { url: string }
-  return new URL(url).pathname
-}
 
 test('signs up with a passkey from an invite, manages tokens and signs out', async ({ page, context }, info) => {
   const client = await context.newCDPSession(page)

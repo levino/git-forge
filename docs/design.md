@@ -1665,6 +1665,23 @@ They read through `ObjectDatabase` like the Git endpoints. The UI layer
 (`src/ui/*.ts`) only composes them into view models; `.astro` files only
 render.
 
+### Collaboration pages
+
+Issues, pull requests and discussions call the service functions of
+`@git-forge/collaboration` directly with a scope from `services.collaboration`
+(its `openRepository` with the same options as the `/api/v3` handler, so
+activity reaches notifications, webhooks and CI the same way). Buttons and
+forms are shown with the package's `can(scope, permission)`; every write
+goes through the service function, which checks the permission again, after
+`verifySessionWrite`. Collaboration errors are shown on the page with their
+status. Links that come from the API (check run `details_url`, status
+`target_url`) are rendered only for `http(s)` URLs.
+
+Inline review comments on the *Files changed* tab use the only client script
+of these pages: a click on a line's `+` clones a `<template>` form below the
+row with path, line and side filled in; the form posts to the page like every
+other form.
+
 ### Rendering
 
 - Tailwind CSS with daisyUI, themes `light` (default) and `dark`

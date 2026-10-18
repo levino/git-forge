@@ -1,0 +1,39 @@
+---
+import type { Issue } from '@git-forge/collaboration'
+import { isoTime, relativeTime } from '../ui/format.ts'
+import { repoUrl, type OpenRepository } from '../ui/repository.ts'
+
+type Props = { repo: OpenRepository; issues: readonly Issue[]; kind: 'issues' | 'pull' }
+
+const { repo, issues, kind } = Astro.props
+const now = Math.floor(Date.now() / 1000)
+const seconds = (ms: number) => Math.floor(ms / 1000)
+---
+
+<ul class="border border-base-300 rounded-box divide-y divide-base-300" aria-label={kind === 'pull' ? 'Pull requests' : 'Issues'}>
+  {
+    issues.map((issue) => (
+      <li class="flex flex-wrap items-start gap-x-3 gap-y-1 px-4 py-3">
+        <span class:list={['badge badge-sm mt-0.5', issue.state === 'open' ? 'badge-success' : 'badge-neutral']}>{issue.state === 'open' ? 'Open' : 'Closed'}</span>
+        <div class="min-w-0 flex-1">
+          <a href={repoUrl(repo.name, kind, String(issue.number))} class="font-semibold link link-hover break-words">
+            {issue.title}
+          </a>
+          {issue.labels.map((label) => (
+            <span class="badge badge-sm ml-1" style={`background-color:#${label.color};color:#000`}>
+              {label.name}
+            </span>
+          ))}
+          <p class="text-sm text-base-content/70">
+            #{issue.number} opened <time datetime={isoTime(seconds(issue.createdAt))}>{relativeTime(seconds(issue.createdAt), now)}</time> by {issue.author.login}
+          </p>
+        </div>
+        {issue.comments > 0 && (
+          <span class="text-sm text-base-content/70" aria-label={`${issue.comments} comments`}>
+            💬 {issue.comments}
+          </span>
+        )}
+      </li>
+    ))
+  }
+</ul>

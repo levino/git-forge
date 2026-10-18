@@ -1,7 +1,7 @@
 ---
 import { cloneUrl, repoUrl, type OpenRepository } from '../ui/repository.ts'
 
-type Tab = 'code' | 'commits' | 'branches' | 'tags' | 'releases' | 'settings'
+type Tab = 'code' | 'issues' | 'pulls' | 'discussions' | 'commits' | 'branches' | 'tags' | 'releases' | 'actions' | 'settings'
 type Props = { repo: OpenRepository; tab: Tab }
 
 const { repo, tab } = Astro.props
@@ -9,6 +9,9 @@ const { name, subject } = repo
 const mirror = repo.mirrors.find((config) => !config.detachedAt)
 const tabs: { id: Tab; label: string; href: string; count?: number }[] = [
   { id: 'code', label: 'Code', href: repoUrl(name) },
+  { id: 'issues', label: 'Issues', href: repoUrl(name, 'issues') },
+  { id: 'pulls', label: 'Pull requests', href: repoUrl(name, 'pulls') },
+  { id: 'discussions', label: 'Discussions', href: repoUrl(name, 'discussions') },
   { id: 'commits', label: 'Commits', href: repoUrl(name, 'commits') },
   { id: 'branches', label: 'Branches', href: repoUrl(name, 'branches'), count: repo.branches.length },
   { id: 'tags', label: 'Tags', href: repoUrl(name, 'tags'), count: repo.tags.length },

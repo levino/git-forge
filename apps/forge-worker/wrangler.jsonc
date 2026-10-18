@@ -72,7 +72,7 @@
     {
       "class_name": "RunnerContainer",
       "image": "./runner/Dockerfile",
-      "instance_type": "standard-1",
+      "instance_type": "basic",
       "max_instances": 4
     }
   ],
@@ -155,7 +155,7 @@
         {
           "class_name": "RunnerContainer",
           "image": "./runner/Dockerfile",
-          "instance_type": "standard-1",
+          "instance_type": "basic",
           "max_instances": 4
         }
       ],
@@ -235,7 +235,7 @@
         {
           "class_name": "RunnerContainer",
           "image": "./runner/Dockerfile",
-          "instance_type": "standard-1",
+          "instance_type": "basic",
           "max_instances": 4
         }
       ],
@@ -315,7 +315,7 @@
         {
           "class_name": "RunnerContainer",
           "image": "./runner/Dockerfile",
-          "instance_type": "standard-1",
+          "instance_type": "basic",
           "max_instances": 4
         }
       ],

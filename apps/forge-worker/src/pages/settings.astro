@@ -21,7 +21,8 @@ if (Astro.request.method === 'POST') {
 }
 Astro.response.headers.set('Cache-Control', 'no-store')
 const user = session.principal
-const [tokens, passkeys] = await Promise.all([forge.account.listTokens(user), forge.account.listPasskeys(user)])
+const passkeysEnabled = forge.loginOptions.passkeys
+const [tokens, passkeys] = await Promise.all([forge.account.listTokens(user), passkeysEnabled ? forge.account.listPasskeys(user) : []])
 const oidcName = forge.loginOptions.oidcName
 const day = (ms: number | null) => (ms === null ? 'never' : isoTime(Math.floor(ms / 1000)).slice(0, 10))
 const configJson = JSON.stringify({ returnTo: '/settings', csrf: session.csrf }).replace(/</g, '\\u003c')
@@ -121,35 +122,39 @@ const configJson = JSON.stringify({ returnTo: '/settings', csrf: session.csrf })
     </form>
   </section>
 
-  <section class="mb-10" aria-labelledby="passkeys">
-    <h2 id="passkeys" class="text-xl font-semibold mb-4">Passkeys</h2>
-    {
-      passkeys.length === 0 ? (
-        <p class="mb-4">No passkeys yet.</p>
-      ) : (
-        <ul class="border border-base-300 rounded-box divide-y divide-base-300 mb-4">
-          {passkeys.map((passkey) => (
-            <li class="flex flex-wrap items-center gap-3 px-4 py-3">
-              <span class="font-semibold">{passkey.name}</span>
-              <span class="text-sm text-base-content/70">
-                added {day(passkey.createdAt)}, last used {passkey.lastUsedAt === null ? 'never' : day(passkey.lastUsedAt)}
-              </span>
-              <form method="post" class="ml-auto">
-                <input type="hidden" name="csrf" value={session.csrf} />
-                <input type="hidden" name="action" value="remove-passkey" />
-                <input type="hidden" name="id" value={passkey.id} />
-                <button class="btn btn-xs btn-error btn-outline" aria-label={`Remove passkey ${passkey.name}`}>
-                  Remove
-                </button>
-              </form>
-            </li>
-          ))}
-        </ul>
-      )
-    }
-    <button class="btn" type="button" data-passkey="register">Add a passkey</button>
-    <p id="message" role="alert" class="text-error mt-2 empty:hidden"></p>
-  </section>
+  {
+    passkeysEnabled && (
+    <section class="mb-10" aria-labelledby="passkeys">
+      <h2 id="passkeys" class="text-xl font-semibold mb-4">Passkeys</h2>
+      {
+        passkeys.length === 0 ? (
+          <p class="mb-4">No passkeys yet.</p>
+        ) : (
+          <ul class="border border-base-300 rounded-box divide-y divide-base-300 mb-4">
+            {passkeys.map((passkey) => (
+              <li class="flex flex-wrap items-center gap-3 px-4 py-3">
+                <span class="font-semibold">{passkey.name}</span>
+                <span class="text-sm text-base-content/70">
+                  added {day(passkey.createdAt)}, last used {passkey.lastUsedAt === null ? 'never' : day(passkey.lastUsedAt)}
+                </span>
+                <form method="post" class="ml-auto">
+                  <input type="hidden" name="csrf" value={session.csrf} />
+                  <input type="hidden" name="action" value="remove-passkey" />
+                  <input type="hidden" name="id" value={passkey.id} />
+                  <button class="btn btn-xs btn-error btn-outline" aria-label={`Remove passkey ${passkey.name}`}>
+                    Remove
+                  </button>
+                </form>
+              </li>
+            ))}
+          </ul>
+        )
+      }
+      <button class="btn" type="button" data-passkey="register">Add a passkey</button>
+      <p id="message" role="alert" class="text-error mt-2 empty:hidden"></p>
+    </section>
+    )
+  }
 
   {
     oidcName && (
@@ -163,6 +168,6 @@ const configJson = JSON.stringify({ returnTo: '/settings', csrf: session.csrf })
       </section>
     )
   }
-  <script type="application/json" id="login-config" set:html={configJson} />
-  <script is:inline set:html={PASSKEY_SCRIPT} />
+  {passkeysEnabled && <script type="application/json" id="login-config" set:html={configJson} />}
+  {passkeysEnabled && <script is:inline set:html={PASSKEY_SCRIPT} />}
 </Layout>

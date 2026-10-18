@@ -616,7 +616,12 @@ cross-origin, the RP ID hash (the host of `PUBLIC_URL`), UP and UV, and the
 signature; the counter must increase unless both sides are zero (synced
 passkeys report 0), and it is updated with compare-and-swap. The user handle
 is random and shared by all passkeys of a user. Public keys are stored as
-JWKs.
+JWKs. `PASSKEYS=false` makes an instance OIDC-only: the passkey functions in
+`login.ts` refuse with `not_configured` (404 on every passkey endpoint,
+including `/api/user/passkeys`), and the login page model carries
+`passkeys: false`, so the sign-in, invite and settings pages render no passkey
+buttons and no ceremony script. Stored credentials are kept, not deleted.
+Break-glass and the device flow are unaffected.
 
 **Device flow.** RFC 8628 with the fixed client id `git-forge-cli`. The user
 code (8 letters without vowels and look-alikes) is entered or confirmed at

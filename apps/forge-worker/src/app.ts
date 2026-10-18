@@ -185,7 +185,7 @@ export type ForgeServices = {
   readonly isInstanceAdmin: (principal: Principal) => Promise<boolean>
   readonly session: (request: Request) => Promise<UiSession | null>
   readonly verifySessionWrite: (request: Request) => Promise<UiSession | null>
-  readonly loginOptions: { readonly oidcName: string | null }
+  readonly loginOptions: { readonly oidcName: string | null; readonly passkeys: boolean }
   readonly account: AccountOperations
   readonly repositories: RepositoryOperations
   readonly inbox: InboxOperations
@@ -360,6 +360,7 @@ export const createForge = (options: ForgeOptions): Forge => {
       oidc,
       selfSignup: options.login?.selfSignup ?? false,
       breakGlassKey: options.login?.breakGlassKey ?? null,
+      passkeys: options.login?.passkeys ?? true,
       fetch: outbound,
       now: () => now().getTime(),
     }
@@ -1181,7 +1182,7 @@ export const createForge = (options: ForgeOptions): Forge => {
         const check = await checkSession(request, loginOptions(request))
         return check.kind === 'session' ? { principal: sessionUserPrincipal(check.active.session), csrf: check.active.csrf } : null
       },
-      loginOptions: { oidcName: oidc?.config.name ?? null },
+      loginOptions: { oidcName: oidc?.config.name ?? null, passkeys: options.login?.passkeys ?? true },
       account: {
         listTokens: (user) => store.listTokens({ accountId: user.id }),
         createToken: (user, input) => store.createPersonalAccessToken(user.id, input, { kind: 'user', id: user.id }),

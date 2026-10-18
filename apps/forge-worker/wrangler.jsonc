@@ -64,6 +64,7 @@
     "OIDC_CLIENT_ID": "",
     "OIDC_NAME": "",
     "SELF_SIGNUP": "false",
+    "PASSKEYS": "true",
     "BREAK_GLASS_PUBLIC_KEY": "",
     "EMAIL_PROVIDER": "console",
     "EMAIL_FROM": "forge@example.org"
@@ -147,6 +148,7 @@
         "OIDC_CLIENT_ID": "",
         "OIDC_NAME": "",
         "SELF_SIGNUP": "false",
+        "PASSKEYS": "true",
         "BREAK_GLASS_PUBLIC_KEY": "",
         "EMAIL_PROVIDER": "console",
         "EMAIL_FROM": "forge@example.org"
@@ -227,6 +229,7 @@
         "OIDC_CLIENT_ID": "",
         "OIDC_NAME": "",
         "SELF_SIGNUP": "false",
+        "PASSKEYS": "true",
         "BREAK_GLASS_PUBLIC_KEY": "",
         "EMAIL_PROVIDER": "console",
         "EMAIL_FROM": "forge@example.org"
@@ -307,6 +310,7 @@
         "OIDC_CLIENT_ID": "",
         "OIDC_NAME": "",
         "SELF_SIGNUP": "false",
+        "PASSKEYS": "true",
         "BREAK_GLASS_PUBLIC_KEY": "",
         "EMAIL_PROVIDER": "console",
         "EMAIL_FROM": "forge@example.org"

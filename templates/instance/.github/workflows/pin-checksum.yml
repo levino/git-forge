@@ -35,4 +35,10 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.pin.result == 'success' && github.head_ref || github.event.pull_request.head.sha }}
-      - run: sh build.sh
+      - name: Verify the pinned release
+        run: |
+          if grep -Eq '"sha256"[[:space:]]*:[[:space:]]*"0{64}"' git-forge.json; then
+            echo "::notice::git-forge.json holds the all-zero placeholder pin; there is no release to verify yet"
+            exit 0
+          fi
+          sh build.sh

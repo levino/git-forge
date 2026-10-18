@@ -11,7 +11,7 @@ forge code: it pins a release of git-forge and configures one instance.
 | `build.sh` | Downloads the pinned release, verifies every file against the pin and unpacks it into `dist/`. Needs only `sh`, `curl`, `sha256sum` and `tar`. |
 | `deploy.sh` | Applies the release's D1 migrations and deploys, in the right order also on the very first deploy. |
 | `renovate.json` | Lets Renovate propose updates when git-forge publishes a release. |
-| `.github/workflows/pin-checksum.yml` | Fills in the `sha256` on Renovate's update PRs and checks that the pin builds. |
+| `.github/workflows/pin-checksum.yml` | Fills in the `sha256` on Renovate's update PRs and checks that the pin builds (not for the all-zero placeholder pin, which has no release). |
 
 There is no `package.json` and no lockfile. Nothing from npm ends up in the
 Worker: it runs the bundled `git-forge-worker.mjs` from the release, byte for

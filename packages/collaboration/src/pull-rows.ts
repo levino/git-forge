@@ -1,5 +1,5 @@
 import { selectProtectionRule, sql, type Statement, first } from '@git-forge/accounts'
-import { type ObjectId, type ObjectSource, parseCommit, type RefsState } from '@git-forge/core'
+import { advertisedRefs, type ObjectId, ObjectDatabase, type ObjectSource, parseCommit, readRefs, type RefsState, type RepositoryName, transferObjects } from '@git-forge/core'
 import { actorColumns } from './actors.ts'
 import { emitActivity, type EventActor, notFound, type Scope } from './context.ts'
 import { branchName, branchTip, objectDatabase } from './git.ts'
@@ -20,10 +20,34 @@ export type PullRow = IssueRow & {
   merge_method: 'merge' | 'squash' | 'rebase' | null
   check_key: string | null
   check_result: string | null
+  head_repository_id: string | null
+  maintainer_can_modify: number
+  head_owner: string | null
+  head_name: string | null
 }
 
 export const PULL_SELECT = `SELECT i.*, p.head_ref, p.base_ref, p.head_sha, p.base_sha, p.draft, p.last_pusher_kind, p.last_pusher_id, p.merged_at, p.merged_by_kind,
-  p.merged_by_id, p.merge_commit_sha, p.merge_method, p.check_key, p.check_result FROM issues i JOIN pull_requests p ON p.issue_id = i.id`
+  p.merged_by_id, p.merge_commit_sha, p.merge_method, p.check_key, p.check_result, p.head_repository_id, p.maintainer_can_modify,
+  ha.login AS head_owner, hr.name AS head_name
+  FROM issues i JOIN pull_requests p ON p.issue_id = i.id
+  LEFT JOIN repositories hr ON hr.id = p.head_repository_id LEFT JOIN accounts ha ON ha.id = hr.owner_id`
+
+export const headRepositoryName = (scope: Pick<Scope, 'repo'>, row: Pick<PullRow, 'head_repository_id' | 'head_owner' | 'head_name'>): RepositoryName =>
+  row.head_repository_id !== null && row.head_owner !== null && row.head_name !== null ? { owner: row.head_owner, name: row.head_name } : scope.repo
+
+export const headRefsState = async (scope: Pick<Scope, 'storage' | 'repo'>, row: Pick<PullRow, 'head_repository_id' | 'head_owner' | 'head_name'>, state: RefsState): Promise<RefsState | null> =>
+  row.head_repository_id === null ? state : ((await readRefs(scope.storage, headRepositoryName(scope, row)))?.state ?? null)
+
+export const branchTips = (state: RefsState): ObjectId[] =>
+  Object.entries(advertisedRefs(state).refs)
+    .filter(([name]) => name.startsWith('refs/heads/'))
+    .map(([, id]) => id)
+
+export const importHeadObjects = async (scope: Pick<Scope, 'storage' | 'repo'>, from: RepositoryName, head: ObjectId, state: RefsState): Promise<void> => {
+  const target = objectDatabase(scope)
+  if (await target.has(head)) return
+  await transferObjects(new ObjectDatabase(scope.storage, from), target, [head], branchTips(state))
+}
 
 export const pullRow = async (scope: Scope, number: number): Promise<PullRow> => {
   const row = await first<PullRow>(scope.db, sql(`${PULL_SELECT} WHERE i.repository_id = ? AND i.number = ?`, scope.repository.id, number))
@@ -86,8 +110,10 @@ export const dismissStatements = async (scope: Scope, row: PullRow, actor: Event
 
 export const refreshPull = async (scope: Scope, row: PullRow, state: RefsState, pusher: EventActor | null): Promise<PullRow> => {
   if (row.merged_at !== null || row.state !== 'open') return row
-  const head = branchTip(state, row.head_ref)
+  const headState = await headRefsState(scope, row, state)
+  const head = headState ? branchTip(headState, row.head_ref) : null
   const base = branchTip(state, row.base_ref)
+  if (head !== null && head !== row.head_sha && row.head_repository_id !== null) await importHeadObjects(scope, headRepositoryName(scope, row), head, state)
   const odb = objectDatabase(scope)
   const at = scope.now()
   const actor = pusher ?? { kind: 'system', id: null }

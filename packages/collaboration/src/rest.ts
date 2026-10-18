@@ -1,6 +1,8 @@
 import { authenticateRequest, type InstanceVerifier, type Principal, type RepositoryDirectory } from '@git-forge/accounts'
 import { isValidName, readAll, SizeLimitError } from '@git-forge/core'
-import { CollaborationError, type CollaborationOptions, invalid, openRepository, type Scope } from './context.ts'
+import { CollaborationError, type CollaborationOptions, invalid, openRepository, type Scope, scopeOptions } from './context.ts'
+import { createFork, forkInfo, forkNetwork, listForks } from './forks.ts'
+import { DEFAULT_SETTINGS } from './permissions.ts'
 import {
   createCategory,
   createDiscussion,
@@ -249,13 +251,25 @@ const pullResponse = async (context: Context, number: number, status = 200): Pro
   return json(status, pullJson(context.urls, context.scope.repository, pull, comments))
 }
 
-const repositoryResponse = async (context: Context): Promise<Response> => {
+const NO_PERMISSIONS = { admin: false, maintain: false, push: false, triage: false, pull: true }
+
+const repositoryResponse = async (context: Context, status = 200): Promise<Response> => {
   const { scope } = context
   let branch = 'main'
   try {
     branch = defaultBranch(await currentRefs(scope))
   } catch {}
-  return json(200, repositoryJson(context.urls, scope.repository, scope.settings, rolePermissions(scope), branch))
+  const fork = await forkInfo(scope)
+  return json(status, {
+    ...repositoryJson(context.urls, scope.repository, scope.settings, rolePermissions(scope), branch),
+    fork: (await scope.accounts.forkInfo(scope.repository.id)) !== null,
+    ...(fork
+      ? {
+          parent: repositoryJson(context.urls, fork.parent, DEFAULT_SETTINGS, NO_PERMISSIONS, ''),
+          source: repositoryJson(context.urls, fork.source, DEFAULT_SETTINGS, NO_PERMISSIONS, ''),
+        }
+      : {}),
+  })
 }
 
 const SETTINGS_FIELDS: Readonly<Record<string, string>> = {
@@ -280,6 +294,32 @@ const routes: readonly Route[] = [
       const settings = await updateSettings(context.scope, input)
       const scope = { ...context.scope, settings }
       return repositoryResponse({ ...context, scope })
+    },
+  },
+  {
+    method: 'GET',
+    pattern: /^\/forks$/,
+    handler: async (context) => sliced(context, await listForks(context.scope), (repository) => repositoryJson(context.urls, repository, DEFAULT_SETTINGS, NO_PERMISSIONS, '')),
+  },
+  {
+    method: 'POST',
+    pattern: /^\/forks$/,
+    body: true,
+    handler: async (context) => {
+      const fork = await createFork(context.scope, { organization: context.body.organization, name: context.body.name, defaultBranchOnly: context.body.default_branch_only })
+      const scope = await openRepository(scopeOptions(context.scope), context.scope.actor.principal, fork.owner, fork.name)
+      return repositoryResponse({ ...context, scope }, 202)
+    },
+  },
+  {
+    method: 'GET',
+    pattern: /^\/network$/,
+    handler: async (context) => {
+      const network = await forkNetwork(context.scope)
+      return json(200, {
+        root: network.root ? repositoryJson(context.urls, network.root, DEFAULT_SETTINGS, NO_PERMISSIONS, '') : null,
+        forks: network.forks.map((fork) => ({ ...repositoryJson(context.urls, fork, DEFAULT_SETTINGS, NO_PERMISSIONS, ''), parent_id: fork.parentId })),
+      })
     },
   },
   { method: 'GET', pattern: /^\/issues$/, handler: async (context) => paged(context, await listIssues(context.scope, issueFilters(context.url, 'all'), pageOf(context.url)), (issue) => issueJson(context.urls, context.scope.repository, issue)) },
@@ -456,7 +496,15 @@ const routes: readonly Route[] = [
     pattern: /^\/pulls$/,
     body: true,
     handler: async (context) => {
-      const pull = await createPull(context.scope, { title: context.body.title, body: context.body.body, head: context.body.head, base: context.body.base, draft: context.body.draft })
+      const pull = await createPull(context.scope, {
+        title: context.body.title,
+        body: context.body.body,
+        head: context.body.head,
+        headRepo: context.body.head_repo,
+        base: context.body.base,
+        draft: context.body.draft,
+        maintainerCanModify: context.body.maintainer_can_modify,
+      })
       return json(201, pullJson(context.urls, context.scope.repository, pull), { Location: `${context.urls.api}/repos/${context.scope.repo.owner}/${context.scope.repo.name}/pulls/${pull.number}` })
     },
   },
@@ -483,6 +531,7 @@ const routes: readonly Route[] = [
         ...(context.body.state !== undefined ? { state: context.body.state } : {}),
         ...(context.body.base !== undefined ? { base: context.body.base } : {}),
         ...(context.body.draft !== undefined ? { draft: context.body.draft } : {}),
+        ...(context.body.maintainer_can_modify !== undefined ? { maintainerCanModify: context.body.maintainer_can_modify } : {}),
       })
       return pullResponse(context, int(context.params[0]!))
     },

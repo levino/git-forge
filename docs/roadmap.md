@@ -133,7 +133,8 @@ Design: [design.md §17](design.md#17-collaboration).
 - [x] Commit statuses and check runs (storage and API; CI writes them)
 - [x] Discussions: categories, threads, answers
 - [x] REST API under `/api/v3` with GitHub-compatible shapes, wired into the Worker
-- [ ] Pull requests from forks
+- [x] Forks on the same instance (object sharing through alternates, fork network listing) and pull requests from forks (head objects copied into the base, maintainers can modify, untrusted CI)
+- [ ] Forks across instances (fork a mirror, pull requests between instances)
 - [x] CODEOWNERS parsing for `require_code_owner_reviews` (owners of every changed file must approve, user owners are requested as reviewers)
 - [x] Rename detection in merges (port of git's `diffcore-rename` scoring and pairing; edits follow renamed files, rename/rename and rename/delete conflicts)
 - [ ] Directory rename detection in merges (a directory removed on one side while the other adds to it is still reported as a conflict)

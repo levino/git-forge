@@ -30,7 +30,20 @@ export type Actor = {
 
 export type AccountsDirectory = Pick<
   AccountsStore,
-  'grantsFor' | 'isInstanceAdmin' | 'teamIdsFor' | 'findTeam' | 'branchProtectionRules' | 'findAccount' | 'findRepository' | 'authenticateToken'
+  | 'grantsFor'
+  | 'isInstanceAdmin'
+  | 'teamIdsFor'
+  | 'findTeam'
+  | 'branchProtectionRules'
+  | 'findAccount'
+  | 'findRepository'
+  | 'findRepositoryById'
+  | 'authenticateToken'
+  | 'createFork'
+  | 'forkInfo'
+  | 'listForks'
+  | 'forkNetwork'
+  | 'organizationRole'
 >
 
 export type BranchUpdate = {
@@ -156,6 +169,16 @@ export const openRepository = async (options: CollaborationOptions, principal: P
     settings: await readSettings(options.db, repository.id),
   }
 }
+
+export const scopeOptions = (scope: Scope): CollaborationOptions => ({
+  db: scope.db,
+  storage: scope.storage,
+  accounts: scope.accounts,
+  now: scope.now,
+  noreplyDomain: scope.noreplyDomain,
+  ...(scope.onActivity ? { onActivity: scope.onActivity } : {}),
+  ...(scope.onBranchUpdated ? { onBranchUpdated: scope.onBranchUpdated } : {}),
+})
 
 export const can = (scope: Scope, permission: Permission, extra: { readonly author?: ActorRef | null; readonly locked?: boolean } = {}): boolean =>
   allowed(permission, {

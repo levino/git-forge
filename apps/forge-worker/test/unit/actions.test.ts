@@ -41,4 +41,22 @@ describe('CI with collaboration', () => {
     const checks = await json<{ check_runs: { name: string; status: string; head_sha: string }[] }>(await call(forge, server.url, 'GET', `/api/v3/repos/admin/ci/commits/${head}/check-runs`, admin))
     expect(checks.check_runs.map((check) => [check.name, check.status, check.head_sha])).toEqual([['test', 'queued', head]])
   })
+
+  it('runs pull_request workflows for pull requests from forks without the base repository having the branch', async () => {
+    expect((await call(forge, server.url, 'POST', '/api/admin/users', admin, { login: 'contrib' })).status).toBe(201)
+    const contrib = (await json<{ token: string }>(await call(forge, server.url, 'POST', '/api/admin/users/contrib/tokens', admin, { scopes: ['repo:write'] }))).token
+    expect((await call(forge, server.url, 'PUT', '/api/repos/admin/ci/collaborators/contrib', admin, { role: 'read' })).status).toBe(200)
+    const fork = await call(forge, server.url, 'POST', '/api/v3/repos/admin/ci/forks', contrib, {})
+    expect(fork.status, await fork.clone().text()).toBe(202)
+    const source = initRepo()
+    await git(source, ['-c', `http.extraHeader=Authorization: Bearer ${contrib}`, 'fetch', '-q', `${server.url}/contrib/ci.git`, 'main:refs/remotes/fork/main'])
+    await git(source, ['checkout', '-q', '-b', 'from-fork', 'fork/main'])
+    writeFile(source, 'FORK.md', 'fork\n')
+    const head = commitAll(source, 'from the fork')
+    await git(source, ['-c', `http.extraHeader=Authorization: Bearer ${contrib}`, 'push', '-q', `${server.url}/contrib/ci.git`, 'from-fork'])
+    const opened = await call(forge, server.url, 'POST', '/api/v3/repos/admin/ci/pulls', contrib, { title: 'From the fork', head: 'contrib:from-fork', base: 'main' })
+    expect(opened.status, await opened.clone().text()).toBe(201)
+    const runs = await json<{ workflow_runs: { event: string; head_sha: string; head_branch: string }[] }>(await call(forge, server.url, 'GET', '/api/v3/repos/admin/ci/actions/runs', admin))
+    expect(runs.workflow_runs).toContainEqual(expect.objectContaining({ event: 'pull_request', head_sha: head, head_branch: 'refs/pull/2/head' }))
+  })
 })

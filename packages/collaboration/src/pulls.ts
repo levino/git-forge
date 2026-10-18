@@ -1,6 +1,7 @@
 import {
   atLeast,
   evaluateBranchUpdate,
+  type RepositorySubject,
   first,
   protectionActor,
   selectProtectionRule,
@@ -24,6 +25,7 @@ import {
   type ObjectId,
   parseCommit,
   readCommitDetails,
+  readRefs,
   type RefsState,
   type Signature,
   signatureAt,
@@ -44,7 +46,10 @@ import {
   readSettings,
   refFromColumns,
   requirePermission,
+  resolveActor,
+  sameActor,
   type Scope,
+  scopeOptions,
   SYSTEM_ACTOR,
 } from './context.ts'
 import { branchName, branchRef, branchTip, currentRefs, defaultBranch, objectDatabase } from './git.ts'
@@ -67,7 +72,7 @@ import {
   placeholders,
   updateIssueStatements,
 } from './issues.ts'
-import { PULL_SELECT, type PullRow, pullRow, recentCommits, refreshPull } from './pull-rows.ts'
+import { headRefsState, headRepositoryName, importHeadObjects, PULL_SELECT, type PullRow, pullRow, recentCommits, refreshPull } from './pull-rows.ts'
 import { type CodeOwnerReview, evaluateCodeOwners, requestCodeOwners } from './owners.ts'
 import { accessOf, reviewEvidence } from './reviews.ts'
 import { checkStates } from './statuses.ts'
@@ -84,6 +89,8 @@ export type PullRequest = Issue & {
   readonly mergeCommitSha: ObjectId | null
   readonly mergeMethod: MergeMethod | null
   readonly requestedReviewers: readonly UserSummary[]
+  readonly headRepository: RepositorySubject | null
+  readonly maintainerCanModify: boolean
 }
 
 export type MergeableState = 'clean' | 'dirty' | 'blocked' | 'behind' | 'draft' | 'unknown'
@@ -112,6 +119,8 @@ const hydratePulls = async (scope: Scope, rows: readonly PullRow[]): Promise<Pul
     ...rows.map((row) => ({ kind: row.merged_by_kind, id: row.merged_by_id })),
     ...requests.map((request) => ({ kind: 'user', id: request.user_id })),
   ])
+  const heads = new Map<string, RepositorySubject | null>()
+  for (const id of new Set(rows.map((row) => row.head_repository_id).filter((id): id is string => id !== null))) heads.set(id, await scope.accounts.findRepositoryById(id))
   return rows.map((row, index) => ({
     ...issues[index]!,
     headRef: branchName(row.head_ref),
@@ -125,15 +134,35 @@ const hydratePulls = async (scope: Scope, rows: readonly PullRow[]): Promise<Pul
     mergeCommitSha: row.merge_commit_sha,
     mergeMethod: row.merge_method,
     requestedReviewers: requests.filter((request) => request.issue_id === row.id).map((request) => users({ kind: 'user', id: request.user_id })),
+    headRepository: row.head_repository_id === null ? null : (heads.get(row.head_repository_id) ?? null),
+    maintainerCanModify: row.maintainer_can_modify === 1,
   }))
 }
 
-const parseHead = (scope: Scope, head: unknown): string => {
+type Head = { readonly repository: RepositorySubject | null; readonly branch: string }
+
+const splitHead = (scope: Scope, head: unknown): { owner: string | null; branch: string } => {
   if (typeof head !== 'string' || head === '') throw invalid('head is required')
   const colon = head.indexOf(':')
-  if (colon === -1) return head
-  if (head.slice(0, colon).toLowerCase() !== scope.repository.owner.toLowerCase()) throw invalid('pull requests from forks are not supported yet')
-  return head.slice(colon + 1)
+  if (colon === -1) return { owner: null, branch: head }
+  const owner = head.slice(0, colon)
+  return { owner: owner.toLowerCase() === scope.repository.owner.toLowerCase() ? null : owner, branch: head.slice(colon + 1) }
+}
+
+const resolveHead = async (scope: Scope, head: unknown, headRepo: unknown): Promise<Head> => {
+  const { owner, branch } = splitHead(scope, head)
+  if (headRepo !== undefined && headRepo !== null && typeof headRepo !== 'string') throw invalid('head_repo must be a repository name')
+  if (owner === null && (headRepo === undefined || headRepo === null || headRepo === scope.repository.name)) return { repository: null, branch }
+  const network = await scope.accounts.forkNetwork(scope.repository.id)
+  const members = network ? [network.root, ...network.forks] : []
+  const candidates = members.filter(
+    (member) => member.id !== scope.repository.id && (owner === null || member.owner.toLowerCase() === owner.toLowerCase()) && (typeof headRepo !== 'string' || member.name.toLowerCase() === headRepo.toLowerCase()),
+  )
+  const readable: RepositorySubject[] = []
+  for (const candidate of candidates) if (atLeast((await resolveActor(scope.accounts, scope.actor.principal, candidate)).access, 'read')) readable.push(candidate)
+  if (readable.length === 0) throw new CollaborationError(422, 'Validation Failed', [{ resource: 'PullRequest', field: 'head', code: 'invalid' }])
+  if (readable.length > 1) throw invalid(`${owner ?? scope.repository.owner} has several repositories in this network; pass head_repo`)
+  return { repository: readable[0]!, branch }
 }
 
 const requireBranch = (state: RefsState, branch: unknown, field: string): { ref: string; tip: ObjectId } => {
@@ -147,27 +176,37 @@ export type PullInput = {
   readonly title?: unknown
   readonly body?: unknown
   readonly head?: unknown
+  readonly headRepo?: unknown
   readonly base?: unknown
   readonly draft?: unknown
+  readonly maintainerCanModify?: unknown
 }
 
 export const createPull = async (scope: Scope, input: PullInput): Promise<PullDetails> => {
   const author = requirePermission(scope, 'pull:create')
   const state = await currentRefs(scope)
-  const head = requireBranch(state, parseHead(scope, input.head), 'head')
+  const target = await resolveHead(scope, input.head, input.headRepo)
+  const headName = target.repository ? { owner: target.repository.owner, name: target.repository.name } : scope.repo
+  const headState = target.repository ? (await readRefs(scope.storage, headName))?.state : state
+  if (!headState) throw new CollaborationError(422, 'Validation Failed', [{ resource: 'PullRequest', field: 'head', code: 'invalid' }])
+  const head = requireBranch(headState, target.branch, 'head')
   const base = requireBranch(state, input.base, 'base')
-  if (head.ref === base.ref) throw invalid('head and base must be different branches')
+  if (!target.repository && head.ref === base.ref) throw invalid('head and base must be different branches')
   if (input.draft !== undefined && typeof input.draft !== 'boolean') throw invalid('draft must be a boolean')
+  if (input.maintainerCanModify !== undefined && typeof input.maintainerCanModify !== 'boolean') throw invalid('maintainer_can_modify must be a boolean')
+  const headRepositoryId = target.repository?.id ?? null
   const existing = await first(
     scope.db,
     sql(
-      "SELECT p.issue_id FROM pull_requests p JOIN issues i ON i.id = p.issue_id WHERE p.repository_id = ? AND p.head_ref = ? AND p.base_ref = ? AND i.state = 'open'",
+      "SELECT p.issue_id FROM pull_requests p JOIN issues i ON i.id = p.issue_id WHERE p.repository_id = ? AND p.head_ref = ? AND p.base_ref = ? AND p.head_repository_id IS ? AND i.state = 'open'",
       scope.repository.id,
       head.ref,
       base.ref,
+      headRepositoryId,
     ),
   )
-  if (existing) throw invalid(`A pull request already exists for ${scope.repository.owner}:${branchName(head.ref)}.`)
+  if (existing) throw invalid(`A pull request already exists for ${headName.owner}:${branchName(head.ref)}.`)
+  if (target.repository) await importHeadObjects(scope, headName, head.tip, state)
   const odb = objectDatabase(scope)
   const bases = await mergeBases(odb, base.tip, head.tip)
   if (bases.length === 0) throw invalid(`The ${branchName(head.ref)} branch has no history in common with ${branchName(base.ref)}`)
@@ -176,7 +215,7 @@ export const createPull = async (scope: Scope, input: PullInput): Promise<PullDe
   const statements = await insertIssueStatements(scope, author, node, input, 'pull')
   statements.push(
     sql(
-      'INSERT INTO pull_requests (issue_id, repository_id, head_ref, base_ref, head_sha, base_sha, draft, last_pusher_kind, last_pusher_id) SELECT id, ?, ?, ?, ?, ?, ?, ?, ? FROM issues WHERE node_id = ?',
+      'INSERT INTO pull_requests (issue_id, repository_id, head_ref, base_ref, head_sha, base_sha, draft, last_pusher_kind, last_pusher_id, head_repository_id, maintainer_can_modify) SELECT id, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? FROM issues WHERE node_id = ?',
       scope.repository.id,
       head.ref,
       base.ref,
@@ -185,6 +224,8 @@ export const createPull = async (scope: Scope, input: PullInput): Promise<PullDe
       input.draft === true ? 1 : 0,
       author.kind,
       author.id,
+      headRepositoryId,
+      target.repository && input.maintainerCanModify === true ? 1 : 0,
       node,
     ),
   )
@@ -215,8 +256,9 @@ export const listPulls = async (scope: Scope, filters: PullFilters = {}, page: P
     params.push(state)
   }
   if (filters.head !== undefined) {
-    where.push('p.head_ref = ?')
-    params.push(branchRef(parseHead(scope, filters.head)))
+    const head = splitHead(scope, filters.head)
+    where.push(head.owner === null ? 'p.head_ref = ? AND p.head_repository_id IS NULL' : 'p.head_ref = ? AND ha.login = ?')
+    params.push(branchRef(head.branch), ...(head.owner === null ? [] : [head.owner]))
   }
   if (filters.base !== undefined) {
     where.push('p.base_ref = ?')
@@ -225,7 +267,16 @@ export const listPulls = async (scope: Scope, filters: PullFilters = {}, page: P
   const column = filters.sort === 'updated' ? 'i.updated_at' : 'i.created_at'
   const direction = filters.direction === 'asc' ? 'ASC' : 'DESC'
   const clause = where.join(' AND ')
-  const total = (await first<{ count: number }>(scope.db, sql(`SELECT COUNT(*) AS count FROM issues i JOIN pull_requests p ON p.issue_id = i.id WHERE ${clause}`, ...params)))?.count ?? 0
+  const total =
+    (
+      await first<{ count: number }>(
+        scope.db,
+        sql(
+          `SELECT COUNT(*) AS count FROM issues i JOIN pull_requests p ON p.issue_id = i.id LEFT JOIN repositories hr ON hr.id = p.head_repository_id LEFT JOIN accounts ha ON ha.id = hr.owner_id WHERE ${clause}`,
+          ...params,
+        ),
+      )
+    )?.count ?? 0
   const rows = await scope.db.all<PullRow>(sql(`${PULL_SELECT} WHERE ${clause} ORDER BY ${column} ${direction}, i.number ${direction} LIMIT ? OFFSET ?`, ...params, page.perPage, offset(page)))
   return { items: await hydratePulls(scope, rows), total }
 }
@@ -241,10 +292,13 @@ const treeOf = async (scope: Scope, commit: ObjectId | null): Promise<ObjectId |
   return object?.type === 'commit' ? parseCommit(object.data).tree : null
 }
 
-const loadFresh = async (scope: Scope, number: number): Promise<{ row: PullRow; state: RefsState }> => {
+const loadFresh = async (scope: Scope, number: number): Promise<{ row: PullRow; state: RefsState; headState: RefsState | null }> => {
   const state = await currentRefs(scope)
-  return { row: await refreshPull(scope, await pullRow(scope, number), state, null), state }
+  const row = await refreshPull(scope, await pullRow(scope, number), state, null)
+  return { row, state, headState: await headRefsState(scope, row, state) }
 }
+
+const headTip = (headState: RefsState | null, row: PullRow): ObjectId | null => (headState ? branchTip(headState, row.head_ref) : null)
 
 export const pullFiles = async (scope: Scope, number: number): Promise<FileDiff[]> => {
   const { row, state } = await loadFresh(scope, number)
@@ -319,10 +373,10 @@ const PLACEHOLDER = 'f'.repeat(40)
 export const getPullSummary = async (scope: Scope, number: number): Promise<PullRequest> => (await hydratePulls(scope, [await pullRow(scope, number)]))[0]!
 
 export const getPull = async (scope: Scope, number: number): Promise<PullDetails> => {
-  const { row, state } = await loadFresh(scope, number)
+  const { row, state, headState } = await loadFresh(scope, number)
   const [pull] = await hydratePulls(scope, [row])
   const base = branchTip(state, row.base_ref)
-  const head = branchTip(state, row.head_ref)
+  const head = headTip(headState, row)
   const mergeBase = await compareBase(scope, row, state)
   const odb = objectDatabase(scope)
   const files = await diffTreesWithContent(odb, await treeOf(scope, mergeBase), await treeOf(scope, row.head_sha), { maxBlobBytes: 256 * 1024 })
@@ -352,7 +406,7 @@ export const getPull = async (scope: Scope, number: number): Promise<PullDetails
   return { ...pull!, ...stats, mergeable: check.mergeable, rebaseable: check.rebaseable, mergeableState, conflicts: check.conflicts, blockers }
 }
 
-export type PullUpdate = IssueUpdate & { readonly base?: unknown; readonly draft?: unknown }
+export type PullUpdate = IssueUpdate & { readonly base?: unknown; readonly draft?: unknown; readonly maintainerCanModify?: unknown }
 
 export const updatePull = async (scope: Scope, number: number, input: PullUpdate): Promise<PullDetails> => {
   const { row, state } = await loadFresh(scope, number)
@@ -380,6 +434,15 @@ export const updatePull = async (scope: Scope, number: number, input: PullUpdate
         sql('UPDATE pull_requests SET draft = ? WHERE issue_id = ?', input.draft ? 1 : 0, row.id),
         eventStatement(row.id, actor, input.draft ? 'convert_to_draft' : 'ready_for_review', {}, at),
       )
+    }
+  }
+  if (input.maintainerCanModify !== undefined) {
+    const actor = requirePermission(scope, 'pull:edit', { author })
+    if (!sameActor(actor, author)) throw new CollaborationError(403, 'Only the author can allow maintainers to modify the head branch')
+    if (typeof input.maintainerCanModify !== 'boolean') throw invalid('maintainer_can_modify must be a boolean')
+    if (row.head_repository_id === null && input.maintainerCanModify) throw invalid('maintainer_can_modify applies to pull requests from forks')
+    if ((row.maintainer_can_modify === 1) !== input.maintainerCanModify) {
+      statements.push(sql('UPDATE pull_requests SET maintainer_can_modify = ? WHERE issue_id = ?', input.maintainerCanModify ? 1 : 0, row.id))
     }
   }
   if (statements.length === 0) return getPull(scope, number)
@@ -432,7 +495,7 @@ const optionalString = (value: unknown, name: string): string | null => {
 
 const commitMessage = async (scope: Scope, row: PullRow, method: MergeMethod, base: ObjectId, head: ObjectId, title: string | null, message: string | null): Promise<string> => {
   if (method === 'merge') {
-    const subject = title ?? `Merge pull request #${row.number} from ${scope.repository.owner}/${branchName(row.head_ref)}`
+    const subject = title ?? `Merge pull request #${row.number} from ${headRepositoryName(scope, row).owner}/${branchName(row.head_ref)}`
     const body = message ?? row.title
     return body === '' ? subject : `${subject}\n\n${body}`
   }
@@ -453,12 +516,12 @@ export const mergePull = async (scope: Scope, number: number, input: MergeInput 
   const title = optionalString(input.commitTitle, 'commit_title')
   const message = optionalString(input.commitMessage, 'commit_message')
   for (let attempt = 0; attempt < 3; attempt++) {
-    const { row, state } = await loadFresh(scope, number)
+    const { row, state, headState } = await loadFresh(scope, number)
     if (row.merged_at !== null) throw new CollaborationError(405, 'Pull Request is already merged')
     if (row.state !== 'open') throw new CollaborationError(405, 'Pull Request is not mergeable')
     if (row.draft === 1) throw new CollaborationError(405, 'Pull Request is still a draft')
     const base = branchTip(state, row.base_ref)
-    const head = branchTip(state, row.head_ref)
+    const head = headTip(headState, row)
     if (!base) throw new CollaborationError(405, 'Base branch was deleted')
     if (!head) throw new CollaborationError(405, 'Head branch was deleted')
     if (input.sha !== undefined && input.sha !== null && input.sha !== head) throw new CollaborationError(409, 'Head branch was modified. Review and try the merge again.')
@@ -537,9 +600,35 @@ export const systemScope = async (options: CollaborationOptions, owner: string, 
   }
 }
 
+const refreshForkPulls = async (scope: Scope, names: readonly string[], pusher: EventActor): Promise<void> => {
+  const rows: (PullRow & { base_owner: string; base_name: string })[] = []
+  for (const part of chunked([...names], 80)) {
+    rows.push(
+      ...(await scope.db.all<PullRow & { base_owner: string; base_name: string }>(
+        sql(
+          `${PULL_SELECT.replace('SELECT i.*,', 'SELECT i.*, ba.login AS base_owner, br.name AS base_name,').replace(
+            'FROM issues i',
+            'FROM issues i JOIN repositories br ON br.id = i.repository_id JOIN accounts ba ON ba.id = br.owner_id',
+          )} WHERE p.head_repository_id = ? AND i.state = 'open' AND p.head_ref IN (${placeholders(part)})`,
+          scope.repository.id,
+          ...part,
+        ),
+      )),
+    )
+  }
+  const options = scopeOptions(scope)
+  for (const row of rows) {
+    const base = await systemScope(options, row.base_owner, row.base_name)
+    if (!base) continue
+    const refreshed = await refreshPull(base, row, await currentRefs(base), pusher)
+    if (refreshed.head_sha !== row.head_sha) await requestPullCodeOwners(base, refreshed)
+  }
+}
+
 export const handlePushedRefs = async (scope: Scope, updates: readonly PushedRef[], pusher: EventActor = SYSTEM_ACTOR): Promise<void> => {
   const branches = updates.filter((update) => update.name.startsWith('refs/heads/'))
   if (branches.length === 0) return
+  await refreshForkPulls(scope, branches.map((update) => update.name), pusher)
   const state = await currentRefs(scope)
   const affected: PullRow[] = []
   for (const names of chunked(branches.map((update) => update.name), 40)) {

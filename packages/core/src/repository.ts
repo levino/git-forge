@@ -67,6 +67,7 @@ const refsKey = (repo: RepositoryName) => `${repositoryPrefix(repo)}refs.json`
 const packsKey = (repo: RepositoryName) => `${gitPrefix(repo)}objects/info/packs`
 const infoRefsKey = (repo: RepositoryName) => `${gitPrefix(repo)}info/refs`
 const headKey = (repo: RepositoryName) => `${gitPrefix(repo)}HEAD`
+export const alternatesKey = (repo: RepositoryName) => `${gitPrefix(repo)}objects/info/alternates`
 export const packKey = (repo: RepositoryName, name: string) => `${gitPrefix(repo)}objects/pack/${name}`
 
 const putText = async (storage: Storage, key: string, text: string) => {
@@ -128,6 +129,7 @@ const BLOB_CODE = 3
 export type LoadedPack = {
   readonly name: string
   readonly key: string
+  readonly repo: RepositoryName
   readonly index: PackIndex
   size?: number
   blocks?: BlockCache
@@ -155,6 +157,49 @@ const parseInfoPacks = (text: string): string[] =>
     .filter((line) => line.startsWith('P '))
     .map((line) => line.slice(2).trim())
 
+const packNamesOf = async (storage: Storage, repo: RepositoryName): Promise<string[]> => parseInfoPacks((await getText(storage, packsKey(repo)))?.text ?? '')
+
+export const formatInfoPacks = (names: readonly string[]): string => `${names.map((name) => `P ${name}`).join('\n')}\n\n`
+
+export const MAX_ALTERNATE_DEPTH = 5
+
+export const alternatePath = (target: RepositoryName): string => `../../../../${target.owner}/${target.name}/git/objects`
+
+const ALTERNATE_LINE = /^\.\.\/\.\.\/\.\.\/\.\.\/([^/]+)\/([^/]+)\/git\/objects\/?$/
+
+export const parseAlternates = (text: string): RepositoryName[] =>
+  text
+    .split('\n')
+    .map((line) => ALTERNATE_LINE.exec(line.trim()))
+    .filter((match): match is RegExpExecArray => match !== null && isValidName(match[1]!) && isValidName(match[2]!))
+    .map((match) => ({ owner: match[1]!, name: match[2]! }))
+
+export const writeAlternates = async (storage: Storage, repo: RepositoryName, targets: readonly RepositoryName[]): Promise<void> =>
+  putText(storage, alternatesKey(repo), targets.map((target) => `${alternatePath(target)}\n`).join(''))
+
+export const alternateRepositories = async (storage: Storage, repo: RepositoryName): Promise<RepositoryName[]> => {
+  const key = (name: RepositoryName) => `${name.owner}/${name.name}`
+  const seen = new Set([key(repo)])
+  const order: RepositoryName[] = []
+  let frontier = [repo]
+  for (let depth = 0; depth < MAX_ALTERNATE_DEPTH && frontier.length > 0; depth++) {
+    const next: RepositoryName[] = []
+    for (const current of frontier) {
+      const stored = await getText(storage, alternatesKey(current))
+      for (const target of parseAlternates(stored?.text ?? '')) {
+        if (seen.has(key(target))) continue
+        seen.add(key(target))
+        order.push(target)
+        next.push(target)
+      }
+    }
+    frontier = next
+  }
+  return order
+}
+
+const sameRepository = (a: RepositoryName, b: RepositoryName): boolean => a.owner === b.owner && a.name === b.name
+
 export class ObjectDatabase {
   readonly #storage: Storage
   readonly #repo: RepositoryName
@@ -181,14 +226,13 @@ export class ObjectDatabase {
   }
 
   async packNames(): Promise<string[]> {
-    const stored = await getText(this.#storage, packsKey(this.#repo))
-    return parseInfoPacks(stored?.text ?? '')
+    return packNamesOf(this.#storage, this.#repo)
   }
 
-  async #loadIndex(name: string): Promise<PackIndex> {
+  async #loadIndex(repo: RepositoryName, name: string): Promise<PackIndex> {
     const known = this.#indexes.get(name)
     if (known) return known
-    const stored = await this.#storage.get(packKey(this.#repo, name.replace(/\.pack$/, '.idx')))
+    const stored = await this.#storage.get(packKey(repo, name.replace(/\.pack$/, '.idx')))
     if (!stored) throw new Error(`missing index for ${name}`)
     const index = new PackIndex(await readAll(stored.body))
     this.#indexes.set(name, index)
@@ -198,9 +242,20 @@ export class ObjectDatabase {
   async packs(): Promise<readonly LoadedPack[]> {
     if (this.#packs) return this.#packs
     const packs: LoadedPack[] = []
-    for (const name of await this.packNames()) packs.push({ name, key: packKey(this.#repo, name), index: await this.#loadIndex(name) })
+    const names = new Set<string>()
+    for (const repo of [this.#repo, ...(await alternateRepositories(this.#storage, this.#repo))]) {
+      for (const name of await packNamesOf(this.#storage, repo)) {
+        if (names.has(name)) continue
+        names.add(name)
+        packs.push({ name, key: packKey(repo, name), repo, index: await this.#loadIndex(repo, name) })
+      }
+    }
     this.#packs = packs
     return packs
+  }
+
+  async ownPacks(): Promise<readonly LoadedPack[]> {
+    return (await this.packs()).filter((pack) => sameRepository(pack.repo, this.#repo))
   }
 
   async smallBlobs(name: string, maxSize: number): Promise<{ readonly id: ObjectId; readonly data: Uint8Array }[]> {
@@ -320,7 +375,7 @@ export class ObjectDatabase {
       const next = change(names)
       if (next === null) return false
       if (next.length === names.length && next.every((name, i) => name === names[i])) return true
-      const bytes = utf8(`${next.map((name) => `P ${name}`).join('\n')}\n\n`)
+      const bytes = utf8(formatInfoPacks(next))
       const result = await this.#storage.put(packsKey(this.#repo), bytes, bytes.length, {
         contentType: 'text/plain',
         ...(stored ? { ifMatch: stored.etag } : { ifNoneMatch: '*' as const }),

@@ -2,7 +2,7 @@ import { fromUtf8, toHex } from './bytes.ts'
 import { type DigestFactory, javascriptDigests } from './digest.ts'
 import { createSha256 } from './hash.ts'
 import type { GitObject } from './objects.ts'
-import { repositoryPrefix, type RepositoryName } from './repository.ts'
+import { alternateRepositories, repositoryPrefix, type RepositoryName } from './repository.ts'
 import type { Storage } from './storage.ts'
 
 export const LFS_CONTENT_TYPE = 'application/vnd.git-lfs+json'
@@ -97,8 +97,22 @@ export const objectError = (object: LfsObjectSpec): string | null => {
   return null
 }
 
+export type LfsLocation = { readonly key: string; readonly size: number }
+
+export const locateLfsObject = async (storage: Storage, repo: RepositoryName, oid: string): Promise<LfsLocation | null> => {
+  const own = lfsObjectKey(repo, oid)
+  const info = await storage.head(own)
+  if (info) return { key: own, size: info.size }
+  for (const alternate of await alternateRepositories(storage, repo)) {
+    const key = lfsObjectKey(alternate, oid)
+    const found = await storage.head(key)
+    if (found) return { key, size: found.size }
+  }
+  return null
+}
+
 export const lfsObjectSize = async (storage: Storage, repo: RepositoryName, oid: string): Promise<number | null> =>
-  (await storage.head(lfsObjectKey(repo, oid)))?.size ?? null
+  (await locateLfsObject(storage, repo, oid))?.size ?? null
 
 export const hasLfsObject = async (storage: Storage, repo: RepositoryName, object: LfsObjectSpec): Promise<boolean> =>
   (await lfsObjectSize(storage, repo, object.oid)) === object.size

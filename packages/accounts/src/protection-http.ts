@@ -66,7 +66,16 @@ export type GitAccess = {
   readonly pushPolicy: PushPolicy
 }
 
-export const createGitAccess = (options: AuthenticateOptions & { readonly directory: ProtectionDirectory }): GitAccess => {
+export type DelegatedBranches = (principal: Principal, repository: RepositorySubject) => Promise<readonly string[]>
+
+export const delegatedBranchPolicy =
+  (branches: readonly string[]): RefPolicy =>
+  (command) =>
+    branches.includes(command.name) ? null : 'permission denied: only the head branches of pull requests that allow edits from maintainers'
+
+export const createGitAccess = (
+  options: AuthenticateOptions & { readonly directory: ProtectionDirectory; readonly delegatedBranches?: DelegatedBranches },
+): GitAccess => {
   const principals = new WeakMap<Request, Promise<Principal | null>>()
   const principalOf = (request: Request): Promise<Principal | null> => {
     const known = principals.get(request)
@@ -81,16 +90,20 @@ export const createGitAccess = (options: AuthenticateOptions & { readonly direct
       const principal = await principalOf(request)
       if (!principal) return challenge('invalid credentials\n')
       const check = await checkRepositoryAccess(options.directory, principal, repo, access === 'write' ? 'write' : 'read', surface)
+      if (check.decision !== 'allow' && check.repository && options.delegatedBranches && (await options.delegatedBranches(principal, check.repository)).length > 0) return null
       return decisionResponse(check.decision, principal)
     },
     pushPolicy: async (request, repo) => {
       const principal = await principalOf(request)
       if (!principal) return denyAll
       const check = await checkRepositoryAccess(options.directory, principal, repo, 'write')
-      if (check.decision !== 'allow' || !check.repository) return denyAll
+      if (!check.repository) return denyAll
+      const delegated = check.decision === 'allow' || !options.delegatedBranches ? null : await options.delegatedBranches(principal, check.repository)
+      if (check.decision !== 'allow' && (!delegated || delegated.length === 0)) return denyAll
       const rules = await options.directory.branchProtectionRules(check.repository.id)
-      if (rules.length === 0) return null
-      return branchProtectionPolicy(rules, await protectionActor(options.directory, principal, check.repository, check.access))
+      const protection = rules.length === 0 ? null : branchProtectionPolicy(rules, await protectionActor(options.directory, principal, check.repository, check.access))
+      if (!delegated) return protection
+      return (command) => delegatedBranchPolicy(delegated)(command) ?? protection?.(command) ?? null
     },
   }
 }

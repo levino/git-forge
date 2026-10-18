@@ -273,6 +273,7 @@ the [accounts README](../packages/accounts/README.md#branch-protection).
     HEAD
     info/refs
     objects/info/packs              # the current pack set
+    objects/info/alternates         # forks only: ../../../../<owner>/<name>/git/objects
     objects/pack/pack-<sha>.pack
     objects/pack/pack-<sha>.idx
   lfs/
@@ -303,6 +304,18 @@ tmp/<repo>/<timestamp>-<uuid>/asset # a release asset upload without a declared 
   are read back once to write the final pack and never again. The `Storage`
   interface has no delete; operators expire `tmp/` with a bucket lifecycle
   rule (e.g. one day). Pushes up to one chunk never touch `tmp/`.
+- **Forks share objects through alternates.** A fork created on the same
+  instance gets its own `refs.json`, an empty pack list and
+  `objects/info/alternates` (git's format, a path relative to the objects
+  directory, so a plain bucket clone resolves it like git does). The object
+  database reads its own packs first, then the packs of the alternates
+  (recursively, at most five levels); LFS lookups fall back to the
+  alternates' `lfs/objects/`. Because packs are never deleted, the upstream's
+  objects stay readable for the fork whatever happens upstream. Compaction
+  only merges a repository's own packs. Over dumb HTTP a fork serves a
+  combined `objects/info/packs` and falls back to the alternates for
+  `objects/pack/*`, so dumb clients and copy-only mirrors get a
+  self-contained repository; the alternates file itself is not served.
 - **Release assets** are content-addressed like LFS objects
   (`lfs/objects/…`, §16). Which asset belongs to which release lives only in
   the database; a deleted asset or release leaves its bytes in place.
@@ -1598,10 +1611,28 @@ Issues, pull requests, reviews, commit statuses, check runs and discussions
   `discussion`, `discussion_comment`);
   the collaboration package itself does not depend on the notifications
   package.
-- **Limits of v1.** Same-repository pull requests only (forks later),
-  computing mergeability and file lists loads the involved objects through
-  the in-memory object database, no reactions, no search,
-  no in-browser conflict resolution.
+- **Forks.** `POST /repos/{o}/{r}/forks` creates a fork on the same
+  instance (bucket: alternates, §6; database: `repository_forks` with parent
+  and root, migration `0010_forks`). Anyone with read access may fork into
+  their own account or an organization they own; the fork has the
+  upstream's visibility and is an independent repository (its own
+  collaborators; upstream collaborators get no access to a private fork).
+  Pull requests may use a head from another repository of the same fork
+  network (`head: owner:branch`, `head_repo` when an owner has several).
+  Their head objects are copied into the base repository when the pull
+  request is opened and whenever the head moves (a pack streamed from the
+  head repository, like GitHub's `refs/pull/N/head` but without a ref), so
+  diffs, reviews, merges and CI read only the base repository and the base
+  never depends on the fork. Pushes to a fork refresh the pull requests it
+  heads. With `maintainer_can_modify` (set by the author) users with write
+  access to the base may push to that one head branch of the fork, and
+  read the fork, through a `delegatedBranches` hook of the git access check;
+  every other ref stays denied. CI for pull requests from forks runs
+  untrusted (`trusted: false`: no secrets, read-only token).
+- **Limits of v1.** Computing mergeability and file lists loads the involved
+  objects through the in-memory object database, no reactions, no search,
+  no in-browser conflict resolution, no directory rename detection in
+  merges.
 
 ## 18. Web UI
 

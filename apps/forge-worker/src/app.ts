@@ -102,6 +102,7 @@ import {
   type CollaborationOptions,
   getPullSummary,
   handleCollaborationApi,
+  maintainerPushBranches,
   handlePushedRefs,
   loadUsers,
   recordCheckRun,
@@ -923,8 +924,8 @@ export const createForge = (options: ForgeOptions): Forge => {
             actor,
             title: pull.title,
             base: { ref: pull.baseRef, sha: pull.baseSha },
-            head: { ref: pull.headRef, sha: pull.headSha, repo: scope.repo },
-            trusted: true,
+            head: { ref: pull.headRef, sha: pull.headSha, repo: pull.headRepository ? { owner: pull.headRepository.owner, name: pull.headRepository.name } : scope.repo },
+            trusted: pull.headRepository === null,
           })
         } catch (error) {
           console.log(JSON.stringify({ event: 'pull-request-runs-failed', repository: `${scope.repo.owner}/${scope.repo.name}`, number: activity.number, error: String(error) }))
@@ -1047,7 +1048,7 @@ export const createForge = (options: ForgeOptions): Forge => {
       if (error instanceof AccountsError) return json(400, { error: error.message })
       throw error
     }
-    const access = createGitAccess(authentication)
+    const access = createGitAccess({ ...authentication, delegatedBranches: (principal, repository) => maintainerPushBranches({ db, accounts: store }, principal, repository) })
     const authorize = withJobTokens(access.authorize)
     const content = await handleContentRequest(request, { storage, authorize: withSessionReads(authorize) })
     if (content) return content

@@ -2,7 +2,7 @@ import { readAll, SizeLimitError } from './bytes.ts'
 import { advertiseReceivePack, type PushOutcome, receivePack, type ReceiveOptions, type RefPolicy } from './receive-pack.ts'
 import { handleLfsRequest, type LfsHttpOptions } from './lfs-http.ts'
 import { lfsPushCheck } from './lfs.ts'
-import { gitPrefix, isValidName, readRefs, type RepositoryName } from './repository.ts'
+import { alternateRepositories, formatInfoPacks, gitPrefix, isValidName, ObjectDatabase, readRefs, type RepositoryName } from './repository.ts'
 import type { Storage } from './storage.ts'
 import { advertiseUploadPackV2, type PackfileUri, uploadPackV2 } from './upload-pack.ts'
 
@@ -161,8 +161,20 @@ export const handleGitRequest = async (request: Request, options: GitHttpOptions
     })
   }
   if ((request.method === 'GET' || request.method === 'HEAD') && DUMB_PATHS.some((pattern) => pattern.test(path))) {
-    const cache = path.startsWith('/objects/pack/') ? immutable : noCache
-    return serveStored(storage, `${gitPrefix(repo)}${path.slice(1)}`, dumbContentType(path), cache)
+    const pack = path.startsWith('/objects/pack/')
+    const alternates = pack || path === '/objects/info/packs' ? await alternateRepositories(storage, repo) : []
+    if (path === '/objects/info/packs' && alternates.length > 0) {
+      const names = (await new ObjectDatabase(storage, repo).packs()).map((loaded) => loaded.name)
+      return new Response(formatInfoPacks(names), { headers: { 'Content-Type': 'text/plain; charset=utf-8', ...noCache } })
+    }
+    if (pack) {
+      for (const owner of alternates.length > 0 ? [repo, ...alternates] : [repo]) {
+        const key = `${gitPrefix(owner)}${path.slice(1)}`
+        if (alternates.length === 0 || (await storage.head(key))) return serveStored(storage, key, dumbContentType(path), immutable)
+      }
+      return text(404, 'not found\n')
+    }
+    return serveStored(storage, `${gitPrefix(repo)}${path.slice(1)}`, dumbContentType(path), noCache)
   }
   if (request.method === 'POST' && path === '/git-upload-pack') {
     if (!isProtocolV2(request)) return text(400, 'only git protocol v2 is supported for smart fetch\n')

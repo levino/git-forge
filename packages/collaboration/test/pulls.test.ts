@@ -69,7 +69,7 @@ describe('pull requests', () => {
     await fixture.sync(['old'])
     expect((await caught(createPull(carol, { title: 'empty', head: 'old', base: 'main' }))).message).toMatch(/No commits/)
     expect((await caught(createPull(carol, { title: 'missing', head: 'nope', base: 'main' }))).status).toBe(422)
-    expect((await caught(createPull(carol, { title: 'fork', head: 'mallory:feature', base: 'main' }))).message).toMatch(/forks/)
+    expect((await caught(createPull(carol, { title: 'fork', head: 'mallory:feature', base: 'main' }))).details).toEqual([{ resource: 'PullRequest', field: 'head', code: 'invalid' }])
   })
 
   it('merges like git merge --no-ff and closes linked issues on the default branch', async () => {

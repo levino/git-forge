@@ -105,8 +105,14 @@ branch do the same.
 
 ## Pull requests
 
-- Same-repository branches only (`head` may be `owner:branch` with the
-  repository owner). Forks come later.
+- `head` is a branch of the repository or `owner:branch` of another
+  repository in the same fork network (`head_repo` picks one when an owner
+  has several). The caller needs read access to the head repository. The
+  head's objects are copied into the base repository when the pull request
+  is opened and whenever its head moves, so everything else reads only the
+  base. `maintainer_can_modify` (author only, forks only) lets users with
+  write access to the base push to the head branch of the fork
+  (`maintainerPushBranches`, wired into the git access check by the host).
 - The head and base shas are refreshed from `refs.json` on every read and on
   every push (`handlePushedRefs`): a moved head records `synchronize` or
   `head_ref_force_pushed` and, if the base branch's protection rule has
@@ -157,6 +163,18 @@ below it. As GitHub documents, a final `/*` (`docs/*`) does not reach into
 subdirectories. Negation (`!`) and character ranges (`[…]`) are not
 supported by GitHub and are reported as errors. The matcher is checked
 against `git check-ignore` for every pattern where GitHub follows gitignore.
+
+## Forks
+
+`createFork(scope, { organization?, name?, defaultBranchOnly? })` creates a
+fork on the same instance: core's `forkRepository` writes refs (branches and
+tags, or the default branch only) and `objects/info/alternates` pointing at
+the upstream, the accounts store records the repository and its parent and
+root (`repository_forks`). The fork has the upstream's visibility and its
+own permissions. `listForks` and `forkNetwork` only return repositories the
+caller can read; `GET /repos/{o}/{r}` adds `fork`, `parent` and `source`.
+Pushes to a fork refresh the open pull requests whose head lives there
+(`handlePushedRefs`).
 
 ## Reviews and line comments
 
@@ -209,6 +227,8 @@ repositories (accounts use UUIDs). Pagination with `page`/`per_page`
 | `GET …/codeowners/errors?ref=` | invalid lines of the `CODEOWNERS` file |
 | `POST …/statuses/{sha}`, `GET …/commits/{ref}/statuses`, `GET …/commits/{ref}/status` | |
 | `POST …/check-runs`, `GET\|PATCH …/check-runs/{id}`, `GET …/commits/{ref}/check-runs` | |
+| `GET\|POST /repos/{o}/{r}/forks` | `organization`, `name`, `default_branch_only`; `202` with the new repository |
+| `GET /repos/{o}/{r}/network` | not in GitHub's API: `{ root, forks: [{ …, parent_id }] }` |
 | `GET\|POST …/discussion-categories`, `GET\|PATCH\|DELETE …/discussion-categories/{slug}` | not in GitHub's REST API (GraphQL only there) |
 | `GET\|POST …/discussions`, `GET\|PATCH …/discussions/{n}`, `PUT\|DELETE …/discussions/{n}/lock`, `PUT\|DELETE …/discussions/{n}/answer` | |
 | `GET\|POST …/discussions/{n}/comments` (`reply_to_id`), `GET\|PATCH\|DELETE …/discussions/comments/{id}` | |

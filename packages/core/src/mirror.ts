@@ -6,8 +6,8 @@ import { connectRemote, type Protocol, type ProtocolPreference } from './fetch-c
 import { LFS_POINTER_MAX_SIZE, parseLfsPointer } from './lfs.ts'
 import { type LfsMissing, type LfsMirrorResult, type LfsPointer, mirrorLfsObjects } from './lfs-mirror.ts'
 import { type CopiedPack, copyPack, listRemotePacks } from './pack-copy.ts'
-import { parsePack } from './pack.ts'
-import { writeIndex } from './pack-index.ts'
+import { ByteCursor } from './cursor.ts'
+import { indexPack } from './pack-indexer.ts'
 import { isSubmodule, isTreeMode, parseCommit, parseTag, parseTree, references } from './objects.ts'
 import { archiveName, UPSTREAM_PREFIX, validRefName } from './receive-pack.ts'
 import { type AuthorizationSupplier, expectOk, type FetchFunction, type Remote, type RemoteRef, remoteRequest, remoteUrl } from './remote.ts'
@@ -17,11 +17,13 @@ import {
   advertisedRefs,
   type MirrorView,
   mirrorViewRefs,
+  packKey,
   readRefs,
   type RefsState,
   registerPacks,
   type RepositoryName,
   repositoryPrefix,
+  stagingPrefix,
   writeRefs,
   writeServerInfo,
 } from './repository.ts'
@@ -684,10 +686,12 @@ export const deepCheckRepository = async (storage: Storage, repo: RepositoryName
   let objects = 0
   for (const name of names) {
     try {
-      const files = await odb.packFiles(name)
-      const parsed = await parsePack(files.bytes, (id) => odb.read(id))
-      if (!equalBytes(writeIndex(parsed.objects, parsed.checksum), files.index)) problems.push(`${name}: index differs from the recomputed index`)
-      objects += parsed.objects.length
+      const index = await storage.get(packKey(repo, name.replace(/\.pack$/, '.idx')))
+      const pack = await storage.get(packKey(repo, name))
+      if (!index || !pack) throw new Error('pack or index is missing')
+      const indexed = await indexPack(new ByteCursor(pack.body), { storage, stagingPrefix: stagingPrefix(repo), objects: odb, checkReferences: false })
+      if (!equalBytes(indexed.indexBytes(), await readAll(index.body))) problems.push(`${name}: index differs from the recomputed index`)
+      objects += indexed.objectCount
     } catch (error) {
       problems.push(`${name}: ${error instanceof Error ? error.message : String(error)}`)
     }

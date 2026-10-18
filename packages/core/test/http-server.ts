@@ -30,7 +30,7 @@ const send = async (response: Response, outgoing: ServerResponse): Promise<void>
   for (;;) {
     const { done, value } = await reader.read()
     if (done) break
-    outgoing.write(value)
+    if (!outgoing.write(value)) await new Promise<void>((resolve) => outgoing.once('drain', () => resolve()))
   }
   outgoing.end()
 }

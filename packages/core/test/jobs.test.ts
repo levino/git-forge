@@ -38,4 +38,41 @@ describe('job queue', () => {
       { job: 'transient', attempts: 3, error: 'down' },
     ])
   })
+
+  it('runs at most the configured number of jobs at the same time', async () => {
+    let active = 0
+    let peak = 0
+    const queue = createMemoryJobQueue<number>(
+      async () => {
+        active++
+        peak = Math.max(peak, active)
+        await new Promise((done) => setTimeout(done, 5))
+        active--
+      },
+      { concurrency: 2 },
+    )
+    for (let job = 0; job < 7; job++) await queue.enqueue(job)
+    await queue.idle()
+    expect(peak).toBe(2)
+    expect([...queue.completed].sort()).toEqual([0, 1, 2, 3, 4, 5, 6])
+  })
+
+  it('reports outcomes without keeping a history when asked to', async () => {
+    const outcomes: unknown[] = []
+    let calls = 0
+    const queue = createMemoryJobQueue<string>(
+      async () => {
+        calls++
+        if (calls === 1) throw new Error('once')
+      },
+      { keepHistory: false, delayMs: () => 0, onOutcome: (outcome) => outcomes.push(outcome) },
+    )
+    await queue.enqueue('job')
+    await queue.idle()
+    expect(outcomes).toEqual([
+      { job: 'job', attempts: 1, outcome: 'retry', error: 'once' },
+      { job: 'job', attempts: 2, outcome: 'done' },
+    ])
+    expect(queue.completed).toEqual([])
+  })
 })

@@ -1,10 +1,11 @@
-import { fromUtf8, readAll, toHex } from './bytes.ts'
+import { fromUtf8, readAll, SizeLimitError, streamOf, toHex } from './bytes.ts'
+import { ByteCursor } from './cursor.ts'
 import { hashObject, type ObjectId } from './hash.ts'
 import { type GitObject, type ObjectType, references } from './objects.ts'
-import { parsePack, writePack } from './pack.ts'
+import { writePack } from './pack.ts'
 import { PackIndex } from './pack-index.ts'
 import { expectOk, parseInfoRefs, type Remote, RemoteError, type RemoteRefs, remoteRequest, remoteUrl } from './remote.ts'
-import type { ObjectDatabase } from './repository.ts'
+import type { IngestOptions, ObjectDatabase } from './repository.ts'
 import { inflateAt } from './zlib.ts'
 
 const getText = async (remote: Remote, path: string, what: string): Promise<string | null> => {
@@ -13,14 +14,30 @@ const getText = async (remote: Remote, path: string, what: string): Promise<stri
   return (await expectOk(response, what)).text()
 }
 
-const getBytes = async (remote: Remote, path: string, what: string, limit: number): Promise<Uint8Array | null> => {
+const getStream = async (remote: Remote, path: string, what: string, limit: number): Promise<ReadableStream<Uint8Array> | null> => {
   const response = await remoteRequest(remote, remoteUrl(remote.url, path))
   if (response.status === 404) {
     await response.body?.cancel()
     return null
   }
   await expectOk(response, what)
-  return response.body ? readAll(response.body, limit) : new Uint8Array(0)
+  const body = response.body ?? streamOf(new Uint8Array(0))
+  if (!Number.isFinite(limit)) return body
+  let seen = 0
+  return body.pipeThrough(
+    new TransformStream<Uint8Array, Uint8Array>({
+      transform(chunk, controller) {
+        seen += chunk.length
+        if (seen > limit) controller.error(new SizeLimitError(limit))
+        else controller.enqueue(chunk)
+      },
+    }),
+  )
+}
+
+const getBytes = async (remote: Remote, path: string, what: string, limit: number): Promise<Uint8Array | null> => {
+  const stream = await getStream(remote, path, what, limit)
+  return stream ? readAll(stream, limit) : null
 }
 
 export const parseHeadFile = (text: string): string | undefined => {
@@ -52,6 +69,7 @@ export type DumbFetchOptions = {
   readonly wants: readonly ObjectId[]
   readonly isConnected: (id: ObjectId) => boolean
   readonly maxPackBytes?: number
+  readonly pack?: IngestOptions
 }
 
 export type DumbFetchResult = {
@@ -91,17 +109,13 @@ export const fetchDumb = async (remote: Remote, odb: ObjectDatabase, options: Du
     const position = packs.findIndex((pack) => pack.index.find(id) !== null)
     if (position === -1) return false
     const [pack] = packs.splice(position, 1) as [RemotePack]
-    const bytes = await getBytes(remote, `objects/pack/${pack.name}`, pack.name, limit)
-    if (!bytes) throw new RemoteError(`pack ${pack.name} listed but not found`, 404)
-    const parsed = await parsePack(bytes, (base) => odb.read(base))
-    if (toHex(parsed.checksum) !== toHex(pack.index.packChecksum)) throw new RemoteError(`pack ${pack.name} does not match its index`)
-    if (parsed.externalBases.length > 0) {
-      const rewritten = writePack(parsed.objects)
-      added.push(await odb.addPack(rewritten.bytes, rewritten.objects, rewritten.checksum))
-    } else {
-      added.push(await odb.addPack(bytes, parsed.objects, parsed.checksum))
-    }
-    objectCount += parsed.objects.length
+    const stream = await getStream(remote, `objects/pack/${pack.name}`, pack.name, limit)
+    if (!stream) throw new RemoteError(`pack ${pack.name} listed but not found`, 404)
+    const indexed = await odb.index(new ByteCursor(stream), { ...options.pack, checkReferences: false })
+    if (toHex(indexed.checksum) !== toHex(pack.index.packChecksum)) throw new RemoteError(`pack ${pack.name} does not match its index`)
+    const name = await odb.storePack(indexed)
+    if (name) added.push(name)
+    objectCount += indexed.objectCount
     return true
   }
 
@@ -135,7 +149,8 @@ export const fetchDumb = async (remote: Remote, odb: ObjectDatabase, options: Du
   }
   if (loose.size > 0) {
     const written = writePack([...loose].map(([id, object]) => ({ ...object, id })))
-    added.push(await odb.addPack(written.bytes, written.objects, written.checksum))
+    const { name } = await odb.ingest(streamOf(written.bytes), { ...options.pack, checkReferences: false })
+    if (name) added.push(name)
     objectCount += loose.size
   }
   return { packs: added, looseObjects: loose.size, objects: objectCount }

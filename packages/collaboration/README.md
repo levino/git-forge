@@ -52,11 +52,13 @@ database, so the HTTP layer and a UI share one permission implementation.
 Every service function reports what happened through `onActivity(scope,
 activity)` after its writes: `{ kind, action, number, actor, commentId?,
 reviewId?, changes?, requestedReviewer?, before?, after? }` with `kind`
-`issues`, `issue_comment`, `pull_request`, `pull_request_review` or
-`pull_request_review_comment` and GitHub's webhook action names (`opened`,
-`edited`, `closed`, `reopened`, `labeled`, `assigned`, `locked`,
-`synchronize`, `review_requested`, `ready_for_review`, `submitted`,
-`dismissed`, `created`, …). Edits made through the issue endpoints on a pull
+`issues`, `issue_comment`, `pull_request`, `pull_request_review`,
+`pull_request_review_comment`, `discussion` or `discussion_comment` and
+GitHub's webhook action names (`opened`, `edited`, `closed`, `reopened`,
+`labeled`, `assigned`, `locked`, `synchronize`, `review_requested`,
+`ready_for_review`, `submitted`, `dismissed`, `created`,
+`category_changed`, `answered`, `unanswered`, …). For discussions `number`
+is the discussion number and `commentId` the comment (or the answer). Edits made through the issue endpoints on a pull
 request are reported as `pull_request`. The package does not depend on
 `@git-forge/notifications`; the Worker maps activities to its events
 (`apps/forge-worker/src/collaboration-events.ts`) and calls

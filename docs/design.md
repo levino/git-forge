@@ -1575,7 +1575,8 @@ Issues, pull requests, reviews, commit statuses, check runs and discussions
   pipeline as a push (CI dispatch, mirror notifications, `push` events).
   Every mutation reports an activity (`onActivity`) that the Worker turns
   into notification events (§16: `issues`, `issue_comment`,
-  `pull_request`, `pull_request_review`, `pull_request_review_comment`);
+  `pull_request`, `pull_request_review`, `pull_request_review_comment`,
+  `discussion`, `discussion_comment`);
   the collaboration package itself does not depend on the notifications
   package.
 - **Limits of v1.** Same-repository pull requests only (forks later),

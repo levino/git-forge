@@ -41,7 +41,7 @@ export type BranchUpdate = {
   readonly actor: EventActor
 }
 
-export type ActivityKind = 'issues' | 'issue_comment' | 'pull_request' | 'pull_request_review' | 'pull_request_review_comment'
+export type ActivityKind = 'issues' | 'issue_comment' | 'pull_request' | 'pull_request_review' | 'pull_request_review_comment' | 'discussion' | 'discussion_comment'
 
 export type Activity = {
   readonly kind: ActivityKind

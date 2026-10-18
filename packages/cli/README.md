@@ -15,6 +15,39 @@ git forge push origin +main            # rewritten history, archived as usual
 Because the executable is called `git-forge`, `git forge …` works as soon as it
 is on `PATH`. It needs `git` 2.38 or newer.
 
+## Login and the credential helper
+
+```sh
+git forge auth login https://forge.example   # or without URL: the host of origin
+git clone https://forge.example/acme/site.git  # no token in the URL
+git forge auth status
+git forge auth logout https://forge.example
+```
+
+`auth login` works like `gh auth login`: it asks the forge for a device code
+(`POST /login/device/code`, RFC 8628), prints the code and
+`https://forge.example/login/device`, and polls until you approve the request
+in the browser, signed in with OIDC or a passkey. The forge then issues a
+personal access token with the scope `repo:write` (Git and Git LFS, no admin
+API) valid for 90 days. The token is stored in
+`~/.config/git-forge/hosts.json` (`$XDG_CONFIG_HOME/git-forge`, or
+`GIT_FORGE_CONFIG_DIR`), mode `0600`, and git is configured globally to use it
+for that host only:
+
+```ini
+[credential "https://forge.example"]
+	helper =
+	helper = !'/usr/local/bin/git-forge' auth git-credential
+```
+
+The empty `helper =` resets other helpers for that host, so a stale password
+from the system keychain is never tried first. `git forge auth git-credential
+get` answers git's credential protocol from `hosts.json` (`username` is your
+login, `password` the token); `store` and `erase` do nothing, so a rejected
+token stays until you log in again. `--no-setup-git` skips the git
+configuration; `git forge auth setup-git [<url>]` writes it later and
+`git forge auth token [<url>]` prints the token for scripts.
+
 ## Installation
 
 Download the single executable for your platform from a git-forge release
@@ -35,7 +68,7 @@ sh packages/cli/build-executables.sh out/  # all platforms plus CLI-SHA256SUMS
 
 | Option | Meaning |
 |---|---|
-| `--max-bytes <size>` | Largest request per push. Default `80MB` (80 000 000 bytes). Also `git config forge.maxPushBytes` or `GIT_FORGE_MAX_PUSH_BYTES`. Units: `k`/`M`/`G` (decimal), `Ki`/`Mi`/`Gi` (binary). Set it below the server's own limit, e.g. `16MiB` for the Worker's default `MAX_PUSH_BYTES`. |
+| `--max-bytes <size>` | Largest request per push. Default `80MB` (80 000 000 bytes). Also `git config forge.maxPushBytes` or `GIT_FORGE_MAX_PUSH_BYTES`. Units: `k`/`M`/`G` (decimal), `Ki`/`Mi`/`Gi` (binary). Set it below the server's limit: Cloudflare's request body limit (100 MB on Free and Pro), or `MAX_PUSH_BYTES` if the Worker sets one. |
 | `-f`, `--force` | Allow non-fast-forward updates, like `+<refspec>`. |
 | `-n`, `--dry-run` | Plan and print the chunks without pushing. |
 
@@ -116,4 +149,4 @@ with a small request limit: a split push lands the same refs and objects as a
 normal push, an interrupted chunk resumes without resending, merged side
 branches go through temporary refs, rewrites archive once, an oversized commit
 is refused. The Worker's end-to-end suite pushes 24 MiB through `wrangler dev`
-with its 16 MiB limit.
+with `MAX_PUSH_BYTES` set to 16 MiB.

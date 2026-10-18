@@ -1,6 +1,6 @@
 import { type AccountsStore, applyMigrations, createAccountsStore, MIGRATIONS, type Principal, type Role } from '@git-forge/accounts'
 import { openSqliteDatabase } from '@git-forge/accounts-node'
-import { createRepository, MemoryStorage, ObjectDatabase, type ObjectId, parsePack, readRefs, type ResolvedObject, updateRefs, writePack, ZERO_ID } from '@git-forge/core'
+import { createRepository, MemoryStorage, ObjectDatabase, type ObjectId, readRefs, streamOf, updateRefs, ZERO_ID } from '@git-forge/core'
 import { commitAll, git, gitBytes, initRepo, writeFile } from '@git-forge/core/test/git-helpers.ts'
 import { type CollaborationOptions, openRepository, type Scope } from '../src/index.ts'
 
@@ -57,13 +57,7 @@ export const createFixture = async (options: { readonly visibility?: 'public' | 
   const repo = { owner: 'alice', name: 'site' }
   const sync = async (branches?: readonly string[]) => {
     const odb = new ObjectDatabase(storage, repo)
-    const parsed = await parsePack(gitBytes(dir, ['pack-objects', '--stdout', '--all'], ''), async () => null)
-    const missing: ResolvedObject[] = []
-    for (const object of parsed.objects) if (!(await odb.has(object.id))) missing.push(object)
-    if (missing.length > 0) {
-      const pack = writePack(missing)
-      await odb.addPack(pack.bytes, pack.objects, pack.checksum)
-    }
+    await odb.ingest(streamOf(gitBytes(dir, ['pack-objects', '--stdout', '--all'], '')))
     const current = (await readRefs(storage, repo))!.state.refs
     const local = git(dir, ['for-each-ref', '--format=%(objectname) %(refname)', 'refs/heads'])
       .trim()

@@ -1,0 +1,18 @@
+[Unit]
+Description=Apply git-forge database migrations (git-forge-node migrate)
+Documentation=https://github.com/levino/git-forge/tree/main/apps/forge-node
+
+[Service]
+Type=oneshot
+User=git-forge
+Group=git-forge
+EnvironmentFile=/etc/git-forge/git-forge.env
+WorkingDirectory=/var/lib/git-forge
+StateDirectory=git-forge
+StateDirectoryMode=0750
+ExecStart=/usr/local/bin/git-forge-node migrate
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/git-forge

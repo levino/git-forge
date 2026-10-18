@@ -20,19 +20,39 @@ export const splitStatements = (text: string): string[] =>
 
 type AppliedRow = { name: string; sha256: string }
 
-export const applyMigrations = async (db: Database, migrations: readonly Migration[], now: number = Date.now()): Promise<string[]> => {
+const checkOrder = (migrations: readonly Migration[]): void => {
   for (const [index, migration] of migrations.entries()) {
     if (!MIGRATION_NAME.test(migration.name)) throw new MigrationError(`invalid migration name ${migration.name}`)
     if (index > 0 && migrations[index - 1]!.name >= migration.name) throw new MigrationError(`migrations out of order at ${migration.name}`)
   }
-  await db.run(sql('CREATE TABLE IF NOT EXISTS schema_migrations (name TEXT PRIMARY KEY, sha256 TEXT NOT NULL, applied_at INTEGER NOT NULL)'))
-  const applied = await db.all<AppliedRow>(sql('SELECT name, sha256 FROM schema_migrations ORDER BY name'))
-  const known = new Map(await Promise.all(migrations.map(async (migration) => [migration.name, await sha256Hex(migration.sql)] as const)))
+}
+
+const hashes = async (migrations: readonly Migration[]): Promise<Map<string, string>> =>
+  new Map(await Promise.all(migrations.map(async (migration) => [migration.name, await sha256Hex(migration.sql)] as const)))
+
+const checkApplied = (applied: readonly AppliedRow[], known: ReadonlyMap<string, string>): void => {
   for (const row of applied) {
     const hash = known.get(row.name)
     if (hash === undefined) throw new MigrationError(`database has unknown migration ${row.name}`)
     if (hash !== row.sha256) throw new MigrationError(`applied migration ${row.name} was modified`)
   }
+}
+
+export const pendingMigrations = async (db: Database, migrations: readonly Migration[]): Promise<string[]> => {
+  checkOrder(migrations)
+  const table = await db.all<{ name: string }>(sql("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'"))
+  const applied = table.length > 0 ? await db.all<AppliedRow>(sql('SELECT name, sha256 FROM schema_migrations ORDER BY name')) : []
+  checkApplied(applied, await hashes(migrations))
+  const done = new Set(applied.map((row) => row.name))
+  return migrations.filter((migration) => !done.has(migration.name)).map((migration) => migration.name)
+}
+
+export const applyMigrations = async (db: Database, migrations: readonly Migration[], now: number = Date.now()): Promise<string[]> => {
+  checkOrder(migrations)
+  await db.run(sql('CREATE TABLE IF NOT EXISTS schema_migrations (name TEXT PRIMARY KEY, sha256 TEXT NOT NULL, applied_at INTEGER NOT NULL)'))
+  const applied = await db.all<AppliedRow>(sql('SELECT name, sha256 FROM schema_migrations ORDER BY name'))
+  const known = await hashes(migrations)
+  checkApplied(applied, known)
   const done = new Set(applied.map((row) => row.name))
   const newlyApplied: string[] = []
   for (const migration of migrations) {

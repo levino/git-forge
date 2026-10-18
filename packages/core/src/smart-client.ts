@@ -1,4 +1,4 @@
-import { concat, fromUtf8, SizeLimitError } from './bytes.ts'
+import { concat, fromUtf8, readAll, SizeLimitError } from './bytes.ts'
 import { isObjectId, type ObjectId } from './hash.ts'
 import { parseCommit, parseTag } from './objects.ts'
 import { DELIM, FLUSH, pkt, SIDEBAND_DATA, SIDEBAND_ERROR, SIDEBAND_PROGRESS, type Packet } from './pktline.ts'
@@ -150,20 +150,24 @@ export type FetchResponse = {
   readonly progress: string
 }
 
-export const parseFetchResponse = async (stream: ReadableStream<Uint8Array>, maxPackBytes = Number.POSITIVE_INFINITY): Promise<FetchResponse> => {
+export type StreamedFetchResponse = {
+  readonly acks: readonly ObjectId[]
+  readonly ready: boolean
+  readonly pack: ReadableStream<Uint8Array> | null
+  progress(): string
+}
+
+export const openFetchResponse = async (stream: ReadableStream<Uint8Array>, maxPackBytes = Number.POSITIVE_INFINITY): Promise<StreamedFetchResponse> => {
   const reader = new PacketReader(stream)
   const acks: ObjectId[] = []
   let ready = false
   let section: string | null = null
-  const packParts: Uint8Array[] = []
-  let packBytes = 0
-  let sawPack = false
   let progress = ''
   try {
     for (;;) {
       const packet = await reader.read()
       if (!packet) {
-        if (section !== null || sawPack) throw new RemoteError('truncated fetch response')
+        if (section !== null) throw new RemoteError('truncated fetch response')
         break
       }
       if (packet.kind === 'flush' || packet.kind === 'response-end') break
@@ -175,23 +179,7 @@ export const parseFetchResponse = async (stream: ReadableStream<Uint8Array>, max
         const line = text(packet)
         checkError(line)
         section = line
-        if (section === 'packfile') sawPack = true
-        continue
-      }
-      if (section === 'packfile') {
-        const channel = packet.data[0]
-        const payload = packet.data.subarray(1)
-        if (channel === SIDEBAND_DATA) {
-          packBytes += payload.length
-          if (packBytes > maxPackBytes) throw new SizeLimitError(maxPackBytes)
-          packParts.push(payload)
-        } else if (channel === SIDEBAND_PROGRESS) {
-          progress += fromUtf8(payload)
-        } else if (channel === SIDEBAND_ERROR) {
-          throw new RemoteError(`remote error: ${fromUtf8(payload).trim()}`)
-        } else {
-          throw new RemoteError(`invalid sideband channel ${channel}`)
-        }
+        if (section === 'packfile') break
         continue
       }
       const line = text(packet)
@@ -202,10 +190,53 @@ export const parseFetchResponse = async (stream: ReadableStream<Uint8Array>, max
         else if (line !== 'NAK') throw new RemoteError(`unexpected acknowledgment: ${line}`)
       }
     }
-  } finally {
+  } catch (error) {
     await reader.cancel()
+    throw error
   }
-  return { acks, ready, pack: sawPack ? concat(packParts) : null, progress }
+  if (section !== 'packfile') {
+    await reader.cancel()
+    return { acks, ready, pack: null, progress: () => progress }
+  }
+  let packBytes = 0
+  const pack = new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      try {
+        for (;;) {
+          const packet = await reader.read()
+          if (!packet) throw new RemoteError('truncated fetch response')
+          if (packet.kind === 'flush' || packet.kind === 'response-end') {
+            await reader.cancel()
+            controller.close()
+            return
+          }
+          if (packet.kind !== 'data') throw new RemoteError('unexpected packet in packfile section')
+          const channel = packet.data[0]
+          const payload = packet.data.subarray(1)
+          if (channel === SIDEBAND_DATA) {
+            packBytes += payload.length
+            if (packBytes > maxPackBytes) throw new SizeLimitError(maxPackBytes)
+            controller.enqueue(payload)
+            return
+          }
+          if (channel === SIDEBAND_PROGRESS) progress += fromUtf8(payload)
+          else if (channel === SIDEBAND_ERROR) throw new RemoteError(`remote error: ${fromUtf8(payload).trim()}`)
+          else throw new RemoteError(`invalid sideband channel ${channel}`)
+        }
+      } catch (error) {
+        await reader.cancel()
+        controller.error(error)
+      }
+    },
+    cancel: () => reader.cancel(),
+  })
+  return { acks, ready, pack, progress: () => progress }
+}
+
+export const parseFetchResponse = async (stream: ReadableStream<Uint8Array>, maxPackBytes = Number.POSITIVE_INFINITY): Promise<FetchResponse> => {
+  const response = await openFetchResponse(stream, maxPackBytes)
+  const pack = response.pack ? await readAll(response.pack) : null
+  return { acks: response.acks, ready: response.ready, pack, progress: response.progress() }
 }
 
 export type HaveSource = {
@@ -274,7 +305,7 @@ export type FetchPackOptions = {
 }
 
 export type FetchedPack = {
-  readonly pack: Uint8Array
+  readonly pack: ReadableStream<Uint8Array>
   readonly rounds: number
   readonly common: readonly ObjectId[]
 }
@@ -302,7 +333,7 @@ export const fetchPackV2 = async (remote: Remote, capabilities: V2Capabilities, 
     ]
     const response = await postCommand(remote, commandRequest(capabilities, 'fetch', args))
     if (!response.body) throw new RemoteError('empty fetch response')
-    const result = await parseFetchResponse(response.body, options.maxPackBytes)
+    const result = await openFetchResponse(response.body, options.maxPackBytes)
     for (const id of result.acks) common.add(id)
     if (result.pack) return { pack: result.pack, rounds: round, common: [...common] }
     if (done) throw new RemoteError('remote sent no pack after done')

@@ -4,6 +4,12 @@
   "private": true,
   "license": "MIT",
   "type": "module",
+  "exports": {
+    "./app": "./src/app.ts",
+    "./config": "./src/config.ts",
+    "./mirror-federation": "./src/mirror-federation.ts",
+    "./test/*": "./test/*"
+  },
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
@@ -12,6 +18,7 @@
     "test:e2e": "vitest run --config vitest.e2e.config.ts",
     "bench": "node --experimental-transform-types --no-warnings --expose-gc scripts/bench.ts",
     "instance-key": "node --experimental-transform-types --no-warnings scripts/instance-key.ts",
+    "break-glass": "node --experimental-transform-types --no-warnings scripts/break-glass.ts",
     "bench:mirror": "node --experimental-transform-types --no-warnings scripts/bench-mirror.ts"
   },
   "dependencies": {
@@ -24,6 +31,7 @@
   "devDependencies": {
     "@cloudflare/workers-types": "5.20261012.1",
     "@git-forge/accounts-node": "workspace:*",
+    "@git-forge/node": "workspace:*",
     "@types/node": "22.20.5",
     "typescript": "6.0.3",
     "vitest": "4.1.11",

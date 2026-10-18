@@ -75,7 +75,7 @@ describe('issues', () => {
 
   it('applies GitHub permissions to issues and comments', async () => {
     const fixture = await createFixture()
-    const [alice, bob, carol, dave] = await Promise.all(['alice', 'bob', 'carol', 'dave'].map((user) => fixture.scope(user as 'alice')))
+    const [alice, bob, carol, dave] = [await fixture.scope('alice'), await fixture.scope('bob'), await fixture.scope('carol'), await fixture.scope('dave')]
     await fails(fixture.scope('anonymous'), 404)
     await fails(fixture.scope('erin'), 404)
     const issue = await createIssue(carol, { title: 'mine', labels: ['bug'], assignees: ['bob'] })

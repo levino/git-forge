@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import {
   type AccountsStore,
   applyMigrations,
+  pendingMigrations,
   createAccountsStore,
   d1Database,
   type D1DatabaseLike,
@@ -26,7 +27,7 @@ const tables = (db: Database) => db.all<{ name: string }>(sql("SELECT name FROM 
 describe('migrations on node:sqlite', () => {
   it('creates the schema once and is idempotent', async () => {
     const { db } = openSqliteDatabase()
-    expect(await applyMigrations(db, MIGRATIONS)).toEqual(['0001_initial', '0002_branch_protection', '0003_instance_admins', '0004_mirror_subscriptions', '0005_actions'])
+    expect(await applyMigrations(db, MIGRATIONS)).toEqual(['0001_initial', '0002_branch_protection', '0003_instance_admins', '0004_mirror_subscriptions', '0005_actions', '0006_login', '0007_collaboration'])
     expect(await applyMigrations(db, MIGRATIONS)).toEqual([])
     expect((await tables(db)).map((row) => row.name)).toEqual(
       expect.arrayContaining([
@@ -59,6 +60,17 @@ describe('migrations on node:sqlite', () => {
     const edited = MIGRATIONS.map((migration) => ({ ...migration, sql: `${migration.sql}\n` }))
     await expect(applyMigrations(db, edited)).rejects.toThrow(/was modified/)
     await expect(applyMigrations(db, [])).rejects.toThrow(/unknown migration 0001_initial/)
+  })
+
+  it('lists pending migrations without touching the database', async () => {
+    const { db } = openSqliteDatabase()
+    expect(await pendingMigrations(db, MIGRATIONS)).toEqual(MIGRATIONS.map((migration) => migration.name))
+    expect(await tables(db)).toEqual([])
+    await applyMigrations(db, MIGRATIONS.slice(0, 2))
+    expect(await pendingMigrations(db, MIGRATIONS)).toEqual(MIGRATIONS.slice(2).map((migration) => migration.name))
+    await applyMigrations(db, MIGRATIONS)
+    expect(await pendingMigrations(db, MIGRATIONS)).toEqual([])
+    await expect(pendingMigrations(db, MIGRATIONS.slice(1))).rejects.toThrow(/unknown migration 0001_initial/)
   })
 
   it('applies new migrations in order and rolls back a failing one completely', async () => {
@@ -313,7 +325,7 @@ describe('D1 adapter', () => {
     const handle = new DatabaseSync(':memory:')
     handle.exec('PRAGMA foreign_keys = ON')
     const db = d1Database(fakeD1(handle))
-    expect(await applyMigrations(db, MIGRATIONS)).toEqual(['0001_initial', '0002_branch_protection', '0003_instance_admins', '0004_mirror_subscriptions', '0005_actions'])
+    expect(await applyMigrations(db, MIGRATIONS)).toEqual(['0001_initial', '0002_branch_protection', '0003_instance_admins', '0004_mirror_subscriptions', '0005_actions', '0006_login', '0007_collaboration'])
     const store = createAccountsStore(db)
     const { alice } = await seed(store)
     const { token } = await store.createPersonalAccessToken(alice.id, { name: 'd1', scopes: ['repo:admin'], expiresAt: null })

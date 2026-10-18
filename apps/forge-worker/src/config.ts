@@ -1,10 +1,24 @@
-import { importSigningKey, normalizeIssuer, type PrivateJwk, type SigningKey } from '@git-forge/accounts'
+import {
+  BreakGlassError,
+  DEFAULT_OIDC_SCOPES,
+  importSigningKey,
+  normalizeIssuer,
+  normalizeOidcIssuer,
+  type OidcClientConfig,
+  OidcError,
+  type OkpPublicJwk,
+  parseBreakGlassPublicKey,
+  type PrivateJwk,
+  type SigningKey,
+} from '@git-forge/accounts'
 
 export type ForgeVars = {
   readonly PUBLIC_URL?: string
   readonly INSTANCE_KEY?: string
   readonly BOOTSTRAP_TOKEN?: string
   readonly MAX_PUSH_BYTES?: string
+  readonly PACKFILE_URI_BASE?: string
+  readonly COMPACT_MAX_BYTES?: string
   readonly MAX_LFS_OBJECT_BYTES?: string
   readonly MIRROR_INTERVAL_MINUTES?: string
   readonly ALLOW_INSECURE_FEDERATION?: string
@@ -13,18 +27,34 @@ export type ForgeVars = {
   readonly ACTIONS_SECRETS?: string
   readonly MIRROR_DEEP_CHECK_DAYS?: string
   readonly MIRROR_UNIT_BYTES?: string
+  readonly OIDC_ISSUER?: string
+  readonly OIDC_CLIENT_ID?: string
+  readonly OIDC_CLIENT_SECRET?: string
+  readonly OIDC_NAME?: string
+  readonly OIDC_SCOPES?: string
+  readonly SELF_SIGNUP?: string
+  readonly BREAK_GLASS_PUBLIC_KEY?: string
+}
+
+export type LoginSettings = {
+  readonly oidc: OidcClientConfig | undefined
+  readonly selfSignup: boolean
+  readonly breakGlassKey: OkpPublicJwk | undefined
 }
 
 export type ForgeSettings = {
   readonly publicUrl: string | undefined
   readonly instanceKey: SigningKey | undefined
   readonly bootstrapToken: string | undefined
-  readonly maxPushBytes: number
+  readonly maxPushBytes: number | undefined
+  readonly packfileUriBase: string | undefined
+  readonly compactMaxBytes: number
   readonly maxLfsObjectBytes: number
   readonly mirrorIntervalMinutes: number
   readonly allowInsecureFederation: boolean
   readonly deepCheckDays: number
   readonly mirrorUnitBytes: number
+  readonly login?: LoginSettings
 }
 
 export type ActionsSettings = {
@@ -51,7 +81,7 @@ export const parseActionsSecrets = (value: string | undefined): Record<string, s
   return parsed as Record<string, string>
 }
 
-export const DEFAULT_MAX_PUSH_BYTES = 16 * 1024 * 1024
+export const DEFAULT_COMPACT_MAX_BYTES = 128 * 1024 * 1024
 
 export const DEFAULT_MAX_LFS_OBJECT_BYTES = 100 * 1024 * 1024
 
@@ -85,18 +115,49 @@ export const parseInstanceKey = async (value: string | undefined): Promise<Signi
   }
 }
 
+export const parseOidcSettings = (vars: ForgeVars): OidcClientConfig | undefined => {
+  const issuer = present(vars.OIDC_ISSUER)
+  const clientId = present(vars.OIDC_CLIENT_ID)
+  if (!issuer && !clientId) return undefined
+  if (!issuer || !clientId) throw new ConfigurationError('OIDC_ISSUER and OIDC_CLIENT_ID must be set together')
+  let normalized: string
+  try {
+    normalized = normalizeOidcIssuer(issuer)
+  } catch (error) {
+    if (error instanceof OidcError) throw new ConfigurationError(error.message)
+    throw error
+  }
+  const scopes = present(vars.OIDC_SCOPES)?.split(/\s+/) ?? [...DEFAULT_OIDC_SCOPES]
+  return { issuer: normalized, clientId, clientSecret: present(vars.OIDC_CLIENT_SECRET), scopes, name: present(vars.OIDC_NAME) ?? 'single sign-on' }
+}
+
+export const parseLoginSettings = (vars: ForgeVars): LoginSettings => {
+  const breakGlass = present(vars.BREAK_GLASS_PUBLIC_KEY)
+  let breakGlassKey: OkpPublicJwk | undefined
+  try {
+    breakGlassKey = breakGlass ? parseBreakGlassPublicKey(breakGlass) : undefined
+  } catch (error) {
+    if (error instanceof BreakGlassError) throw new ConfigurationError(error.message)
+    throw error
+  }
+  return { oidc: parseOidcSettings(vars), selfSignup: vars.SELF_SIGNUP === 'true', breakGlassKey }
+}
+
 export const parseSettings = async (vars: ForgeVars): Promise<ForgeSettings> => {
   const publicUrl = present(vars.PUBLIC_URL)
   return {
     publicUrl: publicUrl ? normalizeIssuer(publicUrl) : undefined,
     instanceKey: await parseInstanceKey(vars.INSTANCE_KEY),
     bootstrapToken: present(vars.BOOTSTRAP_TOKEN),
-    maxPushBytes: positiveInteger(vars.MAX_PUSH_BYTES, DEFAULT_MAX_PUSH_BYTES),
+    maxPushBytes: positiveInteger(vars.MAX_PUSH_BYTES, 0) || undefined,
+    packfileUriBase: present(vars.PACKFILE_URI_BASE),
+    compactMaxBytes: positiveInteger(vars.COMPACT_MAX_BYTES, DEFAULT_COMPACT_MAX_BYTES, true),
     maxLfsObjectBytes: positiveInteger(vars.MAX_LFS_OBJECT_BYTES, DEFAULT_MAX_LFS_OBJECT_BYTES),
     mirrorIntervalMinutes: positiveInteger(vars.MIRROR_INTERVAL_MINUTES, DEFAULT_MIRROR_INTERVAL_MINUTES, true),
     allowInsecureFederation: vars.ALLOW_INSECURE_FEDERATION === 'true',
     deepCheckDays: positiveInteger(vars.MIRROR_DEEP_CHECK_DAYS, DEFAULT_DEEP_CHECK_DAYS, true),
     mirrorUnitBytes: positiveInteger(vars.MIRROR_UNIT_BYTES, 0, true),
+    login: parseLoginSettings(vars),
   }
 }
 

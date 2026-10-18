@@ -1,4 +1,4 @@
-import { concat, fromHex, fromUtf8, utf8 } from './bytes.ts'
+import { concat, fromHex, fromUtf8, streamOf, utf8 } from './bytes.ts'
 import { hashObject, type ObjectId } from './hash.ts'
 import { type GitObject, isTreeMode, type ObjectType, type TreeEntry } from './objects.ts'
 import { writePack } from './pack.ts'
@@ -139,6 +139,6 @@ export const storeObjects = async (odb: ObjectDatabase, objects: readonly (GitOb
   const missing: (GitObject & { readonly id: ObjectId })[] = []
   for (const object of objects) if (!(await odb.has(object.id))) missing.push(object)
   if (missing.length === 0) return null
-  const pack = writePack(missing)
-  return odb.addPack(pack.bytes, pack.objects, pack.checksum)
+  const { name } = await odb.ingest(streamOf(writePack(missing).bytes), { checkReferences: false })
+  return name
 }

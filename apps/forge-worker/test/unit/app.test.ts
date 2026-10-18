@@ -5,7 +5,7 @@ import { type RunningServer, startServer } from '@git-forge/core/test/http-serve
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { basicAuthorization, secretMatches } from '../../src/app.ts'
 import { git } from '../e2e/history.ts'
-import { DEFAULT_MAX_LFS_OBJECT_BYTES, parseSettings } from '../../src/config.ts'
+import { DEFAULT_COMPACT_MAX_BYTES, DEFAULT_MAX_LFS_OBJECT_BYTES, parseSettings } from '../../src/config.ts'
 import { upstreamRepository } from '../../src/mirrors.ts'
 import { bootstrap, BOOTSTRAP_TOKEN, call, type NodeForge, nodeForge } from '../support/node-forge.ts'
 
@@ -29,10 +29,17 @@ describe('settings', () => {
       publicUrl: 'https://forge.example',
       instanceKey: undefined,
       bootstrapToken: undefined,
-      maxPushBytes: 16 * 1024 * 1024,
+      maxPushBytes: undefined,
+      packfileUriBase: undefined,
+      compactMaxBytes: DEFAULT_COMPACT_MAX_BYTES,
       maxLfsObjectBytes: DEFAULT_MAX_LFS_OBJECT_BYTES,
       mirrorIntervalMinutes: 0,
       allowInsecureFederation: false,
+    })
+    expect(await parseSettings({ MAX_PUSH_BYTES: '1000', COMPACT_MAX_BYTES: '0', PACKFILE_URI_BASE: 'https://cdn.example' })).toMatchObject({
+      maxPushBytes: 1000,
+      compactMaxBytes: 0,
+      packfileUriBase: 'https://cdn.example',
     })
     const { privateJwk, key } = await generateSigningKey()
     expect((await parseSettings({ INSTANCE_KEY: JSON.stringify(privateJwk) })).instanceKey?.kid).toBe(key.kid)

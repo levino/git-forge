@@ -9,12 +9,12 @@ discussions.
 - [x] Pack parsing and writing, including thin packs
 - [x] Pack index v2, byte-identical to `git index-pack`
 - [x] Refs via compare-and-swap
-- [x] `receive-pack` (smart HTTP), push size limit (default 64 MB)
-- [x] `upload-pack` protocol v2
+- [x] `receive-pack` (smart HTTP), streamed; size bounded by the platform's request body limit
+- [x] `upload-pack` protocol v2, streaming stored packs; `packfile-uris`
 - [x] Dumb HTTP
 - [x] Archive under `refs/archive/{timestamp}/...` on force push and deletion
-- [ ] Streaming pack indexing (packs are processed in memory in v1)
-- [ ] Pack compaction
+- [x] Streaming pack indexing with bounded memory (staging chunks, LRU cache, range reads)
+- [x] Geometric pack compaction (append-only, swaps the current pack set)
 
 ## M2 — Git LFS
 
@@ -30,13 +30,14 @@ discussions.
 - [x] Users, organizations, teams, roles, PATs, apps in SQLite
 - [x] Instance admins, one-time bootstrap of the first admin
 - [x] Private repositories by default, per-repository visibility
-- [ ] Login: OIDC (ZITADEL etc.), passkeys
+- [x] Login: OIDC (authorization code + PKCE, ZITADEL as first target), passkeys (WebAuthn, attestation none, UV required), browser sessions with CSRF protection, invites and optional self-signup
 - [x] Git over HTTPS with PATs and app tokens
 - [x] Git and LFS as separate authorization surfaces (`git:read` / `lfs:read`)
 - [x] Instance keys (Ed25519), `/.well-known/openid-configuration`, `/.well-known/jwks.json`
 - [x] Short-lived instance JWTs, trust table "issuer X may read repo Y", optional pinned thumbprint
-- [ ] Device flow (`gh auth login`-style)
-- [ ] Break-glass key
+- [x] Device flow (`git forge auth login`, RFC 8628) and git credential helper (`git forge auth git-credential`)
+- [x] Break-glass key (offline Ed25519, one-hour admin session)
+- [ ] Login follow-ups: OIDC groups → teams, session list and revocation in the UI, rate limits on login and device endpoints, purging expired challenges and device codes, branch protection API with sessions, device-flow scope choice
 - [ ] SAML, SCIM
 - [x] Branch protection rules (patterns, force push, deletion, push restrictions, admin bypass) enforced in `receive-pack`, API under `/api/repos/{owner}/{repo}/branches/{branch}/protection`
 - [ ] Branch protection API and push policy wired into the Worker app (needs accounts on D1 there)
@@ -61,14 +62,16 @@ discussions.
 - [x] File system storage adapter (`@git-forge/node`)
 - [x] Shared storage conformance suite for all adapters
 - [x] Local S3 test environment (versitygw; Garage, SeaweedFS, RustFS evaluated)
-- [ ] Headless deployment on a Raspberry Pi (Bun/Node + SQLite file + filesystem or S3)
+- [x] Headless deployment on a Raspberry Pi: `apps/forge-node` serves the Worker's router over `node:http` with an SQLite file, `FsStorage` or `S3Storage`, an in-process job queue and a cron schedule; explicit `migrate` command; single executables for `linux-x64`/`linux-arm64` (Bun) in every release, Dockerfile, systemd units; E2E with a Worker under `wrangler dev` mirroring in both directions
+- [ ] Publish the `apps/forge-node` image to a container registry (multi-arch) from the release workflow
+- [ ] Durable jobs for Node deployments (job table in SQLite), so queued mirror jobs survive a restart instead of waiting for the next notification or scheduled run
 
 ## M5a — Large pushes
 
-- [ ] Streaming receive-pack and upload-pack with bounded memory, `packfile-uris` (in progress)
+- [x] Streaming receive-pack and upload-pack with bounded memory, `packfile-uris`, geometric compaction
 - [x] Server-side import: create or update a repository by pulling from a URL (no request body limit), in resumable steps driven by a queue
 - [x] Chunked push helper: `git forge push` splits history into pushes below the platform body limit, using the unmodified git client; single executables per platform from the release workflow
-- [ ] Import: stream fetched packs into storage and index them with the streaming indexing job (via `ingestPack`)
+- [x] Import and mirror sync: stream fetched packs into the streaming indexer (via `ingestPack`)
 - [ ] Remote helper `git-remote-forge`: resumable multipart pack upload directly to object storage via presigned URLs, then a finalize call that indexes the pack and updates refs
 
 ## M5b — CI and distribution

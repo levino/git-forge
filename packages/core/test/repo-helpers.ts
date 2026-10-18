@@ -1,5 +1,5 @@
 import { MemoryStorage } from '../src/memory-storage.ts'
-import { parsePack } from '../src/pack.ts'
+import { streamOf } from '../src/bytes.ts'
 import { createRepository, ObjectDatabase, type RepositoryName } from '../src/repository.ts'
 import { updateRefs } from '../src/ref-update.ts'
 import { ZERO_ID } from '../src/hash.ts'
@@ -10,9 +10,7 @@ export const loadRepository = async (dir: string, repo: RepositoryName = { owner
   const odb = new ObjectDatabase(storage, repo)
   const revs = git(dir, ['rev-list', '--all', '--objects']).trim()
   if (revs !== '') {
-    const pack = gitBytes(dir, ['pack-objects', '--stdout', '--all'], '')
-    const parsed = await parsePack(pack, async () => null)
-    await odb.addPack(pack, parsed.objects, parsed.checksum)
+    await odb.ingest(streamOf(gitBytes(dir, ['pack-objects', '--stdout', '--all'], '')))
   }
   const refs = git(dir, ['for-each-ref', '--format=%(objectname) %(refname)'])
     .trim()

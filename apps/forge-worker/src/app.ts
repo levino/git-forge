@@ -14,7 +14,11 @@ import {
   AccountsError,
   authenticateRequest,
   checkRepositoryAccess,
+  checkSession,
   createAccountsStore,
+  createLoginHandler,
+  createLoginStore,
+  createOidcProvider,
   createGitAccess,
   createInstanceVerifier,
   createJwksCache,
@@ -25,6 +29,11 @@ import {
   isRole,
   isTokenScope,
   type JwksSource,
+  type LoginContext,
+  type LoginHttpOptions,
+  type LoginPageRenderer,
+  relyingParty,
+  sessionUserPrincipal,
   normalizeIssuer,
   parseAuthorization,
   type Principal,
@@ -33,6 +42,7 @@ import {
 } from '@git-forge/accounts'
 import {
   type Authorize,
+  compactRepository,
   configureMirror,
   createRepository,
   deepCheckMirror,
@@ -49,6 +59,9 @@ import {
   listMirrors,
   MirrorExistsError,
   MirrorNotFoundError,
+  type PackfileUri,
+  publicPackfileUris,
+  type PushOutcome,
   readAll,
   readMirrorConfig,
   readImportState,
@@ -57,7 +70,6 @@ import {
   type RepositoryName,
   SizeLimitError,
   startImport,
-  type PushOutcome,
   type Storage,
 } from '@git-forge/core'
 import { type BranchUpdate, type CollaborationOptions, handleCollaborationApi, handlePushedRefs, loadUsers, systemScope, actorRefOf } from '@git-forge/collaboration'
@@ -89,12 +101,15 @@ export type ForgeOptions = ForgeSettings & {
   readonly jobs?: JobQueue<ForgeJob>
   readonly digests?: DigestFactory
   readonly scheduleImport?: ImportScheduler
+  readonly renderLoginPage?: LoginPageRenderer
 }
+
+export type WaitUntil = (promise: Promise<unknown>) => void
 
 export const ACTIONS_SERVICE_PATH = '/_services/actions'
 
 export type Forge = {
-  readonly fetch: (request: Request) => Promise<Response>
+  readonly fetch: (request: Request, waitUntil?: WaitUntil) => Promise<Response>
   readonly scheduled: (at?: Date) => Promise<ScheduledMirrorRun[]>
   readonly runJob: (job: ForgeJob) => Promise<void>
 }
@@ -178,8 +193,11 @@ type Route = { readonly pattern: RegExp; readonly method: string; readonly handl
 
 export const createForge = (options: ForgeOptions): Forge => {
   const { storage, db } = options
-  const store: AccountsStore = createAccountsStore(db)
   const now = options.now ?? (() => new Date())
+  const store: AccountsStore = createAccountsStore(db, { now: () => now().getTime() })
+  const logins = createLoginStore(db, { now: () => now().getTime() })
+  const outbound = (input: string, init?: RequestInit) => (options.fetch ? options.fetch(new Request(input, init)) : fetch(input, init))
+  const oidc = options.login?.oidc ? createOidcProvider(options.login.oidc, outbound, () => now().getTime()) : null
   const jwks: JwksSource = createJwksCache({
     allowInsecureHttp: options.allowInsecureFederation,
     ...(options.fetch ? { fetch: (input, init) => options.fetch!(new Request(input, init)) } : {}),
@@ -191,7 +209,28 @@ export const createForge = (options: ForgeOptions): Forge => {
     verifyInstance: createInstanceVerifier({ audience: issuerFor(request), trust: store.lookupTrustedIssuer, jwks }),
   })
 
+  const loginOptions = (request: Request): LoginHttpOptions => {
+    const origin = new URL(issuerFor(request)).origin
+    const context: LoginContext = {
+      store,
+      logins,
+      origin,
+      rp: relyingParty(origin),
+      oidc,
+      selfSignup: options.login?.selfSignup ?? false,
+      breakGlassKey: options.login?.breakGlassKey ?? null,
+      fetch: outbound,
+      now: () => now().getTime(),
+    }
+    return { context, secureCookies: origin.startsWith('https:'), ...(options.renderLoginPage ? { renderPage: options.renderLoginPage } : {}) }
+  }
+
   const principalOf = async (request: Request): Promise<Principal> => {
+    if (!request.headers.has('Authorization')) {
+      const check = await checkSession(request, loginOptions(request))
+      if (check.kind === 'csrf-failed') throw new HttpError(403, 'missing or invalid CSRF token')
+      if (check.kind === 'session') return sessionUserPrincipal(check.active.session)
+    }
     const principal = await authenticateRequest(request, authenticateOptions(request))
     if (!principal) throw new HttpError(401, 'invalid credentials', { 'WWW-Authenticate': 'Bearer' })
     return principal
@@ -290,6 +329,33 @@ export const createForge = (options: ForgeOptions): Forge => {
     if (expiresAt !== null && (typeof expiresAt !== 'number' || !Number.isSafeInteger(expiresAt))) throw new HttpError(400, 'expiresAt must be Unix milliseconds')
     const created = await store.createPersonalAccessToken(account.id, { name: optionalString(body, 'name') ?? 'api', scopes, expiresAt }, { kind: 'user', id: actor.id })
     return json(201, created)
+  }
+
+  const currentUser = async (request: Request): Promise<Response> => {
+    const principal = await principalOf(request)
+    if (principal.kind !== 'user') throw new HttpError(401, 'authentication required', { 'WWW-Authenticate': 'Bearer' })
+    const via = request.headers.has('Authorization') ? 'token' : 'session'
+    return json(200, { id: principal.id, login: principal.login, admin: await store.isInstanceAdmin(principal.id), via, ceiling: principal.limits?.ceiling ?? null })
+  }
+
+  const createInvite = async (request: Request): Promise<Response> => {
+    const actor = await requireInstanceAdmin(request)
+    const body = await readBody(request)
+    const login = optionalString(body, 'login')
+    const existing = optionalString(body, 'user')
+    const email = optionalString(body, 'email')
+    const days = body.expiresInDays ?? 7
+    if (typeof days !== 'number' || !Number.isInteger(days) || days < 1 || days > 90) throw new HttpError(400, 'expiresInDays must be an integer between 1 and 90')
+    if (login !== undefined && existing !== undefined) throw new HttpError(400, 'pass either login (a new account) or user (an existing one)')
+    let userId: string | null = null
+    if (existing !== undefined) {
+      const account = await store.findAccount(existing)
+      if (!account || account.kind !== 'user') throw new HttpError(404, 'user not found')
+      userId = account.id
+    }
+    if (login !== undefined && (await store.findAccount(login))) throw new HttpError(409, `${login} already exists`)
+    const invite = await logins.createInvite({ login: login ?? null, userId, email: email ?? null, ttlMs: days * 24 * 60 * 60 * 1000 }, { kind: 'user', id: actor.id })
+    return json(201, { code: invite.code, url: new URL(`/login/invite/${invite.code}`, issuerFor(request)).toString(), expiresAt: invite.expiresAt })
   }
 
   const trustInstance = async (request: Request): Promise<Response> => {
@@ -558,7 +624,7 @@ export const createForge = (options: ForgeOptions): Forge => {
     now: () => now().getTime(),
     onBranchUpdated: async (update: BranchUpdate) => {
       const actor = (await loadUsers(db, [update.actor]))(update.actor).login
-      const outcome: PushOutcome = { unpack: 'ok', results: [{ name: update.ref, oldId: update.oldId, newId: update.newId, ok: true }], objects: [], archived: [] }
+      const outcome: PushOutcome = { unpack: 'ok', results: [{ name: update.ref, oldId: update.oldId, newId: update.newId, ok: true }], pack: null, objectCount: 0, archived: [] }
       await afterRefUpdate(request, update.repo, outcome, actor)
     },
   })
@@ -587,6 +653,10 @@ export const createForge = (options: ForgeOptions): Forge => {
     { method: 'POST', pattern: /^\/api\/admin\/users$/, handler: createUser },
     { method: 'POST', pattern: new RegExp(`^/api/admin/users/${SEGMENT}/tokens$`), handler: createToken },
     { method: 'POST', pattern: /^\/api\/admin\/instances$/, handler: trustInstance },
+    { method: 'POST', pattern: /^\/api\/admin\/invites$/, handler: createInvite },
+    { method: 'GET', pattern: /^\/api\/user$/, handler: currentUser },
+    { method: 'POST', pattern: /^\/api\/admin\/invites$/, handler: createInvite },
+    { method: 'GET', pattern: /^\/api\/user$/, handler: currentUser },
     { method: 'POST', pattern: /^\/api\/repos$/, handler: createRepositoryRoute },
     { method: 'PATCH', pattern: new RegExp(`^${REPO}$`), handler: updateRepository },
     { method: 'PUT', pattern: new RegExp(`^${REPO}/collaborators/${SEGMENT}$`), handler: setCollaborator },
@@ -610,11 +680,27 @@ export const createForge = (options: ForgeOptions): Forge => {
     return match.handler(request, params)
   }
 
-  const handle = async (request: Request): Promise<Response> => {
+  const compactAfterPush = (waitUntil: WaitUntil | undefined) => async (repo: RepositoryName, outcome: PushOutcome) => {
+    if (!outcome.pack || options.compactMaxBytes === 0) return
+    const compaction = compactRepository(storage, repo, { maxBytes: options.compactMaxBytes }).catch((error: unknown) =>
+      console.error(JSON.stringify({ event: 'compaction-failed', repo: `${repo.owner}/${repo.name}`, error: String(error) })),
+    )
+    if (waitUntil) waitUntil(compaction)
+    else await compaction
+  }
+
+  const packfileUris = async (request: Request, repo: RepositoryName, authorize: Authorize): Promise<PackfileUri | undefined> => {
+    const anonymous = new Request(request.url, { method: 'GET' })
+    return (await authorize(anonymous, repo, 'read', 'git')) ? undefined : publicPackfileUris(options.packfileUriBase)(request, repo)
+  }
+
+  const handle = async (request: Request, waitUntil?: WaitUntil): Promise<Response> => {
     const wellKnown = options.instanceKey ? handleWellKnownRequest(request, { issuer: issuerFor(request), keys: [options.instanceKey.publicJwk] }) : null
     if (wellKnown) return wellKnown
     const federated = federation ? await handleFederationRequest(federation, request) : null
     if (federated) return federated
+    const login = await createLoginHandler(loginOptions(request))(request)
+    if (login) return login
     const authentication = authenticateOptions(request)
     const protection = await handleBranchProtectionRequest(request, { store, verifyInstance: authentication.verifyInstance })
     if (protection) return protection
@@ -642,9 +728,11 @@ export const createForge = (options: ForgeOptions): Forge => {
       storage,
       authorize,
       pushPolicy: access.pushPolicy,
-      maxRequestBytes: options.maxPushBytes,
+      ...(options.maxPushBytes !== undefined ? { maxPushBytes: options.maxPushBytes } : {}),
       lfs: { maxObjectBytes: options.maxLfsObjectBytes },
+      packfileUris: (incoming, repo) => packfileUris(incoming, repo, authorize),
       onPush: async (repo, outcome) => {
+        await compactAfterPush(waitUntil)(repo, outcome)
         await refreshCollaboration(request, repo, outcome)
         if (options.actions || federation) await afterRefUpdate(request, repo, outcome, await actorOf(request))
       },

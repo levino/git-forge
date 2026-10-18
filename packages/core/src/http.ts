@@ -4,7 +4,7 @@ import { handleLfsRequest, type LfsHttpOptions } from './lfs-http.ts'
 import { lfsPushCheck } from './lfs.ts'
 import { gitPrefix, isValidName, readRefs, type RepositoryName } from './repository.ts'
 import type { Storage } from './storage.ts'
-import { advertiseUploadPackV2, uploadPackV2 } from './upload-pack.ts'
+import { advertiseUploadPackV2, type PackfileUri, uploadPackV2 } from './upload-pack.ts'
 
 export type Access = 'read' | 'write'
 
@@ -19,10 +19,25 @@ export type GitHttpOptions = {
   readonly authorize?: Authorize
   readonly pushPolicy?: PushPolicy
   readonly maxRequestBytes?: number
+  readonly maxPushBytes?: number
   readonly receive?: Omit<ReceiveOptions, 'storage' | 'repo'>
   readonly onPush?: (repo: RepositoryName, outcome: PushOutcome) => Promise<void>
   readonly lfs?: LfsHttpOptions | false
+  readonly packfileUris?: (request: Request, repo: RepositoryName) => PackfileUri | undefined | Promise<PackfileUri | undefined>
 }
+
+export const publicPackfileUris =
+  (baseUrl?: string) =>
+  (request: Request, repo: RepositoryName): PackfileUri =>
+  async (pack) =>
+    `${(baseUrl ?? new URL(request.url).origin).replace(/\/+$/, '')}/${repo.owner}/${repo.name}.git/objects/pack/${pack.name}`
+
+export const presignedPackfileUris =
+  (storage: Storage, expiresInSeconds = 3600) =>
+  (): PackfileUri | undefined => {
+    const presign = storage.presignGet?.bind(storage)
+    return presign ? async (pack) => presign(pack.key, expiresInSeconds) : undefined
+  }
 
 export type GitRoute = {
   readonly repo: RepositoryName
@@ -52,14 +67,28 @@ const text = (status: number, body: string, headers: Record<string, string> = {}
 const isProtocolV2 = (request: Request): boolean =>
   (request.headers.get('Git-Protocol') ?? '').split(':').includes('version=2')
 
-const readBody = async (request: Request, limit: number): Promise<Uint8Array> => {
-  if (!request.body) return new Uint8Array(0)
+const bodyStream = (request: Request): ReadableStream<Uint8Array> => {
+  if (!request.body) return new ReadableStream({ start: (controller) => controller.close() })
   const encoding = request.headers.get('Content-Encoding')
-  const stream =
-    encoding === 'gzip' || encoding === 'x-gzip'
-      ? request.body.pipeThrough(new DecompressionStream('gzip') as unknown as ReadableWritablePair<Uint8Array, Uint8Array>)
-      : request.body
-  return readAll(stream, limit)
+  return encoding === 'gzip' || encoding === 'x-gzip'
+    ? request.body.pipeThrough(new DecompressionStream('gzip') as unknown as ReadableWritablePair<Uint8Array, Uint8Array>)
+    : request.body
+}
+
+const readBody = async (request: Request, limit: number): Promise<Uint8Array> => readAll(bodyStream(request), limit)
+
+const limited = (stream: ReadableStream<Uint8Array>, limit: number): ReadableStream<Uint8Array> => {
+  if (!Number.isFinite(limit)) return stream
+  let seen = 0
+  return stream.pipeThrough(
+    new TransformStream<Uint8Array, Uint8Array>({
+      transform(chunk, controller) {
+        seen += chunk.length
+        if (seen > limit) controller.error(new SizeLimitError(limit))
+        else controller.enqueue(chunk)
+      },
+    }),
+  )
 }
 
 const serveStored = async (storage: Storage, key: string, contentType: string, cache: Record<string, string>): Promise<Response> => {
@@ -122,8 +151,12 @@ export const handleGitRequest = async (request: Request, options: GitHttpOptions
       headers: { 'Content-Type': 'application/x-git-receive-pack-advertisement', ...noCache },
     })
   }
+  const uploadOptions = async () => {
+    const packfileUri = await options.packfileUris?.(request, repo)
+    return packfileUri ? { packfileUri } : {}
+  }
   if (request.method === 'GET' && path === '/info/refs' && service === 'git-upload-pack' && isProtocolV2(request)) {
-    return new Response(binary(advertiseUploadPackV2()), {
+    return new Response(binary(advertiseUploadPackV2(await uploadOptions())), {
       headers: { 'Content-Type': 'application/x-git-upload-pack-advertisement', ...noCache },
     })
   }
@@ -140,20 +173,24 @@ export const handleGitRequest = async (request: Request, options: GitHttpOptions
       if (error instanceof SizeLimitError) return text(413, 'request too large\n')
       throw error
     }
-    return new Response(binary(await uploadPackV2(storage, repo, body)), {
+    return new Response(await uploadPackV2(storage, repo, body, await uploadOptions()), {
       headers: { 'Content-Type': 'application/x-git-upload-pack-result', ...noCache },
     })
   }
   if (request.method === 'POST' && path === '/git-receive-pack') {
-    let body: Uint8Array
+    const pushLimit = options.maxPushBytes ?? options.maxRequestBytes ?? Number.POSITIVE_INFINITY
+    const policy = combinePolicies(options.receive?.policy, await options.pushPolicy?.(request, repo))
+    let received: Awaited<ReturnType<typeof receivePack>>
     try {
-      body = await readBody(request, limit)
+      received = await receivePack(
+        { ...options.receive, storage, repo, policy, beforeUpdate: withLfsCheck(options, repo) },
+        limited(bodyStream(request), pushLimit),
+      )
     } catch (error) {
-      if (error instanceof SizeLimitError) return text(413, `push exceeds ${limit} bytes; use Git LFS for large files\n`)
+      if (error instanceof SizeLimitError) return text(413, `push exceeds ${pushLimit} bytes; use Git LFS for large files\n`)
       throw error
     }
-    const policy = combinePolicies(options.receive?.policy, await options.pushPolicy?.(request, repo))
-    const { response, outcome } = await receivePack({ ...options.receive, storage, repo, policy, beforeUpdate: withLfsCheck(options, repo) }, body)
+    const { response, outcome } = received
     if (options.onPush) await options.onPush(repo, outcome)
     return new Response(binary(response), { headers: { 'Content-Type': 'application/x-git-receive-pack-result', ...noCache } })
   }

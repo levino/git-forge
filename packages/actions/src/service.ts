@@ -1,8 +1,14 @@
 import type { Database } from '@git-forge/accounts'
-import { readAll, repositoryPrefix, type Storage, type WorkflowEnv, type WorkflowJob } from '@git-forge/core'
+import { readAll, repositoryPrefix, type Storage } from '@git-forge/core'
+import { type ActionReference, type ActionSources, resolveActionDownloads } from './actions-download.ts'
+import { jobDefinitionOf, runContextOf, runDefinitionOf } from './definitions.ts'
+import { recordCheck } from './dispatch.ts'
 import { buildJobMessage, JOB_REQUEST_MESSAGE_TYPE } from './job-message.ts'
 import { verifyClientAssertion } from './keys.ts'
+import { readSecrets, type SecretsKey } from './secrets.ts'
+import { authorizationUrl, POOL_ID, POOL_NAME } from './service-constants.ts'
 import {
+  acknowledgeMessage,
   claimJob,
   closeSession,
   completeJob,
@@ -19,6 +25,8 @@ import {
   issueToken,
   listRunners,
   type JobRow,
+  markCancelDelivered,
+  pendingCancellation,
   pendingDelivery,
   recordLogChunk,
   removeRunner,
@@ -26,6 +34,8 @@ import {
   revokeJobTokens,
   type Runner,
   RunnerExistsError,
+  type RunRow,
+  setJobOutputs,
   touchSession,
   upsertTimelineRecords,
   verifyToken,
@@ -33,10 +43,7 @@ import {
 
 export type SecretsProvider = (owner: string, repo: string) => Promise<Readonly<Record<string, string>>>
 
-export type JobDefinition = {
-  readonly job: WorkflowJob
-  readonly workflowEnv: WorkflowEnv
-}
+export { authorizationUrl, POOL_ID, POOL_NAME }
 
 export type ActionsServiceOptions = {
   readonly db: Database
@@ -45,21 +52,21 @@ export type ActionsServiceOptions = {
   readonly instanceId: string
   readonly serverUrl?: string
   readonly secrets?: SecretsProvider
+  readonly secretsKey?: SecretsKey
+  readonly actionSources?: ActionSources
   readonly now?: () => number
   readonly messageWaitMs?: number
   readonly pollIntervalMs?: number
   readonly onJobCompleted?: (job: JobRow) => Promise<void>
 }
 
-export const POOL_ID = 1
-
-export const authorizationUrl = (serviceUrl: string): string => `${serviceUrl}/_apis/v1/auth/`
-
-export const POOL_NAME = 'Default'
-
 export const RUNNER_TOKEN_TTL_MS = 60 * 60 * 1000
 
 const LOCK_DURATION_MS = 10 * 60 * 1000
+
+export const CANCEL_MESSAGE_OFFSET = 2 ** 40
+
+export const JOB_CANCEL_MESSAGE_TYPE = 'JobCancellation'
 
 const MAX_UNSIZED_UPLOAD_BYTES = 16 * 1024 * 1024
 
@@ -281,16 +288,29 @@ const jobRequestJson = (job: JobRow, runner: Runner | null) => ({
   ...(runner ? { reservedAgent: { id: runner.id, name: runner.name } } : {}),
 })
 
+export const jobSecrets = async (options: Pick<ActionsServiceOptions, 'db' | 'secrets' | 'secretsKey'>, run: RunRow, job: JobRow): Promise<Record<string, string>> => {
+  if (run.trusted !== 1) return {}
+  const scope = { owner: run.owner, repo: run.repo }
+  const instance = (await options.secrets?.(run.owner, run.repo)) ?? {}
+  const key = options.secretsKey
+  if (!key) return { ...instance }
+  const repository = await readSecrets(options.db, key, { ...scope, environment: '' })
+  const environment = job.environment && job.approval !== 'rejected' && job.approval !== 'waiting' ? await readSecrets(options.db, key, { ...scope, environment: job.environment }) : {}
+  return { ...instance, ...repository, ...environment }
+}
+
+const jobTtlMs = (job: JobRow): number => (jobDefinitionOf(job).job.timeoutMinutes + 60) * 60 * 1000
+
 const deliver = async (context: Context, job: JobRow, runner: Runner): Promise<Response> => {
   const { db } = context.options
   const run = await getRun(db, job.run_id)
   if (!run) throw new Error(`job ${job.id} has no run ${job.run_id}`)
-  const definition = JSON.parse(job.definition) as JobDefinition
-  const ttlMs = (definition.job.timeoutMinutes + 60) * 60 * 1000
+  const definition = jobDefinitionOf(job)
+  const ttlMs = jobTtlMs(job)
   const [runtimeToken, githubToken, secrets] = await Promise.all([
     issueToken(db, { kind: 'runtime', jobId: job.id, runnerId: runner.id, owner: run.owner, repo: run.repo, ttlMs }, context.now),
     issueToken(db, { kind: 'github', jobId: job.id, owner: run.owner, repo: run.repo, ttlMs }, context.now),
-    context.options.secrets?.(run.owner, run.repo) ?? Promise.resolve({}),
+    jobSecrets(context.options, run, job),
   ])
   const message = buildJobMessage({
     requestId: job.request_id,
@@ -299,18 +319,11 @@ const deliver = async (context: Context, job: JobRow, runner: Runner): Promise<R
     timelineId: job.timeline_id,
     stepIds: definition.job.steps.map(() => crypto.randomUUID()),
     job: definition.job,
-    run: {
-      id: run.id,
-      owner: run.owner,
-      repo: run.repo,
-      workflowName: run.workflow_name,
-      workflowPath: run.workflow_path,
-      workflowEnv: definition.workflowEnv,
-      event: run.event,
-      ref: run.ref,
-      sha: run.sha,
-      actor: run.actor,
-    },
+    displayName: job.display_name,
+    run: runContextOf(run, runDefinitionOf(run), definition),
+    matrix: definition.matrix ?? null,
+    strategy: definition.strategy ?? null,
+    needs: definition.needs ?? {},
     serverUrl: context.serverUrl,
     serviceUrl: context.serviceUrl,
     runtimeToken,
@@ -319,6 +332,9 @@ const deliver = async (context: Context, job: JobRow, runner: Runner): Promise<R
   })
   return json(200, { messageId: job.request_id, messageType: JOB_REQUEST_MESSAGE_TYPE, body: JSON.stringify(message) })
 }
+
+const cancellationMessage = (job: JobRow) =>
+  json(200, { messageId: CANCEL_MESSAGE_OFFSET + job.request_id, messageType: JOB_CANCEL_MESSAGE_TYPE, body: JSON.stringify({ jobId: job.id, timeout: '00:05:00' }) })
 
 const getMessageRoute = async (context: Context, runner: Runner): Promise<Response> => {
   const { db } = context.options
@@ -331,6 +347,8 @@ const getMessageRoute = async (context: Context, runner: Runner): Promise<Respon
   const deadline = now() + (context.options.messageWaitMs ?? 50_000)
   await touchSession(db, sessionId, now())
   for (;;) {
+    const cancelled = await pendingCancellation(db, sessionId)
+    if (cancelled && (await markCancelDelivered(db, cancelled.request_id, now()))) return cancellationMessage(cancelled)
     const job = (await pendingDelivery(db, sessionId)) ?? (await claimJob(db, runner, sessionId, now()))
     if (job) return deliver({ ...context, now: now() }, job, runner)
     if (now() >= deadline) return empty(204)
@@ -352,7 +370,22 @@ const agentRequestRoute = async (context: Context, runner: Runner, requestId: nu
   }
   const renewed = await renewJob(db, requestId, runner.id, context.now + LOCK_DURATION_MS, context.now)
   if (!renewed) return vssError(409, 'GitHub.DistributedTask.WebApi.TaskAgentJobTokenExpiredException', 'job request is no longer owned by this runner')
+  if (job.status !== 'in_progress' && renewed.status === 'in_progress') {
+    const run = await getRun(db, renewed.run_id)
+    if (run) await recordCheck(db, context.serverUrl, run, renewed, context.now)
+  }
   return json(200, jobRequestJson(renewed, runner))
+}
+
+const parseOutputs = (value: unknown): Record<string, string> => {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return {}
+  const outputs: Record<string, string> = {}
+  for (const [name, entry] of Object.entries(value as Record<string, unknown>)) {
+    const raw = typeof entry === 'object' && entry !== null ? (entry as { value?: unknown }).value : entry
+    if (typeof raw === 'string') outputs[name] = raw
+    else if (typeof raw === 'number' || typeof raw === 'boolean') outputs[name] = String(raw)
+  }
+  return outputs
 }
 
 const finish = async (context: Context, job: JobRow, result: TaskResult): Promise<void> => {
@@ -445,14 +478,46 @@ const jobRoutes = async (context: Context, segments: readonly string[]): Promise
   }
   if (area === 'timelinewebconsolelog' && method === 'POST' && tail.length === 2) return appendConsole(context, authenticated, tail[1]!)
   if (area === 'finishjob' && method === 'POST') {
-    const event = await readJson<{ name?: string; result?: unknown }>(context.request)
-    if (event?.name === 'JobCompleted') await finish(context, job, parseTaskResult(event.result) ?? 'failed')
+    const event = await readJson<{ name?: string; result?: unknown; outputs?: unknown }>(context.request)
+    if (event?.name === 'JobCompleted') {
+      const outputs = parseOutputs(event.outputs)
+      if (Object.keys(outputs).length > 0 && job.status !== 'completed') await setJobOutputs(db, job.request_id, outputs)
+      await finish(context, job, parseTaskResult(event.result) ?? 'failed')
+    }
     return empty(200)
   }
-  if (area === 'actiondownloadinfo') {
-    return vssError(501, 'GitHub.DistributedTask.WebApi.FailedToResolveActionDownloadInfoException', 'this forge cannot resolve "uses:" actions yet; use run steps')
-  }
+  if (area === 'actiondownloadinfo' && method === 'POST') return actionDownloadInfo(context, job)
   return notFound()
+}
+
+const actionDownloadInfo = async (context: Context, job: JobRow): Promise<Response> => {
+  const { db, storage } = context.options
+  const body = await readJson<{ actions?: unknown }>(context.request)
+  const references = (Array.isArray(body?.actions) ? body.actions : []).flatMap((entry: unknown): ActionReference[] => {
+    const candidate = entry as { nameWithOwner?: unknown; ref?: unknown; path?: unknown }
+    return typeof candidate?.nameWithOwner === 'string' && typeof candidate.ref === 'string'
+      ? [{ nameWithOwner: candidate.nameWithOwner, ref: candidate.ref, ...(typeof candidate.path === 'string' ? { path: candidate.path } : {}) }]
+      : []
+  })
+  const run = await getRun(db, job.run_id)
+  if (!run) return notFound('run')
+  const { resolved, unresolved } = await resolveActionDownloads(
+    db,
+    storage,
+    context.serverUrl,
+    context.options.actionSources ?? {},
+    { owner: run.owner, repo: run.repo, jobId: job.id, expiresAt: context.now + jobTtlMs(job) },
+    references,
+    context.now,
+  )
+  if (unresolved.length > 0) {
+    return vssError(
+      404,
+      'GitHub.DistributedTask.WebApi.FailedToResolveActionDownloadInfoException',
+      `Unable to resolve action ${unresolved.map((key) => `\`${key}\``).join(', ')}: no mirror of the repository on this forge, or the ref does not exist there`,
+    )
+  }
+  return json(200, { actions: resolved })
 }
 
 const base64ToBase64Url = (value: string): string => value.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
@@ -537,7 +602,12 @@ const runnerRoutes = async (context: Context, segments: readonly string[]): Prom
   }
   if (area === 'message') {
     if (method === 'GET' && tail.length === 1) return getMessageRoute(context, runner)
-    if (method === 'DELETE' && tail.length === 2) return empty(204)
+    if (method === 'DELETE' && tail.length === 2) {
+      const messageId = Number(tail[1])
+      const sessionId = context.url.searchParams.get('sessionId')
+      if (Number.isSafeInteger(messageId) && messageId < CANCEL_MESSAGE_OFFSET && sessionId) await acknowledgeMessage(context.options.db, messageId, sessionId, context.now)
+      return empty(204)
+    }
   }
   if (area === 'agentrequest' && tail.length === 2 && /^\d+$/.test(tail[1]!)) return agentRequestRoute(context, runner, Number(tail[1]))
   return notFound()

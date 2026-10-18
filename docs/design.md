@@ -261,7 +261,7 @@ Every building block is an interface; Cloudflare is the first implementation.
 | Building block | Cloudflare | Others |
 |---|---|---|
 | Functions | Workers | Bunny Edge Scripting, Deno Deploy, Lambda, self-hosted Node/Bun |
-| Object storage | R2 | any S3: Hetzner, B2, OVH, IONOS, self-hosted (Garage, SeaweedFS, RustFS, versitygw) |
+| Object storage | R2 | any S3 with conditional writes: Hetzner, B2, OVH, IONOS, self-hosted (versitygw, RustFS); a local directory |
 | Database | D1 / SQLite in Durable Objects | libSQL/Turso, SQLite file (Pi) |
 | Per-repository consistency | Durable Object | conditional writes (S3 CAS), single-writer process |
 | Scheduling, jobs | Cron Triggers, Queues | `Deno.cron`, systemd timers, job table |
@@ -276,8 +276,31 @@ with checksum), `put` with `If-None-Match` / `If-Match`, `list` by prefix. No
 delete. Conditional writes are the only coordination primitive; Durable
 Objects are an optimization, not a requirement.
 
-MinIO is discontinued; Garage, SeaweedFS, RustFS and versitygw are evaluated
-as local S3 test environment.
+Contract every adapter must meet, checked by the shared conformance suite
+`packages/core/test/storage-conformance.ts` (run against `MemoryStorage`,
+`FsStorage`, `R2Storage` and `S3Storage`):
+
+- `put` is atomic: if the body is shorter or longer than the declared size or
+  the stream errors, the call throws and the key keeps its previous state.
+  Streaming adapters achieve this by withholding the last byte until the
+  length is verified (`exactLength` in the core).
+- Exactly one of several concurrent conditional writers wins.
+- ETags are unquoted and change on every write.
+- `list` yields keys in lexicographic order across pages.
+- Ranges past the end are clamped; the reported size is the full size.
+
+Adapters: `MemoryStorage` (core, tests), `FsStorage` (`@git-forge/node`, a
+plain directory per key, lock files for conditional writes), `R2Storage`
+(`@git-forge/cloudflare`, binding, no presigning) and `S3Storage`
+(`@git-forge/s3`, any S3 API including R2's, with presigning). Presigned LFS
+uploads bind `Content-Length` and `x-amz-checksum-sha256` into the signature,
+so the bucket rejects any other content.
+
+**Local S3 test environment:** MinIO is discontinued. versitygw (posix
+backend) is used; it passed the full suite, as did RustFS. SeaweedFS lists in
+directory order instead of lexicographic order, and Garage ignores
+`If-Match`/`If-None-Match` on `PutObject` — both unsuitable for refs. Details
+in `packages/s3/README.md`.
 
 ## 12. Infrastructure and cost (100 GB)
 
@@ -294,13 +317,13 @@ as local S3 test environment.
 
 ## 13. Open questions
 
-- Conditional writes on B2, Hetzner, Bunny — supported?
+- Conditional writes on B2, Hetzner, Bunny — supported? (Run the S3 conformance
+  suite against them; see `packages/s3/README.md`.)
 - Compaction for dumb HTTP: frequency, grace period for old packs.
 - Signed append-only log of ref/pack/LFS changes (e.g. C2SP tlog-tiles with
   cosigning instances as witnesses): still useful as audit trail, format open.
 - Ref checksum à la GitHub Spokes (XOR over `hash(refname, value)`) for cheap
   mirror comparison.
-- Can presigned PUTs be bound to length/checksum?
 - Name.
 
 ## 14. Prior art and references

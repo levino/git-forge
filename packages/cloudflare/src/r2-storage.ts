@@ -1,4 +1,4 @@
-import type { ByteRange, ObjectInfo, PutBody, PutOptions, PutResult, Storage, StoredObject } from '@git-forge/core'
+import { type ByteRange, exactLength, type ObjectInfo, type PutBody, type PutOptions, type PutResult, type Storage, type StoredObject } from '@git-forge/core'
 
 export type R2StorageOptions = {
   readonly prefix?: string
@@ -19,7 +19,7 @@ const fixedLength = (body: PutBody, size: number): Uint8Array | ReadableStream<U
     if (body.length !== size) throw new Error(`size mismatch: expected ${size}, got ${body.length}`)
     return body
   }
-  return body.pipeThrough(new FixedLengthStream(size) as unknown as ReadableWritablePair<Uint8Array, Uint8Array>)
+  return body.pipeThrough(exactLength(size)).pipeThrough(new FixedLengthStream(size) as unknown as ReadableWritablePair<Uint8Array, Uint8Array>)
 }
 
 export class R2Storage implements Storage {

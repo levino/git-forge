@@ -93,7 +93,10 @@ describe.skipIf('skip' in runner)(`official actions/runner${'skip' in runner ? `
         const child = spawn(join(home, 'run.sh'), ['--jitconfig', launch.encodedJitConfig], {
           cwd: home,
           env: {
-            ...process.env,
+            PATH: process.env['PATH'] ?? '/usr/bin:/bin',
+            HOME: home,
+            LANG: 'C.UTF-8',
+            ...(process.env['HTTPS_PROXY'] ? { HTTPS_PROXY: process.env['HTTPS_PROXY'], NO_PROXY: '127.0.0.1,localhost' } : {}),
             RUNNER_ALLOW_RUNASROOT: '1',
             DOTNET_SYSTEM_GLOBALIZATION_INVARIANT: '1',
             GITHUB_ACTIONS_RUNNER_PRINT_LOG_TO_STDOUT: '1',

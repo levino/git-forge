@@ -1,20 +1,19 @@
-import { decodeConfig, exchangeToken } from '@git-forge/actions/test/runner-client.ts'
-import { writeFileSync, mkdirSync } from 'node:fs'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { generateHistory, git, gitFails, tempDir } from './history.ts'
 import { startWranglerDev, type WranglerDev } from './wrangler-dev.ts'
 
-const ADMIN_TOKEN = `e2e-${crypto.randomUUID()}`
+const BOOTSTRAP_TOKEN = `e2e-${crypto.randomUUID()}`
 
 let dev: WranglerDev
 let source: string
 let remote: string
 let pushRemote: string
+let token: string
 
-const admin = (body: unknown, token = ADMIN_TOKEN) =>
-  fetch(`${dev.url}/api/admin/repos`, {
+const api = (path: string, body: unknown, authorization = token) =>
+  fetch(`${dev.url}${path}`, {
     method: 'POST',
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    headers: { Authorization: `Bearer ${authorization}`, 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   })
 
@@ -28,12 +27,11 @@ const requestsSince = (mark: number) =>
     .filter((line) => /\b(GET|POST|HEAD) \//.test(line))
 
 beforeAll(async () => {
-  dev = await startWranglerDev({ ADMIN_TOKEN })
+  dev = await startWranglerDev({ vars: { BOOTSTRAP_TOKEN } })
   source = tempDir()
   await git(source, ['init', '-q', '-b', 'main'])
   generateHistory(source, { commits: 120, files: 40, binaryBytes: 48 * 1024, seed: 1 })
   remote = `${dev.url}/e2e/history.git`
-  pushRemote = remote.replace('http://', `http://git:${ADMIN_TOKEN}@`)
 }, 90_000)
 
 afterAll(async () => {
@@ -41,18 +39,30 @@ afterAll(async () => {
 })
 
 describe('forge worker on wrangler dev', () => {
-  it('protects the admin endpoint and creates a repository', async () => {
-    expect((await admin({ owner: 'e2e', name: 'history' }, 'wrong')).status).toBe(401)
-    expect((await admin({ owner: 'e2e', name: 'bad.git' })).status).toBe(400)
-    const created = await admin({ owner: 'e2e', name: 'history' })
+  it('bootstraps the first admin and creates a repository', async () => {
+    expect((await api('/api/bootstrap', { login: 'e2e' }, 'wrong')).status).toBe(401)
+    const bootstrapped = await api('/api/bootstrap', { login: 'e2e' }, BOOTSTRAP_TOKEN)
+    expect(bootstrapped.status).toBe(201)
+    token = ((await bootstrapped.json()) as { token: string }).token
+    pushRemote = remote.replace('http://', `http://git:${token}@`)
+    expect((await api('/api/bootstrap', { login: 'other' }, BOOTSTRAP_TOKEN)).status).toBe(409)
+    expect((await api('/api/repos', { owner: 'e2e', name: 'history' }, 'wrong')).status).toBe(401)
+    expect((await api('/api/repos', { owner: 'e2e', name: 'bad.git' })).status).toBe(400)
+    const created = await api('/api/repos', { owner: 'e2e', name: 'history', visibility: 'public' })
     expect(created.status).toBe(201)
-    expect(await created.json()).toMatchObject({ owner: 'e2e', name: 'history', defaultBranch: 'main', cloneUrl: `${dev.url}/e2e/history.git` })
-    expect((await admin({ owner: 'e2e', name: 'history' })).status).toBe(409)
+    expect(await created.json()).toMatchObject({ owner: 'e2e', name: 'history', defaultBranch: 'main', visibility: 'public', cloneUrl: `${dev.url}/e2e/history.git` })
+    expect((await api('/api/repos', { owner: 'e2e', name: 'history' })).status).toBe(409)
   })
 
-  it('rejects pushes without the token', async () => {
+  it('rejects pushes without a token', async () => {
     const message = await gitFails(source, ['push', remote, 'main'])
     expect(message).toMatch(/401|Authentication failed|could not read Username/i)
+  })
+
+  it('keeps repositories private by default', async () => {
+    expect((await api('/api/repos', { owner: 'e2e', name: 'private' })).status).toBe(201)
+    expect(await gitFails(tempDir(), ['clone', '-q', `${dev.url}/e2e/private.git`, 'out'])).toMatch(/401|Authentication failed|could not read Username/i)
+    await git(tempDir(), ['clone', '-q', `${dev.url}/e2e/private.git`.replace('http://', `http://git:${token}@`), 'out'])
   })
 
   it('accepts a push of a generated history with the real git client', async () => {
@@ -114,45 +124,9 @@ describe('forge worker on wrangler dev', () => {
     expect(await gitFails(source, ['push', pushRemote, `${rewritten}:${archived!.split('\t')[1]!}`])).toMatch(/invalid ref name|rejected/)
   })
 
-  it('runs the scheduled handler stub', async () => {
+  it('runs the scheduled mirror sync', async () => {
     const response = await fetch(`${dev.url}/__scheduled?cron=${encodeURIComponent('*/30 * * * *')}`)
     expect(response.status).toBe(200)
-    await expect.poll(() => dev.output()).toContain('"task":"mirror-sync"')
-  })
-
-  it('queues a workflow run on push and hands the job to a JIT runner over the Actions protocol', async () => {
-    const api = (path: string, init: RequestInit = {}, token = ADMIN_TOKEN) =>
-      fetch(`${dev.url}${path}`, { ...init, headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', ...(init.headers as Record<string, string>) } })
-    expect((await admin({ owner: 'e2e', name: 'ci' })).status).toBe(201)
-    const repo = tempDir()
-    await git(repo, ['init', '-q', '-b', 'main'])
-    mkdirSync(`${repo}/.github/workflows`, { recursive: true })
-    writeFileSync(`${repo}/.github/workflows/ci.yml`, 'on: push\njobs:\n  hello:\n    runs-on: [self-hosted, e2e]\n    steps:\n      - run: echo hello\n')
-    await git(repo, ['add', '-A'])
-    await git(repo, ['commit', '-q', '-m', 'workflow'])
-    await git(repo, ['push', '-q', `${dev.url.replace('http://', `http://git:${ADMIN_TOKEN}@`)}/e2e/ci.git`, 'main'])
-    const runs = (await (await api('/api/v3/repos/e2e/ci/actions/runs')).json()) as { workflow_runs: { id: number; status: string }[] }
-    expect(runs.workflow_runs).toHaveLength(1)
-    expect(runs.workflow_runs[0]!.status).toBe('queued')
-    expect((await api('/api/v3/repos/e2e/ci/actions/runs', {}, 'wrong')).status).toBe(404)
-
-    const generated = await api('/api/v3/repos/e2e/ci/actions/runners/generate-jitconfig', { method: 'POST', body: JSON.stringify({ name: 'e2e-runner', runner_group_id: 1, labels: ['self-hosted', 'e2e'] }) })
-    expect(generated.status).toBe(201)
-    const config = decodeConfig(((await generated.json()) as { encoded_jit_config: string }).encoded_jit_config)
-    expect(config['.runner']['ServerUrl']).toBe(`${dev.url}/_services/actions`)
-    const token = ((await (await exchangeToken(config)).json()) as { access_token: string }).access_token
-    const services = `${dev.url}/_services/actions/_apis`
-    expect((await fetch(`${services}/connectionData?connectOptions=1`)).status).toBe(200)
-    const session = (await (await api('/_services/actions/_apis/v1/AgentSession/1', { method: 'POST', body: JSON.stringify({ ownerName: 'e2e', agent: { id: config['.runner']['AgentId'] } }) }, token)).json()) as {
-      sessionId: string
-    }
-    const message = await api(`/_services/actions/_apis/v1/Message/1?sessionId=${session.sessionId}`, {}, token)
-    expect(message.status).toBe(200)
-    const job = JSON.parse(((await message.json()) as { body: string }).body) as { jobName: string; requestId: number }
-    expect(job.jobName).toBe('hello')
-    const renewed = await api(`/_services/actions/_apis/v1/AgentRequest/1/${job.requestId}`, { method: 'PATCH', body: JSON.stringify({ requestId: job.requestId }) }, token)
-    expect(renewed.status).toBe(200)
-    const jobs = (await (await api(`/api/v3/repos/e2e/ci/actions/runs/${runs.workflow_runs[0]!.id}/jobs`)).json()) as { jobs: { status: string }[] }
-    expect(jobs.jobs[0]!.status).toBe('in_progress')
+    await expect.poll(() => dev.output()).toContain('"task":"mirror-sync","runs":[]')
   })
 })

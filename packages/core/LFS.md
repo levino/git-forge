@@ -11,7 +11,10 @@ with the `basic` transfer adapter and `sha256` as the only hash algorithm.
 - `src/lfs-http.ts` — `handleLfsRequest`, the HTTP layer. `handleGitRequest`
   calls it first for every repository route, so no separate wiring is needed.
   Pass `lfs: false` in `GitHttpOptions` to switch LFS (routes and push check)
-  off, or `lfs: { expiresInSeconds, maxJsonBytes }` to tune it.
+  off, or `lfs: { expiresInSeconds, maxJsonBytes, maxObjectBytes }` to tune it.
+  `maxObjectBytes` caps the size of a single object: the batch API answers
+  oversized upload objects with a per-object `422` and no upload action, and
+  `PUT` answers `413` before reading the body.
 
 ## Routes
 
@@ -34,7 +37,9 @@ when a download target is missing, `422` for an invalid oid or size or a size
 that differs from the stored object.
 
 Access is decided by the `authorize` hook of `GitHttpOptions`, i.e. from the
-verified token or session. For the batch endpoint the hook runs after the body
+verified token or session. The hook receives the surface `'lfs'` for every
+route above and `'git'` for Git routes, so an authorizer can grant them
+separately (instance tokens carry `git:read` and `lfs:read` scopes). For the batch endpoint the hook runs after the body
 has been parsed because the required access depends on `operation`. Actions
 pointing back at the forge carry the `Authorization` header of the batch request
 so `git-lfs` presents the same credentials to the transfer endpoints, which
@@ -51,14 +56,14 @@ the pointer. Nothing else is written; there are no marker or staging keys.
 
 ## Uploads
 
-**With presigning** (`Storage.presignPut` implemented, e.g. S3/R2): the batch
+**With presigning** (`Storage.presignPut` implemented: `S3Storage`, also for R2 through its S3 API): the batch
 response hands out a presigned `PUT` for the final key. The adapter must bind
 the URL to the declared size and SHA-256 (e.g. `Content-Length` plus
 `x-amz-checksum-sha256`), so the bucket itself refuses wrong content. Because
 the forge did not see the bytes, `verify` re-reads the object and hashes it
 before answering `200`.
 
-**Without presigning** (`MemoryStorage`, file system): the upload goes to
+**Without presigning** (`MemoryStorage`, `FsStorage`, `R2Storage`): the upload goes to
 `PUT .../info/lfs/objects/{oid}` and is streamed into `Storage.put` for the
 final key through a `TransformStream` that counts and hashes the bytes. If the
 body is longer than `Content-Length`, shorter, or hashes to something other
@@ -67,9 +72,10 @@ than the oid, the stream errors before it ends and the upload answers `422`.
 
 Why no staging key: the storage is append-only, so a staging copy could never
 be removed and every object would be stored twice. Instead this relies on one
-contract for `Storage.put`, which S3, R2 and `MemoryStorage` already fulfil and
-which every other adapter must fulfil (file system: write to a temporary file,
-rename on success):
+contract for `Storage.put`, which every adapter fulfils and the shared
+conformance suite (`test/storage-conformance.ts`) checks (S3 and R2 withhold
+the last byte via `exactLength`, `FsStorage` writes to a temporary file and
+renames on success):
 
 > `put` is atomic. If the body stream errors, nothing is stored under the key.
 

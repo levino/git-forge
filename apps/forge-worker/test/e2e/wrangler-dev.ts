@@ -1,8 +1,11 @@
-import { type ChildProcess, spawn } from 'node:child_process'
+import { type ChildProcess, execFile, spawn } from 'node:child_process'
 import { mkdtempSync } from 'node:fs'
 import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
+import { promisify } from 'node:util'
+
+const run = promisify(execFile)
 
 export type WranglerDev = {
   readonly url: string
@@ -10,7 +13,7 @@ export type WranglerDev = {
   stop(): Promise<void>
 }
 
-const freePort = (): Promise<number> =>
+export const freePort = (): Promise<number> =>
   new Promise((done, fail) => {
     const server = createServer()
     server.once('error', fail)
@@ -22,11 +25,26 @@ const freePort = (): Promise<number> =>
 
 const appRoot = resolve(import.meta.dirname, '../..')
 
-export const startWranglerDev = async (vars: Record<string, string>): Promise<WranglerDev> => {
-  const port = await freePort()
+export type WranglerDevOptions = {
+  readonly vars: Record<string, string>
+  readonly env?: string
+  readonly port?: number
+}
+
+export const startWranglerDev = async (options: WranglerDevOptions): Promise<WranglerDev> => {
+  const port = options.port ?? (await freePort())
   const persist = mkdtempSync(join(tmpdir(), 'git-forge-wrangler-'))
+  const environment = { ...process.env, WRANGLER_SEND_METRICS: 'false', CI: '1', NO_COLOR: '1' }
+  const envArgs = options.env ? ['--env', options.env] : []
+  await run(join(appRoot, 'node_modules/.bin/wrangler'), ['d1', 'migrations', 'apply', 'DB', '--local', '--persist-to', persist, ...envArgs], {
+    cwd: appRoot,
+    env: environment,
+  })
   const args = [
     'dev',
+    ...envArgs,
+    '--inspector-port',
+    String(await freePort()),
     '--ip',
     '127.0.0.1',
     '--port',
@@ -35,12 +53,12 @@ export const startWranglerDev = async (vars: Record<string, string>): Promise<Wr
     persist,
     '--test-scheduled',
     '--show-interactive-dev-session=false',
-    ...Object.entries(vars).flatMap(([key, value]) => ['--var', `${key}:${value}`]),
+    ...Object.entries(options.vars).flatMap(([key, value]) => ['--var', `${key}:${value}`]),
   ]
   const child: ChildProcess = spawn(join(appRoot, 'node_modules/.bin/wrangler'), args, {
     cwd: appRoot,
     detached: true,
-    env: { ...process.env, WRANGLER_SEND_METRICS: 'false', CI: '1', NO_COLOR: '1' },
+    env: environment,
     stdio: ['ignore', 'pipe', 'pipe'],
   })
   let log = ''

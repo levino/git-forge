@@ -18,37 +18,78 @@ discussions.
 
 ## M2 — Git LFS
 
-- [ ] Batch API with presigned URLs (in progress)
-- [ ] Verify step (size, SHA-256) before an object counts as present
-- [ ] Reject pushes referencing missing LFS objects
-- [ ] Media URLs `/{owner}/{repo}/media/{oid}` and raw endpoint resolving LFS pointers
+- [x] Batch API (presigned URLs where the storage can sign, upload through the function otherwise)
+- [x] Verify step (size, SHA-256) before an object counts as present
+- [x] Reject pushes referencing missing LFS objects
+- [x] Per-object size limit (`MAX_LFS_OBJECT_BYTES` in the Worker)
+- [x] Media URLs `/{owner}/{repo}/media/{oid}` and raw endpoint `/{owner}/{repo}/raw/{ref}/{path}` resolving LFS pointers (CDN pull-zone friendly: immutable caching, ETag, Range, HEAD)
 - [ ] Optional: publish public LFS objects to a CDN bucket on push
 
 ## M3 — Accounts and federation
 
-- [ ] Users, organizations, teams, roles, PATs, apps in SQLite (in progress)
+- [x] Users, organizations, teams, roles, PATs, apps in SQLite
+- [x] Instance admins, one-time bootstrap of the first admin
+- [x] Private repositories by default, per-repository visibility
 - [ ] Login: OIDC (ZITADEL etc.), passkeys
-- [ ] Git over HTTPS with PATs and app tokens
-- [ ] Instance keys (Ed25519), `/.well-known/openid-configuration`, `/.well-known/jwks.json` (in progress)
-- [ ] Short-lived instance JWTs, trust table "issuer X may read repo Y", optional pinned thumbprint
+- [x] Git over HTTPS with PATs and app tokens
+- [x] Git and LFS as separate authorization surfaces (`git:read` / `lfs:read`)
+- [x] Instance keys (Ed25519), `/.well-known/openid-configuration`, `/.well-known/jwks.json`
+- [x] Short-lived instance JWTs, trust table "issuer X may read repo Y", optional pinned thumbprint
 - [ ] Device flow (`gh auth login`-style)
 - [ ] Break-glass key
 - [ ] SAML, SCIM
+- [x] Branch protection rules (patterns, force push, deletion, push restrictions, admin bypass) enforced in `receive-pack`, API under `/api/repos/{owner}/{repo}/branches/{branch}/protection`
+- [ ] Branch protection API and push policy wired into the Worker app (needs accounts on D1 there)
 
 ## M4 — Mirrors
 
-- [ ] Sync Git content into `refs/upstream/{remote}/heads|tags/*` (in progress)
-- [ ] Sync LFS objects
-- [ ] Per-repository auto/manual sync, detach
-- [ ] Archive and alarm on rewritten upstream history
+- [x] Sync Git content into `refs/upstream/{remote}/heads|tags/*`
+- [x] Sync LFS objects
+- [x] Per-repository auto/manual sync, detach; auto sync from the Cron Trigger
+- [x] Archive and alarm on rewritten upstream history (tested across three instances)
 - [ ] Mirror overview
 
 ## M5 — Deployment and adapters
 
-- [ ] Cloudflare Worker app (in progress)
-- [ ] S3 storage adapter (in progress)
-- [ ] Local S3 test environment (in progress; MinIO discontinued — Garage, SeaweedFS, RustFS, versitygw evaluated)
+- [x] Cloudflare Worker app with accounts (D1), federation and scheduled mirror sync
+- [x] Wrangler environments `alpha`, `beta`, `gamma` and a three-instance E2E test
+- [x] S3 storage adapter (`@git-forge/s3`, presigned PUTs bound to length and SHA-256)
+- [x] File system storage adapter (`@git-forge/node`)
+- [x] Shared storage conformance suite for all adapters
+- [x] Local S3 test environment (versitygw; Garage, SeaweedFS, RustFS evaluated)
 - [ ] Headless deployment on a Raspberry Pi (Bun/Node + SQLite file + filesystem or S3)
+
+## M5a — Large pushes
+
+- [ ] Streaming receive-pack and upload-pack with bounded memory, `packfile-uris` (in progress)
+- [ ] Server-side import: create a repository by pulling from a URL (no request body limit)
+- [ ] Chunked push helper: `git forge push` splits history into pushes below the platform body limit, using the unmodified git client
+- [ ] Remote helper `git-remote-forge`: resumable multipart pack upload directly to object storage via presigned URLs, then a finalize call that indexes the pack and updates refs
+
+## M5b — CI and distribution
+
+Design: [design.md §15](design.md#ci).
+
+- [x] Spike, part 1: YAML subset parser and workflow/job model in core (pure), push filters
+- [x] Spike, part 1: Actions service, legacy flow (connectionData, OAuth client assertion, sessions, message long-poll, job renew/finish, timeline, logs, console lines, attachments)
+- [x] Spike, part 1: GHES REST subset (`generate-jitconfig`, `registration-token`, `runner-registration`, list/get/delete runners, runs, jobs, job logs)
+- [x] Spike, part 1: dispatch on push, one ephemeral JIT runner per job via `RunnerLauncher`, `needs` with skip on failure; job tokens (`GITHUB_TOKEN` read over Git HTTP, runtime token per job), instance secrets
+- [x] Spike, part 1: Cloudflare Container definition for the runner (Dockerfile, `wrangler.jsonc`)
+- [ ] Spike, part 2: run the real-runner integration test where GitHub downloads are allowed and fix what it finds; deploy the container and deploy a hello-world Worker with `wrangler` from our own CI
+- [ ] `uses:` actions: `ActionDownloadInfo` with tarballs from mirrored action repositories (`actions/checkout`, `actions/setup-node`, …)
+- [ ] Expressions server-side: job-level `if`, `runs-on` expressions, `strategy`/`matrix`, job outputs across `needs`
+- [ ] Cancellation, job timeouts, reaper for expired locks and dead runners, re-runs
+- [ ] Per-repository and per-environment secrets (encrypted in SQLite), environments with required reviewers, no secrets for fork runs
+- [ ] `workflow_dispatch`, `pull_request`, `schedule` triggers; commit statuses / check runs (feeds required status checks)
+- [ ] Broker and run service (v2 flow), results service, message encryption; then cache, artifacts, OIDC id tokens
+- [ ] External providers: signed `workflow_job` webhook delivery, GitHub App auth (JWT → installation token, manifest flow) and PATs on `/api/v3`, org-level runners; try WarpBuild Enterprise, AWS CodeBuild, RunsOn
+- [ ] `container:` and `services:` (Docker-in-Docker in the runner container)
+- [ ] Ship the actions migrations in the release's `migrations.tar.gz` instead of applying them at runtime
+- [ ] Web UI for runs and live logs
+- [x] "Deploy to Cloudflare" button in the README pointing at the instance template; template wired to accounts (`BOOTSTRAP_TOKEN`)
+- [x] Release artifact (bundled worker + migrations + checksums) and instance template with pinned version
+- [ ] Create `levino/git-forge-instance`, add the deploy key secret `INSTANCE_TEMPLATE_DEPLOY_KEY`, cut the first release
+- [ ] Verify the Deploy button, Workers Builds settings and automatic provisioning of D1/R2 of the template against a real Cloudflare account
 
 ## M6 — Web UI (Astro SSR)
 
@@ -59,41 +100,17 @@ discussions.
 
 ## M7 — Collaboration
 
+- [ ] Branch protection (in progress, v1)
 - [ ] Issues
 - [ ] Pull requests, reviews, conflict-free merge
+- [ ] Enforce required reviews and status checks on merge via `evaluateBranchUpdate(..., { via: 'pull-request' })`
 - [ ] Discussions
 - [ ] Submit via form
 
-## M8 — CI (GitHub Actions compatible)
-
-Design: [design.md §12](design.md#12-ci). Spike: real `actions/runner` via JIT
-config, run steps, logs, `needs`, Cloudflare Container definition.
-
-- [x] YAML subset parser and workflow/job model in core (pure), push filters
-- [x] Actions service, legacy flow: connectionData, OAuth client assertion, sessions, message long-poll, job renew/finish, timeline, logs, console lines, attachments
-- [x] GHES REST subset: `generate-jitconfig`, `registration-token`, `runner-registration`, list/get/delete runners, runs, jobs, job logs
-- [x] Dispatch on push: one ephemeral JIT runner per job via `RunnerLauncher`, `needs` with skip on failure
-- [x] Job tokens (`GITHUB_TOKEN` read access over Git HTTP, runtime token per job), instance secrets
-- [x] Cloudflare Container definition for the runner (Dockerfile, `wrangler.jsonc`), deployment untested
-- [ ] Run the end-to-end test with the real runner where GitHub downloads are allowed; fix protocol gaps it finds
-- [ ] Deploy the runner container on Cloudflare and run a `wrangler deploy` job from our own CI
-- [ ] `uses:` actions: `ActionDownloadInfo` with tarballs from mirrored action repositories (`actions/checkout`, `actions/setup-node`, …)
-- [ ] Expressions server-side: job-level `if`, `runs-on` expressions, `strategy`/`matrix`, job outputs across `needs`
-- [ ] Cancellation, job timeouts, reaper for expired locks and dead runners, re-runs
-- [ ] Per-repository and per-environment secrets (encrypted in SQLite), environments with required reviewers, no secrets for fork runs
-- [ ] `workflow_dispatch`, `pull_request`, `schedule` triggers
-- [ ] Commit statuses / check runs, web UI for runs and live logs
-- [ ] Broker and run service (v2 flow), results service, message encryption
-- [ ] Cache, artifacts, OIDC id tokens (`id-token: write`) for cloud deployments without long-lived secrets
-- [ ] External providers: signed `workflow_job` webhooks, GitHub App auth (JWT → installation token, manifest flow), org-level runners; try WarpBuild Enterprise, AWS CodeBuild, RunsOn
-- [ ] `container:` and `services:` (needs Docker inside the runner container)
-
 ## Later
 
-- [ ] Branch protection
 - [ ] Notifications, email, webhooks
 - [ ] Releases
 - [ ] Encrypted full backups, partial visibility
 - [ ] External mirror verification
-- [ ] SSH-to-HTTPS gateway
 - [ ] Pages

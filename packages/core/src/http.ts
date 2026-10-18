@@ -1,5 +1,5 @@
 import { readAll, SizeLimitError } from './bytes.ts'
-import { advertiseReceivePack, type PushOutcome, receivePack, type ReceiveOptions } from './receive-pack.ts'
+import { advertiseReceivePack, type PushOutcome, receivePack, type ReceiveOptions, type RefPolicy } from './receive-pack.ts'
 import { handleLfsRequest, type LfsHttpOptions } from './lfs-http.ts'
 import { lfsPushCheck } from './lfs.ts'
 import { gitPrefix, isValidName, readRefs, type RepositoryName } from './repository.ts'
@@ -8,11 +8,16 @@ import { advertiseUploadPackV2, uploadPackV2 } from './upload-pack.ts'
 
 export type Access = 'read' | 'write'
 
-export type Authorize = (request: Request, repo: RepositoryName, access: Access) => Promise<Response | null>
+export type Surface = 'git' | 'lfs'
+
+export type Authorize = (request: Request, repo: RepositoryName, access: Access, surface: Surface) => Promise<Response | null>
+
+export type PushPolicy = (request: Request, repo: RepositoryName) => Promise<RefPolicy | null>
 
 export type GitHttpOptions = {
   readonly storage: Storage
   readonly authorize?: Authorize
+  readonly pushPolicy?: PushPolicy
   readonly maxRequestBytes?: number
   readonly receive?: Omit<ReceiveOptions, 'storage' | 'repo'>
   readonly onPush?: (repo: RepositoryName, outcome: PushOutcome) => Promise<void>
@@ -78,6 +83,16 @@ const withLfsCheck = (options: GitHttpOptions, repo: RepositoryName): NonNullabl
   return async (objects, commands) => (await lfs?.(objects)) ?? (await custom?.(objects, commands)) ?? null
 }
 
+export const combinePolicies =
+  (...policies: readonly (RefPolicy | null | undefined)[]): RefPolicy =>
+  (command) => {
+    for (const policy of policies) {
+      const denied = policy?.(command) ?? null
+      if (denied) return denied
+    }
+    return null
+  }
+
 export const handleGitRequest = async (request: Request, options: GitHttpOptions): Promise<Response | null> => {
   const url = new URL(request.url)
   const route = matchGitRoute(url.pathname)
@@ -97,7 +112,7 @@ export const handleGitRequest = async (request: Request, options: GitHttpOptions
   const isReceive = service === 'git-receive-pack' || path === '/git-receive-pack'
   const isGitPath = path === '/git-upload-pack' || path === '/git-receive-pack' || DUMB_PATHS.some((pattern) => pattern.test(path))
   if (!isGitPath) return null
-  const denied = await options.authorize?.(request, repo, isReceive ? 'write' : 'read')
+  const denied = await options.authorize?.(request, repo, isReceive ? 'write' : 'read', 'git')
   if (denied) return denied
   const refs = await readRefs(storage, repo)
   if (!refs) return text(404, 'repository not found\n')
@@ -137,7 +152,8 @@ export const handleGitRequest = async (request: Request, options: GitHttpOptions
       if (error instanceof SizeLimitError) return text(413, `push exceeds ${limit} bytes; use Git LFS for large files\n`)
       throw error
     }
-    const { response, outcome } = await receivePack({ ...options.receive, storage, repo, beforeUpdate: withLfsCheck(options, repo) }, body)
+    const policy = combinePolicies(options.receive?.policy, await options.pushPolicy?.(request, repo))
+    const { response, outcome } = await receivePack({ ...options.receive, storage, repo, policy, beforeUpdate: withLfsCheck(options, repo) }, body)
     if (options.onPush) await options.onPush(repo, outcome)
     return new Response(binary(response), { headers: { 'Content-Type': 'application/x-git-receive-pack-result', ...noCache } })
   }

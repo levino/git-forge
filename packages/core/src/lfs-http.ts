@@ -19,6 +19,7 @@ import type { Storage } from './storage.ts'
 export type LfsHttpOptions = {
   readonly expiresInSeconds?: number
   readonly maxJsonBytes?: number
+  readonly maxObjectBytes?: number
 }
 
 export type LfsContext = {
@@ -91,14 +92,15 @@ export const handleLfsRequest = async (request: Request, repo: RepositoryName, p
     if (path === '/info/lfs/objects/batch') {
       if (request.method !== 'POST') return failure(405, 'method not allowed')
       const batch = parseBatchRequest(await readJson(request, context.lfs?.maxJsonBytes ?? 1024 * 1024))
-      const denied = await context.authorize?.(request, repo, batch.operation === 'upload' ? 'write' : 'read')
+      const denied = await context.authorize?.(request, repo, batch.operation === 'upload' ? 'write' : 'read', 'lfs')
       if (denied) return denied
       if (!(await readRefs(storage, repo))) return failure(404, 'repository not found')
-      return json(200, await lfsBatch(storage, repo, batch, selfLinks(request, base, storage, repo, expiresIn)))
+      const limits = context.lfs?.maxObjectBytes !== undefined ? { maxObjectBytes: context.lfs.maxObjectBytes } : {}
+      return json(200, await lfsBatch(storage, repo, batch, selfLinks(request, base, storage, repo, expiresIn), limits))
     }
     if (path === '/info/lfs/objects/verify') {
       if (request.method !== 'POST') return failure(405, 'method not allowed')
-      const denied = await context.authorize?.(request, repo, 'write')
+      const denied = await context.authorize?.(request, repo, 'write', 'lfs')
       if (denied) return denied
       const spec = parseSpec(await readJson(request, 64 * 1024))
       const result = await verifyLfsObject(storage, repo, spec, { checkHash: storage.presignPut !== undefined })
@@ -108,16 +110,21 @@ export const handleLfsRequest = async (request: Request, repo: RepositoryName, p
     if (oid === undefined) return failure(404, 'not found')
     if (!isLfsOid(oid)) return failure(422, 'invalid oid')
     if (request.method === 'PUT') {
-      const denied = await context.authorize?.(request, repo, 'write')
+      const denied = await context.authorize?.(request, repo, 'write', 'lfs')
       if (denied) return denied
       const size = declaredLength(request)
       if (size === null) return failure(411, 'Content-Length required')
+      const max = context.lfs?.maxObjectBytes
+      if (max !== undefined && size > max) {
+        await request.body?.cancel()
+        return failure(413, `object exceeds ${max} bytes`)
+      }
       if (!(await readRefs(storage, repo))) return failure(404, 'repository not found')
       const result = await storeLfsObject(storage, repo, { oid, size }, request.body ?? new ReadableStream({ start: (c) => c.close() }))
       return result.ok ? new Response(null, { status: 200, headers: noCache }) : failure(result.status, result.message)
     }
     if (request.method === 'GET' || request.method === 'HEAD') {
-      const denied = await context.authorize?.(request, repo, 'read')
+      const denied = await context.authorize?.(request, repo, 'read', 'lfs')
       if (denied) return denied
       const key = lfsObjectKey(repo, oid)
       const stored = request.method === 'GET' ? await storage.get(key) : await storage.head(key)

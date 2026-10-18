@@ -4,7 +4,7 @@ GitHub Actions compatible CI for git-forge: the Actions service that the
 unmodified official [`actions/runner`](https://github.com/actions/runner)
 talks to, a GHES-style REST subset under `/api/v3`, and the dispatcher that
 turns a push into workflow runs and one ephemeral JIT runner per job.
-Architecture, protocol and gaps: [docs/design.md §12](../../docs/design.md#12-ci).
+Architecture, protocol and gaps: [docs/design.md §15](../../docs/design.md#ci).
 
 Everything in `src/` uses web-standard APIs only (WebCrypto, `fetch`,
 Streams) and SQLite SQL through the `Database` adapter of
@@ -42,11 +42,12 @@ accounts schema.
 
 ## Running a runner by hand
 
-Against `pnpm --filter forge-worker dev` (or any forge instance):
+Against `pnpm --filter forge-worker dev` (or any forge instance), with a
+`repo:admin` personal access token of a repository admin:
 
 ```sh
 curl -sX POST http://127.0.0.1:8787/api/v3/repos/acme/site/actions/runners/generate-jitconfig \
-  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Authorization: Bearer $TOKEN" \
   -d '{"name":"laptop","runner_group_id":1,"labels":["self-hosted","linux"]}' | jq -r .encoded_jit_config > jit
 ./run.sh --jitconfig "$(cat jit)"   # in an extracted actions-runner-linux-x64-*.tar.gz
 ```

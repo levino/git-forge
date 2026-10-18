@@ -42,7 +42,8 @@ or pull requests between instances.
 2. **Data outlives the software.** Without the code, cloneable Git
    repositories and an LFS directory remain.
 3. **Append only.** Nothing is deleted automatically. Force pushes and
-   deletions are allowed, but the previous state is archived (§5).
+   deletions are allowed unless branch protection forbids them, and the
+   previous state is archived (§5).
 4. **Trust through signatures and recomputation, not claims.**
 5. **One language:** TypeScript, Web-standard APIs only (`fetch`, Streams,
    `DecompressionStream`, WebCrypto). No WebAssembly.
@@ -74,13 +75,11 @@ issues, pull requests and discussions.
 - **Pull requests:** from a branch, diff view, comments (general and inline),
   reviews (approve / request changes), merge (merge, squash or rebase —
   conflict-free only), close.
+- **Branch protection:** GitHub-style rules per repository (§5).
 - **Discussions:** separate from issues; categories, threads, mark answer.
 
 **Should (soon after)**
 
-- CI compatible with GitHub Actions workflows and the official runner (§12).
-
-- Branch protection (no force push, required reviews).
 - Notifications, email, webhooks.
 - Reactions, search in issues and discussions.
 - Edit and upload files in the browser (commit via form).
@@ -137,19 +136,67 @@ OIDC-style, modelled on GitHub Actions OIDC:
 - The target fetches the issuer's JWKS over HTTPS; the trust anchor is the
   issuer's domain. Optionally a key thumbprint is pinned per grant.
 - Public repositories need no grant.
+- The token carries the scopes `git:read` and `lfs:read`. The core tells the
+  authorization hook whether a request is a Git or an LFS request, so both are
+  checked separately.
+- A mirror marks in its config (`auth: "instance"`) that it presents an
+  instance token to its upstream; otherwise it fetches anonymously. A mirror
+  of a mirror reads the upstream's `refs/upstream/{remote}/*` by setting the
+  namespace to `upstream/{remote}/`.
+- JWKS documents are fetched without following redirects (`redirect:
+  "manual"`, any 3xx is an error), because Workers do not implement
+  `redirect: "error"`.
 - There are no push certificates. The instance signs; trust is
   server-to-server.
 
 ## 5. Refs, force pushes and archive
 
 - Refs are updated with compare-and-swap (conditional writes).
-- Force pushes and ref deletions are allowed (branch protection comes later).
-  The previous value is always kept under
+- Force pushes and ref deletions are allowed unless a branch protection rule
+  forbids them (below). The previous value is always kept under
   `refs/archive/{timestamp}/heads/...` resp. `refs/archive/{timestamp}/tags/...`,
   so no commit becomes unreachable.
 - `refs/archive/*` and `refs/upstream/*` cannot be pushed to by clients.
 - Git object format stays SHA-1 (compatibility). Signatures and LFS use
   SHA-256.
+
+### Branch protection
+
+Modelled on GitHub's classic branch protection rules; details and API in
+the [accounts README](../packages/accounts/README.md#branch-protection).
+
+- **Rules per repository**, each with a branch name pattern (`fnmatch` with
+  `FNM_PATHNAME` like GitHub: `*` stops at `/`, `**/` spans directories).
+  Exactly one rule applies to a branch: an exact name beats wildcards, among
+  wildcards the oldest wins. Rules never combine. Only `refs/heads/*` is
+  protected.
+- **Settings:** allow force pushes (default no), allow deletions (default
+  no), restrict who may push (users, teams, apps, minimum roles), require a
+  pull request with 0–6 approving reviews (plus stale-review dismissal,
+  code-owner review, last-push approval), require named status checks
+  (optionally strict = up to date). `enforce_admins` off means repository
+  admins bypass the rule, as on GitHub.
+- **One pure check:** `evaluateBranchUpdate(rule, actor, update, evidence)`
+  returns all unmet requirements. The actor (principal, resolved access,
+  teams) comes from the verified token only. Direct pushes pass
+  `via: 'push'`; the pull request merge will pass `via: 'pull-request'` with
+  approvals and statuses and call the same function. Required reviews
+  therefore already block direct pushes; required status checks block pushes
+  whose commit has no passing statuses (CI does not report statuses yet, so in
+  practice all direct pushes).
+- **Pre-receive policy:** receive-pack asks the `pushPolicy` hook once per
+  request, which loads the rules and the actor before the ref transaction and
+  returns a synchronous per-ref check. A violation rejects only that ref with
+  `ng <ref> protected branch: <reason>`, shown by `git push` as
+  `[remote rejected]`; with `--atomic` the whole push fails. A rejected force
+  push archives nothing.
+- **Mirrors:** `refs/upstream/*` and `refs/archive/*` are not client-writable
+  at all and are never matched by branch protection; mirror sync writes
+  `refs/upstream/*` itself. Branch protection applies only to the
+  repository's own branches.
+- **Storage:** rules live in the accounts database (migration
+  `0002_branch_protection`), not in the bucket, so a plain clone of a bucket
+  carries no rules. Changes are audited.
 
 ## 6. Bucket layout
 
@@ -174,8 +221,9 @@ OIDC-style, modelled on GitHub Actions OIDC:
 ## 7. Flows
 
 **Push** — `receive-pack` over smart HTTP. Parse and index the pack
-(completing thin packs), check fast-forward or archive the old value, update
-refs via CAS, `report-status`. Push size limit for Git packs: 64 MB by default;
+(completing thin packs), check branch protection per ref (§5), check
+fast-forward or archive the old value, update refs via CAS, `report-status`.
+Push size limit for Git packs: 64 MB by default;
 large files belong in LFS. In v1 packs are processed in memory; streaming pack
 indexing is a later optimization.
 
@@ -193,12 +241,58 @@ pass through the function on upload.
 `refs/upstream/{remote}/*` (archive and alarm on rewrites), fetch missing LFS
 objects via the Batch API and verify their hashes.
 
-**Media URLs (LFS onto a CDN without CI)** — the forge serves
-content-addressed, immutable URLs such as `/{owner}/{repo}/media/{oid}` and a
-path/ref-based raw endpoint that resolves LFS pointers. Both redirect to
-presigned bucket URLs or stream the object. A CDN (e.g. a Bunny pull zone) in
-front caches them. Optional later: a "publish" setting that copies public LFS
-objects into a public CDN bucket on push.
+**Media URLs (LFS onto a CDN without CI)** — two read-only endpoints that a
+pull-zone CDN (e.g. Bunny) can sit in front of. The CDN pulls on a cache miss;
+there is no upload or publish step.
+
+- `GET|HEAD /{owner}/{repo}/media/{oid}[/{filename}]` streams the LFS object
+  with that SHA-256 oid from the bucket. Content-addressed, so
+  `Cache-Control: public, max-age=31536000, immutable` and the strong ETag
+  `"{oid}"`. The optional trailing file name sets `Content-Type` (by
+  extension) and `Content-Disposition: inline`; without it the type is sniffed
+  from the first 64 bytes (images, video, audio, PDF, fonts, archives),
+  otherwise `application/octet-stream`. The file name does not change the
+  bytes, only the headers.
+- `GET|HEAD /{owner}/{repo}/raw/{ref}/{path}` resolves `{ref}` and walks the
+  trees to `{path}`. `{ref}` is a full 40-character commit (or tag object) id,
+  a tag, a branch (names with slashes work: the longest prefix of the path
+  that names a ref wins, tags before branches as in `git rev-parse`) or
+  `HEAD`. Abbreviated ids are not resolved. A plain blob is streamed with its
+  Git blob id as ETag; an LFS pointer answers `302` to
+  `/{owner}/{repo}/media/{oid}/{basename}` (relative, so a CDN keeps its own
+  host), so the large bytes are cached once, immutably, however many refs
+  point at them. Directories, submodules and pointers whose object is not in
+  the bucket answer `404`.
+- Caching of raw responses (including the redirect): full commit ids are
+  immutable; branches, tags and `HEAD` get `public, max-age=60` (core option
+  `refMaxAgeSeconds`) because they move.
+- Both support single `Range` requests (`206`, `416` with
+  `Content-Range: bytes */size`; multi-range requests get the full body),
+  `If-Range`, `If-None-Match` (`304`) and `HEAD`.
+- Served content must not run script on the forge origin: every response
+  carries `X-Content-Type-Options: nosniff` and, except PDFs (browser PDF
+  viewers refuse sandboxed documents), `Content-Security-Policy: default-src
+  'none'; …; sandbox`. HTML is never labelled `text/html`; unknown types are
+  `text/plain` if valid UTF-8, else `application/octet-stream`.
+- Permissions use the same `Authorize` callback as Git and LFS with access
+  `read`: public repositories anonymously, private ones need a token. A CDN
+  pulls private content with a read-only token that the pull zone adds to
+  every origin request (`Authorization: Bearer <token>`; in Bunny an Edge
+  Rule "Set Request Header" or origin header setting). Everything the CDN
+  caches is then readable by whoever can reach the CDN URL, so for private
+  repositories the pull zone itself must restrict access (e.g. Bunny token
+  authentication / signed URLs) or the repository should be public. The
+  Worker has no special token for this: a personal access token with the
+  scope `repo:read` of a user with read access does it.
+- Core: `matchContentRoute`, `resolveRevision`, `resolvePath`, `resolveRaw`,
+  `parseRange` and the content-type helpers are pure functions;
+  `handleContentRequest` builds the HTTP responses. Plain blobs are read
+  through the object database, which still loads packs into memory (see
+  Push); LFS bytes are always streamed from the bucket, ranges via ranged
+  bucket reads.
+
+Optional later: a "publish" setting that copies public LFS objects into a
+public CDN bucket on push.
 
 **Submit via form** — the server creates blob, tree and commit on a proposal
 branch.
@@ -226,11 +320,28 @@ SQLite database. A new instance works without an external identity provider.
 For the village archive: people log in via OIDC with ZITADEL; apps and
 automations use app tokens; mirrors use instance federation (§4).
 
+**Instance admins and bootstrap.** Instance admins (table `instance_admins`)
+create users and tokens, trust other instances and count as admins of every
+repository. A fresh instance has none: one call of `POST /api/bootstrap`,
+authenticated with the deployment secret `BOOTSTRAP_TOKEN`, creates the first
+admin atomically and returns a personal access token; further calls answer
+`409`. Until login methods exist, the JSON API is used with personal access
+tokens that carry the scope `repo:admin`.
+
+**Visibility.** Repositories are private by default; visibility is a
+per-repository setting in the database. There is no instance-wide public read
+switch.
+
+**Size limits.** Git pushes are limited by `MAX_PUSH_BYTES`; single LFS
+objects by `MAX_LFS_OBJECT_BYTES` (default 100 MiB, the request body limit of
+Cloudflare's Free and Pro plans), enforced in the batch API and on `PUT`.
+
 ## 9. Git over SSH
 
-Not supported: serverless functions accept only HTTP. Git uses HTTPS with
-tokens, later also a device flow. An optional SSH-to-HTTPS gateway could run
-on a Pi or VPS later.
+Not supported, by decision. Serverless functions accept only HTTP; SSH would
+need an always-on host or a TCP-capable container platform, and SSH over
+WebSocket needs client-side configuration. Git uses HTTPS with tokens, made
+convenient by `git forge auth login` (credential helper, device flow).
 
 ## 10. Mirror overview and verification
 
@@ -256,14 +367,24 @@ dev environments) need real machines, started on demand via API.
 | Search in issues | SQLite FTS5 |
 | Web UI | Astro SSR |
 | Releases, Pages | Bucket + CDN |
-| CI | Actions service emulating GHES for the official `actions/runner`; compute adapter starts one runner per job (§12) |
+| CI | Actions service emulating GHES for the official `actions/runner`; compute adapter starts one runner per job (§15) |
 
 Every building block is an interface; Cloudflare is the first implementation.
+
+**Cloudflare deployment.** One Worker serves Git, LFS, media and raw URLs, the
+JSON API and the well-known federation documents, and runs mirror sync from a
+Cron Trigger. It binds one R2 bucket (`BUCKET`) and one D1 database (`DB`).
+The Worker never migrates its database: `wrangler d1 migrations apply` does,
+from `packages/accounts/migrations` (`migrations_dir` in
+`apps/forge-worker/wrangler.jsonc`, the release's `dist/migrations` in the
+instance template; see §15). Several instances on one account are Wrangler
+environments (`alpha`, `beta`, `gamma`), each with its own Worker, bucket and
+database.
 
 | Building block | Cloudflare | Others |
 |---|---|---|
 | Functions | Workers | Bunny Edge Scripting, Deno Deploy, Lambda, self-hosted Node/Bun |
-| Object storage | R2 | any S3: Hetzner, B2, OVH, IONOS, self-hosted (Garage, SeaweedFS, RustFS, versitygw) |
+| Object storage | R2 | any S3 with conditional writes: Hetzner, B2, OVH, IONOS, self-hosted (versitygw, RustFS); a local directory |
 | Database | D1 / SQLite in Durable Objects | libSQL/Turso, SQLite file (Pi) |
 | Per-repository consistency | Durable Object | conditional writes (S3 CAS), single-writer process |
 | Scheduling, jobs | Cron Triggers, Queues | `Deno.cron`, systemd timers, job table |
@@ -278,204 +399,33 @@ with checksum), `put` with `If-None-Match` / `If-Match`, `list` by prefix. No
 delete. Conditional writes are the only coordination primitive; Durable
 Objects are an optimization, not a requirement.
 
-MinIO is discontinued; Garage, SeaweedFS, RustFS and versitygw are evaluated
-as local S3 test environment.
+Contract every adapter must meet, checked by the shared conformance suite
+`packages/core/test/storage-conformance.ts` (run against `MemoryStorage`,
+`FsStorage`, `R2Storage` and `S3Storage`):
 
-## 12. CI
+- `put` is atomic: if the body is shorter or longer than the declared size or
+  the stream errors, the call throws and the key keeps its previous state.
+  Streaming adapters achieve this by withholding the last byte until the
+  length is verified (`exactLength` in the core).
+- Exactly one of several concurrent conditional writers wins.
+- ETags are unquoted and change on every write.
+- `list` yields keys in lexicographic order across pages.
+- Ranges past the end are clamped; the reported size is the full size.
 
-Decision (18 Oct 2026, research in issue #7): CI **emulates the GitHub
-runner stack**. Workflows are GitHub Actions YAML, jobs run on the
-**unmodified official [`actions/runner`](https://github.com/actions/runner)**,
-and the forge looks like a GitHub Enterprise Server (GHES) to everything
-outside: the runner, and later external per-minute runner providers.
+Adapters: `MemoryStorage` (core, tests), `FsStorage` (`@git-forge/node`, a
+plain directory per key, lock files for conditional writes), `R2Storage`
+(`@git-forge/cloudflare`, binding, no presigning) and `S3Storage`
+(`@git-forge/s3`, any S3 API including R2's, with presigning). Presigned LFS
+uploads bind `Content-Length` and `x-amz-checksum-sha256` into the signature,
+so the bucket rejects any other content.
 
-Why: the runner, the action ecosystem and the providers all exist already.
-`actions/runner` treats every host that is not `github.com` / `*.ghe.com` as
-GHES, so a forge that answers under `/api/v3` and speaks the runner's service
-protocol can use all of them. The alternatives from issue #7 (Gitea's
-`act_runner` protocol, Buildkite, GitLab runner emulation) would lock us out
-of either the official runner or the providers.
+**Local S3 test environment:** MinIO is discontinued. versitygw (posix
+backend) is used; it passed the full suite, as did RustFS. SeaweedFS lists in
+directory order instead of lexicographic order, and Garage ignores
+`If-Match`/`If-None-Match` on `PutObject` — both unsuitable for refs. Details
+in `packages/s3/README.md`.
 
-### Architecture
-
-```
-git push ──► receive-pack ──► onPush
-                                │ read .github/workflows/*.yml at the new tip
-                                │ parseWorkflow (core, pure) + triggeredByPush
-                                ▼
-                      actions_runs / actions_jobs (SQLite)
-                                │ per queued job: JIT runner (RSA key, ephemeral)
-                                ▼
-                      RunnerLauncher (compute adapter)
-                       ├─ Cloudflare Container: official runner image, --jitconfig
-                       ├─ local process (tests, Pi)
-                       └─ later: external provider via GHES API + workflow_job webhook
-                                │
-           unmodified actions/runner ──HTTPS──► Actions service  /_services/actions
-                                                connectionData, OAuth, sessions,
-                                                message long-poll, job renew/finish,
-                                                timeline, logs ──► bucket
-```
-
-Pieces and where they live:
-
-| Piece | Package | Notes |
-|---|---|---|
-| YAML subset parser, workflow/job model, push filters, reading workflow files from a commit | `@git-forge/core` (`yaml.ts`, `workflow.ts`) | Pure functions. Unsupported YAML (anchors, tags, multi-document, multi-line plain scalars) and unsupported workflow keys are rejected with all problems listed, never silently ignored. |
-| Actions service (runner protocol) | `@git-forge/actions` (`service.ts`) | Mounted at `/_services/actions`; that URL is the runner's `ServerUrl`. |
-| GHES REST subset | `@git-forge/actions` (`rest.ts`) | Under `/api/v3`. |
-| Job message, template tokens, context data | `@git-forge/actions` (`job-message.ts`, `template.ts`) | Pure. `${{ }}` in strings becomes a `format()` expression token, so the runner evaluates expressions exactly as on GitHub. |
-| Dispatch: push → runs → jobs → JIT runners, `needs` ordering | `@git-forge/actions` (`dispatch.ts`) | Jobs with `needs` wait in `pending` and are queued (or skipped) when their needs complete. |
-| Runner container | `apps/forge-worker` (`runner-container.ts`, `runner/Dockerfile`) | Cloudflare Containers; the only Cloudflare-specific part. |
-
-### Runner protocol
-
-The spike implements the "legacy" distributed-task flow (`use_v2_flow:
-false`), which the runner still supports for GHES. Endpoints, relative to the
-service URL (route templates published through `connectionData`, the same
-location IDs as in the runner SDK and in ChristopherHX/runner.server):
-
-| Endpoint | Purpose |
-|---|---|
-| `GET _apis/connectionData`, `OPTIONS _apis` | Location service: maps location GUIDs to route templates. |
-| `POST _apis/v1/auth/` | OAuth 2 client-credentials with an RS256/PS256 JWT client assertion signed by the runner's RSA key; answers a short-lived runner token. Unauthenticated calls get `401` with `WWW-Authenticate: Bearer`, which makes the runner fetch a token. |
-| `POST/DELETE _apis/v1/AgentSession/1[/{sessionId}]` | Session per listener process. Messages are not encrypted (no session key); TLS protects them. |
-| `GET/DELETE _apis/v1/Message/1[/{messageId}]` | Long-poll (≤ 50 s, polling the job table) for a `PipelineAgentJobRequest`. A job is claimed atomically (`UPDATE … WHERE status = 'queued'`); an unacknowledged message is re-delivered to the same session. |
-| `GET/PATCH _apis/v1/AgentRequest/1/{requestId}` | Renew the job lock (first renew = job started) and finish it. |
-| `PATCH _apis/v1/Timeline/{scope}/{hub}/{plan}/{timelineId}` | Timeline records (job and steps). |
-| `POST _apis/v1/Logfiles/{scope}/{hub}/{plan}[/{logId}]` | Step logs, stored as append-only chunks in the bucket. |
-| `POST _apis/v1/TimeLineWebConsoleLog/…` | Live console lines, stored in the bucket. |
-| `POST _apis/v1/FinishJob/{scope}/{hub}/{plan}` | `JobCompleted` event from the worker: result, then `needs` advance. |
-| `PUT …/attachments/{recordId}/{type}/{name}` | Step summaries and other attachments. |
-| `POST _apis/v1/ActionDownloadInfo/…` | Not implemented: `uses:` steps fail with a clear error. |
-| `GET/POST _apis/v1/AgentPools`, `_apis/v1/Agent/1` | Classic `config.sh` registration with a registration token. |
-
-The job message is built server-side from the job model: `run` steps become
-`ActionStep`s with a `script` reference; `uses` steps get a `repository` /
-`containerRegistry` reference; job and workflow `env` become
-`environmentVariables`; the `github` context is filled from the run; the job
-token is `system.github.token`; secrets are variables with `isSecret: true`
-(so the runner masks them and exposes them as the `secrets` context).
-
-### GHES API (`/api/v3`)
-
-Implemented for repositories: `POST …/actions/runners/generate-jitconfig`,
-`POST …/actions/runners/registration-token` (and `remove-token`),
-`GET …/actions/runners[?name=]`, `GET/DELETE …/actions/runners/{id}`,
-`POST /api/v3/actions/runner-registration` (`RemoteAuth`), `GET
-…/actions/runs[/{id}[/jobs]]`, `GET …/actions/jobs/{id}[/logs]`, `GET
-/api/v3/meta`. Pure functions for signed `workflow_job` webhooks
-(`X-Hub-Signature-256`) exist; delivering them to providers, GitHub App auth
-(JWT → installation token) and org-level runners come with the provider work
-package.
-
-### Tokens and permissions
-
-All CI credentials are random opaque tokens, stored only as SHA-256 hashes in
-`actions_tokens`, with an expiry and a kind:
-
-| Kind | Holder | Grants |
-|---|---|---|
-| `registration` | `config.sh` | Register one runner for one repository (1 h). |
-| `runner` | Runner listener | Its own sessions, messages and job requests (1 h, renewed via OAuth). |
-| `runtime` | Runner worker (`SystemVssConnection`) | Timeline, logs and completion of exactly one job (plan id checked on every call). Revoked when the job completes. |
-| `github` | Steps (`GITHUB_TOKEN`) | Read access to the job's repository over Git HTTP. Revoked when the job completes. |
-
-The forge never trusts IDs from the runner: the runner is derived from the
-token, a session must belong to that runner, a job request must be assigned to
-it, and a runtime token must match the plan in the URL. Runner management
-(REST) needs repository admin rights; until accounts are wired in, that is the
-instance admin token.
-
-### Compute backends
-
-`RunnerLauncher.launch({ jobId, encodedJitConfig, labels, … })` is the compute
-adapter. The dispatcher creates one ephemeral JIT runner per queued job, binds
-the job to it and calls the launcher; if the launch fails, the job is unbound
-and stays queued for any registered runner with matching labels.
-
-- **Cloudflare Containers (first backend):** `RunnerContainer` is a Durable
-  Object container class, one instance per job (`getContainer(env.RUNNER,
-  jobId)`). The image (`apps/forge-worker/runner/Dockerfile`) is the official
-  `ghcr.io/actions/actions-runner` image plus Git and Node.js; its entrypoint
-  runs `run.sh --jitconfig "$ACTIONS_RUNNER_JITCONFIG"`. The runner is
-  ephemeral: it exits after one job, the container stops and is discarded.
-  Deployment is untested so far.
-- **Local process:** the integration test copies the downloaded runner into a
-  temporary directory per job and starts it with `--jitconfig`. The same works
-  on a Pi or against `wrangler dev`.
-- **External providers (later):** WarpBuild Enterprise, AWS CodeBuild and
-  RunsOn call `generate-jitconfig` / `registration-token` themselves after a
-  `workflow_job` webhook; the forge only has to deliver signed webhooks and
-  accept GitHub App or PAT authentication on `/api/v3`.
-
-### Secrets
-
-Secrets come from a `SecretsProvider` adapter (`(owner, repo) → name/value`).
-The Worker reads instance secrets from the `ACTIONS_SECRETS` secret (a JSON
-object, e.g. `{"CLOUDFLARE_API_TOKEN": "…"}`). They are sent only inside the
-job message to the runner of that job, marked secret. Later: per-repository
-and per-environment secrets encrypted in the database, required reviewers for
-environments, and no secrets for runs triggered from forks.
-
-### Deploying with wrangler from our own CI
-
-A deploy job is an ordinary workflow; the Cloudflare API token is an instance
-secret:
-
-```yaml
-on:
-  push:
-    branches: [main]
-jobs:
-  deploy:
-    runs-on: [self-hosted, linux]
-    steps:
-      - name: Checkout
-        env:
-          TOKEN: ${{ github.token }}
-        run: |
-          auth=$(printf 'x-access-token:%s' "$TOKEN" | base64 | tr -d '\n')
-          git -c http.extraHeader="Authorization: Basic $auth" clone -q "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" .
-      - run: npm ci && npx wrangler deploy
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-```
-
-`actions/checkout` is replaced by a `git clone` step until `uses:` works.
-
-### Data
-
-- SQLite (`packages/actions/migrations`, own migrations table
-  `actions_migrations`): `actions_runners`, `actions_tokens`,
-  `actions_sessions`, `actions_runs`, `actions_jobs`,
-  `actions_timeline_records`, `actions_logs`.
-- Bucket, append-only, written with `If-None-Match: *`:
-  `repos/<owner>/<repo>/actions/jobs/<jobId>/logs/<logId>/<chunk>`,
-  `…/console/<recordId>/<startLine>` and
-  `…/attachments/<recordId>/<type>/<name>`. Like the rest of the bucket
-  layout this is a durable format.
-
-### Spike status and known gaps
-
-- The protocol is implemented from the runner sources and runner.server and
-  tested step by step with our own client in Node and in `wrangler dev` (D1).
-  The end-to-end test with the real runner downloads the latest release and
-  skips when that is impossible; in the environment where the spike was
-  written GitHub downloads were blocked, so **the real runner has not run
-  against the forge yet**. That is the first thing to do next.
-- `uses:` actions (needs `ActionDownloadInfo` with tarballs, ideally from
-  mirrored action repositories), so no `actions/checkout` yet.
-- Job-level `if`, `strategy`/`matrix`, `container`, `services`, reusable
-  workflows, `concurrency`, `workflow_dispatch` inputs, job outputs across
-  `needs`.
-- Cancellation, job timeouts and a reaper for expired locks and dead runners.
-- Broker / run service (v2 flow), results service, cache, artifacts, OIDC
-  tokens.
-- Message encryption with the session key.
-- Web UI for runs and logs; check runs / commit statuses.
-
-## 13. Infrastructure and cost (100 GB)
+## 12. Infrastructure and cost (100 GB)
 
 | Item | approx. per month |
 |---|---|
@@ -488,18 +438,18 @@ jobs:
 | Pi with 1 TB SSD | one-off ~€150 |
 | **Total** | **~€13–15** |
 
-## 14. Open questions
+## 13. Open questions
 
-- Conditional writes on B2, Hetzner, Bunny — supported?
+- Conditional writes on B2, Hetzner, Bunny — supported? (Run the S3 conformance
+  suite against them; see `packages/s3/README.md`.)
 - Compaction for dumb HTTP: frequency, grace period for old packs.
 - Signed append-only log of ref/pack/LFS changes (e.g. C2SP tlog-tiles with
   cosigning instances as witnesses): still useful as audit trail, format open.
 - Ref checksum à la GitHub Spokes (XOR over `hash(refname, value)`) for cheap
   mirror comparison.
-- Can presigned PUTs be bound to length/checksum?
 - Name.
 
-## 15. Prior art and references
+## 14. Prior art and references
 
 **Research decisions**
 
@@ -533,3 +483,282 @@ jobs:
 - git-lfs — Batch API specification and integration tests
 - Radicle — signed refs per participant
 - LOCKSS — many copies, verification, repair
+
+## 15. CI, deployment and updates
+
+### CI
+
+Decision (18 Oct 2026, research in issue #7): CI **emulates the GitHub
+runner stack**. Workflows are GitHub Actions YAML, jobs run on the
+**unmodified official [`actions/runner`](https://github.com/actions/runner)**,
+and the forge looks like a GitHub Enterprise Server (GHES) to everything
+outside: the runner, and later external per-minute runner providers.
+
+Why: the runner, the action ecosystem and the providers all exist already.
+`actions/runner` treats every host that is not `github.com` / `*.ghe.com` as
+GHES, so a forge that answers under `/api/v3` and speaks the runner's service
+protocol can use all of them. The alternatives from issue #7 (Gitea's
+`act_runner` protocol, Buildkite, GitLab runner emulation) would lock us out
+of either the official runner or the providers.
+
+#### Architecture
+
+```
+git push ──► receive-pack ──► onPush
+                                │ read .github/workflows/*.yml at the new tip
+                                │ parseWorkflow (core, pure) + triggeredByPush
+                                ▼
+                      actions_runs / actions_jobs (SQLite)
+                                │ per queued job: JIT runner (RSA key, ephemeral)
+                                ▼
+                      RunnerLauncher (compute adapter)
+                       ├─ Cloudflare Container: official runner image, --jitconfig
+                       ├─ local process (tests, Pi)
+                       └─ later: external provider via GHES API + workflow_job webhook
+                                │
+           unmodified actions/runner ──HTTPS──► Actions service  /_services/actions
+                                                connectionData, OAuth, sessions,
+                                                message long-poll, job renew/finish,
+                                                timeline, logs ──► bucket
+```
+
+Pieces and where they live:
+
+| Piece | Package | Notes |
+|---|---|---|
+| YAML subset parser, workflow/job model, push filters, reading workflow files from a commit | `@git-forge/core` (`yaml.ts`, `workflow.ts`) | Pure functions. Unsupported YAML (anchors, tags, multi-document, multi-line plain scalars) and unsupported workflow keys are rejected with all problems listed, never silently ignored. |
+| Actions service (runner protocol) | `@git-forge/actions` (`service.ts`) | Mounted at `/_services/actions`; that URL is the runner's `ServerUrl`. |
+| GHES REST subset | `@git-forge/actions` (`rest.ts`) | Under `/api/v3`. |
+| Job message, template tokens, context data | `@git-forge/actions` (`job-message.ts`, `template.ts`) | Pure. `${{ }}` in strings becomes a `format()` expression token, so the runner evaluates expressions exactly as on GitHub. |
+| Dispatch: push → runs → jobs → JIT runners, `needs` ordering | `@git-forge/actions` (`dispatch.ts`) | Jobs with `needs` wait in `pending` and are queued (or skipped) when their needs complete. |
+| Runner container | `apps/forge-worker` (`runner-container.ts`, `runners.ts`, `runner/Dockerfile`, `wrangler.runners.jsonc`) | Cloudflare Containers; the only Cloudflare-specific part. A separate entry and config, because `wrangler deploy --dry-run` builds container images and the release bundle must stay a single module without imports. |
+
+#### Runner protocol
+
+The spike implements the "legacy" distributed-task flow (`use_v2_flow:
+false`), which the runner still supports for GHES. Endpoints, relative to the
+service URL (route templates published through `connectionData`, the same
+location IDs as in the runner SDK and in ChristopherHX/runner.server):
+
+| Endpoint | Purpose |
+|---|---|
+| `GET _apis/connectionData`, `OPTIONS _apis` | Location service: maps location GUIDs to route templates. |
+| `POST _apis/v1/auth/` | OAuth 2 client-credentials with an RS256/PS256 JWT client assertion signed by the runner's RSA key; answers a short-lived runner token. Unauthenticated calls get `401` with `WWW-Authenticate: Bearer`, which makes the runner fetch a token. |
+| `POST/DELETE _apis/v1/AgentSession/1[/{sessionId}]` | Session per listener process. Messages are not encrypted (no session key); TLS protects them. |
+| `GET/DELETE _apis/v1/Message/1[/{messageId}]` | Long-poll (≤ 50 s, polling the job table) for a `PipelineAgentJobRequest`. A job is claimed atomically (`UPDATE … WHERE status = 'queued'`); an unacknowledged message is re-delivered to the same session. |
+| `GET/PATCH _apis/v1/AgentRequest/1/{requestId}` | Renew the job lock (first renew = job started) and finish it. |
+| `PATCH _apis/v1/Timeline/{scope}/{hub}/{plan}/{timelineId}` | Timeline records (job and steps). |
+| `POST _apis/v1/Logfiles/{scope}/{hub}/{plan}[/{logId}]` | Step logs, stored as append-only chunks in the bucket. |
+| `POST _apis/v1/TimeLineWebConsoleLog/…` | Live console lines, stored in the bucket. |
+| `POST _apis/v1/FinishJob/{scope}/{hub}/{plan}` | `JobCompleted` event from the worker: result, then `needs` advance. |
+| `PUT …/attachments/{recordId}/{type}/{name}` | Step summaries and other attachments. |
+| `POST _apis/v1/ActionDownloadInfo/…` | Not implemented: `uses:` steps fail with a clear error. |
+| `GET/POST _apis/v1/AgentPools`, `_apis/v1/Agent/1` | Classic `config.sh` registration with a registration token. |
+
+The job message is built server-side from the job model: `run` steps become
+`ActionStep`s with a `script` reference; `uses` steps get a `repository` /
+`containerRegistry` reference; job and workflow `env` become
+`environmentVariables`; the `github` context is filled from the run; the job
+token is `system.github.token`; secrets are variables with `isSecret: true`
+(so the runner masks them and exposes them as the `secrets` context).
+
+#### GHES API (`/api/v3`)
+
+Implemented for repositories: `POST …/actions/runners/generate-jitconfig`,
+`POST …/actions/runners/registration-token` (and `remove-token`),
+`GET …/actions/runners[?name=]`, `GET/DELETE …/actions/runners/{id}`,
+`POST /api/v3/actions/runner-registration` (`RemoteAuth`), `GET
+…/actions/runs[/{id}[/jobs]]`, `GET …/actions/jobs/{id}[/logs]`, `GET
+/api/v3/meta`. Pure functions for signed `workflow_job` webhooks
+(`X-Hub-Signature-256`) exist; delivering them to providers, GitHub App auth
+(JWT → installation token) and org-level runners come with the provider work
+package.
+
+#### Tokens and permissions
+
+All CI credentials are random opaque tokens, stored only as SHA-256 hashes in
+`actions_tokens`, with an expiry and a kind:
+
+| Kind | Holder | Grants |
+|---|---|---|
+| `registration` | `config.sh` | Register one runner for one repository (1 h). |
+| `runner` | Runner listener | Its own sessions, messages and job requests (1 h, renewed via OAuth). |
+| `runtime` | Runner worker (`SystemVssConnection`) | Timeline, logs and completion of exactly one job (plan id checked on every call). Revoked when the job completes. |
+| `github` | Steps (`GITHUB_TOKEN`) | Read access to the job's repository over Git HTTP. Revoked when the job completes. |
+
+The forge never trusts IDs from the runner: the runner is derived from the
+token, a session must belong to that runner, a job request must be assigned to
+it, and a runtime token must match the plan in the URL. Runner management
+(REST) needs repository admin rights; until accounts are wired in, that is the
+instance admin token.
+
+#### Compute backends
+
+`RunnerLauncher.launch({ jobId, encodedJitConfig, labels, … })` is the compute
+adapter. The dispatcher creates one ephemeral JIT runner per queued job, binds
+the job to it and calls the launcher; if the launch fails, the job is unbound
+and stays queued for any registered runner with matching labels.
+
+- **Cloudflare Containers (first backend):** billed per 10 ms, scale to
+  zero, up to 4 vCPU / 12 GiB, rootless Docker-in-Docker (needed later for
+  `container:` and `services:`). `RunnerContainer` is a Durable Object
+  container class, one instance per job (`env.RUNNER.idFromName(jobId)`). The image (`apps/forge-worker/runner/Dockerfile`) is the official
+  `ghcr.io/actions/actions-runner` image plus Git and Node.js; its entrypoint
+  runs `run.sh --jitconfig "$ACTIONS_RUNNER_JITCONFIG"`. The runner is
+  ephemeral: it exits after one job, the container stops and is discarded.
+  Deployment is untested so far.
+- **Local process:** the integration test copies the downloaded runner into a
+  temporary directory per job and starts it with `--jitconfig`. The same works
+  on a Pi or against `wrangler dev`.
+- **External providers (later):** WarpBuild Enterprise, AWS CodeBuild and
+  RunsOn call `generate-jitconfig` / `registration-token` themselves after a
+  `workflow_job` webhook; the forge only has to deliver signed webhooks and
+  accept GitHub App or PAT authentication on `/api/v3`.
+
+#### Secrets
+
+Secrets come from a `SecretsProvider` adapter (`(owner, repo) → name/value`).
+The Worker reads instance secrets from the `ACTIONS_SECRETS` secret (a JSON
+object, e.g. `{"CLOUDFLARE_API_TOKEN": "…"}`). They are sent only inside the
+job message to the runner of that job, marked secret. Later: per-repository
+and per-environment secrets encrypted in the database, required reviewers for
+environments, and no secrets for runs triggered from forks.
+
+#### Data
+
+- SQLite (`packages/actions/migrations`, applied at runtime on first use with
+  the accounts migration runner into its own table `actions_migrations`, so
+  the release's `migrations.tar.gz` and `deploy.sh` stay unchanged; moving
+  them into the release bundle is a follow-up): `actions_runners`, `actions_tokens`,
+  `actions_sessions`, `actions_runs`, `actions_jobs`,
+  `actions_timeline_records`, `actions_logs`.
+- Bucket, append-only, written with `If-None-Match: *`:
+  `repos/<owner>/<repo>/actions/jobs/<jobId>/logs/<logId>/<chunk>`,
+  `…/console/<recordId>/<startLine>` and
+  `…/attachments/<recordId>/<type>/<name>`. Like the rest of the bucket
+  layout this is a durable format.
+
+#### Spike status and known gaps
+
+- The protocol is implemented from the runner sources and runner.server and
+  tested step by step with our own client in Node and in `wrangler dev` (D1).
+  The end-to-end test with the real runner downloads the latest release and
+  skips when that is impossible; in the environment where the spike was
+  written GitHub downloads were blocked, so **the real runner has not run
+  against the forge yet**. That is the first thing to do next.
+- `uses:` actions (needs `ActionDownloadInfo` with tarballs, ideally from
+  mirrored action repositories), so no `actions/checkout` yet.
+- Job-level `if`, `strategy`/`matrix`, `container`, `services`, reusable
+  workflows, `concurrency`, `workflow_dispatch` inputs, job outputs across
+  `needs`.
+- Cancellation, job timeouts and a reaper for expired locks and dead runners.
+- Broker / run service (v2 flow), results service, cache, artifacts, OIDC
+  tokens.
+- Message encryption with the session key.
+- Web UI for runs and logs; check runs / commit statuses.
+
+### Deployment
+
+Deployments run in our own CI: a job calls `wrangler deploy` with a Cloudflare
+API token stored as an instance secret. No Cloudflare Workers Builds and no
+GitHub mirror are needed.
+
+For example:
+
+```yaml
+on:
+  push:
+    branches: [main]
+jobs:
+  deploy:
+    runs-on: [self-hosted, linux]
+    steps:
+      - name: Checkout
+        env:
+          TOKEN: ${{ github.token }}
+        run: |
+          auth=$(printf 'x-access-token:%s' "$TOKEN" | base64 | tr -d '\n')
+          git -c http.extraHeader="Authorization: Basic $auth" clone -q "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" .
+      - run: npm ci && npx wrangler deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+```
+
+`actions/checkout` is replaced by a `git clone` step until `uses:` works.
+
+### Distribution, new instances and updates
+
+An instance is a stateless deployment; its operators choose the version. The
+deployable unit is a release artifact, not an npm package, and instances never
+update themselves.
+
+- **Release artifact** (`release/build-release.sh`, run by
+  `.github/workflows/release.yml` on every `v*` tag with `GITHUB_TOKEN` only):
+  - `git-forge-worker.mjs`: `apps/forge-worker` bundled by
+    `wrangler deploy --dry-run` into one ES module without imports, uploaded by
+    instances with `no_bundle: true`, so workerd runs exactly the released
+    bytes.
+  - `migrations.tar.gz`: the D1 migrations (`migrations/*.sql`, currently from
+    `packages/accounts`), built reproducibly.
+  - `SHA256SUMS`: `sha256sum` output for both files.
+  - The release notes contain the `git-forge.json` to pin. Tags with a `-` are
+    pre-releases.
+- **One pin covers everything:** `git-forge.json` holds `version` and the
+  SHA-256 of `SHA256SUMS`. The build script checks `SHA256SUMS` against the
+  pin and then every asset against `SHA256SUMS`; any mismatch fails the build
+  before anything is deployed. Asset names and the archive layout are a durable
+  format: later releases may add assets, never rename or remove these.
+- **Instance template** (`templates/instance`, synced to its own repository
+  `levino/git-forge-instance`): `wrangler.jsonc` (own bindings, vars, domain,
+  `main: dist/git-forge-worker.mjs`, `build.command: sh build.sh`,
+  `migrations_dir: dist/migrations`), `git-forge.json`, `build.sh` (POSIX sh,
+  `curl`, `sha256sum`, `tar`), `deploy.sh`, `renovate.json`, a checksum
+  workflow and a README. No `package.json`, no lockfile, nothing from npm in the Worker.
+  `GIT_FORGE_RELEASE_URL` overrides the download base for mirrors and tests.
+- **Resources only from config:** every Cloudflare resource is declared in
+  `wrangler.jsonc` and created by Wrangler, never by hand. D1 and R2 have a
+  name and no id, so the first `wrangler deploy` provisions them (automatic
+  resource provisioning) and later commands find them by name. Cron, vars,
+  routes (custom domains) and the required `BOOTSTRAP_TOKEN` secret
+  (`secrets.required`) are declared there as well; only the secret's value is
+  set outside the repository.
+- **Build on Cloudflare (Workers Builds):** build command `sh build.sh`,
+  deploy command `sh deploy.sh`. `deploy.sh` applies the D1 migrations before
+  the upload so new code never sees an old schema; migrations are therefore
+  additive and compatible with the previous release, which keeps a rollback
+  (reverting the pin) safe. When the database does not exist yet (first
+  deploy), it deploys first, which provisions the database, and migrates right
+  after. `build.sh` is idempotent, so the second run through `build.command` is
+  a no-op.
+- **First install:** "Deploy to Cloudflare" button (copies the template and
+  connects Workers Builds) or "Use this template" plus importing the
+  repository in the dashboard. The setup page asks for `BOOTSTRAP_TOKEN`
+  (from `.dev.vars.example`); one call of `POST /api/bootstrap` with it
+  creates the first instance admin (§8).
+- **Update:** bump `version` and `sha256` in `git-forge.json` and push.
+  Renovate proposes the version via a regex manager on the GitHub releases of
+  `levino/git-forge`. It cannot compute the checksum (the `github-releases`
+  datasource's digest is the tag's commit, not a file hash, and
+  `postUpgradeTasks` exist only for self-hosted Renovate), so the template's
+  `Pin checksum` workflow fills in `sha256` on Renovate's pull requests from
+  the new `SHA256SUMS` and runs `build.sh`; a human reviews and merges.
+- **Template sync:** `.github/workflows/sync-instance-template.yml` copies
+  `templates/instance` to `levino/git-forge-instance` with `git-forge.json`
+  pinned to the latest release, after every release and on template changes on
+  `main`. It pushes with the deploy key `INSTANCE_TEMPLATE_DEPLOY_KEY` and is
+  skipped while that secret is missing. The copy in this repository carries an
+  all-zero placeholder pin that fails the build on purpose.
+- **Test:** `release/test/instance.test.ts` builds a release, runs the
+  template's `build.sh` against it via `file://`, checks that wrong pins and
+  tampered assets are refused, checks the order of `deploy.sh` with a stub
+  Wrangler, applies the migrations and does a push/clone
+  smoke test against `wrangler dev` running the template.
+- The same bundle may additionally be published to npm later; the template
+  never depends on it.
+
+### Test instances
+
+`apps/forge-worker` defines three wrangler environments `alpha`, `beta` and
+`gamma`, each with its own D1 and R2. An E2E test runs all three locally and
+checks mirroring and federation across them (beta mirrors alpha, gamma mirrors
+beta).

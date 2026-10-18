@@ -1,6 +1,6 @@
 import type { ObjectId } from './hash.ts'
 import { fetchDumb, lsRefsDumb } from './dumb-client.ts'
-import { parsePack, writePack } from './pack.ts'
+import { parsePack, type ResolvedObject, writePack } from './pack.ts'
 import { expectOk, type Remote, RemoteError, type RemoteRefs, remoteRequest, remoteUrl } from './remote.ts'
 import type { ObjectDatabase } from './repository.ts'
 import { fetchPackV2, HaveWalker, lsRefsV2, parseV2Advertisement, type V2Capabilities } from './smart-client.ts'
@@ -24,12 +24,21 @@ export type FetchObjectsResult = {
 
 export type RemoteConnection = {
   readonly protocol: Protocol
+  readonly capabilities?: V2Capabilities
   listRefs(prefixes: readonly string[]): Promise<RemoteRefs>
   fetchObjects(odb: ObjectDatabase, options: FetchObjectsOptions): Promise<FetchObjectsResult>
 }
 
+export const storeFetchedPack = async (odb: ObjectDatabase, pack: Uint8Array): Promise<{ objects: readonly ResolvedObject[]; name: string | null }> => {
+  const parsed = await parsePack(pack, (id) => odb.read(id))
+  if (parsed.objects.length === 0) return { objects: [], name: null }
+  const stored = parsed.externalBases.length > 0 ? writePack(parsed.objects) : { bytes: pack, ...parsed }
+  return { objects: stored.objects, name: await odb.addPack(stored.bytes, stored.objects, stored.checksum) }
+}
+
 const v2Connection = (remote: Remote, capabilities: V2Capabilities): RemoteConnection => ({
   protocol: 'v2',
+  capabilities,
   listRefs: (prefixes) => lsRefsV2(remote, capabilities, prefixes),
   async fetchObjects(odb, options) {
     const fetched = await fetchPackV2(remote, capabilities, {
@@ -37,11 +46,8 @@ const v2Connection = (remote: Remote, capabilities: V2Capabilities): RemoteConne
       haves: new HaveWalker(odb, options.haveTips),
       ...(options.maxPackBytes !== undefined ? { maxPackBytes: options.maxPackBytes } : {}),
     })
-    const parsed = await parsePack(fetched.pack, (id) => odb.read(id))
-    if (parsed.objects.length === 0) return { objects: 0, packs: [], rounds: fetched.rounds }
-    const stored = parsed.externalBases.length > 0 ? writePack(parsed.objects) : { bytes: fetched.pack, ...parsed }
-    const name = await odb.addPack(stored.bytes, stored.objects, stored.checksum)
-    return { objects: parsed.objects.length, packs: [name], rounds: fetched.rounds }
+    const stored = await storeFetchedPack(odb, fetched.pack)
+    return { objects: stored.objects.length, packs: stored.name ? [stored.name] : [], rounds: fetched.rounds }
   },
 })
 

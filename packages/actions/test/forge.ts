@@ -1,8 +1,7 @@
-import { applyMigrations, type Database } from '@git-forge/accounts'
+import { applyMigrations, type Database, MIGRATIONS } from '@git-forge/accounts'
 import { openSqliteDatabase } from '@git-forge/accounts-node'
 import { handleGitRequest, MemoryStorage, type Storage } from '@git-forge/core'
 import {
-  ACTIONS_MIGRATIONS,
   advanceRun,
   handleActionsService,
   handleGhesApi,
@@ -42,7 +41,7 @@ const presented = (request: Request): string | null => {
 
 export const createTestForge = async (options: TestForgeOptions = {}): Promise<TestForge> => {
   const { db } = openSqliteDatabase()
-  await applyMigrations(db, ACTIONS_MIGRATIONS, Date.now(), 'actions_migrations')
+  await applyMigrations(db, MIGRATIONS)
   const storage = new MemoryStorage()
   const runs: QueuedRun[] = []
   const urlsFor = (request: Request) => {

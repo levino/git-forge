@@ -14,7 +14,6 @@
     "instance-key": "node --experimental-transform-types --no-warnings scripts/instance-key.ts"
   },
   "dependencies": {
-    "@cloudflare/containers": "0.3.7",
     "@git-forge/accounts": "workspace:*",
     "@git-forge/actions": "workspace:*",
     "@git-forge/cloudflare": "workspace:*",

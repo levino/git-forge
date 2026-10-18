@@ -15,7 +15,15 @@
       "migrations_dir": "dist/migrations"
     }
   ],
+  "queues": {
+    "producers": [{ "binding": "IMPORTS", "queue": "git-forge-imports" }],
+    "consumers": [{ "queue": "git-forge-imports", "max_batch_size": 1, "max_batch_timeout": 1, "max_retries": 3 }]
+  },
   "triggers": { "crons": ["*/30 * * * *"] },
-  "vars": { "MAX_PUSH_BYTES": "16777216", "MAX_LFS_OBJECT_BYTES": "104857600", "MIRROR_INTERVAL_MINUTES": "30" },
-  "secrets": { "required": ["BOOTSTRAP_TOKEN"] }
+  "vars": { "MAX_PUSH_BYTES": "16777216", "MAX_LFS_OBJECT_BYTES": "104857600", "MIRROR_INTERVAL_MINUTES": "30", "ACTIONS": "true" },
+  "secrets": { "required": ["BOOTSTRAP_TOKEN"] },
+  "containers": [{ "class_name": "RunnerContainer", "image": "./runner/Dockerfile", "instance_type": "standard-1", "max_instances": 4 }],
+  "durable_objects": { "bindings": [{ "name": "RUNNER", "class_name": "RunnerContainer" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["RunnerContainer"] }],
+  "dev": { "enable_containers": false }
 }

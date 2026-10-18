@@ -210,6 +210,8 @@ the [accounts README](../packages/accounts/README.md#branch-protection).
     objects/pack/pack-<sha>.idx
   lfs/
     objects/<oid[0:2]>/<oid[2:4]>/<oid>
+  import/status.json                # progress of the last import
+  import/commits.txt                # commit order of the last import
   README.txt                        # plain text: what this is, how to read it
 ```
 
@@ -226,6 +228,65 @@ fast-forward or archive the old value, update refs via CAS, `report-status`.
 Push size limit for Git packs: 64 MB by default;
 large files belong in LFS. In v1 packs are processed in memory; streaming pack
 indexing is a later optimization.
+
+**Large pushes** — a push is one HTTP request, and Cloudflare caps request
+bodies at 100 MB (Free/Pro). Three ways around it, none of which changes git:
+
+- *Chunked push helper* `git forge push` (`packages/cli`, a single executable
+  built with `bun build --compile`): splits the history not yet on the remote
+  into pushes below a byte budget (default 80 MB, measured with
+  `git pack-objects` dry runs) and pushes them one after another with the
+  unmodified `git` client. Chunks of a branch go directly to the destination
+  branch, so every step after the first is a fast-forward (works with branch
+  protection, no garbage); only merged side branches and tags need temporary
+  `refs/forge-chunk/…` refs, which the final atomic push deletes. Resuming is
+  a rerun: what landed is on the remote. Details in `packages/cli/README.md`.
+- *Server-side import* (below): the forge pulls from a URL, so no request
+  body is involved at all.
+- Later: streaming receive-pack and a remote helper uploading packs directly
+  to object storage (roadmap M5a).
+
+**Import** — create or update a repository by pulling from any Git URL
+(smart HTTP v2 or dumb HTTP, optional token). It reuses the mirror client
+(`connectRemote`, `fetchPackV2`, the dumb walker, `commitClosure`,
+`scanNewObjects`, `mirrorLfsObjects`). Unlike a mirror, refs land directly in
+`refs/heads/*` and `refs/tags/*`, it runs once and keeps no upstream config.
+Rewritten refs are archived as on a force push; local refs missing upstream
+are kept. To stay within the CPU and memory limits of one invocation it runs
+as a sequence of stateless steps, each persisting its progress in
+`<repo>/import/status.json` (compare-and-swap):
+
+1. *discover* — list upstream heads and tags, note local tips and the wanted
+   tips.
+2. *graph* — if the server supports `filter`, fetch only the commit graph
+   (`filter tree:0`), order the new commits parents-first (depth-first
+   post-order, so side branches precede their merge) and store the order in
+   `<repo>/import/commits.txt`. Nothing of this pack is kept.
+3. *fetch* — one step per range of `commitsPerStep` commits (default 500):
+   `want` the last commit of the range, `have` every earlier range end and all
+   local tips, so the server sends exactly the new objects; store the pack,
+   check connectivity, collect LFS pointers. A step whose pack exceeds
+   `maxStepBytes` (32 MiB) is retried with a quarter of the commits; small
+   packs double the range. A final fetch picks up tag objects. Servers without
+   `filter`, and dumb servers, are fetched in one step.
+4. *lfs* — 100 LFS objects per step via the upstream's batch API; missing
+   objects are recorded, not fatal.
+5. *refs* — update refs via compare-and-swap and rewrite `info/refs`; an
+   empty repository adopts the upstream `HEAD`.
+
+Fetched packs are handed to a `PackIngester` (`ingestPack`); the default
+parses and indexes the pack in memory like the mirror does. Once streaming
+pack indexing (a resumable job behind a job adapter, roadmap M5a) is on
+`main`, the import streams each fetched pack into storage and hands it to
+that job instead, so a step no longer holds the pack in memory.
+
+A failing step is retried with exponential backoff (15 s … 10 min); after
+five failures in a row the import is `failed`, and starting it again with the
+same URL resumes at the failed phase. Credentials are never written to the
+bucket: the token travels with each scheduled step. Steps are driven by the
+scheduling adapter (`ImportScheduler`): a Cloudflare Queue in the Worker
+(each message is one step in its own invocation), a simple loop (`runImport`)
+elsewhere.
 
 **Fetch** — public: dumb HTTP directly from the bucket/CDN. Private:
 `upload-pack` (smart HTTP protocol v2) or dumb HTTP behind an authorizing
@@ -531,7 +592,7 @@ Pieces and where they live:
 | GHES REST subset | `@git-forge/actions` (`rest.ts`) | Under `/api/v3`. |
 | Job message, template tokens, context data | `@git-forge/actions` (`job-message.ts`, `template.ts`) | Pure. `${{ }}` in strings becomes a `format()` expression token, so the runner evaluates expressions exactly as on GitHub. |
 | Dispatch: push → runs → jobs → JIT runners, `needs` ordering | `@git-forge/actions` (`dispatch.ts`) | Jobs with `needs` wait in `pending` and are queued (or skipped) when their needs complete. |
-| Runner container | `apps/forge-worker` (`runner-container.ts`, `runners.ts`, `runner/Dockerfile`, `wrangler.runners.jsonc`) | Cloudflare Containers; the only Cloudflare-specific part. A separate entry and config, because `wrangler deploy --dry-run` builds container images and the release bundle must stay a single module without imports. |
+| Runner container | `apps/forge-worker` (`runner-container.ts`, `runner-launcher.ts`, `runner/Dockerfile`), declared in `wrangler.jsonc` and `templates/instance` | Cloudflare Containers; the only Cloudflare-specific part. A plain Durable Object class on `ctx.container`, so the release bundle stays one module without imports. |
 
 #### Runner protocol
 
@@ -602,11 +663,20 @@ and stays queued for any registered runner with matching labels.
 - **Cloudflare Containers (first backend):** billed per 10 ms, scale to
   zero, up to 4 vCPU / 12 GiB, rootless Docker-in-Docker (needed later for
   `container:` and `services:`). `RunnerContainer` is a Durable Object
-  container class, one instance per job (`env.RUNNER.idFromName(jobId)`). The image (`apps/forge-worker/runner/Dockerfile`) is the official
-  `ghcr.io/actions/actions-runner` image plus Git and Node.js; its entrypoint
-  runs `run.sh --jitconfig "$ACTIONS_RUNNER_JITCONFIG"`. The runner is
-  ephemeral: it exits after one job, the container stops and is discarded.
-  Deployment is untested so far.
+  container class, one instance per job (`env.RUNNER.idFromName(jobId)`),
+  that starts its container with the entrypoint `run.sh --jitconfig <config>`
+  and keeps the object alive until the container exits. The image
+  (`runner/Dockerfile`, in the app and in the instance template) is the
+  official `ghcr.io/actions/actions-runner` image plus Git and Node.js. Like
+  every other resource it comes from the wrangler config (`containers`, the
+  `RUNNER` Durable Object binding and its migration, in every environment and
+  in the template): `wrangler deploy` builds the image and pushes it to the
+  Cloudflare registry, so the deploy environment needs Docker. Durable Object
+  containers cannot pull external images by reference, only digest-pinned
+  images from the Cloudflare registry or a local Dockerfile. The release
+  bundle is built with `wrangler deploy --dry-run --containers-rollout=none`,
+  which skips the image. The runner is ephemeral: it exits after one job, the
+  container stops and is discarded. Deployment is untested so far.
 - **Local process:** the integration test copies the downloaded runner into a
   temporary directory per job and starts it with `--jitconfig`. The same works
   on a Pi or against `wrangler dev`.
@@ -626,10 +696,9 @@ environments, and no secrets for runs triggered from forks.
 
 #### Data
 
-- SQLite (`packages/actions/migrations`, applied at runtime on first use with
-  the accounts migration runner into its own table `actions_migrations`, so
-  the release's `migrations.tar.gz` and `deploy.sh` stay unchanged; moving
-  them into the release bundle is a follow-up): `actions_runners`, `actions_tokens`,
+- SQLite, migration `packages/accounts/migrations/0004_actions.sql`, applied by
+  `wrangler d1 migrations apply` like every other migration and shipped in
+  the release's `migrations.tar.gz`: `actions_runners`, `actions_tokens`,
   `actions_sessions`, `actions_runs`, `actions_jobs`,
   `actions_timeline_records`, `actions_logs`.
 - Bucket, append-only, written with `If-None-Match: *`:

@@ -62,8 +62,9 @@ discussions.
 ## M5a — Large pushes
 
 - [ ] Streaming receive-pack and upload-pack with bounded memory, `packfile-uris` (in progress)
-- [ ] Server-side import: create a repository by pulling from a URL (no request body limit)
-- [ ] Chunked push helper: `git forge push` splits history into pushes below the platform body limit, using the unmodified git client
+- [x] Server-side import: create or update a repository by pulling from a URL (no request body limit), in resumable steps driven by a queue
+- [x] Chunked push helper: `git forge push` splits history into pushes below the platform body limit, using the unmodified git client; single executables per platform from the release workflow
+- [ ] Import: stream fetched packs into storage and index them with the streaming indexing job (via `ingestPack`)
 - [ ] Remote helper `git-remote-forge`: resumable multipart pack upload directly to object storage via presigned URLs, then a finalize call that indexes the pack and updates refs
 
 ## M5b — CI and distribution
@@ -84,7 +85,6 @@ Design: [design.md §15](design.md#ci).
 - [ ] Broker and run service (v2 flow), results service, message encryption; then cache, artifacts, OIDC id tokens
 - [ ] External providers: signed `workflow_job` webhook delivery, GitHub App auth (JWT → installation token, manifest flow) and PATs on `/api/v3`, org-level runners; try WarpBuild Enterprise, AWS CodeBuild, RunsOn
 - [ ] `container:` and `services:` (Docker-in-Docker in the runner container)
-- [ ] Ship the actions migrations in the release's `migrations.tar.gz` instead of applying them at runtime
 - [ ] Web UI for runs and live logs
 - [x] "Deploy to Cloudflare" button in the README pointing at the instance template; template wired to accounts (`BOOTSTRAP_TOKEN`)
 - [x] Release artifact (bundled worker + migrations + checksums) and instance template with pinned version

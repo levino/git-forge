@@ -94,6 +94,7 @@ triggers with `RAISE`), all of which D1, Durable Objects and libSQL support.
 | `branch_protection_push_allowances` | who may push when a rule restricts pushes: `user`, `team`, `app` (by ID) or `role` (minimum role) |
 | `branch_protection_status_checks` | required status check names per rule |
 | `instance_admins` | users who administer the instance (create users and tokens, trust other instances, act as admin on every repository)  (migration `0003`) |
+| `actions_*` | CI state of `@git-forge/actions`: runners, hashed CI tokens, sessions, runs, jobs, timeline records, log index (migration `0004`; the schema lives here so that all D1 migrations come from one directory) |
 
 Timestamps are Unix milliseconds. IDs are random UUIDs. Logins and repository
 names are case-insensitive (`COLLATE NOCASE`).

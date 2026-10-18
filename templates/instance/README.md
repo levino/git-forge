@@ -7,7 +7,8 @@ forge code: it pins a release of git-forge and configures one instance.
 | File | Purpose |
 |---|---|
 | `git-forge.json` | The pinned release: `version` and the `sha256` of the release's `SHA256SUMS` asset. |
-| `wrangler.jsonc` | The instance: Worker name, R2 bucket, D1 database, cron, vars, domain. |
+| `wrangler.jsonc` | The instance: Worker name, R2 bucket, D1 database, cron, vars, domain, and the CI runner container. |
+| `runner/Dockerfile` | Image for CI jobs: the official `ghcr.io/actions/actions-runner` image plus Git and Node.js. Wrangler builds it on deploy and pushes it to the Cloudflare registry, so the deploy environment needs Docker. |
 | `build.sh` | Downloads the pinned release, verifies every file against the pin and unpacks it into `dist/`. Needs only `sh`, `curl`, `sha256sum` and `tar`. |
 | `deploy.sh` | Applies the release's D1 migrations and deploys, in the right order also on the very first deploy. |
 | `renovate.json` | Lets Renovate propose updates when git-forge publishes a release. |
@@ -26,7 +27,12 @@ Every Cloudflare resource of the instance is declared in `wrangler.jsonc` and
 created by Wrangler, never by hand: the D1 database and the R2 bucket have a
 name but no id, so the first `wrangler deploy` provisions them (automatic
 resource provisioning) and later deploys find them by name. Cron, vars, routes
-and the required secret are declared there too.
+and the required secret are declared there too, and so is the CI runner
+container (`containers`, the `RUNNER` Durable Object binding and its
+migration): every CI job starts one container with the official
+`actions/runner`. Set `ACTIONS` to `false` and remove these three entries to
+run without CI; workflow secrets go into the `ACTIONS_SECRETS` secret (a JSON
+object).
 
 ### With the Deploy button
 
@@ -105,6 +111,14 @@ collaborators, instance federation and mirrors are described in the
 [forge-worker README](https://github.com/levino/git-forge/tree/main/apps/forge-worker#api).
 To mirror private repositories of other instances, also set the secret
 `INSTANCE_KEY` and the var `PUBLIC_URL` (see there).
+
+## Imports
+
+`POST /api/repos/<owner>/<name>/import` creates or updates a repository by
+pulling it from another Git server, without the request body limit of a push.
+Its steps run on the Cloudflare Queue `git-forge-imports`, declared in
+`wrangler.jsonc` and created by the first `wrangler deploy` like the bucket
+and the database.
 
 ## Update
 

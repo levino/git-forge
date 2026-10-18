@@ -9,7 +9,5 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/* \
  && curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz" | tar -xJ -C /usr/local --strip-components=1
 
-COPY --chmod=755 entrypoint.sh /usr/local/bin/forge-runner
 USER runner
 WORKDIR /home/runner
-ENTRYPOINT ["/usr/local/bin/forge-runner"]

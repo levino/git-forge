@@ -14,6 +14,22 @@
       "*/30 * * * *"
     ]
   },
+  "queues": {
+    "producers": [
+      {
+        "binding": "IMPORTS",
+        "queue": "git-forge-imports"
+      }
+    ],
+    "consumers": [
+      {
+        "queue": "git-forge-imports",
+        "max_batch_size": 1,
+        "max_batch_timeout": 1,
+        "max_retries": 3
+      }
+    ]
+  },
   "r2_buckets": [
     {
       "binding": "BUCKET",
@@ -38,9 +54,52 @@
       "BOOTSTRAP_TOKEN"
     ]
   },
+  "containers": [
+    {
+      "class_name": "RunnerContainer",
+      "image": "./runner/Dockerfile",
+      "instance_type": "standard-1",
+      "max_instances": 4
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "RUNNER",
+        "class_name": "RunnerContainer"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": [
+        "RunnerContainer"
+      ]
+    }
+  ],
+  "dev": {
+    "enable_containers": false
+  },
   "env": {
     "alpha": {
       "name": "git-forge-alpha",
+      "queues": {
+        "producers": [
+          {
+            "binding": "IMPORTS",
+            "queue": "git-forge-alpha-imports"
+          }
+        ],
+        "consumers": [
+          {
+            "queue": "git-forge-alpha-imports",
+            "max_batch_size": 1,
+            "max_batch_timeout": 1,
+            "max_retries": 3
+          }
+        ]
+      },
       "r2_buckets": [
         {
           "binding": "BUCKET",
@@ -64,10 +123,50 @@
         "required": [
           "BOOTSTRAP_TOKEN"
         ]
-      }
+      },
+      "containers": [
+        {
+          "class_name": "RunnerContainer",
+          "image": "./runner/Dockerfile",
+          "instance_type": "standard-1",
+          "max_instances": 4
+        }
+      ],
+      "durable_objects": {
+        "bindings": [
+          {
+            "name": "RUNNER",
+            "class_name": "RunnerContainer"
+          }
+        ]
+      },
+      "migrations": [
+        {
+          "tag": "v1",
+          "new_sqlite_classes": [
+            "RunnerContainer"
+          ]
+        }
+      ]
     },
     "beta": {
       "name": "git-forge-beta",
+      "queues": {
+        "producers": [
+          {
+            "binding": "IMPORTS",
+            "queue": "git-forge-beta-imports"
+          }
+        ],
+        "consumers": [
+          {
+            "queue": "git-forge-beta-imports",
+            "max_batch_size": 1,
+            "max_batch_timeout": 1,
+            "max_retries": 3
+          }
+        ]
+      },
       "r2_buckets": [
         {
           "binding": "BUCKET",
@@ -91,10 +190,50 @@
         "required": [
           "BOOTSTRAP_TOKEN"
         ]
-      }
+      },
+      "containers": [
+        {
+          "class_name": "RunnerContainer",
+          "image": "./runner/Dockerfile",
+          "instance_type": "standard-1",
+          "max_instances": 4
+        }
+      ],
+      "durable_objects": {
+        "bindings": [
+          {
+            "name": "RUNNER",
+            "class_name": "RunnerContainer"
+          }
+        ]
+      },
+      "migrations": [
+        {
+          "tag": "v1",
+          "new_sqlite_classes": [
+            "RunnerContainer"
+          ]
+        }
+      ]
     },
     "gamma": {
       "name": "git-forge-gamma",
+      "queues": {
+        "producers": [
+          {
+            "binding": "IMPORTS",
+            "queue": "git-forge-gamma-imports"
+          }
+        ],
+        "consumers": [
+          {
+            "queue": "git-forge-gamma-imports",
+            "max_batch_size": 1,
+            "max_batch_timeout": 1,
+            "max_retries": 3
+          }
+        ]
+      },
       "r2_buckets": [
         {
           "binding": "BUCKET",
@@ -118,7 +257,31 @@
         "required": [
           "BOOTSTRAP_TOKEN"
         ]
-      }
+      },
+      "containers": [
+        {
+          "class_name": "RunnerContainer",
+          "image": "./runner/Dockerfile",
+          "instance_type": "standard-1",
+          "max_instances": 4
+        }
+      ],
+      "durable_objects": {
+        "bindings": [
+          {
+            "name": "RUNNER",
+            "class_name": "RunnerContainer"
+          }
+        ]
+      },
+      "migrations": [
+        {
+          "tag": "v1",
+          "new_sqlite_classes": [
+            "RunnerContainer"
+          ]
+        }
+      ]
     }
   }
 }

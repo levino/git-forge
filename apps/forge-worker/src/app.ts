@@ -1,5 +1,4 @@
 import {
-  ACTIONS_MIGRATIONS,
   advanceRun,
   type DispatchOptions,
   handleActionsService,
@@ -13,7 +12,6 @@ import {
 import {
   type AccountsStore,
   AccountsError,
-  applyMigrations,
   authenticateRequest,
   checkRepositoryAccess,
   createAccountsStore,
@@ -41,16 +39,21 @@ import {
   type FetchFunction,
   handleContentRequest,
   handleGitRequest,
+  type ImportScheduler,
+  ImportRunningError,
+  isValidImportUrl,
   isValidName,
   listMirrors,
   MirrorExistsError,
   MirrorNotFoundError,
   readAll,
   readMirrorConfig,
+  readImportState,
   readMirrorStatus,
   RepositoryExistsError,
   type RepositoryName,
   SizeLimitError,
+  startImport,
   type Storage,
 } from '@git-forge/core'
 import type { ForgeSettings } from './config.ts'
@@ -68,11 +71,10 @@ export type ForgeOptions = ForgeSettings & {
   readonly fetch?: FetchFunction
   readonly now?: () => Date
   readonly actions?: ActionsOptions
+  readonly scheduleImport?: ImportScheduler
 }
 
 export const ACTIONS_SERVICE_PATH = '/_services/actions'
-
-export const ACTIONS_MIGRATIONS_TABLE = 'actions_migrations'
 
 export type Forge = {
   readonly fetch: (request: Request) => Promise<Response>
@@ -146,6 +148,13 @@ const DECISION_STATUS: Record<Exclude<Decision, 'allow'>, [number, string]> = {
 }
 
 const BRANCH = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$/
+
+export const basicAuthorization = (username: string, password: string): string => {
+  const bytes = new TextEncoder().encode(`${username}:${password}`)
+  let binary = ''
+  for (const byte of bytes) binary += String.fromCharCode(byte)
+  return `Basic ${btoa(binary)}`
+}
 
 type Route = { readonly pattern: RegExp; readonly method: string; readonly handler: (request: Request, params: string[]) => Promise<Response> }
 
@@ -261,8 +270,12 @@ export const createForge = (options: ForgeOptions): Forge => {
   const createRepositoryRoute = async (request: Request): Promise<Response> => {
     const actor = await requireManager(request)
     const body = await readBody(request)
-    const owner = requiredString(body, 'owner')
-    const name = requiredString(body, 'name')
+    const created = await createRepositoryFor(actor, requiredString(body, 'owner'), requiredString(body, 'name'), body)
+    const cloneUrl = new URL(`/${created.owner}/${created.name}.git`, request.url).toString()
+    return json(201, { ...created, cloneUrl })
+  }
+
+  const createRepositoryFor = async (actor: UserPrincipal, owner: string, name: string, body: Body) => {
     const visibility = optionalString(body, 'visibility') ?? 'private'
     const defaultBranch = optionalString(body, 'defaultBranch') ?? 'main'
     if (!isValidName(owner) || !isValidName(name)) throw new HttpError(400, 'owner and name must match [A-Za-z0-9][A-Za-z0-9._-]* and must not end in .git')
@@ -284,8 +297,58 @@ export const createForge = (options: ForgeOptions): Forge => {
       if (await store.findRepository(owner, name)) throw new HttpError(409, `${owner}/${name} already exists`)
       throw error
     }
-    const cloneUrl = new URL(`/${account.login}/${name}.git`, request.url).toString()
-    return json(201, { owner: account.login, name, visibility, defaultBranch, cloneUrl })
+    return { owner: account.login, name, visibility, defaultBranch }
+  }
+
+  const optionalCount = (body: Body, key: string): number | undefined => {
+    const value = body[key]
+    if (value === undefined || value === null) return undefined
+    if (typeof value !== 'number' || !Number.isSafeInteger(value) || value <= 0) throw new HttpError(400, `${key} must be a positive integer`)
+    return value
+  }
+
+  const importRepository = async (request: Request, params: string[]): Promise<Response> => {
+    const repo = repoName(params)
+    if (!options.scheduleImport) throw new HttpError(503, 'imports need a queue (IMPORTS binding)')
+    const body = await readBody(request)
+    const url = requiredString(body, 'url')
+    const token = optionalString(body, 'token')
+    const username = optionalString(body, 'username') ?? 'git'
+    const lfsUrl = optionalString(body, 'lfsUrl')
+    const commitsPerStep = optionalCount(body, 'commitsPerStep')
+    if (body.lfs !== undefined && typeof body.lfs !== 'boolean') throw new HttpError(400, 'lfs must be a boolean')
+    if (!isValidImportUrl(url) || (lfsUrl !== undefined && !isValidImportUrl(lfsUrl))) throw new HttpError(400, 'url and lfsUrl must be http(s) URLs without credentials; pass a token instead')
+    let target: RepositoryName
+    if (await store.findRepository(repo.owner, repo.name)) {
+      const { repository } = await requireRepositoryAdmin(request, repo)
+      target = { owner: repository.owner, name: repository.name }
+    } else {
+      const created = await createRepositoryFor(await requireManager(request), repo.owner, repo.name, body)
+      target = { owner: created.owner, name: created.name }
+    }
+    let state
+    try {
+      state = await startImport(storage, target, {
+        url,
+        ...(body.lfs !== undefined ? { lfs: body.lfs as boolean } : {}),
+        ...(lfsUrl ? { lfsUrl } : {}),
+        ...(commitsPerStep ? { commitsPerStep } : {}),
+      })
+    } catch (error) {
+      if (error instanceof ImportRunningError) throw new HttpError(409, error.message)
+      throw new HttpError(400, (error as Error).message)
+    }
+    await options.scheduleImport({ ...target, ...(token ? { authorization: basicAuthorization(username, token) } : {}) }, 0)
+    const statusUrl = new URL(`/api/repos/${target.owner}/${target.name}/import`, request.url).toString()
+    const cloneUrl = new URL(`/${target.owner}/${target.name}.git`, request.url).toString()
+    return json(202, { ...state, statusUrl, cloneUrl }, { Location: statusUrl })
+  }
+
+  const importStatus = async (request: Request, params: string[]): Promise<Response> => {
+    const { repository } = await requireRepositoryAdmin(request, repoName(params))
+    const state = await readImportState(storage, { owner: repository.owner, name: repository.name })
+    if (!state) throw new HttpError(404, 'no import for this repository')
+    return json(200, state)
   }
 
   const updateRepository = async (request: Request, params: string[]): Promise<Response> => {
@@ -378,15 +441,6 @@ export const createForge = (options: ForgeOptions): Forge => {
     }
   }
 
-  let actionsSchema: Promise<unknown> | undefined
-  const ensureActionsSchema = (): Promise<unknown> => {
-    actionsSchema ??= applyMigrations(db, ACTIONS_MIGRATIONS, now().getTime(), ACTIONS_MIGRATIONS_TABLE).catch((error: unknown) => {
-      actionsSchema = undefined
-      throw error
-    })
-    return actionsSchema
-  }
-
   const dispatchOptions = (request: Request): DispatchOptions => {
     const serverUrl = issuerFor(request)
     return {
@@ -414,7 +468,6 @@ export const createForge = (options: ForgeOptions): Forge => {
     const { actions } = options
     const { pathname } = new URL(request.url)
     if (!actions || !(pathname.startsWith(`${ACTIONS_SERVICE_PATH}/`) || pathname === '/api/v3' || pathname.startsWith('/api/v3/'))) return null
-    await ensureActionsSchema()
     const dispatch = dispatchOptions(request)
     return (
       (await handleActionsService(request, {
@@ -438,7 +491,6 @@ export const createForge = (options: ForgeOptions): Forge => {
       const credential = parseAuthorization(request.headers.get('Authorization'))
       const secret = credential.kind === 'secret' ? credential.secret : null
       if (access === 'read' && secret?.startsWith(TOKEN_PREFIX.github)) {
-        await ensureActionsSchema()
         const grant = await verifyToken(db, secret, 'github', now().getTime())
         if (grant && grant.owner === repo.owner && grant.repo === repo.name) return null
       }
@@ -467,6 +519,8 @@ export const createForge = (options: ForgeOptions): Forge => {
     { method: 'PATCH', pattern: new RegExp(`^${REPO}$`), handler: updateRepository },
     { method: 'PUT', pattern: new RegExp(`^${REPO}/collaborators/${SEGMENT}$`), handler: setCollaborator },
     { method: 'POST', pattern: new RegExp(`^${REPO}/instances$`), handler: grantInstance },
+    { method: 'POST', pattern: new RegExp(`^${REPO}/import$`), handler: importRepository },
+    { method: 'GET', pattern: new RegExp(`^${REPO}/import$`), handler: importStatus },
     { method: 'GET', pattern: new RegExp(`^${REPO}/mirrors$`), handler: listMirrorsRoute },
     { method: 'POST', pattern: new RegExp(`^${REPO}/mirrors$`), handler: addMirror },
     { method: 'POST', pattern: new RegExp(`^${REPO}/mirrors/${SEGMENT}/sync$`), handler: syncMirrorRoute },
@@ -512,7 +566,6 @@ export const createForge = (options: ForgeOptions): Forge => {
       ...(options.actions
         ? {
             onPush: async (repo, outcome) => {
-              await ensureActionsSchema()
               await queueRunsForPush(dispatchOptions(request), { repo, outcome, actor: await actorOf(request) })
             },
           }

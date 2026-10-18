@@ -1,0 +1,22 @@
+{
+  "name": "@git-forge/cli",
+  "version": "0.0.0",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "git-forge": "./src/main.ts"
+  },
+  "scripts": {
+    "start": "node --no-warnings src/main.ts",
+    "build": "bun build --compile --minify src/main.ts --outfile dist/git-forge",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@git-forge/core": "workspace:*",
+    "@types/node": "22.20.5",
+    "typescript": "6.0.3",
+    "vitest": "4.1.11"
+  }
+}

@@ -14,10 +14,8 @@ Streams) and SQLite SQL through the `Database` adapter of
 ## Use
 
 ```ts
-import { applyMigrations } from '@git-forge/accounts'
-import { ACTIONS_MIGRATIONS, advanceRun, handleActionsService, handleGhesApi, queueRunsForPush } from '@git-forge/actions'
+import { advanceRun, handleActionsService, handleGhesApi, queueRunsForPush } from '@git-forge/actions'
 
-await applyMigrations(db, ACTIONS_MIGRATIONS, Date.now(), 'actions_migrations')
 const urls = { serverUrl: 'https://forge.example', serviceUrl: 'https://forge.example/_services/actions' }
 const dispatch = { db, storage, urls, launcher }
 
@@ -26,9 +24,9 @@ handleGhesApi(request, { db, storage, urls, authorize: (request, owner, repo) =>
 handleGitRequest(request, { storage, onPush: (repo, outcome) => queueRunsForPush(dispatch, { repo, outcome, actor }) })
 ```
 
-Both handlers return `null` for paths they do not own. The migrations use
-their own table (`actions_migrations`) so they can share a database with the
-accounts schema.
+Both handlers return `null` for paths they do not own. The tables are part of
+the D1 schema in `packages/accounts/migrations` (`0004_actions.sql`), applied
+by `wrangler d1 migrations apply` (tests: `applyMigrations(db, MIGRATIONS)`).
 
 ## Adapters
 

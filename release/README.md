@@ -11,12 +11,16 @@ writes into `out-dir` (default `release/dist`):
 
 | File | Content |
 |---|---|
-| `git-forge-worker.mjs` | `apps/forge-worker` bundled by `wrangler deploy --dry-run` into one ES module without imports. Instances upload it with `no_bundle: true`, unchanged. |
+| `git-forge-worker.mjs` | `apps/forge-worker` bundled by `wrangler deploy --dry-run --containers-rollout=none` (no container image build) into one ES module without imports. Instances upload it with `no_bundle: true`, unchanged. |
 | `migrations.tar.gz` | `migrations/*.sql` for D1, collected from the packages listed in `migration_dirs`. Built reproducibly (sorted, zero mtime, `gzip -n`). |
 | `SHA256SUMS` | `sha256sum` output for the two files above. |
 
 and prints the SHA-256 of `SHA256SUMS`, which is the `sha256` an instance pins
 in `git-forge.json`.
+
+The release workflow also attaches the single executables of the `git-forge`
+CLI (`packages/cli/build-executables.sh`, built with Bun) and their checksums
+in a separate `CLI-SHA256SUMS`.
 
 `.github/workflows/release.yml` runs the script on every `v*` tag, on a push to
 `main` that changes `release/VERSION` (it then creates the tag `v<VERSION>` on

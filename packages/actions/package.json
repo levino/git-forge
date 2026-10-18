@@ -6,13 +6,11 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
-    "./migrations/*": "./migrations/*",
     "./test/*": "./test/*"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "vitest run",
-    "migrations:bundle": "node --experimental-strip-types scripts/bundle-migrations.ts"
+    "test": "vitest run"
   },
   "dependencies": {
     "@git-forge/accounts": "workspace:*",

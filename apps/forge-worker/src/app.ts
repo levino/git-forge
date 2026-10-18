@@ -105,6 +105,7 @@ import {
   createRepository,
   deepCheckMirror,
   detachMirror,
+  type CopyBudget,
   type DigestFactory,
   type EmailSender,
   type FetchFunction,
@@ -114,6 +115,7 @@ import {
   type JobQueue,
   importLfsObject,
   type ImportLfsJob,
+  javascriptDigests,
   type ImportScheduler,
   type ImportState,
   ImportRunningError,
@@ -202,6 +204,7 @@ import {
   runJob,
   syncAndNotify,
 } from './mirror-federation.ts'
+import { type BackupJob, type BackupStatus, backupStatus, backupStep, startBackup, verifyBackup } from './backup.ts'
 import { MirrorAuthError, type MirrorContext, runMirrorSync, type ScheduledMirrorRun, syncDueMirrors } from './mirrors.ts'
 import { receiveGitHubWebhook, setUpGitHubWebhook } from './github-mirrors.ts'
 import { createMirrorSecrets, MirrorSecretsUnavailableError } from './mirror-secrets.ts'
@@ -234,6 +237,8 @@ export type ForgeOptions = ForgeSettings & {
   readonly clientAddress?: (request: Request) => string | null
   readonly artifacts?: ArtifactSource
   readonly lfsPublisher?: LfsPublisher
+  readonly backup?: Storage
+  readonly backupBudget?: CopyBudget
 }
 
 export type LfsPublishJob = { readonly kind: 'lfs-publish'; readonly owner: string; readonly name: string; readonly oids: readonly string[] | null }
@@ -253,7 +258,7 @@ export type GitHubMirrorJob = {
   readonly sealedToken?: SealedSecret
 }
 
-export type AppJob = ForgeJob | NotificationJob | PagesJob | LfsPublishJob | ImportLfsJob | GitHubMirrorJob
+export type AppJob = ForgeJob | NotificationJob | PagesJob | LfsPublishJob | ImportLfsJob | GitHubMirrorJob | BackupJob
 
 export const LFS_PUBLISH_BATCH = 100
 
@@ -291,8 +296,15 @@ export type ForgeServices = {
 
 export type MirrorOverviewEntry = { readonly repository: RepositoryName; readonly config: MirrorConfig; readonly status: MirrorStatus | null }
 
+export type BackupOperations = {
+  readonly status: (principal: Principal) => Promise<BackupStatus>
+  readonly run: (principal: Principal) => Promise<BackupStatus>
+  readonly verify: (principal: Principal, sample: number) => Promise<{ readonly checked: number; readonly failures: string[] }>
+}
+
 export type InstanceOperations = InstanceAdministration & {
   readonly mirrors: (principal: Principal) => Promise<MirrorOverviewEntry[]>
+  readonly backup: BackupOperations
 }
 
 export type InboxOperations = {
@@ -863,6 +875,36 @@ export const createForge = (options: ForgeOptions): Forge => {
       }
       return overview
     },
+    backup: {
+      status: async (principal) => {
+        await instanceAdministration.view(principal)
+        return backupStatus(db, options.backup !== undefined, now())
+      },
+      run: async (principal) => {
+        await instanceAdministration.view(principal)
+        if (!options.backup) throw new HttpError(409, 'no backup target is configured (BACKUP bucket binding or BACKUP_STORAGE)')
+        await startBackup(db, now())
+        await scheduleBackup()
+        return backupStatus(db, true, now())
+      },
+      verify: async (principal, sample) => {
+        await instanceAdministration.view(principal)
+        if (!options.backup) throw new HttpError(409, 'no backup target is configured (BACKUP bucket binding or BACKUP_STORAGE)')
+        return verifyBackup(db, options.backup, options.digests ?? javascriptDigests, sample)
+      },
+    },
+  }
+
+  const backupContext = (target: Storage) => ({ db, source: storage, target, digests: options.digests ?? javascriptDigests, now, ...(options.backupBudget ? { budget: options.backupBudget } : {}) })
+
+  const scheduleBackup = async (): Promise<void> => {
+    if (!options.backup) return
+    if (options.jobs) return options.jobs.enqueue({ kind: 'backup' })
+    while (await backupStep(backupContext(options.backup))) {}
+  }
+
+  const runBackupJob = async (): Promise<void> => {
+    if (options.backup && (await backupStep(backupContext(options.backup)))) await scheduleBackup()
   }
 
   const trustInstance = async (request: Request): Promise<Response> => {
@@ -886,6 +928,18 @@ export const createForge = (options: ForgeOptions): Forge => {
   }
 
   const adminMirrorsRoute = async (request: Request): Promise<Response> => json(200, await instance.mirrors(await principalOf(request)))
+
+  const adminBackupRoute = async (request: Request): Promise<Response> => json(200, await instance.backup.status(await principalOf(request)))
+
+  const runBackupRoute = async (request: Request): Promise<Response> => json(202, await instance.backup.run(await principalOf(request)))
+
+  const verifyBackupRoute = async (request: Request): Promise<Response> => {
+    const principal = await principalOf(request)
+    const sample = (await readBody(request)).sample ?? 20
+    if (typeof sample !== 'number' || !Number.isSafeInteger(sample) || sample < 1 || sample > 1000) throw new HttpError(400, 'sample must be an integer between 1 and 1000')
+    const result = await instance.backup.verify(principal, sample)
+    return json(result.failures.length === 0 ? 200 : 409, result)
+  }
 
   const organizations = createOrganizationOperations(store)
 
@@ -1722,6 +1776,9 @@ export const createForge = (options: ForgeOptions): Forge => {
     { method: 'PUT', pattern: new RegExp(`^/api/admin/admins/${SEGMENT}$`), handler: setInstanceAdmin(true) },
     { method: 'DELETE', pattern: new RegExp(`^/api/admin/admins/${SEGMENT}$`), handler: setInstanceAdmin(false) },
     { method: 'GET', pattern: /^\/api\/admin\/mirrors$/, handler: adminMirrorsRoute },
+    { method: 'GET', pattern: /^\/api\/admin\/backup$/, handler: adminBackupRoute },
+    { method: 'POST', pattern: /^\/api\/admin\/backup$/, handler: runBackupRoute },
+    { method: 'POST', pattern: /^\/api\/admin\/backup\/verify$/, handler: verifyBackupRoute },
     { method: 'POST', pattern: /^\/api\/admin\/invites$/, handler: createInvite },
     { method: 'GET', pattern: /^\/api\/user$/, handler: currentUser },
     { method: 'POST', pattern: /^\/api\/orgs$/, handler: createOrganizationRoute },
@@ -1944,6 +2001,12 @@ export const createForge = (options: ForgeOptions): Forge => {
       console.log(JSON.stringify({ event: 'notification-sweep', ...sweep }))
       const purged = await logins.purgeExpired().catch((error: unknown) => ({ error: String(error) }))
       console.log(JSON.stringify({ event: 'login-purge', ...purged }))
+      if (options.backup) {
+        const backup = await startBackup(db, at)
+          .then(async (state) => (await scheduleBackup(), { run: state.run?.id }))
+          .catch((error: unknown) => ({ error: String(error) }))
+        console.log(JSON.stringify({ event: 'backup-scheduled', ...backup }))
+      }
       return federation ? enqueueDueMirrors(federation, at, options.mirrorIntervalMinutes) : syncDueMirrors(mirrorContext(options.publicUrl), at, options.mirrorIntervalMinutes)
     },
     actionsTick: async () => {
@@ -1963,6 +2026,7 @@ export const createForge = (options: ForgeOptions): Forge => {
       if (isNotificationJob(job)) return notifications.runJob(job)
       if (isPagesJob(job)) return pages.runJob(job)
       if (job.kind === 'lfs-publish') return publishLfs(job)
+      if (job.kind === 'backup') return runBackupJob()
       if (job.kind === 'mirror-github') return adoptGitHubRepository(job)
       if (job.kind === 'import-lfs') return void (await importLfsObject(job, { storage, ...(options.fetch ? { fetch: options.fetch } : {}), ...(options.digests ? { digests: options.digests } : {}) }))
       if (!federation) throw new Error('jobs need PUBLIC_URL, INSTANCE_KEY and a job queue')

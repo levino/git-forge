@@ -2,7 +2,7 @@ import { generateSigningKey } from '@git-forge/accounts'
 import { serve } from '@git-forge/node'
 import { ACTIONS_CRON, ConfigurationError, generateEs256Key, importEs256Key } from 'forge-worker/config'
 import { parseCron } from './cron.ts'
-import { createInstance, jsonLog, type Log, migrate } from './instance.ts'
+import { createInstance, jsonLog, type Log, migrate, restore, restoreSqlFrom, verify } from './instance.ts'
 import { startScheduler } from './scheduler.ts'
 
 declare const GIT_FORGE_VERSION: string | undefined
@@ -16,6 +16,11 @@ commands:
   migrate        apply pending database migrations and exit
   instance-key   print a new Ed25519 instance key (private JWK) for INSTANCE_KEY
   oidc-key       print a new P-256 key (private JWK) for ACTIONS_OIDC_KEY
+  restore [id]   restore the latest (or the given) backup from BACKUP_STORAGE into an empty DATABASE_PATH and STORAGE
+  restore-sql [id]
+                 print the database dump of a backup as SQL (for wrangler d1 execute)
+  backup-verify [n]
+                 re-hash n (default 20) random backed-up objects in BACKUP_STORAGE
   version        print the version
 
 Configuration comes from environment variables; see the README.`
@@ -76,7 +81,7 @@ const runServe = async (env: Env, log: Log): Promise<number> => {
 
 export const main = async (args: readonly string[], env: Env = process.env, log: Log = jsonLog): Promise<number> => {
   const [command = 'serve', ...rest] = args
-  if (rest.length > 0 || command === 'help' || command === '-h' || command === '--help') {
+  if (rest.length > (['restore', 'restore-sql', 'backup-verify'].includes(command) ? 1 : 0) || command === 'help' || command === '-h' || command === '--help') {
     process.stdout.write(`${USAGE}\n`)
     return command === 'help' || command === '-h' || command === '--help' ? 0 : 1
   }
@@ -88,6 +93,17 @@ export const main = async (args: readonly string[], env: Env = process.env, log:
         const applied = await migrate(env)
         log({ event: 'migrated', applied })
         return 0
+      }
+      case 'restore':
+        log({ event: 'restored', ...(await restore(env, rest[0])) })
+        return 0
+      case 'restore-sql':
+        for await (const chunk of await restoreSqlFrom(env, rest[0])) process.stdout.write(chunk)
+        return 0
+      case 'backup-verify': {
+        const result = await verify(env, Number(rest[0] ?? 20))
+        log({ event: 'backup-verified', ...result })
+        return result.failures.length === 0 ? 0 : 1
       }
       case 'instance-key': {
         const { key, privateJwk } = await generateSigningKey()

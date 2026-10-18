@@ -8,6 +8,7 @@
     "./app": "./src/app.ts",
     "./config": "./src/config.ts",
     "./mirror-federation": "./src/mirror-federation.ts",
+    "./backup": "./src/backup.ts",
     "./test/*": "./test/*"
   },
   "scripts": {

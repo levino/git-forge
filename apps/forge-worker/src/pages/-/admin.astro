@@ -1,8 +1,10 @@
 ---
 import { InstanceAdministrationError, type InstanceView } from '@git-forge/accounts'
+import BackupPanel from '../../components/BackupPanel.astro'
 import NotFound from '../../components/NotFound.astro'
 import Layout from '../../layouts/Layout.astro'
 import type { MirrorOverviewEntry } from '../../app.ts'
+import type { BackupStatus } from '../../backup.ts'
 import { type AdminOutcome, handleAdminPost, mirrorHealth } from '../../ui/admin.ts'
 import { relativeTime } from '../../ui/format.ts'
 import { repoUrl } from '../../ui/repository.ts'
@@ -16,9 +18,11 @@ if (Astro.request.method === 'POST') {
 }
 let view: InstanceView | null = null
 let mirrors: MirrorOverviewEntry[] = []
+let backup: BackupStatus | null = null
 try {
   view = await forge.instance.view(session.principal)
   mirrors = await forge.instance.mirrors(session.principal)
+  backup = await forge.instance.backup.status(session.principal)
 } catch (error) {
   if (!(error instanceof InstanceAdministrationError)) throw error
 }
@@ -116,6 +120,7 @@ const ago = (iso: string | undefined) => (iso ? relativeTime(Math.floor(Date.par
           </div>
         )}
       </section>
+      {backup && <BackupPanel status={backup} csrf={session.csrf} />}
     </Layout>
   )
 }

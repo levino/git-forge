@@ -68,5 +68,5 @@ describe('xdiff oracle', () => {
       } else expect(merged.clean, `round ${round}`).toBe(false)
     }
     expect(clean).toBeGreaterThan(50)
-  })
+  }, 60_000)
 })

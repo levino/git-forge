@@ -31,6 +31,7 @@ export type ForgeVars = {
   readonly ACTIONS_GITHUB_FALLBACK?: string
   readonly MIRROR_DEEP_CHECK_DAYS?: string
   readonly MIRROR_UNIT_BYTES?: string
+  readonly UI?: string
   readonly ALLOW_INSECURE_WEBHOOKS?: string
   readonly EMAIL_PROVIDER?: string
   readonly EMAIL_FROM?: string
@@ -262,3 +263,5 @@ export const loadSecretsKey = async (settings: ActionsSettings | undefined): Pro
     throw new ConfigurationError(`ACTIONS_SECRETS_KEY: ${(error as Error).message}`)
   }
 }
+
+export const uiEnabled = (vars: ForgeVars): boolean => vars.UI?.trim().toLowerCase() !== 'false'

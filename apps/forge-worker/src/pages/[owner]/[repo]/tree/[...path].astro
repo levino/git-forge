@@ -1,0 +1,23 @@
+---
+import NotFound from '../../../../components/NotFound.astro'
+import RepoHeader from '../../../../components/RepoHeader.astro'
+import TreeBrowser from '../../../../components/TreeBrowser.astro'
+import Layout from '../../../../layouts/Layout.astro'
+import { browse } from '../../../../ui/browse.ts'
+import { openRepository } from '../../../../ui/repository.ts'
+
+const repo = await openRepository(Astro.locals.forge, Astro.locals.principal, Astro.params.owner!, Astro.params.repo!)
+const segments = (Astro.params.path ?? '').split('/').filter((segment) => segment !== '')
+const view = repo.kind === 'ok' ? await browse(repo, segments, 'tree') : null
+---
+
+{
+  repo.kind !== 'ok' || !view || view.kind === 'not-found' || view.kind === 'blob' ? (
+    <NotFound />
+  ) : (
+    <Layout title={`${view.kind === 'tree' && view.target.path.length > 0 ? `${view.target.path.join('/')} · ` : ''}${repo.name.owner}/${repo.name.name}`}>
+      <RepoHeader repo={repo} tab="code" />
+      <TreeBrowser repo={repo} view={view} />
+    </Layout>
+  )
+}

@@ -1,0 +1,22 @@
+---
+import NotFound from '../../../components/NotFound.astro'
+import RefTable from '../../../components/RefTable.astro'
+import RepoHeader from '../../../components/RepoHeader.astro'
+import Layout from '../../../layouts/Layout.astro'
+import { refsWithCommits } from '../../../ui/refs.ts'
+import { openRepository } from '../../../ui/repository.ts'
+
+const repo = await openRepository(Astro.locals.forge, Astro.locals.principal, Astro.params.owner!, Astro.params.repo!)
+const refs = repo.kind === 'ok' ? await refsWithCommits(repo, repo.tags) : []
+---
+
+{
+  repo.kind !== 'ok' ? (
+    <NotFound />
+  ) : (
+    <Layout title={`Tags · ${repo.name.owner}/${repo.name.name}`}>
+      <RepoHeader repo={repo} tab="tags" />
+      <RefTable repo={repo} refs={refs} label="Tags" />
+    </Layout>
+  )
+}

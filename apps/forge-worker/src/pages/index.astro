@@ -1,0 +1,48 @@
+---
+import RepoList from '../components/RepoList.astro'
+import Layout from '../layouts/Layout.astro'
+import { visibleRepositories } from '../ui/listing.ts'
+
+const { forge, principal } = Astro.locals
+const login = principal.kind === 'user' ? principal.login : null
+const repositories = await visibleRepositories(forge, principal, login ?? undefined)
+const explore = login ? [] : repositories.slice(0, 20)
+---
+
+<Layout title={Astro.url.host}>
+  {
+    login ? (
+      <section aria-labelledby="your-repositories">
+        <h1 id="your-repositories" class="text-2xl font-semibold mb-4">
+          Your repositories
+        </h1>
+        <RepoList repositories={repositories} showOwner={false} />
+      </section>
+    ) : (
+      <>
+        <section class="hero bg-base-200 rounded-box mb-8">
+          <div class="hero-content text-center py-12">
+            <div class="max-w-xl">
+              <h1 class="text-3xl font-bold">{Astro.url.host}</h1>
+              <p class="py-4">Git repositories with Git LFS, served by git-forge.</p>
+              <div class="flex gap-2 justify-center">
+                <a href="/explore" class="btn btn-primary">
+                  Explore repositories
+                </a>
+                <a href="/login" class="btn">
+                  Sign in
+                </a>
+              </div>
+            </div>
+          </div>
+        </section>
+        <section aria-labelledby="recent">
+          <h2 id="recent" class="text-xl font-semibold mb-4">
+            Public repositories
+          </h2>
+          <RepoList repositories={explore} />
+        </section>
+      </>
+    )
+  }
+</Layout>

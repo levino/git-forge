@@ -1,0 +1,49 @@
+---
+import type { CommitInfo, RepositoryName } from '@git-forge/core'
+import { isoTime, relativeTime, shortId } from '../ui/format.ts'
+import { commitUrl, treeUrl } from '../ui/repository.ts'
+
+type Props = { repo: RepositoryName; commits: readonly CommitInfo[] }
+
+const { repo, commits } = Astro.props
+const now = Math.floor(Date.now() / 1000)
+const day = (commit: CommitInfo) => isoTime(commit.committer.timestamp).slice(0, 10)
+const groups: { day: string; commits: CommitInfo[] }[] = []
+for (const commit of commits) {
+  const last = groups[groups.length - 1]
+  if (last && last.day === day(commit)) last.commits.push(commit)
+  else groups.push({ day: day(commit), commits: [commit] })
+}
+---
+
+<div class="flex flex-col gap-6">
+  {
+    groups.map((group) => (
+      <section aria-label={`Commits on ${group.day}`}>
+        <h2 class="text-sm text-base-content/70 mb-2">Commits on {group.day}</h2>
+        <ul class="border border-base-300 rounded-box divide-y divide-base-300">
+          {group.commits.map((commit) => (
+            <li class="flex flex-wrap items-center gap-x-4 gap-y-1 px-4 py-3">
+              <div class="min-w-0 flex-1">
+                <a href={commitUrl(repo, commit.id)} class="font-semibold link link-hover break-words">
+                  {commit.summary || '(no message)'}
+                </a>
+                <p class="text-sm text-base-content/70">
+                  {commit.author.name} committed <time datetime={isoTime(commit.committer.timestamp)}>{relativeTime(commit.committer.timestamp, now)}</time>
+                </p>
+              </div>
+              <div class="join">
+                <a href={commitUrl(repo, commit.id)} class="btn btn-sm join-item font-mono">
+                  {shortId(commit.id)}
+                </a>
+                <a href={treeUrl(repo, commit.id)} class="btn btn-sm join-item" aria-label={`Browse files at ${shortId(commit.id)}`}>
+                  Browse
+                </a>
+              </div>
+            </li>
+          ))}
+        </ul>
+      </section>
+    ))
+  }
+</div>

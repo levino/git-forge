@@ -1,19 +1,27 @@
 # forge-worker
 
-The Cloudflare Worker deployment of git-forge. It serves Git over HTTPS
-(smart HTTP protocol v2 for fetch, `receive-pack` for push, dumb HTTP for
+The Cloudflare Worker deployment of git-forge. It serves the web UI, Git over
+HTTPS (smart HTTP protocol v2 for fetch, `receive-pack` for push, dumb HTTP for
 protocol v0 clients) and Git LFS straight from an R2 bucket, keeps accounts,
 tokens and federation trust in D1, and keeps mirrors current through signed
 push notifications, a job queue and a daily Cron Trigger as safety net.
 
 `src/app.ts` is platform-neutral: `createForge({ storage, db, ... })` takes a
-core `Storage` and an accounts `Database` and returns `{ fetch, scheduled, runJob }`.
-`src/index.ts` only wires the Cloudflare bindings (`R2Storage`, `d1Database`,
-`QueueJobs` and the queue consumer)
-and parses the vars (`src/config.ts`). The same app runs in Node for the unit
-tests and the benchmark, and as a deployment of its own without Cloudflare in
-[apps/forge-node](../forge-node) (which imports `forge-worker/app` and
-`forge-worker/config`).
+core `Storage` and an accounts `Database` and returns `{ fetch, services,
+scheduled, runJob }`. `src/cloudflare.ts` wires the Cloudflare bindings
+(`R2Storage`, `d1Database`, `QueueJobs` and the queue consumer) and parses the
+vars (`src/config.ts`). The same app runs in Node for the unit tests and the
+benchmark, and as a deployment of its own without Cloudflare and without the
+web UI in [apps/forge-node](../forge-node) (which imports `forge-worker/app`
+and `forge-worker/config`).
+
+The Worker entry is `src/worker.ts`, an Astro SSR app (`@astrojs/cloudflare`,
+`astro.config.ts`): the middleware (`src/middleware.ts`) hands Git, LFS, media,
+raw, API, Actions and well-known paths to `createForge` and renders every
+other path as a page from `src/pages`. With `UI=false` the entry skips Astro
+and serves only the forge. Pages use the view models in `src/ui` on top of the
+read functions of `@git-forge/core` and check access with the same
+`repositoryAccess` as the API (`docs/design.md` §18).
 
 ## Configuration
 
@@ -41,6 +49,7 @@ tests and the benchmark, and as a deployment of its own without Cloudflare in
 | `ACTIONS_REPOSITORIES` | var, optional | Where `uses: owner/repo@ref` is looked up on this forge, as JSON, e.g. `{"actions/*": "mirrors/*"}`. Without a mapping, `actions/checkout` is looked up as the repository `actions/checkout`. |
 | `ACTIONS_GITHUB_FALLBACK` | var, optional | `true` (or an API base URL): actions that have no repository on this forge are downloaded from `api.github.com` tarballs. Default: off, unresolved actions fail the job. |
 | `ACTIONS_INSTANCE_ID` | var, optional | Stable GUID reported by the Actions location service. |
+| `UI` | var | `false` turns the web UI off: every request goes to the forge and `/` answers the health JSON. For headless instances such as backup mirrors. Default: on. |
 | `ALLOW_INSECURE_WEBHOOKS` | var | `true` allows webhook URLs over plain HTTP and to local or private hosts. Only for local tests. |
 | `EMAIL_PROVIDER` | var | `none` (default, no emails), `console` (logs each email as a JSON line; the default of the test environments) or `ses` (Amazon SES v2, `@git-forge/ses`). |
 | `EMAIL_FROM` | var | Sender address, e.g. `Forge <forge@example.org>`; required with a provider. |
@@ -121,7 +130,7 @@ organization owner; releases need read or write access):
   `/{owner}/{name}/releases/download/{tag}/{name}` (`packages/releases/README.md`).
 
 Pushes, mirror alarms, CI completions and releases are emitted as events
-(`docs/design.md` §16); links in payloads and emails use `PUBLIC_URL`, or the
+(`docs/design.md` §18); links in payloads and emails use `PUBLIC_URL`, or the
 request origin when it is unset.
 
 Branch protection rules use the GitHub-style API of `@git-forge/accounts`
@@ -145,8 +154,9 @@ notification events (webhooks, inbox, digests). Browser sessions work on
 
 Routes of `createLoginHandler` (`@git-forge/accounts`), mounted by
 `createForge` before the JSON API. Pages are minimal server-rendered HTML; the
-web UI replaces them through `createForge({ renderLoginPage })` and calls the
-same core functions.
+web UI (`src/pages/-/login.astro`) replaces them through `createForge({
+renderLoginPage })` and calls the same core functions. Signed-in users manage
+their tokens and passkeys at `/settings`.
 
 | Route | Purpose |
 |---|---|
@@ -251,7 +261,7 @@ pnpm install
 cd apps/forge-worker
 npx wrangler login
 openssl rand -base64 32 | npx wrangler secret put BOOTSTRAP_TOKEN
-npx wrangler deploy
+pnpm run deploy
 npx wrangler d1 migrations apply DB --remote
 ```
 
@@ -293,7 +303,7 @@ its public URL:
 
 ```sh
 pnpm --filter forge-worker instance-key | npx wrangler secret put INSTANCE_KEY
-npx wrangler deploy --var PUBLIC_URL:https://git-forge.<account>.workers.dev
+pnpm run deploy --var PUBLIC_URL:https://git-forge.<account>.workers.dev
 ```
 
 (or set `PUBLIC_URL` under `vars`). On the upstream an instance admin trusts
@@ -375,7 +385,7 @@ secret (`secrets.required`) are declared as well. An environment goes from
 nothing to running with:
 
 ```sh
-npx wrangler deploy --env alpha
+pnpm run deploy --env alpha
 npx wrangler d1 migrations apply DB --env alpha --remote
 npx wrangler secret put BOOTSTRAP_TOKEN --env alpha
 ```
@@ -385,7 +395,8 @@ environment also needs `INSTANCE_KEY` (secret) and `PUBLIC_URL` (var). Locally:
 
 ```sh
 npx wrangler d1 migrations apply DB --env beta --local
-npx wrangler dev --env beta --port 8788
+pnpm run build
+npx wrangler dev dist/server/entry.mjs --config wrangler.jsonc --env beta --port 8788
 ```
 
 ## Large pushes
@@ -419,15 +430,49 @@ npx wrangler d1 migrations apply DB --local
 pnpm --filter forge-worker dev
 ```
 
-`wrangler dev` runs the Worker in workerd with a local R2 bucket and D1
-database (Miniflare), persisted under `.wrangler/`. `.dev.vars` is gitignored.
+`astro dev` runs the Worker in workerd through the Cloudflare Vite plugin,
+with a local R2 bucket and D1 database (Miniflare) persisted under
+`.wrangler/`, and reloads pages on change. `pnpm --filter forge-worker
+preview` builds the bundle and runs it with `wrangler dev` exactly as it is
+deployed. `.dev.vars` is gitignored.
+
+Deploying from a checkout is `pnpm --filter forge-worker run deploy` (`astro
+build`, then `wrangler deploy dist/server/entry.mjs`); environments take
+`-- --env alpha`. Because the entry is built by Astro, plain `wrangler dev`
+and `wrangler deploy` need the built `dist/server/entry.mjs` as script
+argument.
 
 ## Tests
 
-- `pnpm --filter forge-worker test` runs the unit tests and then the
-  end-to-end suites (about 25 seconds, part of the root `pnpm test`). Each
+- `pnpm --filter forge-worker test` runs the unit tests, the page rendering
+  tests, the end-to-end suites and the browser tests (about two minutes, part
+  of the root `pnpm test`). The end-to-end and browser suites build the bundle
+  once (`astro build`) and run `wrangler dev` on `dist/server/entry.mjs`. Each
   `wrangler dev` start applies the D1 migrations with
   `wrangler d1 migrations apply --local` first, as a deployment does.
+- `test/unit/ui.test.ts`: which paths go to the forge and which to the UI,
+  the cross-site write check, Markdown sanitizing and link rewriting,
+  highlighting and formatting.
+- `test/pages` (`vitest.pages.config.ts`): pages rendered with Astro's
+  container API against a Node forge with a repository pushed by the real
+  `git`: file tree, README, private repositories as 404, empty repositories,
+  branches with slashes and tags, highlighted and escaped file contents,
+  Markdown files, image previews, commit lists with path history, commit
+  diffs, explore, home and profiles.
+- `test/browser` (Playwright, `playwright.config.ts`, desktop and mobile
+  Chromium): against `wrangler dev` with a repository pushed by `git` and
+  `git-lfs`: navigation from the home page to a file and its history and
+  diff, the LFS image preview, relative README links, 404 for private
+  repositories, light and dark colour schemes and the cached stylesheet. CI
+  installs Chromium with `playwright install`; elsewhere the version of
+  `@playwright/test` must match the installed browsers.
+- `test/browser/login.spec.ts`: an invited user signs up with a passkey
+  (Chromium's virtual authenticator), creates and revokes a token at
+  `/settings`, signs out and signs in with the passkey again; a cross-site
+  settings form is refused.
+- `test/e2e/headless.e2e.test.ts`: the same bundle with `UI=false` serves only
+  the forge; with the UI, pages and the API answer and cross-site form posts
+  are refused.
 - Unit tests (`test/unit`) run the app in Node with `MemoryStorage` and
   `node:sqlite`: settings, media/raw authorization, branch protection API, bootstrap, admin API, PAT authorization, private
   defaults, visibility and collaborators, the LFS size limit, the import

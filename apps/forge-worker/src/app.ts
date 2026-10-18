@@ -20,7 +20,9 @@ import {
   workflowJobPayload,
 } from '@git-forge/actions'
 import {
+  type Access,
   type AccountsStore,
+  atLeast,
   AccountsError,
   authenticateRequest,
   checkRepositoryAccess,
@@ -48,7 +50,13 @@ import {
   parseAuthorization,
   type Principal,
   type RepositorySubject,
+  type Role,
   type UserPrincipal,
+  readActiveSession,
+  isUnsafeMethod,
+  type CreatedToken,
+  type CredentialSummary,
+  type TokenScope,
 } from '@git-forge/accounts'
 import {
   type Authorize,
@@ -117,8 +125,9 @@ import {
   SYSTEM_ACTOR,
   workflowJobEvent,
   workflowRunEvent,
+  type ThreadRow,
 } from '@git-forge/notifications'
-import { handleReleasesRequest } from '@git-forge/releases'
+import { type AssetRow, createReleaseStore, handleReleasesRequest, type ReleaseRow } from '@git-forge/releases'
 import { activityEvent } from './collaboration-events.ts'
 import type { ForgeSettings } from './config.ts'
 import {
@@ -161,8 +170,53 @@ export type WaitUntil = (promise: Promise<unknown>) => void
 
 export const ACTIONS_SERVICE_PATH = '/_services/actions'
 
+export type ForgeServices = {
+  readonly storage: Storage
+  readonly store: AccountsStore
+  readonly authenticate: (request: Request) => Promise<Principal | null>
+  readonly issuer: (request: Request) => string
+  readonly repositoryAccess: (principal: Principal, repo: RepositoryName, required: Role) => Promise<RepositoryAccess>
+  readonly isInstanceAdmin: (principal: Principal) => Promise<boolean>
+  readonly session: (request: Request) => Promise<UiSession | null>
+  readonly verifySessionWrite: (request: Request) => Promise<UiSession | null>
+  readonly loginOptions: { readonly oidcName: string | null }
+  readonly account: AccountOperations
+  readonly inbox: InboxOperations
+  readonly releases: ReleaseReads
+}
+
+export type InboxOperations = {
+  readonly threads: (user: UserPrincipal, filter: { readonly all: boolean; readonly limit: number; readonly offset: number }) => Promise<ThreadRow[]>
+  readonly markRead: (user: UserPrincipal, id: number) => Promise<boolean>
+  readonly markDone: (user: UserPrincipal, id: number) => Promise<boolean>
+  readonly markAllRead: (user: UserPrincipal) => Promise<number>
+}
+
+export type ReleaseReads = {
+  readonly list: (repository: RepositorySubject, includeDrafts: boolean, limit: number, offset: number) => Promise<ReleaseRow[]>
+  readonly byTag: (repository: RepositorySubject, tag: string, includeDrafts: boolean) => Promise<ReleaseRow | null>
+  readonly assets: (releaseIds: readonly number[]) => Promise<AssetRow[]>
+}
+
+export type UiSession = { readonly principal: UserPrincipal; readonly csrf: string }
+
+export type AccountOperations = {
+  readonly listTokens: (user: UserPrincipal) => ReturnType<AccountsStore['listTokens']>
+  readonly createToken: (user: UserPrincipal, input: { readonly name: string; readonly scopes: readonly TokenScope[]; readonly expiresAt: number | null }) => Promise<CreatedToken>
+  readonly revokeToken: (user: UserPrincipal, tokenId: string) => Promise<boolean>
+  readonly listPasskeys: (user: UserPrincipal) => Promise<CredentialSummary[]>
+  readonly revokePasskey: (user: UserPrincipal, id: string) => Promise<boolean>
+}
+
+export type RepositoryAccess = {
+  readonly decision: Decision
+  readonly access: Access
+  readonly repository: RepositorySubject | null
+}
+
 export type Forge = {
   readonly fetch: (request: Request, waitUntil?: WaitUntil) => Promise<Response>
+  readonly services: ForgeServices
   readonly scheduled: (at?: Date) => Promise<ScheduledMirrorRun[]>
   readonly actionsTick: () => Promise<ActionsTick | null>
   readonly runJob: (job: AppJob) => Promise<void>
@@ -316,16 +370,28 @@ export const createForge = (options: ForgeOptions): Forge => {
     return principal
   }
 
+  const repositoryAccess = async (principal: Principal, repo: RepositoryName, required: Role): Promise<RepositoryAccess> => {
+    const check = await checkRepositoryAccess(store, principal, repo, required)
+    if (!check.repository) return { decision: check.decision === 'allow' ? 'not-found' : check.decision, access: 'none', repository: null }
+    if (principal.kind === 'user' && (await store.isInstanceAdmin(principal.id))) {
+      const ceiling = principal.limits?.ceiling ?? 'admin'
+      const scoped = principal.limits?.repositoryIds ?? null
+      if (scoped === null || scoped.includes(check.repository.id)) {
+        return { decision: atLeast(ceiling, required) ? 'allow' : 'forbidden', access: ceiling, repository: check.repository }
+      }
+    }
+    return { decision: check.decision, access: check.access, repository: check.repository }
+  }
+
   const requireRepositoryAdmin = async (request: Request, repo: RepositoryName): Promise<{ principal: UserPrincipal; repository: RepositorySubject }> => {
     const principal = await requireManager(request)
-    const check = await checkRepositoryAccess(store, principal, repo, 'admin')
-    if (check.repository && (check.decision === 'allow' || (await store.isInstanceAdmin(principal.id)))) {
-      return { principal, repository: check.repository }
-    }
+    const check = await repositoryAccess(principal, repo, 'admin')
+    if (check.repository && check.decision === 'allow') return { principal, repository: check.repository }
     const [status, message] = DECISION_STATUS[check.decision === 'allow' ? 'not-found' : check.decision]
     throw new HttpError(status, message)
   }
 
+  const releaseStore = createReleaseStore(db, () => now().getTime())
   const notifications = createNotifications({
     db,
     directory: store,
@@ -775,6 +841,14 @@ export const createForge = (options: ForgeOptions): Forge => {
     }
   }
 
+  const withSessionReads = (authorize: Authorize): Authorize => async (request, repo, access, ...rest) => {
+    if (access === 'read' && !request.headers.has('Authorization') && !isUnsafeMethod(request.method)) {
+      const active = await readActiveSession(request, loginOptions(request))
+      if (active && (await repositoryAccess(sessionUserPrincipal(active.session), repo, 'read')).decision === 'allow') return null
+    }
+    return authorize(request, repo, access, ...rest)
+  }
+
   const emitRunEvents = async (serverUrl: string, job: JobRow): Promise<void> => {
     const run = await getRun(db, job.run_id)
     if (!run) return
@@ -975,7 +1049,7 @@ export const createForge = (options: ForgeOptions): Forge => {
     }
     const access = createGitAccess(authentication)
     const authorize = withJobTokens(access.authorize)
-    const content = await handleContentRequest(request, { storage, authorize })
+    const content = await handleContentRequest(request, { storage, authorize: withSessionReads(authorize) })
     if (content) return content
     const git = await handleGitRequest(request, {
       storage,
@@ -996,6 +1070,54 @@ export const createForge = (options: ForgeOptions): Forge => {
 
   return {
     fetch: handle,
+    services: {
+      storage,
+      store,
+      authenticate: async (request) => {
+        if (!request.headers.has('Authorization')) {
+          const active = await readActiveSession(request, loginOptions(request))
+          if (active) return sessionUserPrincipal(active.session)
+        }
+        return authenticateRequest(request, authenticateOptions(request))
+      },
+      issuer: issuerFor,
+      repositoryAccess,
+      isInstanceAdmin: async (principal) => principal.kind === 'user' && (await store.isInstanceAdmin(principal.id)),
+      session: async (request) => {
+        const active = await readActiveSession(request, loginOptions(request))
+        return active ? { principal: sessionUserPrincipal(active.session), csrf: active.csrf } : null
+      },
+      verifySessionWrite: async (request) => {
+        const check = await checkSession(request, loginOptions(request))
+        return check.kind === 'session' ? { principal: sessionUserPrincipal(check.active.session), csrf: check.active.csrf } : null
+      },
+      loginOptions: { oidcName: oidc?.config.name ?? null },
+      account: {
+        listTokens: (user) => store.listTokens({ accountId: user.id }),
+        createToken: (user, input) => store.createPersonalAccessToken(user.id, input, { kind: 'user', id: user.id }),
+        revokeToken: async (user, tokenId) => {
+          const own = (await store.listTokens({ accountId: user.id })).some((token) => token.id === tokenId)
+          if (own) await store.revokeToken(tokenId, { kind: 'user', id: user.id })
+          return own
+        },
+        listPasskeys: (user) => logins.listCredentials(user.id),
+        revokePasskey: (user, id) => logins.revokeCredential(user.id, id),
+      },
+      inbox: {
+        threads: (user, filter) => notifications.store.threads(user.id, { ...filter, participating: false }),
+        markRead: (user, id) => notifications.store.markThreadRead(user.id, id),
+        markDone: (user, id) => notifications.store.markThreadDone(user.id, id),
+        markAllRead: (user) => notifications.store.markAllRead(user.id, now().getTime()),
+      },
+      releases: {
+        list: (repository, includeDrafts, limit, offset) => releaseStore.list(repository.id, includeDrafts, limit, offset),
+        byTag: async (repository, tag, includeDrafts) => {
+          const release = await releaseStore.byTag(repository.id, tag)
+          return release && (includeDrafts || release.draft === 0) ? release : null
+        },
+        assets: (releaseIds) => releaseStore.assets(releaseIds),
+      },
+    },
     scheduled: async (at = now()) => {
       const sweep = await notifications.sweep().catch((error: unknown) => ({ error: String(error) }))
       console.log(JSON.stringify({ event: 'notification-sweep', ...sweep }))

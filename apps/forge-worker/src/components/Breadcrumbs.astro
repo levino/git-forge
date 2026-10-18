@@ -1,0 +1,22 @@
+---
+import { type OpenRepository, treeUrl } from '../ui/repository.ts'
+
+type Props = { repo: OpenRepository; refName: string; path: readonly string[] }
+
+const { repo, refName, path } = Astro.props
+---
+
+<nav class="breadcrumbs text-sm min-w-0" aria-label="Path">
+  <ul>
+    <li><a href={treeUrl(repo.name, refName)} class="font-semibold">{repo.name.name}</a></li>
+    {
+      path.map((segment, index) =>
+        index === path.length - 1 ? (
+          <li aria-current="page" class="font-semibold">{segment}</li>
+        ) : (
+          <li><a href={treeUrl(repo.name, refName, path.slice(0, index + 1))}>{segment}</a></li>
+        ),
+      )
+    }
+  </ul>
+</nav>

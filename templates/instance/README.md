@@ -107,6 +107,15 @@ collaborators, instance federation and mirrors are described in the
 To mirror private repositories of other instances, also set the secret
 `INSTANCE_KEY` and the var `PUBLIC_URL` (see there).
 
+## Web UI
+
+The instance serves a web UI from the same Worker: `https://<your-instance>/`
+lists repositories, `https://<your-instance>/alice/site` shows the files, the
+README, commits, diffs, branches, tags and previews of LFS images, video,
+audio and PDFs. Public repositories are visible to everyone, private ones only
+with access. For a headless instance, for example a backup mirror, add
+`"UI": "false"` to `vars`; it then serves Git, LFS and the API only.
+
 ## Login
 
 People sign in at `https://<your-instance>/login` with passkeys (built in),

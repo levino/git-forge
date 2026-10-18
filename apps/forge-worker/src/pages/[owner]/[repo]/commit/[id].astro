@@ -1,0 +1,65 @@
+---
+import DiffView from '../../../../components/DiffView.astro'
+import NotFound from '../../../../components/NotFound.astro'
+import RepoHeader from '../../../../components/RepoHeader.astro'
+import Layout from '../../../../layouts/Layout.astro'
+import { isoTime, plural, relativeTime, shortId } from '../../../../ui/format.ts'
+import { commitView } from '../../../../ui/history.ts'
+import { blobUrl, commitUrl, openRepository, treeUrl } from '../../../../ui/repository.ts'
+
+const repo = await openRepository(Astro.locals.forge, Astro.locals.principal, Astro.params.owner!, Astro.params.repo!)
+const view = repo.kind === 'ok' ? await commitView(repo, Astro.params.id!) : null
+const now = Math.floor(Date.now() / 1000)
+const body = view?.kind === 'commit' ? view.commit.message.split('\n').slice(1).join('\n').trim() : ''
+---
+
+{
+  repo.kind !== 'ok' || view?.kind !== 'commit' ? (
+    <NotFound />
+  ) : (
+    <Layout title={`${view.commit.summary} · ${repo.name.owner}/${repo.name.name}@${shortId(view.commit.id)}`} wide>
+      <RepoHeader repo={repo} tab="commits" />
+      <section class="border border-base-300 rounded-box mb-6" aria-label="Commit">
+        <div class="p-4">
+          <h2 class="text-lg font-semibold break-words">{view.commit.summary || '(no message)'}</h2>
+          {body && <pre class="mt-2 whitespace-pre-wrap text-sm font-sans">{body}</pre>}
+        </div>
+        <div class="flex flex-wrap items-center gap-x-4 gap-y-1 px-4 py-3 bg-base-200 text-sm border-t border-base-300">
+          <span>
+            <span class="font-semibold">{view.commit.author.name}</span> authored{' '}
+            <time datetime={isoTime(view.commit.author.timestamp)}>{relativeTime(view.commit.author.timestamp, now)}</time>
+          </span>
+          <span class="ml-auto">
+            {view.commit.parents.length === 0
+              ? 'root commit'
+              : view.commit.parents.map((parent, index) => (
+                  <>
+                    {index === 0 ? `${plural(view.commit.parents.length, 'parent')} ` : ' + '}
+                    <a class="font-mono link" href={commitUrl(repo.name, parent)}>
+                      {shortId(parent)}
+                    </a>
+                  </>
+                ))}
+          </span>
+          <span>
+            commit <span class="font-mono">{view.commit.id}</span>
+          </span>
+          <a class="btn btn-xs" href={treeUrl(repo.name, view.commit.id)}>
+            Browse files
+          </a>
+        </div>
+      </section>
+      <p class="mb-4 text-sm">
+        Showing {plural(view.files.length, 'changed file')} with <span class="text-success">{plural(view.added, 'addition')}</span> and{' '}
+        <span class="text-error">{plural(view.deleted, 'deletion')}</span>
+        {view.truncated && ' (list truncated)'}
+        {view.commit.parents.length > 1 && ' compared with the first parent'}.
+      </p>
+      <div class="flex flex-col gap-4">
+        {view.files.map((file, index) => (
+          <DiffView file={file} index={index} href={file.status === 'removed' ? null : blobUrl(repo.name, view.commit.id, file.path.split('/'))} />
+        ))}
+      </div>
+    </Layout>
+  )
+}

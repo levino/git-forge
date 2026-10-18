@@ -86,6 +86,23 @@ describe('passkeys', () => {
     expect(passkeys).toEqual([expect.objectContaining({ name: 'laptop' })])
   })
 
+  it('lets a browser session read media and raw URLs of repositories it may read', async () => {
+    const forge = await loginForge({})
+    const admin = await bootstrap(forge, BASE)
+    const authenticator = await createSoftAuthenticator({ origin: BASE })
+    const browser = new Browser(forge)
+    const invite = await json<{ code: string }>(await call(forge, BASE, 'POST', '/api/admin/invites', admin, { login: 'erin' }))
+    expect((await registerPasskey(browser, authenticator, { invite: invite.code })).status).toBe(201)
+    expect((await call(forge, BASE, 'POST', '/api/repos', admin, { owner: 'admin', name: 'secret' })).status).toBe(201)
+    const raw = '/admin/secret/raw/main/README.md'
+    expect((await forge.fetch(new Request(`${BASE}${raw}`))).status).toBe(401)
+    expect((await browser.fetch(raw)).status).toBe(401)
+    expect((await call(forge, BASE, 'PUT', '/api/repos/admin/secret/collaborators/erin', admin, { role: 'read' })).status).toBe(200)
+    const allowed = await browser.fetch(raw)
+    expect(allowed.status).toBe(404)
+    expect(await allowed.text()).toContain('unknown ref')
+  })
+
   it('rejects assertions for another origin, without user verification, or replayed', async () => {
     const forge = await loginForge({ selfSignup: true })
     const authenticator = await createSoftAuthenticator({ origin: BASE })

@@ -1,0 +1,47 @@
+---
+import { formatBytes, isoTime, relativeTime } from '../ui/format.ts'
+import { assetUrl, type ReleaseView, releaseUrl } from '../ui/releases.ts'
+import { commitsUrl, type OpenRepository, treeUrl } from '../ui/repository.ts'
+
+type Props = { repo: OpenRepository; view: ReleaseView; heading?: 'h1' | 'h2' }
+
+const { repo, view, heading = 'h2' } = Astro.props
+const { release } = view
+const now = Math.floor(Date.now() / 1000)
+const at = Math.floor((release.published_at ?? release.created_at) / 1000)
+const Heading = heading
+---
+
+<article class="border border-base-300 rounded-box" aria-labelledby={`release-${release.id}`}>
+  <header class="p-4 flex flex-wrap items-center gap-2 border-b border-base-300">
+    <Heading id={`release-${release.id}`} class="text-xl font-semibold break-words">
+      <a href={releaseUrl(repo, release.tag_name)} class="link link-hover">{view.title}</a>
+    </Heading>
+    {release.draft === 1 && <span class="badge badge-warning badge-sm">Draft</span>}
+    {release.prerelease === 1 && <span class="badge badge-info badge-sm">Pre-release</span>}
+    <span class="text-sm text-base-content/70 w-full">
+      <a href={treeUrl(repo.name, release.tag_name)} class="font-mono link link-hover">{release.tag_name}</a>
+      {release.author_login && <> · {release.author_login}</>} · <time datetime={isoTime(at)}>{relativeTime(at, now)}</time> ·
+      <a href={commitsUrl(repo.name, release.tag_name)} class="link link-hover">Commits</a>
+    </span>
+  </header>
+  {view.html !== null && <div class="markdown-body p-4 overflow-x-auto" set:html={view.html} />}
+  {
+    view.assets.length > 0 && (
+      <section class="p-4 border-t border-base-300" aria-label="Assets">
+        <h3 class="font-semibold mb-2">Assets</h3>
+        <ul class="divide-y divide-base-300">
+          {view.assets.map((asset) => (
+            <li class="flex flex-wrap items-center gap-2 py-2">
+              <a href={assetUrl(repo, release.tag_name, asset.name)} class="link link-hover font-mono break-all">
+                {asset.name}
+              </a>
+              {asset.label && <span class="text-sm text-base-content/70">{asset.label}</span>}
+              <span class="ml-auto text-sm text-base-content/70">{formatBytes(asset.size)}</span>
+            </li>
+          ))}
+        </ul>
+      </section>
+    )
+  }
+</article>

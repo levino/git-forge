@@ -1,0 +1,38 @@
+---
+import NotFound from '../../../../components/NotFound.astro'
+import ReleaseCard from '../../../../components/ReleaseCard.astro'
+import RepoHeader from '../../../../components/RepoHeader.astro'
+import Layout from '../../../../layouts/Layout.astro'
+import { parsePage } from '../../../../ui/history.ts'
+import { listReleases } from '../../../../ui/releases.ts'
+import { openRepository } from '../../../../ui/repository.ts'
+
+const repo = await openRepository(Astro.locals.forge, Astro.locals.principal, Astro.params.owner!, Astro.params.repo!)
+const page = parsePage(Astro.url.searchParams.get('page'))
+const list = repo.kind === 'ok' ? await listReleases(Astro.locals.forge, repo, page) : null
+---
+
+{
+  repo.kind !== 'ok' || !list ? (
+    <NotFound />
+  ) : (
+    <Layout title={`Releases · ${repo.name.owner}/${repo.name.name}`}>
+      <RepoHeader repo={repo} tab="releases" />
+      {list.releases.length === 0 ? (
+        <p>No releases yet.</p>
+      ) : (
+        <div class="flex flex-col gap-6">
+          {list.releases.map((view) => (
+            <ReleaseCard repo={repo} view={view} />
+          ))}
+        </div>
+      )}
+      {(page > 1 || list.more) && (
+        <nav class="join mt-6 flex justify-center" aria-label="Pagination">
+          {page > 1 ? <a class="join-item btn btn-sm" href={`?page=${page - 1}`} rel="prev">Newer</a> : <span class="join-item btn btn-sm btn-disabled">Newer</span>}
+          {list.more ? <a class="join-item btn btn-sm" href={`?page=${page + 1}`} rel="next">Older</a> : <span class="join-item btn btn-sm btn-disabled">Older</span>}
+        </nav>
+      )}
+    </Layout>
+  )
+}

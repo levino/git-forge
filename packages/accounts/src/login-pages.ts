@@ -33,7 +33,7 @@ export const escapeHtml = (value: string): string =>
 
 const scriptJson = (value: unknown): string => JSON.stringify(value).replace(/</g, '\\u003c')
 
-const PASSKEY_SCRIPT = `
+export const PASSKEY_SCRIPT = `
 const config = JSON.parse(document.getElementById('login-config').textContent);
 const enc = (buffer) => btoa(String.fromCharCode(...new Uint8Array(buffer))).replace(/\\+/g, '-').replace(/\\//g, '_').replace(/=+$/, '');
 const dec = (text) => Uint8Array.from(atob(text.replace(/-/g, '+').replace(/_/g, '/') + '==='.slice((text.length + 3) % 4)), (c) => c.charCodeAt(0));

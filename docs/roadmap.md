@@ -52,7 +52,7 @@ discussions.
 - [x] Copy-only sync: copy upstream packs and indexes as stored (byte-identical), verify index consistency and pack trailer while streaming; deep check (re-hash everything, recompute indexes, walk refs) on demand or every 30 days
 - [x] Native streaming hashes (`crypto.DigestStream` behind a `DigestFactory` seam) and one job per pack / LFS object with a byte budget (`MIRROR_UNIT_BYTES`), oversized units stay pending (design §12)
 - [x] Plain clones of a mirror check out the upstream default branch: read-side `refs/heads/*` view of one remote, own refs win, detach materializes it
-- [ ] Mirror overview
+- [ ] Mirror overview (UI: M6)
 
 ## M5 — Deployment and adapters
 
@@ -103,10 +103,22 @@ Design: [design.md §15](design.md#ci).
 
 ## M6 — Web UI (Astro SSR)
 
-- [ ] File tree, commits, diffs, Markdown rendering
-- [ ] LFS previews (images, video, audio, PDF)
-- [ ] Account, organization and repository settings
-- [ ] Mirror settings and alarms
+Design: [design.md §18](design.md#18-web-ui).
+
+- [x] Astro SSR as the Worker entry, middleware hands non-UI paths to `createForge`, `UI=false` for headless instances, one release bundle
+- [x] Home, explore, user and organization profiles
+- [x] File tree, file view with server-side highlighting, sanitized Markdown (README), commits with path history, commit diff, branches, tags
+- [x] LFS previews (images, video, audio, PDF) via the media URLs
+- [x] Dark mode, responsive layout, page rendering tests, Playwright E2E against `wrangler dev`
+- [x] Login pages (sign-in, invite, device code entry, break-glass) rendered by the UI from the login package's page models; sessions in the middleware; account menu with sign-out
+- [x] Account settings: personal access tokens (create, revoke), passkeys (add, remove), linking an OIDC identity
+- [x] Notifications inbox (unread/all, mark read, done, all read) and repository releases (list, tag page, notes, asset downloads)
+- [ ] List and unlink linked OIDC identities, list and end sessions
+- [ ] Organizations and teams
+- [ ] Repository settings (visibility, collaborators, branch protection, federation trust)
+- [ ] Mirror settings, status and alarms
+- [ ] Blame, syntax highlighting in diffs and Markdown code blocks
+- [ ] Explore and profile listings without one access check per repository
 
 ## M7 — Collaboration
 

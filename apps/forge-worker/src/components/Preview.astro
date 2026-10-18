@@ -1,0 +1,26 @@
+---
+import type { PreviewKind } from '../ui/browse.ts'
+
+type Props = { kind: PreviewKind; src: string; name: string }
+
+const { kind, src, name } = Astro.props
+---
+
+<div class="p-4 flex justify-center bg-base-200/50">
+  {kind === 'image' && <img src={src} alt={name} class="max-w-full max-h-[70vh] object-contain" loading="lazy" />}
+  {
+    kind === 'video' && (
+      <video src={src} controls preload="metadata" class="max-w-full max-h-[70vh]">
+        <a href={src}>Download {name}</a>
+      </video>
+    )
+  }
+  {
+    kind === 'audio' && (
+      <audio src={src} controls preload="metadata" class="w-full">
+        <a href={src}>Download {name}</a>
+      </audio>
+    )
+  }
+  {kind === 'pdf' && <iframe src={src} title={name} class="w-full h-[80vh] bg-white" />}
+</div>

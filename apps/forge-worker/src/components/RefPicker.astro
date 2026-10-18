@@ -1,0 +1,41 @@
+---
+import type { OpenRepository } from '../ui/repository.ts'
+
+type Props = { repo: OpenRepository; current: string; link: (ref: string) => string }
+
+const { repo, current, link } = Astro.props
+---
+
+<details class="dropdown">
+  <summary class="btn btn-sm max-w-60" aria-label={`Switch branch or tag, current: ${current}`}>
+    <span class="truncate font-mono">{current}</span>
+    <span aria-hidden="true">▾</span>
+  </summary>
+  <div class="dropdown-content bg-base-100 border border-base-300 rounded-box shadow-lg z-10 w-72 max-h-96 overflow-y-auto p-2">
+    {repo.branches.length > 0 && <p class="menu-title px-2 text-xs">Branches</p>}
+    <ul class="menu menu-sm w-full p-0">
+      {
+        repo.branches.map((branch) => (
+          <li>
+            <a href={link(branch.name)} class:list={['font-mono', { 'menu-active': branch.name === current }]}>
+              {branch.name}
+              {branch.name === repo.defaultBranch && <span class="badge badge-xs">default</span>}
+            </a>
+          </li>
+        ))
+      }
+    </ul>
+    {repo.tags.length > 0 && <p class="menu-title px-2 text-xs">Tags</p>}
+    <ul class="menu menu-sm w-full p-0">
+      {
+        repo.tags.map((tag) => (
+          <li>
+            <a href={link(tag.name)} class:list={['font-mono', { 'menu-active': tag.name === current }]}>
+              {tag.name}
+            </a>
+          </li>
+        ))
+      }
+    </ul>
+  </div>
+</details>

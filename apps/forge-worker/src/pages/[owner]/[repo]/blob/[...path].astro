@@ -1,0 +1,78 @@
+---
+import Breadcrumbs from '../../../../components/Breadcrumbs.astro'
+import CodeView from '../../../../components/CodeView.astro'
+import LatestCommit from '../../../../components/LatestCommit.astro'
+import NotFound from '../../../../components/NotFound.astro'
+import Preview from '../../../../components/Preview.astro'
+import RefPicker from '../../../../components/RefPicker.astro'
+import RepoHeader from '../../../../components/RepoHeader.astro'
+import Layout from '../../../../layouts/Layout.astro'
+import { browse, previewKind } from '../../../../ui/browse.ts'
+import { formatBytes, plural } from '../../../../ui/format.ts'
+import { blobUrl, commitsUrl, mediaUrl, openRepository, rawUrl, treeUrl } from '../../../../ui/repository.ts'
+
+const repo = await openRepository(Astro.locals.forge, Astro.locals.principal, Astro.params.owner!, Astro.params.repo!)
+const segments = (Astro.params.path ?? '').split('/').filter((segment) => segment !== '')
+const view = repo.kind === 'ok' ? await browse(repo, segments, 'any') : null
+if (repo.kind === 'ok' && view?.kind === 'tree') return Astro.redirect(treeUrl(repo.name, view.target.ref, view.target.path))
+const showSource = Astro.url.searchParams.get('plain') === '1'
+const name = view?.kind === 'blob' ? view.entry.name : ''
+const preview = previewKind(name)
+---
+
+{
+  repo.kind !== 'ok' || view?.kind !== 'blob' ? (
+    <NotFound />
+  ) : (
+    <Layout title={`${view.target.path.join('/')} · ${repo.name.owner}/${repo.name.name}`}>
+      <RepoHeader repo={repo} tab="code" />
+      <div class="flex flex-wrap items-center gap-3 mb-3">
+        <RefPicker repo={repo} current={view.target.ref} link={(ref: string) => blobUrl(repo.name, ref, view.target.path)} />
+        <Breadcrumbs repo={repo} refName={view.target.ref} path={view.target.path} />
+      </div>
+      <div class="border border-base-300 rounded-box overflow-hidden">
+        {view.latest && <LatestCommit repo={repo.name} commit={view.latest} historyHref={commitsUrl(repo.name, view.target.ref, view.target.path)} />}
+        <div class="flex flex-wrap items-center gap-3 px-4 py-2 border-y border-base-300 text-sm">
+          <span class="text-base-content/70">
+            {view.content.kind === 'text' && `${plural(view.lines?.length ?? 0, 'line')} · ${formatBytes(view.content.size)}`}
+            {view.content.kind === 'binary' && formatBytes(view.content.size)}
+            {view.content.kind === 'lfs' && (
+              <>
+                <span class="badge badge-sm badge-outline mr-1">Git LFS</span>
+                {formatBytes(view.content.pointer.size)}
+              </>
+            )}
+          </span>
+          <div class="ml-auto flex gap-2">
+            {view.markdown !== null && (
+              <a class="btn btn-xs" href={showSource ? '?' : '?plain=1'}>
+                {showSource ? 'Preview' : 'Code'}
+              </a>
+            )}
+            <a class="btn btn-xs" href={rawUrl(repo.name, view.target.ref, view.target.path)}>
+              Raw
+            </a>
+          </div>
+        </div>
+        {view.content.kind === 'text' && view.markdown !== null && !showSource && <article class="markdown-body p-6 overflow-x-auto" set:html={view.markdown} />}
+        {view.content.kind === 'text' && (view.markdown === null || showSource) && view.lines && <CodeView lines={view.lines} />}
+        {view.content.kind === 'lfs' &&
+          (preview ? (
+            <Preview kind={preview} src={mediaUrl(repo.name, view.content.pointer.oid, name)} name={name} />
+          ) : (
+            <p class="p-6 text-center">
+              Stored with Git LFS. <a class="link" href={mediaUrl(repo.name, view.content.pointer.oid, name)}>Download</a>
+            </p>
+          ))}
+        {view.content.kind === 'binary' &&
+          (preview ? (
+            <Preview kind={preview} src={rawUrl(repo.name, view.target.commit, view.target.path)} name={name} />
+          ) : (
+            <p class="p-6 text-center">
+              Binary file not shown. <a class="link" href={rawUrl(repo.name, view.target.ref, view.target.path)}>Download</a>
+            </p>
+          ))}
+      </div>
+    </Layout>
+  )
+}

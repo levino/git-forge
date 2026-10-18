@@ -3,10 +3,9 @@ import { consumeJobs, digestStreams, QueueJobs, R2Storage } from '@git-forge/clo
 import { continueImport, createConsoleEmailSender, type EmailSender, type ImportJob, type ImportScheduler } from '@git-forge/core'
 import { createSesEmailSender } from '@git-forge/ses'
 import { type AppJob, createForge, type Forge } from './app.ts'
-import { ACTIONS_CRON, type EmailSettings, type ForgeVars, loadSecretsKey, parseActionsSettings, parseEmailSettings, parseSettings } from './config.ts'
+import { ACTIONS_CRON, type EmailSettings, type ForgeVars, loadSecretsKey, parseActionsSettings, parseEmailSettings, parseSettings, uiEnabled } from './config.ts'
 import { containerLauncher } from './runner-launcher.ts'
-
-export { RunnerContainer } from './runner-container.ts'
+import { captureLoginPage } from './ui/login-pages.ts'
 
 export type Env = ForgeVars & {
   readonly BUCKET: R2Bucket
@@ -30,7 +29,7 @@ const emailSender = (settings: EmailSettings | undefined): EmailSender | undefin
 
 let forge: Promise<Forge> | undefined
 
-const forgeFor = (env: Env): Promise<Forge> => {
+export const forgeFor = (env: Env): Promise<Forge> => {
   forge ??= parseSettings(env)
     .then(async (settings) => {
       const actions = parseActionsSettings(env)
@@ -41,6 +40,7 @@ const forgeFor = (env: Env): Promise<Forge> => {
         storage: new R2Storage(env.BUCKET),
         db: d1Database(env.DB),
         digests: digestStreams,
+        ...(uiEnabled(env) ? { renderLoginPage: captureLoginPage } : {}),
         ...(env.IMPORTS ? { scheduleImport: importScheduler(env.IMPORTS) } : {}),
         ...(env.JOBS ? { jobs: new QueueJobs(env.JOBS) } : {}),
         ...(email ? { email } : {}),
@@ -67,10 +67,7 @@ const forgeFor = (env: Env): Promise<Forge> => {
 
 const isJobQueue = (name: string): boolean => name === 'git-forge-jobs' || /^git-forge-[a-z0-9-]+-jobs$/.test(name)
 
-export default {
-  async fetch(request, env, ctx): Promise<Response> {
-    return (await forgeFor(env)).fetch(request, (promise) => ctx.waitUntil(promise))
-  },
+export const backgroundHandlers = {
   async scheduled(controller, env): Promise<void> {
     if (controller.cron === ACTIONS_CRON) {
       const tick = await (await forgeFor(env)).actionsTick()
@@ -95,4 +92,4 @@ export default {
       message.ack()
     }
   },
-} satisfies ExportedHandler<Env, ImportJob | AppJob>
+} satisfies Omit<ExportedHandler<Env, ImportJob | AppJob>, 'fetch'>

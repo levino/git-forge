@@ -1,0 +1,18 @@
+---
+import type { Readme } from '../ui/browse.ts'
+
+type Props = { readme: Readme }
+
+const { readme } = Astro.props
+---
+
+<section class="border border-base-300 rounded-box mt-6" aria-labelledby="readme-title">
+  <h2 id="readme-title" class="px-4 py-2 border-b border-base-300 font-semibold text-sm">{readme.name}</h2>
+  {
+    readme.html !== null ? (
+      <article class="markdown-body p-6 overflow-x-auto" set:html={readme.html} />
+    ) : (
+      <pre class="p-6 whitespace-pre-wrap text-sm">{readme.text}</pre>
+    )
+  }
+</section>

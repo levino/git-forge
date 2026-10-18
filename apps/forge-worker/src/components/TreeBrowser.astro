@@ -1,0 +1,40 @@
+---
+import { cloneUrl, commitsUrl, type OpenRepository, treeUrl } from '../ui/repository.ts'
+import type { TreeView } from '../ui/browse.ts'
+import Breadcrumbs from './Breadcrumbs.astro'
+import FileList from './FileList.astro'
+import LatestCommit from './LatestCommit.astro'
+import Readme from './Readme.astro'
+import RefPicker from './RefPicker.astro'
+
+type Props = { repo: OpenRepository; view: TreeView | { kind: 'empty' } }
+
+const { repo, view } = Astro.props
+const origin = Astro.url.origin
+---
+
+{
+  view.kind === 'empty' ? (
+    <section class="border border-base-300 rounded-box p-6" aria-labelledby="empty-title">
+      <h2 id="empty-title" class="text-lg font-semibold mb-2">
+        This repository is empty
+      </h2>
+      <p class="mb-4">Push an existing repository from the command line:</p>
+      <pre class="bg-base-200 rounded-box p-4 text-sm overflow-x-auto">
+        <code>{`git remote add origin ${cloneUrl(origin, repo.name)}\ngit push -u origin main`}</code>
+      </pre>
+    </section>
+  ) : (
+    <>
+      <div class="flex flex-wrap items-center gap-3 mb-3">
+        <RefPicker repo={repo} current={view.target.ref} link={(ref: string) => treeUrl(repo.name, ref, view.target.path)} />
+        <Breadcrumbs repo={repo} refName={view.target.ref} path={view.target.path} />
+      </div>
+      <div class="border border-base-300 rounded-box overflow-hidden">
+        {view.latest && <LatestCommit repo={repo.name} commit={view.latest} historyHref={commitsUrl(repo.name, view.target.ref, view.target.path)} />}
+        <FileList repo={repo} refName={view.target.ref} path={view.target.path} entries={view.entries} />
+      </div>
+      {view.readme && <Readme readme={view.readme} />}
+    </>
+  )
+}

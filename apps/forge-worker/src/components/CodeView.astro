@@ -1,0 +1,28 @@
+---
+import type { HighlightedLine } from '../ui/highlight.ts'
+
+type Props = { lines: readonly HighlightedLine[] }
+
+const { lines } = Astro.props
+---
+
+<div class="overflow-x-auto">
+  <table class="font-mono text-xs leading-5 w-full border-separate border-spacing-0" aria-label="File contents">
+    <tbody>
+      {
+        lines.map((line, index) => (
+          <tr id={`L${index + 1}`} class="code-line target:bg-warning/20">
+            <td class="select-none text-right pr-3 pl-4 w-px text-base-content/50 align-top">
+              <a href={`#L${index + 1}`} class="hover:underline">
+                {index + 1}
+              </a>
+            </td>
+            <td class="whitespace-pre pr-4">
+              {line.map((token) => (token.style ? <span style={token.style}>{token.content}</span> : token.content))}
+            </td>
+          </tr>
+        ))
+      }
+    </tbody>
+  </table>
+</div>

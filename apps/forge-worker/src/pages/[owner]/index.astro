@@ -1,0 +1,36 @@
+---
+import NotFound from '../../components/NotFound.astro'
+import RepoList from '../../components/RepoList.astro'
+import Layout from '../../layouts/Layout.astro'
+import { visibleRepositories } from '../../ui/listing.ts'
+
+const { forge, principal } = Astro.locals
+const account = await forge.store.findAccount(Astro.params.owner!)
+const repositories = account ? await visibleRepositories(forge, principal, account.login) : []
+---
+
+{
+  !account ? (
+    <NotFound />
+  ) : (
+    <Layout title={account.login}>
+      <div class="flex flex-col md:flex-row gap-8">
+        <aside class="md:w-64 flex-none">
+          <div class="avatar avatar-placeholder mb-4">
+            <div class="bg-neutral text-neutral-content w-24 md:w-48 rounded-full">
+              <span class="text-4xl" aria-hidden="true">{account.login.slice(0, 1).toUpperCase()}</span>
+            </div>
+          </div>
+          <h1 class="text-2xl font-semibold break-all">{account.login}</h1>
+          <p class="text-base-content/70">{account.kind === 'organization' ? 'Organization' : 'User'}</p>
+        </aside>
+        <section class="flex-1 min-w-0" aria-labelledby="repositories">
+          <h2 id="repositories" class="text-xl font-semibold mb-4">
+            Repositories <span class="badge">{repositories.length}</span>
+          </h2>
+          <RepoList repositories={repositories} showOwner={false} />
+        </section>
+      </div>
+    </Layout>
+  )
+}

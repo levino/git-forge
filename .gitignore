@@ -4,3 +4,6 @@ dist
 .dev.vars
 *.log
 .claude/worktrees
+.astro
+test-results
+playwright-report

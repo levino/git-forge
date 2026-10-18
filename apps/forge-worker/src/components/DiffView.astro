@@ -1,0 +1,75 @@
+---
+import type { FileDiff } from '@git-forge/core'
+
+type Props = { file: FileDiff; index: number; href: string | null }
+
+const { file, index, href } = Astro.props
+const label = { added: 'Added', removed: 'Deleted', modified: 'Modified', renamed: 'Renamed' }[file.status]
+const badge = { added: 'badge-success', removed: 'badge-error', modified: 'badge-warning', renamed: 'badge-info' }[file.status]
+const rowClass = { ' ': '', '+': 'bg-success/15', '-': 'bg-error/15' }
+const spoken = { ' ': '', '+': 'added: ', '-': 'deleted: ' }
+const range = (start: number, count: number) => (count === 1 ? `${start}` : `${start},${count}`)
+const text = file.kind === 'text' || file.kind === 'lfs'
+---
+
+<section id={`diff-${index}`} class="border border-base-300 rounded-box overflow-hidden" aria-label={`${label} ${file.path}`}>
+  <header class="flex flex-wrap items-center gap-2 px-4 py-2 bg-base-200 text-sm">
+    <span class:list={['badge badge-sm', badge]}>{label}</span>
+    {file.previousPath && <span class="font-mono break-all text-base-content/70">{file.previousPath} →</span>}
+    {href ? <a href={href} class="font-mono link link-hover break-all">{file.path}</a> : <span class="font-mono break-all">{file.path}</span>}
+    {
+      text && (
+        <span class="ml-auto font-mono">
+          <span class="text-success">+{file.additions}</span> <span class="text-error">-{file.deletions}</span>
+        </span>
+      )
+    }
+  </header>
+  {file.kind === 'binary' && <p class="px-4 py-3 text-sm text-base-content/70">Binary file not shown.</p>}
+  {file.kind === 'large' && <p class="px-4 py-3 text-sm text-base-content/70">The file is too large to show.</p>}
+  {file.kind === 'submodule' && <p class="px-4 py-3 text-sm text-base-content/70">Submodule changed.</p>}
+  {
+    file.kind === 'lfs' && file.lfs && (
+      <p class="px-4 py-2 text-sm text-base-content/70 border-b border-base-300">
+        Git LFS object {file.lfs.old && <span class="font-mono">{file.lfs.old.oid.slice(0, 12)}</span>}
+        {file.lfs.old && file.lfs.new && ' → '}
+        {file.lfs.new && <span class="font-mono">{file.lfs.new.oid.slice(0, 12)}</span>}
+      </p>
+    )
+  }
+  {
+    text && file.kind === 'text' && file.hunks.length === 0 && (
+      <p class="px-4 py-3 text-sm text-base-content/70">{file.status === 'renamed' ? 'File renamed without changes.' : file.status === 'modified' ? 'File mode changed.' : 'Empty file.'}</p>
+    )
+  }
+  {
+    file.kind === 'text' && file.hunks.length > 0 && (
+      <div class="overflow-x-auto">
+        <table class="font-mono text-xs leading-5 w-full border-separate border-spacing-0">
+          {file.hunks.map((hunk) => (
+            <tbody>
+              <tr class="bg-info/10 text-base-content/70">
+                <td colspan="3" class="px-4 py-1">
+                  {`@@ -${range(hunk.oldStart, hunk.oldLines)} +${range(hunk.newStart, hunk.newLines)} @@${hunk.section ? ` ${hunk.section}` : ''}`}
+                </td>
+              </tr>
+              {hunk.lines.map((line) => (
+                <tr class={rowClass[line.kind]}>
+                  <td class="select-none text-right px-2 w-px text-base-content/50">{line.oldLine ?? ''}</td>
+                  <td class="select-none text-right px-2 w-px text-base-content/50">{line.newLine ?? ''}</td>
+                  <td class="whitespace-pre pr-4">
+                    <span class="select-none" aria-hidden="true">
+                      {line.kind}
+                    </span>
+                    <span class="sr-only">{spoken[line.kind]}</span>
+                    {line.text}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          ))}
+        </table>
+      </div>
+    )
+  }
+</section>

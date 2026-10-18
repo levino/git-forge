@@ -72,40 +72,14 @@ falling back to a default.
 
 Jobs run in the process, with the same handler, retry policy (exponential
 backoff from 10 s, at most 8 attempts, `PermanentJobError` stops at once)
-and job format as the Worker's Queue consumer. The queue is the `jobs` table
-in the SQLite file (migration `0021_jobs`): a job that was queued, delayed or
-waiting for a retry when the process stopped runs after the next start. A
-running job holds a lease of 60 s that it renews while it runs; if the
-process is killed, the job runs again once the lease has expired (that lost
-run counts as an attempt, so a job that crashes the process is dropped after
-its last attempt). Import steps use the same table, so an import continues
-after a restart by itself. Delivery is at least once; every job kind re-reads
-current state, so running one twice is harmless.
-
-For mirrors there is a second safety net anyway: the upstream retries an
-undelivered notification with backoff (eight attempts within about 20
-minutes), a repeated notification of an unchanged state is a no-op, and the
-next scheduled run catches up on anything missed, including pushes made while
-the Pi was offline for longer.
+and job format as the Worker's Queue consumer. Jobs live in the `jobs` table
+of the SQLite file and survive restarts; a job interrupted by a crash runs
+again once its 60 s lease has expired.
 
 ## Email
 
-Notification digests (§16 of `docs/design.md`) are sent when `EMAIL_PROVIDER`
-is set. With `smtp` the instance talks to any SMTP server (your mail
-provider's submission port, a local Postfix):
-
-```sh
-EMAIL_PROVIDER=smtp
-EMAIL_FROM='Forge <forge@example.org>'
-SMTP_HOST=smtp.example.org
-SMTP_USERNAME=forge@example.org
-SMTP_PASSWORD=…
-```
-
-Sending runs in jobs: a `5xx` reply is permanent, a `4xx` reply or a
-connection, TLS or timeout error is retried with backoff. `console` logs
-messages as JSON lines instead, `ses` uses Amazon SES as on the Worker
-(`packages/ses`).
+`EMAIL_PROVIDER=smtp` with `EMAIL_FROM` and `SMTP_*` sends notification
+digests over SMTP; `5xx` replies are permanent, everything else is retried.
 
 ## A backup mirror on a Raspberry Pi
 
@@ -212,18 +186,12 @@ running. Repository data in the bucket or directory is append-only.
 
 ## Container image
 
-Every release publishes `ghcr.io/levino/git-forge-node` for `linux/amd64`
-and `linux/arm64` (tags `<version>`, `<major>.<minor>` and `latest`; a
-prerelease only gets its version tag):
+Every release publishes `ghcr.io/levino/git-forge-node` (`linux/amd64`,
+`linux/arm64`):
 
 ```sh
 docker run --rm -v git-forge:/data ghcr.io/levino/git-forge-node:0.8.0 migrate
 docker run -d -p 8080:8080 -v git-forge:/data --env-file git-forge.env ghcr.io/levino/git-forge-node:0.8.0
-```
-
-To build it yourself:
-
-```sh
 docker build -f apps/forge-node/Dockerfile -t git-forge-node .
 ```
 
@@ -242,8 +210,8 @@ pnpm --filter forge-node test               # unit tests and the E2E suite
 ```
 
 The unit tests cover configuration parsing, cron expressions, the scheduler,
-the SQLite job queue (delays, retries, restarts, expired leases, lease
-renewal), the migrate/serve contract and the storage conformance suite on
+the SQLite job queue, the migrate/serve contract and the storage conformance
+suite on
 the `fs` storage as configured here. The E2E suite (`test/e2e`) starts a Worker under
 `wrangler dev` and this app as a separate process, then: pushes and clones
 with Git LFS (protocol v2 and dumb HTTP) on the Node instance; mirrors a

@@ -769,35 +769,15 @@ CPU budget); `createMemoryJobQueue` runs jobs in process (Node, tests), with
 an optional `concurrency` limit, `keepHistory: false` for long-running
 processes and an `onOutcome` callback for logging. Jobs are plain JSON
 (repository, remote, callback), so a retry re-reads current state instead of
-replaying old data. Memory jobs are not durable: whatever is queued when the
-process stops is lost. Every job kind tolerates that (mirror state is
-re-derived by the next notification or scheduled run, and an abandoned import
-is taken over after 30 minutes, §7), but the Node deployment does not rely on
-it.
+replaying old data. Memory jobs are lost when the process stops.
 
 **Durable jobs (`apps/forge-node/src/jobs.ts`).** `createSqliteJobQueue`
-implements `JobQueue<J>` on the `jobs` table (migration `0021_jobs`, plain
-SQLite SQL on the `Database` adapter, so it also works on libSQL or D1; the
-Worker does not use it). A row is one job: `queue` (the Node instance uses
-`jobs` and `imports`), the JSON `payload`, `attempts`, `run_at` (enqueue time
-plus the delay), `lease_until` and `last_error`. A runner claims the oldest
-due row whose lease is free with one `UPDATE … WHERE id = (SELECT …) RETURNING`
-that increments `attempts` and sets `lease_until` (default 60 s ahead), and
-renews the lease every third of that while the handler runs. `attempts` is
-the fencing token: renewing, finishing and rescheduling only touch the row
-with the attempt count they claimed. A finished or finally failed job is
-deleted (the outcome is logged); a failed attempt moves `run_at` by
-`jobRetryDelaySeconds(attempts)` and frees the lease; `PermanentJobError` or
-`maxAttempts` (8, imports 3) end it. If the process dies, the lease runs out
-and the job is claimed again; the lost run counts as an attempt, and a job
-claimed after its last attempt is dropped as failed instead of being run, so
-a job that kills the process cannot loop. Delivery is therefore at least
-once, which every job kind tolerates (they re-read state). The runner wakes on
-`enqueue`, at the next `run_at` or expiring lease, and at least every 60 s.
-On `SIGTERM` the instance stops claiming, waits up to 10 s for running jobs
-and leaves everything else in the table for the next start. Import jobs carry
-the import's `authorization` like a Queue message does, so it rests in the
-SQLite file until that step ran.
+implements `JobQueue<J>` on the `jobs` table (migration `0021_jobs`). A claim
+is one `UPDATE … RETURNING` that increments `attempts` and takes a lease
+(60 s, renewed while running); `attempts` fences later updates. Finished or
+finally failed jobs are deleted, failed attempts get `run_at` moved by
+`jobRetryDelaySeconds`. After a crash the lease expires and the job runs
+again (at least once delivery); the lost run counts as an attempt.
 
 **Node deployment (`apps/forge-node`).** The same router as the Worker
 (`createForge` from `apps/forge-worker/src/app.ts`, imported as
@@ -1453,12 +1433,10 @@ update themselves.
   `release/VERSION`) and `NODE-SHA256SUMS`. They need no template: install the
   executable, run `migrate`, start `serve` (systemd units and a Dockerfile in
   `apps/forge-node`).
-- **Container image:** the `image` job of the release workflow builds
-  `apps/forge-node/Dockerfile` with `docker/build-push-action` for
-  `linux/amd64` and `linux/arm64` (Bun cross-compiles in the build stage, so
-  no emulation is needed) and pushes it to `ghcr.io/levino/git-forge-node`
-  with `GITHUB_TOKEN` (`packages: write`): tag `<version>`, and for versions
-  without a prerelease suffix also `<major>.<minor>` and `latest`.
+- **Container image:** the `image` job of the release workflow pushes
+  `apps/forge-node/Dockerfile` for `linux/amd64` and `linux/arm64` to
+  `ghcr.io/levino/git-forge-node` (`<version>`; releases also
+  `<major>.<minor>` and `latest`) with `GITHUB_TOKEN`.
 
 ### Test instances
 
@@ -1529,17 +1507,10 @@ production, `createSmtpEmailSender` from `@git-forge/smtp` for the Node
 deployment). SES uses the v2 `SendEmail` API with a simple message (subject,
 text, HTML, `List-Unsubscribe` and auto-reply suppression headers), signed
 with SigV4; `4xx` answers are permanent (`EmailRejectedError`), throttling
-and `5xx` are retried by the job queue. SMTP (`@git-forge/smtp`) is only for
-the Node deployment: it uses `node:net` and `node:tls` (Workers would need
-`connect()`, and SES covers the Cloudflare deployment). It opens one
-connection per message: implicit TLS (465), STARTTLS (587; a server that does
-not offer it is an error) or, for a local relay, plain (25, then without
-credentials); then `EHLO`, `AUTH PLAIN` or `AUTH LOGIN`, `MAIL FROM`, one
-`RCPT TO` per recipient and `DATA`. The message is MIME with base64 parts
-(`multipart/alternative` when there is HTML), an RFC 2047 encoded subject and
-display names, `Date`, a `Message-ID` on the sender's domain (returned as the
-id) and the message's extra headers. `5xx` replies throw `EmailRejectedError`
-(permanent); `4xx`, timeouts and connection or TLS failures throw `SmtpError`
+and `5xx` are retried by the job queue. SMTP (`@git-forge/smtp`, `node:net`
+and `node:tls`, Node only): one connection per message, STARTTLS (required),
+implicit TLS or plain without credentials, `AUTH PLAIN`/`LOGIN`, MIME with
+base64 parts. `5xx` throws `EmailRejectedError`, everything else `SmtpError`
 (retried).
 
 Digests: when a notification should be emailed, the user's

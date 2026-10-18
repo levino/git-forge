@@ -3,15 +3,8 @@ import { looksLikeText } from './content.ts'
 import { diffLines, type LineDiff, splitLines } from './diff.ts'
 import type { ObjectId } from './hash.ts'
 import { type LfsObjectSpec, parseLfsPointer } from './lfs.ts'
-import { isSubmodule, isTreeMode, parseTag, parseTree, type TreeEntry } from './objects.ts'
+import { isSubmodule, isTreeMode, parseCommitMetadata, parseTag, parseTree, type Signature, type TreeEntry } from './objects.ts'
 import { advertisedRefs, type ObjectDatabase, type RefsState } from './repository.ts'
-
-export type Signature = {
-  readonly name: string
-  readonly email: string
-  readonly time: number
-  readonly timezone: string
-}
 
 export type CommitDetails = {
   readonly id: ObjectId
@@ -31,39 +24,18 @@ export type RefKind = 'branch' | 'tag'
 
 export type NamedRef = { readonly kind: RefKind; readonly name: string; readonly ref: string; readonly id: ObjectId }
 
-const SIGNATURE = /^(.*?) <([^>]*)> (-?\d+) ([+-]\d{4})$/
-
-export const parseSignature = (value: string): Signature => {
-  const match = SIGNATURE.exec(value)
-  if (!match) return { name: value, email: '', time: 0, timezone: '+0000' }
-  return { name: match[1]!, email: match[2]!, time: Number(match[3]), timezone: match[4]! }
-}
+const UNKNOWN: Signature = { name: '', email: '', timestamp: 0, timezone: '+0000' }
 
 export const parseCommitDetails = (id: ObjectId, data: Uint8Array): CommitDetails => {
-  const text = fromUtf8(data)
-  const end = text.indexOf('\n\n')
-  const header = (end === -1 ? text : text.slice(0, end)).split('\n')
-  const message = end === -1 ? '' : text.slice(end + 2)
-  let tree: ObjectId | undefined
-  const parents: ObjectId[] = []
-  let author: Signature | undefined
-  let committer: Signature | undefined
-  for (const line of header) {
-    if (line.startsWith('tree ')) tree = line.slice(5)
-    else if (line.startsWith('parent ')) parents.push(line.slice(7))
-    else if (line.startsWith('author ')) author = parseSignature(line.slice(7))
-    else if (line.startsWith('committer ')) committer = parseSignature(line.slice(10))
-  }
-  if (!tree) throw new Error('commit without tree')
-  const unknown = { name: '', email: '', time: 0, timezone: '+0000' }
+  const metadata = parseCommitMetadata(data)
   return {
     id,
-    tree,
-    parents,
-    author: author ?? committer ?? unknown,
-    committer: committer ?? author ?? unknown,
-    message,
-    summary: message.split('\n', 1)[0]!.trim(),
+    tree: metadata.tree,
+    parents: metadata.parents,
+    author: metadata.author ?? metadata.committer ?? UNKNOWN,
+    committer: metadata.committer ?? metadata.author ?? UNKNOWN,
+    message: metadata.message,
+    summary: metadata.message.split('\n', 1)[0]!.trim(),
   }
 }
 
@@ -174,7 +146,7 @@ export const commitLog = async (odb: ObjectDatabase, start: ObjectId, options: L
   let walked = 0
   while (queue.length > 0 && matched.length < wanted && walked++ < maxWalk) {
     let best = 0
-    for (let i = 1; i < queue.length; i++) if (queue[i]!.committer.time > queue[best]!.committer.time) best = i
+    for (let i = 1; i < queue.length; i++) if (queue[i]!.committer.timestamp > queue[best]!.committer.timestamp) best = i
     const commit = queue.splice(best, 1)[0]!
     if (path.length === 0 || (await touchesPath(odb, commit, path))) matched.push(commit)
     for (const parent of commit.parents) {

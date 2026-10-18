@@ -1,0 +1,104 @@
+---
+import Layout from '../layouts/Layout.astro'
+import { isoTime, relativeTime } from '../ui/format.ts'
+import { parsePage } from '../ui/history.ts'
+import { inboxAction, INBOX_PAGE_SIZE, threadLink } from '../ui/inbox.ts'
+import { repoUrl } from '../ui/repository.ts'
+
+const { forge } = Astro.locals
+let session = Astro.locals.session
+if (!session) return Astro.redirect(`/login?return_to=${encodeURIComponent('/notifications')}`)
+let error: string | null = null
+if (Astro.request.method === 'POST') {
+  const verified = await forge.verifySessionWrite(Astro.request)
+  if (!verified) {
+    Astro.response.status = 403
+    error = 'The form expired. Reload the page and try again.'
+  } else {
+    session = verified
+    const outcome = await inboxAction(forge, verified, await Astro.request.formData())
+    if (outcome === 'unknown') {
+      Astro.response.status = 400
+      error = 'Unknown notification.'
+    }
+  }
+}
+Astro.response.headers.set('Cache-Control', 'no-store')
+const all = Astro.url.searchParams.get('all') === '1'
+const page = parsePage(Astro.url.searchParams.get('page'))
+const rows = await forge.inbox.threads(session.principal, { all, limit: INBOX_PAGE_SIZE + 1, offset: (page - 1) * INBOX_PAGE_SIZE })
+const threads = rows.slice(0, INBOX_PAGE_SIZE)
+const more = rows.length > INBOX_PAGE_SIZE
+const now = Math.floor(Date.now() / 1000)
+const query = (next: number) => `?${all ? 'all=1&' : ''}page=${next}`
+---
+
+<Layout title="Notifications">
+  <div class="flex flex-wrap items-center gap-3 mb-4">
+    <h1 class="text-2xl font-semibold">Notifications</h1>
+    <nav class="join" aria-label="Filter">
+      <a class:list={['join-item btn btn-sm', { 'btn-active': !all }]} href="/notifications" aria-current={!all ? 'page' : undefined}>Unread</a>
+      <a class:list={['join-item btn btn-sm', { 'btn-active': all }]} href="/notifications?all=1" aria-current={all ? 'page' : undefined}>All</a>
+    </nav>
+    <form method="post" class="ml-auto">
+      <input type="hidden" name="csrf" value={session.csrf} />
+      <input type="hidden" name="action" value="read-all" />
+      <button class="btn btn-sm">Mark all as read</button>
+    </form>
+  </div>
+  {error && <div role="alert" class="alert alert-error mb-4">{error}</div>}
+  {
+    threads.length === 0 ? (
+      <p class="text-base-content/70">{all ? 'No notifications.' : 'All caught up.'}</p>
+    ) : (
+      <ul class="border border-base-300 rounded-box divide-y divide-base-300" aria-label="Notifications">
+        {threads.map((thread) => (
+          <li class:list={['flex flex-wrap items-center gap-x-4 gap-y-1 px-4 py-3', { 'bg-base-200/60': thread.unread === 1 }]}>
+            <div class="min-w-0 flex-1">
+              <p class="text-sm text-base-content/70">
+                <a class="link link-hover" href={repoUrl({ owner: thread.owner_login, name: thread.repository_name })}>
+                  {thread.owner_login}/{thread.repository_name}
+                </a>{' '}
+                · {thread.subject_type} · {thread.reason.replace(/_/g, ' ')}
+              </p>
+              <a class:list={['link link-hover break-words', { 'font-semibold': thread.unread === 1 }]} href={threadLink(thread)}>
+                {thread.subject_title}
+              </a>
+            </div>
+            <time class="text-sm text-base-content/70" datetime={isoTime(Math.floor(thread.updated_at / 1000))}>
+              {relativeTime(Math.floor(thread.updated_at / 1000), now)}
+            </time>
+            <div class="join">
+              {thread.unread === 1 && (
+                <form method="post" class="join-item">
+                  <input type="hidden" name="csrf" value={session.csrf} />
+                  <input type="hidden" name="action" value="read" />
+                  <input type="hidden" name="id" value={String(thread.id)} />
+                  <button class="btn btn-xs" aria-label={`Mark ${thread.subject_title} as read`}>
+                    Read
+                  </button>
+                </form>
+              )}
+              <form method="post" class="join-item">
+                <input type="hidden" name="csrf" value={session.csrf} />
+                <input type="hidden" name="action" value="done" />
+                <input type="hidden" name="id" value={String(thread.id)} />
+                <button class="btn btn-xs" aria-label={`Mark ${thread.subject_title} as done`}>
+                  Done
+                </button>
+              </form>
+            </div>
+          </li>
+        ))}
+      </ul>
+    )
+  }
+  {
+    (page > 1 || more) && (
+      <nav class="join mt-6 flex justify-center" aria-label="Pagination">
+        {page > 1 ? <a class="join-item btn btn-sm" href={query(page - 1)} rel="prev">Newer</a> : <span class="join-item btn btn-sm btn-disabled">Newer</span>}
+        {more ? <a class="join-item btn btn-sm" href={query(page + 1)} rel="next">Older</a> : <span class="join-item btn btn-sm btn-disabled">Older</span>}
+      </nav>
+    )
+  }
+</Layout>

@@ -30,11 +30,12 @@ describe('routing between the UI and the forge', () => {
     '/acme/site/info/lfs/objects/batch',
     `/acme/site/media/${'a'.repeat(64)}`,
     '/acme/site/raw/main/README.md',
+    '/acme/site/releases/download/v1.0/app.tar.gz',
   ])('sends %s to the forge', (path) => {
     expect(isForgePath(path)).toBe(true)
   })
 
-  it.each(['/', '/explore', '/settings', '/acme/site.git', '/acme', '/acme/site', '/acme/site/tree/main/src', '/acme/site/blob/main/info/refs', '/acme/site/commits', '/-/style.css'])(
+  it.each(['/', '/explore', '/settings', '/acme/site.git', '/acme', '/acme/site', '/acme/site/tree/main/src', '/acme/site/blob/main/info/refs', '/acme/site/commits', '/acme/site/releases', '/acme/site/releases/tag/v1.0', '/notifications', '/-/style.css'])(
     'renders %s in the UI',
     (path) => {
       expect(isForgePath(path)).toBe(false)

@@ -13,6 +13,6 @@ const now = Math.floor(Date.now() / 1000)
   <span class="font-semibold">{commit.author.name}</span>
   <a href={commitUrl(repo, commit.id)} class="link link-hover truncate min-w-0 flex-1">{commit.summary}</a>
   <a href={commitUrl(repo, commit.id)} class="font-mono link link-hover text-base-content/70">{shortId(commit.id)}</a>
-  <time datetime={isoTime(commit.committer.time)} class="text-base-content/70">{relativeTime(commit.committer.time, now)}</time>
+  <time datetime={isoTime(commit.committer.timestamp)} class="text-base-content/70">{relativeTime(commit.committer.timestamp, now)}</time>
   {historyHref && <a href={historyHref} class="link link-hover font-semibold">History</a>}
 </div>

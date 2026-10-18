@@ -7,7 +7,7 @@ type Props = { repo: RepositoryName; commits: readonly CommitDetails[] }
 
 const { repo, commits } = Astro.props
 const now = Math.floor(Date.now() / 1000)
-const day = (commit: CommitDetails) => isoTime(commit.committer.time).slice(0, 10)
+const day = (commit: CommitDetails) => isoTime(commit.committer.timestamp).slice(0, 10)
 const groups: { day: string; commits: CommitDetails[] }[] = []
 for (const commit of commits) {
   const last = groups[groups.length - 1]
@@ -29,7 +29,7 @@ for (const commit of commits) {
                   {commit.summary || '(no message)'}
                 </a>
                 <p class="text-sm text-base-content/70">
-                  {commit.author.name} committed <time datetime={isoTime(commit.committer.time)}>{relativeTime(commit.committer.time, now)}</time>
+                  {commit.author.name} committed <time datetime={isoTime(commit.committer.timestamp)}>{relativeTime(commit.committer.timestamp, now)}</time>
                 </p>
               </div>
               <div class="join">

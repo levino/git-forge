@@ -156,6 +156,33 @@ Its steps run on the Cloudflare Queue `git-forge-imports`, declared in
 `wrangler.jsonc` and created by the first `wrangler deploy` like the bucket
 and the database.
 
+## Notifications, email and webhooks
+
+Notifications (`/api/v3/notifications`), webhooks
+(`/api/v3/repos/<owner>/<name>/hooks`) and releases
+(`/api/v3/repos/<owner>/<name>/releases`) work without further setup; their
+jobs run on the `git-forge-jobs` queue. Set the var `PUBLIC_URL` so links in
+payloads and emails point to your domain.
+
+Emails are off (`"EMAIL_PROVIDER": "none"`). To send them through Amazon SES,
+verify the sender address or domain in SES, create an IAM user with
+`ses:SendEmail`, and set in `wrangler.jsonc`
+
+```jsonc
+  "vars": { "…": "…", "EMAIL_PROVIDER": "ses", "EMAIL_FROM": "Forge <forge@example.org>", "SES_REGION": "eu-central-1" },
+```
+
+plus the two secrets:
+
+```sh
+npx wrangler@4 secret put SES_ACCESS_KEY_ID
+npx wrangler@4 secret put SES_SECRET_ACCESS_KEY
+```
+
+`"EMAIL_PROVIDER": "console"` writes each email to the Worker logs instead,
+which is handy for a first test. Users choose `instant`, `hourly`, `daily` or
+`off` with `PATCH /api/v3/user/notification-settings`.
+
 ## Update
 
 An update is a change of `git-forge.json`:

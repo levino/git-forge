@@ -10,5 +10,5 @@ export const refsWithCommits = async (repo: OpenRepository, refs: readonly Named
       return { ref, commit: id ? await readCommit(repo.odb, id) : null }
     }),
   )
-  return listed.sort((a, b) => (b.commit?.committer.time ?? 0) - (a.commit?.committer.time ?? 0))
+  return listed.sort((a, b) => (b.commit?.committer.timestamp ?? 0) - (a.commit?.committer.timestamp ?? 0))
 }

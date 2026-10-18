@@ -9,7 +9,6 @@ import {
   diffTrees,
   lastCommitFor,
   namedRefs,
-  parseSignature,
   readBlobContent,
   readCommit,
   resolveRefAndPath,
@@ -57,9 +56,8 @@ afterAll(async () => {
 describe('browse', () => {
   it('parses commits and signatures', async () => {
     const commit = await readCommit(odb, ids[0]!)
-    expect(commit).toMatchObject({ summary: 'first commit', parents: [], author: { name: 'Test', email: 'test@example.org', time: 1767225600, timezone: '+0000' } })
+    expect(commit).toMatchObject({ summary: 'first commit', parents: [], author: { name: 'Test', email: 'test@example.org', timestamp: 1767225600, timezone: '+0000' } })
     expect(commit!.message).toBe('first commit\n\nwith a body\n')
-    expect(parseSignature('broken')).toEqual({ name: 'broken', email: '', time: 0, timezone: '+0000' })
   })
 
   it('lists refs and resolves refs with slashes, tags and commit ids', async () => {

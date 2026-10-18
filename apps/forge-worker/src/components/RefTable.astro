@@ -25,7 +25,7 @@ const now = Math.floor(Date.now() / 1000)
               <a class="font-mono link link-hover" href={commitUrl(repo.name, commit.id)}>
                 {shortId(commit.id)}
               </a>{' '}
-              {commit.summary} · <time datetime={isoTime(commit.committer.time)}>{relativeTime(commit.committer.time, now)}</time>
+              {commit.summary} · <time datetime={isoTime(commit.committer.timestamp)}>{relativeTime(commit.committer.timestamp, now)}</time>
             </span>
           )}
           <a href={commitsUrl(repo.name, ref.name)} class="btn btn-xs ml-auto">

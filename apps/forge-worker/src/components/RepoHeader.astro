@@ -1,7 +1,7 @@
 ---
 import { cloneUrl, repoUrl, type OpenRepository } from '../ui/repository.ts'
 
-type Tab = 'code' | 'commits' | 'branches' | 'tags' | 'settings'
+type Tab = 'code' | 'commits' | 'branches' | 'tags' | 'releases' | 'settings'
 type Props = { repo: OpenRepository; tab: Tab }
 
 const { repo, tab } = Astro.props
@@ -12,6 +12,7 @@ const tabs: { id: Tab; label: string; href: string; count?: number }[] = [
   { id: 'commits', label: 'Commits', href: repoUrl(name, 'commits') },
   { id: 'branches', label: 'Branches', href: repoUrl(name, 'branches'), count: repo.branches.length },
   { id: 'tags', label: 'Tags', href: repoUrl(name, 'tags'), count: repo.tags.length },
+  { id: 'releases', label: 'Releases', href: repoUrl(name, 'releases') },
   ...(repo.canAdmin ? [{ id: 'settings' as const, label: 'Settings', href: repoUrl(name, 'settings') }] : []),
 ]
 const clone = cloneUrl(Astro.url.origin, name)

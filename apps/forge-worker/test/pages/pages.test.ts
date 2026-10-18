@@ -15,6 +15,9 @@ import Explore from '../../src/pages/explore.astro'
 import Home from '../../src/pages/index.astro'
 import Login from '../../src/pages/-/login.astro'
 import Settings from '../../src/pages/settings.astro'
+import Notifications from '../../src/pages/notifications.astro'
+import Releases from '../../src/pages/[owner]/[repo]/releases/index.astro'
+import ReleaseTag from '../../src/pages/[owner]/[repo]/releases/tag/[...tag].astro'
 import type { LoginPage, UserPrincipal } from '@git-forge/accounts'
 import type { UiSession } from '../../src/app.ts'
 import { git, tempDir } from '../e2e/history.ts'
@@ -76,6 +79,21 @@ beforeAll(async () => {
   await git(dir, ['tag', 'v1.0', first])
   const remote = server.url.replace('://', `://git:${token}@`)
   for (const name of ['site', 'secret']) await git(dir, ['push', '-q', `${remote}/alice/${name}.git`, 'main', 'feature/ui', 'v1.0'])
+  const release = async (body: unknown) => {
+    const response = await call(forge, BASE, 'POST', '/api/v3/repos/alice/site/releases', token, body)
+    expect(response.status).toBe(201)
+    return (await response.json()) as { id: number; upload_url: string }
+  }
+  const published = await release({ tag_name: 'v1.0', name: 'First release', body: '## Changes\n\n<script>x()</script>\n\nFixed [main](src/main.ts).' })
+  const upload = await forge.fetch(
+    new Request(`${BASE}/api/uploads/repos/alice/site/releases/${published.id}/assets?name=app.tar.gz`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/gzip', 'Content-Length': '4' },
+      body: new Uint8Array([1, 2, 3, 4]),
+    }),
+  )
+  expect(upload.status).toBe(201)
+  await release({ tag_name: 'v2.0-draft', name: 'Secret plans', draft: true, target_commitish: 'main' })
   container = await AstroContainer.create()
 }, 60_000)
 
@@ -257,5 +275,55 @@ describe('login and account pages', () => {
     expect((await post({ action: 'revoke-token', id })).html).toContain('Token revoked.')
     expect(await forge.services.authenticate(new Request(BASE, { headers: { Authorization: `Bearer ${token}` } }))).toBeNull()
     expect((await post({ action: 'revoke-token', id: 'someone-elses' })).status).toBe(400)
+  })
+})
+
+describe('releases and notifications', () => {
+  it('lists published releases with sanitized notes and asset downloads', async () => {
+    const { status, html } = await render(Releases, '/alice/site/releases', { owner: 'alice', repo: 'site' })
+    expect(status).toBe(200)
+    expect(html).toContain('First release')
+    expect(html).toContain('<h2>Changes</h2>')
+    expect(html).not.toContain('<script>x()')
+    expect(html).toContain('href="/alice/site/blob/v1.0/src/main.ts"')
+    expect(html).toContain('href="/alice/site/releases/download/v1.0/app.tar.gz"')
+    expect(html).toContain('4 B')
+    expect(html).not.toContain('Secret plans')
+  })
+
+  it('shows drafts only to people who can write', async () => {
+    const owner = await render(Releases, '/alice/site/releases', { owner: 'alice', repo: 'site' }, admin)
+    expect(owner.html).toContain('Secret plans')
+    expect((await render(ReleaseTag, '/alice/site/releases/tag/v2.0-draft', { owner: 'alice', repo: 'site', tag: 'v2.0-draft' })).status).toBe(404)
+    const tag = await render(ReleaseTag, '/alice/site/releases/tag/v1.0', { owner: 'alice', repo: 'site', tag: 'v1.0' })
+    expect(tag.status).toBe(200)
+    expect(tag.html).toContain('<title>First release · alice/site</title>')
+  })
+
+  it('shows the inbox of the session user and applies its actions', async () => {
+    const session: UiSession = { principal: admin as UserPrincipal, csrf: 'csrf-token' }
+    const done: number[] = []
+    const thread = {
+      id: 7, user_id: 'x', repository_id: 'r', subject_key: 'k', subject_type: 'Release', subject_title: 'First release', subject_url: null, latest_comment_url: null,
+      html_url: 'https://forge.example/alice/site/releases/tag/v1.0', reason: 'subscribed', unread: 1, last_event_id: 1, updated_at: Date.now(), last_read_at: null, emailed_at: null,
+      owner_login: 'alice', repository_name: 'site',
+    } as const
+    const inbox = {
+      threads: async () => [thread],
+      markRead: async () => true,
+      markDone: async (_user: UserPrincipal, id: number) => (done.push(id), true),
+      markAllRead: async () => 1,
+    }
+    expect(await render(Notifications, '/notifications', {})).toMatchObject({ status: 302 })
+    const page = await render(Notifications, '/notifications', {}, admin, { session, services: { inbox } })
+    expect(page.html).toContain('href="/alice/site/releases/tag/v1.0"')
+    expect(page.html).toContain('Mark First release as done')
+    const post = await render(Notifications, '/notifications', {}, admin, {
+      session,
+      services: { inbox, verifySessionWrite: async () => session },
+      request: new Request(`${BASE}/notifications`, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'action=done&id=7' }),
+    })
+    expect(post.status).toBe(200)
+    expect(done).toEqual([7])
   })
 })

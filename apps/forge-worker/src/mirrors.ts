@@ -23,6 +23,7 @@ export type MirrorContext = {
   readonly instanceKey: SigningKey | undefined
   readonly fetch?: FetchFunction
   readonly digests?: DigestFactory
+  readonly onSynced?: (repo: RepositoryName, config: MirrorConfig, result: SyncResult) => Promise<void>
 }
 
 const UPSTREAM_PATH = /^\/([^/]+)\/([^/]+?)(?:\.git)?\/?$/
@@ -64,7 +65,11 @@ export const runMirrorSync = async (
   repo: RepositoryName,
   config: MirrorConfig,
   extra: Pick<SyncOptions, 'deferLfs'> = {},
-): Promise<SyncResult> => syncMirror({ ...mirrorUnitOptions(context, repo, config), strategy: 'auto', ...extra })
+): Promise<SyncResult> => {
+  const result = await syncMirror({ ...mirrorUnitOptions(context, repo, config), strategy: 'auto', ...extra })
+  if (context.onSynced) await context.onSynced(repo, config, result)
+  return result
+}
 
 export type ScheduledMirrorRun = {
   readonly repository: string

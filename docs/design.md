@@ -307,11 +307,8 @@ tmp/<repo>/<timestamp>-<uuid>/asset # a release asset upload without a declared 
   are read back once to write the final pack and never again. The `Storage`
   interface has no delete; operators expire `tmp/` with a bucket lifecycle
   rule (e.g. one day). Pushes up to one chunk never touch `tmp/`. Fetched
-  packs (import, mirror sync) are staged the same way. Every attempt writes
-  under a fresh `<timestamp>-<uuid>` prefix, so the chunks of an attempt that
-  failed (pack over the step limit, crash, timeout) are never read or reused
-  again; they stay until the lifecycle rule expires them. The same holds for
-  pack files that were written but never listed in `objects/info/packs`.
+  packs are staged the same way; chunks of failed attempts and unlisted packs
+  are never reused and stay until expired.
 - **Release assets** are content-addressed like LFS objects
   (`lfs/objects/…`, §16). Which asset belongs to which release lives only in
   the database; a deleted asset or release leaves its bytes in place.
@@ -347,9 +344,7 @@ Memory is the cache budget (16 MiB), one staging chunk (4 MiB) and about
 60–100 bytes per object, independent of the pack's size in bytes. Plain
 blobs of any size are only streamed, but objects that must be materialized
 (commits, trees, tags, delta bases and delta results) are limited to 64 MiB;
-large files belong in LFS. A blob above the limit (or above the cache's keep
-limit) that arrives as a plain entry is always streamed, and an import refetches
-large blobs one by one so that they arrive plain (Import, below). The Worker sets no push size limit of its own
+large files belong in LFS. The Worker sets no push size limit of its own
 (`MAX_PUSH_BYTES` is optional); the platform's request body limit applies
 (`apps/forge-worker/README.md`).
 
@@ -390,78 +385,34 @@ as a sequence of stateless steps, each persisting its progress in
    `want` the last commit of the range, `have` every earlier range end and all
    local tips, so the server sends exactly the new objects; store the pack,
    check connectivity, collect LFS pointers. A step whose pack exceeds
-   `maxStepBytes` (32 MiB), or that contains a delta whose result exceeds the
-   indexer's object limit (64 MiB), is retried with a quarter of the commits;
-   small packs double the range. A final fetch picks up tag objects (without
-   a byte limit: every commit is already present). Servers without `filter`,
-   and dumb servers, are fetched in one step.
+   `maxStepBytes` (32 MiB), or with a delta result above 64 MiB, is retried
+   with a quarter of the commits; small packs double the range. A final fetch
+   without byte limit picks up tag objects. Servers without `filter`, and dumb
+   servers, are fetched in one step.
 
-   *Splitting a commit.* The step limit only bounds the work per invocation,
-   never what can be imported. If a range of one commit is still too large,
-   the import splits it over several steps, recorded in `split` in the state:
-   - *list* — fetch the commit with `filter blob:none` (same `have`s), store
-     its commits and trees as a pack that is written but **not** listed in
-     `objects/info/packs`, and write the blobs that its new trees reference
-     and the repository lacks (subtrees not in the pack are reachable from a
-     `have` and therefore complete; gitlinks are skipped) to
-     `<repo>/import/blobs.txt`.
-   - *blobs* — `want` the listed blobs by id, `blobsPerStep` at a time
-     (start: half the list; halved when the pack exceeds `maxStepBytes` or a
-     delta result exceeds the object limit; doubled after small packs).
-     Without `thin-pack` the server only deltifies against objects in the same
-     pack, so a batch of one blob arrives undeltified and is fetched without a
-     byte limit: the indexer only hashes plain blobs while streaming them to
-     `tmp/`, whatever their size.
-   - *done* — after the last batch the tree pack is listed, the commit becomes
-     a cut (`have`) and the next step continues with a one-commit range.
-
-   The tree pack stays unlisted until all blobs are stored, so an object
-   database never sees a commit without its blobs: an abandoned split leaves
-   only unlisted files and complete blob packs, and a new import cannot take
-   the half-split commit for a complete one. Retries repeat the current
-   sub-step (the server sends the same trees again; blob batches skip blobs
-   already present). github.com supports `filter blob:none` and `want` of a
-   blob id (checked against `dorfpflege-roessing/dorfarchiv`, whose 32 MiB+
-   commit made this necessary); it advertises no `object-info`, so blob sizes
-   are not known in advance and batches adapt to failures instead.
-
-   *CPU bound.* What cannot be split is one blob (and the trees of one
-   commit): a blob of N bytes costs one invocation inflating, hashing and
-   writing N bytes to `tmp/` and then copying them to the final pack, about
-   6 s of CPU per 100 MiB (measured in Node: a 150 MiB blob took 9.6 s; the
-   inflater and SHA-1 run in JavaScript). The Worker sets `limits.cpu_ms` to
-   60 s, enough for single blobs of about 1 GiB; Cloudflare allows up to five
-   minutes, which the operator can configure for larger ones. GitHub rejects
-   pushes of files above 100 MiB outside LFS.
-4. *lfs* — LFS objects via the upstream's batch API, at most 100 objects and
-   `maxLfsStepBytes` (512 MiB) per step, always at least one object, so an
-   object of any size gets a step of its own. Each object is streamed from the
-   download into storage while its SHA-256 and size are checked
-   (`verifyingStream`; the Worker uses the native `crypto.DigestStream`, Node
-   `node:crypto`), so neither memory nor `MAX_LFS_OBJECT_BYTES` limits it; the
-   bound is the storage's single-`put` limit (5 GiB on R2). Measured in Node
-   for `dorfpflege-roessing/dorfarchiv` (29 objects, 4.3 GB, largest 538 MB):
-   at most 5.8 s CPU and 10.6 s wall time per step; JavaScript SHA-256 adds
-   about 1.3 s CPU per 100 MiB. Both fit the 60 s `cpu_ms` of the Worker and
-   the instance template and the 15 minutes of wall time of a queue consumer.
-   Missing objects are recorded, not fatal.
-
-   *Endpoint.* Like `git-lfs`, an explicit `lfsUrl` (the equivalent of git
-   config) wins over the repository's `.lfsconfig`, which wins over the
-   default `<url>.git/info/lfs`. Without `lfsUrl`, the first *lfs* step reads
-   `.lfsconfig` from the imported default branch (`HEAD`); only if that branch
-   has no `.lfsconfig` file are the other branch tips and then the tags tried,
-   in name order. Within the file `lfs.url` wins over `remote.origin.lfsurl`
-   (git-lfs's order). The URL is normalized: http(s) only, no credentials,
-   query or fragment, trailing slashes and a trailing `/objects/batch` removed
-   (git-lfs appends `/objects/batch` itself; an endpoint configured with the
-   full batch URL, as in `dorfarchiv`, works with git-lfs only because that
-   server answers both paths, and the stripped form is what was meant). Other keys such as `lfs.fetchexclude` are ignored: an
-   import mirrors every object so that every clone can smudge. The result is
-   kept in the import state (`lfsEndpoint` with `source` `setting`,
-   `lfsconfig` or `default`). The import token is sent to an endpoint taken
-   from `.lfsconfig` only if it has the same origin as the import URL, since
-   the file is repository content; public LFS servers need no token.
+   *Split* — a one-commit range that is still too large is spread over steps
+   (`split` in the state): fetch it with `filter blob:none` into a pack that
+   stays unlisted, write the missing blobs of its new trees to
+   `import/blobs.txt`, then `want` them by id in batches (halved on overflow,
+   doubled after small packs); a batch of one blob has no byte limit and
+   arrives undeltified (no `thin-pack`), so the indexer only streams it. After
+   the last batch the tree pack is listed and the commit becomes a cut.
+   Unlisted until complete, an abandoned split never exposes a commit without
+   its blobs. github.com supports both (no `object-info`). Bound: one blob per
+   invocation, about 6 s CPU per 100 MiB (JavaScript inflate and SHA-1), so
+   about 1 GiB at `cpu_ms` 60000.
+4. *lfs* — via the upstream's batch API, at most 100 objects and
+   `maxLfsStepBytes` (512 MiB) per step, at least one object; objects are
+   streamed into storage with native SHA-256 (`DigestStream`, `node:crypto`),
+   so any size up to the storage's single `put` (5 GiB on R2) works;
+   `MAX_LFS_OBJECT_BYTES` only limits uploads. A 538 MB object costs about
+   1.7 s CPU. Missing objects are recorded, not fatal.
+   Endpoint precedence as in git-lfs: `lfsUrl`, then `.lfsconfig` of the
+   default branch (other tips, then tags, only if it has none; `lfs.url`
+   before `remote.origin.lfsurl`), then `<url>.git/info/lfs`. URLs are
+   normalized (http(s), no credentials, trailing `/objects/batch` removed);
+   other keys are ignored. The token goes to a `.lfsconfig` endpoint only if
+   it has the import URL's origin.
 5. *refs* — update refs via compare-and-swap and rewrite `info/refs`; an
    empty repository adopts the upstream `HEAD`.
 
@@ -729,9 +680,7 @@ switch.
 **Size limits.** Git pushes are only limited by the platform's request body
 limit unless `MAX_PUSH_BYTES` is set; single LFS
 objects by `MAX_LFS_OBJECT_BYTES` (default 100 MiB, the request body limit of
-Cloudflare's Free and Pro plans), enforced in the batch API and on `PUT`. The
-limit only applies to uploads through the forge's LFS API; imports and mirrors
-download LFS objects server-side into storage and accept any size (§7, Import).
+Cloudflare's Free and Pro plans), enforced in the batch API and on `PUT`.
 
 ## 9. Git over SSH
 

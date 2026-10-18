@@ -77,6 +77,11 @@ describe('CI on wrangler dev', () => {
       ['hello (1)', 'in_progress'],
       ['hello (2)', 'queued'],
     ])
+    const checks = (await (await call('/api/v3/repos/e2e/ci/commits/main/check-runs')).json()) as { check_runs: { name: string; status: string }[] }
+    expect(checks.check_runs.map((check) => [check.name, check.status]).sort()).toEqual([
+      ['hello (1)', 'in_progress'],
+      ['hello (2)', 'queued'],
+    ])
 
     const githubToken = job.variables['system.github.token']!.value
     await git(tempDir(), ['clone', '-q', `${dev.url.replace('http://', `http://x-access-token:${githubToken}@`)}/e2e/ci.git`, 'out'])

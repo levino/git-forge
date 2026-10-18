@@ -89,8 +89,9 @@ Design: [design.md §15](design.md#ci).
 - [x] Expressions server-side: job-level `if`, `runs-on` expressions, `strategy`/`matrix` (include/exclude, fail-fast, max-parallel), job outputs across `needs`, `env`/`defaults`, step `if`/`continue-on-error`/`timeout-minutes`, workflow `concurrency`
 - [x] Cancellation (`JobCancellation`), job timeouts, reaper for expired locks, dead runners and lost launches, re-runs (all, failed, one job) as new attempts
 - [x] Per-repository and per-environment secrets (AES-GCM in SQLite under an instance key), environments with required reviewers (`pending_deployments`), no secrets for untrusted runs
-- [x] `workflow_dispatch` (typed inputs), `schedule` (cron table + Worker cron), `pull_request` trigger function (`queueRunsForPullRequest`, to be wired by collaboration); check runs per job through a `CheckRunSink`
-- [ ] Wire `pull_request` runs and the check-run sink to the collaboration package (#26); `paths` filters; job-level `concurrency`; configuration variables (`vars`)
+- [x] `workflow_dispatch` (typed inputs), `schedule` (cron table + Worker cron), `pull_request` trigger function (`queueRunsForPullRequest`, wired to collaboration's events); check runs per job through a `CheckRunSink`
+- [x] `pull_request` runs from the collaboration package's pull request events; check runs written with its store
+- [ ] `paths` filters; job-level `concurrency`; configuration variables (`vars`)
 - [ ] Broker and run service (v2 flow), results service, message encryption; then cache, artifacts, OIDC id tokens
 - [ ] External providers: signed `workflow_job` webhook delivery, GitHub App auth (JWT → installation token, manifest flow) and PATs on `/api/v3`, org-level runners; try WarpBuild Enterprise, AWS CodeBuild, RunsOn
 - [ ] `container:` and `services:` (Docker-in-Docker in the runner container)
@@ -109,11 +110,23 @@ Design: [design.md §15](design.md#ci).
 
 ## M7 — Collaboration
 
-- [ ] Branch protection (in progress, v1)
-- [ ] Issues
-- [ ] Pull requests, reviews, conflict-free merge
-- [ ] Enforce required reviews and status checks on merge via `evaluateBranchUpdate(..., { via: 'pull-request' })`
-- [ ] Discussions
+Design: [design.md §17](design.md#17-collaboration).
+
+- [x] Branch protection (v1)
+- [x] Issues: create/edit/close/reopen, comments, labels, assignees, milestones, locking, events and timeline, `#N` cross references, numbering shared with pull requests and discussions
+- [x] Git diff and merge in core identical to git (xdiff port, tree diff, binary/LFS detection, merge bases incl. criss-cross, merge commit, squash, rebase, conflict detection)
+- [x] Pull requests from branches of the same repository: files, diff, commits, mergeability, merge methods, auto-close linked issues, manual merges detected on push
+- [x] Reviews (approve / request changes / comment, pending reviews, dismissal), line comments anchored to commit + path + line, requested reviewers, stale-review dismissal on push
+- [x] Enforce required reviews and status checks on merge via `evaluateBranchUpdate(..., { via: 'pull-request' })`
+- [x] Commit statuses and check runs (storage and API; CI writes them)
+- [x] Discussions: categories, threads, answers
+- [x] REST API under `/api/v3` with GitHub-compatible shapes, wired into the Worker
+- [ ] Pull requests from forks
+- [ ] CODEOWNERS parsing for `require_code_owner_reviews`
+- [ ] Rename detection in merges (renames are reported as conflicts today)
+- [ ] In-browser conflict resolution
+- [ ] Reactions, search (FTS5), notifications
+- [ ] Web UI for issues, pull requests and discussions (separate work package)
 - [ ] Submit via form
 
 ## Later

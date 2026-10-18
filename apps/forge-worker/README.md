@@ -127,7 +127,19 @@ request origin when it is unset.
 Branch protection rules use the GitHub-style API of `@git-forge/accounts`
 (`GET /api/repos/{owner}/{name}/branch-protection`,
 `GET|PUT|DELETE /api/repos/{owner}/{name}/branches/{pattern}/protection`) and
-are enforced on every push.
+are enforced on every push and every pull request merge.
+
+Issues, pull requests, reviews, statuses, check runs and discussions are
+served under `/api/v3/repos/{owner}/{name}/…` with GitHub-compatible shapes
+(routes in the [collaboration README](../../packages/collaboration/README.md#rest-api-apiv3));
+the GHES subset of the CI package keeps `/api/v3/repos/{owner}/{name}/actions/…`.
+Every successful push refreshes the repository's open pull requests (head
+sha, stale-review dismissal, merges done with plain `git push`) and closes
+issues referenced with a closing keyword by commits on the default branch.
+A merge through the API runs the push pipeline (CI, mirror notifications,
+`push` webhooks). Issue, comment, pull request and review activity becomes
+notification events (webhooks, inbox, digests). Browser sessions work on
+`/api/v3` the same way as on the other APIs (CSRF token required).
 
 ## Login
 
@@ -489,7 +501,8 @@ database (Miniflare), persisted under `.wrangler/`. `.dev.vars` is gitignored.
   matrix workflow to a private repository, checks that the run is queued in
   D1, registers a JIT runner through `/api/v3`, takes the job over the
   Actions protocol (OAuth assertion, session, message, renew) with instance
-  and repository secrets, clones the repository with
+  and repository secrets, checks the check runs through the collaboration
+  API, clones the repository with
   the job's `GITHUB_TOKEN` and cancels the run (the runner receives a
   `JobCancellation` message, the queued leg is cancelled).
 - `test/e2e/media.e2e.test.ts` starts an instance, issues a `repo:read`

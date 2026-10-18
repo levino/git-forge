@@ -2,6 +2,9 @@ import {
   type ActionsTick,
   actionsTick,
   advanceRun,
+  type CheckRunReport,
+  type CheckRunSink,
+  queueRunsForPullRequest,
   type DispatchOptions,
   handleActionsService,
   type SecretsKey,
@@ -86,6 +89,20 @@ import {
   ZERO_ID,
 } from '@git-forge/core'
 import {
+  type BranchUpdate,
+  type CheckRunInput,
+  type CollaborationOptions,
+  getPullSummary,
+  handleCollaborationApi,
+  handlePushedRefs,
+  loadUsers,
+  recordCheckRun,
+  SYSTEM_ACTOR as COLLABORATION_SYSTEM_ACTOR,
+  systemScope,
+  actorRefOf,
+  updateCheckRunRecord,
+} from '@git-forge/collaboration'
+import {
   createNotifications,
   type EventActor,
   type ForgeEvent,
@@ -102,6 +119,7 @@ import {
   workflowRunEvent,
 } from '@git-forge/notifications'
 import { handleReleasesRequest } from '@git-forge/releases'
+import { activityEvent } from './collaboration-events.ts'
 import type { ForgeSettings } from './config.ts'
 import {
   enqueueDueMirrors,
@@ -639,12 +657,33 @@ export const createForge = (options: ForgeOptions): Forge => {
     }
   }
 
+  const checkRunInput = (check: CheckRunReport): CheckRunInput => ({
+    name: check.name,
+    status: check.status,
+    conclusion: check.conclusion,
+    externalId: check.externalId,
+    detailsUrl: check.detailsUrl,
+    ...(check.title ? { output: { title: check.title } } : {}),
+  })
+
+  const checkRuns: CheckRunSink = {
+    create: async (repo, check) => {
+      const repository = await store.findRepository(repo.owner, repo.name)
+      return repository ? recordCheckRun(db, repository.id, check.headSha, checkRunInput(check), COLLABORATION_SYSTEM_ACTOR, now().getTime()) : null
+    },
+    update: async (repo, id, check) => {
+      const repository = await store.findRepository(repo.owner, repo.name)
+      if (repository) await updateCheckRunRecord(db, repository.id, id, checkRunInput(check), now().getTime())
+    },
+  }
+
   const dispatchOptions = (request: Request): DispatchOptions => {
     const serverUrl = issuerFor(request)
     return {
       db,
       storage,
       urls: { serverUrl, serviceUrl: `${serverUrl}${ACTIONS_SERVICE_PATH}` },
+      checks: checkRuns,
       ...(options.actions?.launcher ? { launcher: options.actions.launcher } : {}),
       now: () => now().getTime(),
       log: (event) => console.log(JSON.stringify(event)),
@@ -695,6 +734,7 @@ export const createForge = (options: ForgeOptions): Forge => {
         now: () => now().getTime(),
         ...(actions.secrets ? { secrets: actions.secrets } : {}),
         ...(actions.secretsKey ? { secretsKey: actions.secretsKey } : {}),
+        checks: checkRuns,
         actionSources: {
           ...(actions.repositories ? { repositories: actions.repositories } : {}),
           githubFallback: actions.githubFallback ?? null,
@@ -715,6 +755,7 @@ export const createForge = (options: ForgeOptions): Forge => {
         actor: userLogin,
         ...(actions.secretsKey ? { secretsKey: actions.secretsKey } : {}),
         ...(actions.launcher ? { launcher: actions.launcher } : {}),
+        checks: checkRuns,
         log: dispatch.log!,
         now: () => now().getTime(),
       }))
@@ -784,6 +825,50 @@ export const createForge = (options: ForgeOptions): Forge => {
     )
     if (waitUntil) waitUntil(events)
     else await events
+  }
+
+  const collaborationOptions = (request: Request, waitUntil?: WaitUntil): CollaborationOptions => ({
+    db,
+    storage,
+    accounts: store,
+    now: () => now().getTime(),
+    onBranchUpdated: async (update: BranchUpdate) => {
+      const outcome: PushOutcome = { unpack: 'ok', results: [{ name: update.ref, oldId: update.oldId, newId: update.newId, ok: true }], pack: null, objectCount: 0, archived: [] }
+      await afterPush(request, update.repo, outcome, waitUntil, await apiPrincipal(request))
+    },
+    onActivity: async (scope, activity) => {
+      await emit(await activityEvent(scope, activity, issuerFor(request)))
+      if (options.actions && activity.kind === 'pull_request') {
+        try {
+          const pull = await getPullSummary(scope, activity.number)
+          const actor = activity.actor.kind === 'system' ? 'system' : (await loadUsers(scope.db, [activity.actor]))(activity.actor).login
+          await queueRunsForPullRequest(dispatchOptions(request), {
+            repo: scope.repo,
+            number: pull.number,
+            action: activity.action,
+            actor,
+            title: pull.title,
+            base: { ref: pull.baseRef, sha: pull.baseSha },
+            head: { ref: pull.headRef, sha: pull.headSha, repo: scope.repo },
+            trusted: true,
+          })
+        } catch (error) {
+          console.log(JSON.stringify({ event: 'pull-request-runs-failed', repository: `${scope.repo.owner}/${scope.repo.name}`, number: activity.number, error: String(error) }))
+        }
+      }
+    },
+  })
+
+  const refreshCollaboration = async (request: Request, repo: RepositoryName, outcome: PushOutcome, principal: Principal | null): Promise<void> => {
+    const updates = outcome.results.filter((result) => result.ok)
+    if (updates.length === 0) return
+    try {
+      const scope = await systemScope(collaborationOptions(request), repo.owner, repo.name)
+      if (!scope) return
+      await handlePushedRefs(scope, updates, (principal && actorRefOf(principal)) ?? { kind: 'system', id: null })
+    } catch (error) {
+      console.log(JSON.stringify({ event: 'collaboration-push-failed', repository: `${repo.owner}/${repo.name}`, error: (error as Error).message }))
+    }
   }
 
   const health = async () => json(200, { ok: true, service: 'git-forge' })
@@ -871,6 +956,13 @@ export const createForge = (options: ForgeOptions): Forge => {
       onTagCreated: (repo, outcome, principal) => afterPush(request, repo, outcome, waitUntil, principal),
     })
     if (releases) return releases
+    const collaboration = await handleCollaborationApi(request, {
+      ...collaborationOptions(request, waitUntil),
+      authenticate: apiPrincipal,
+      verifyInstance: authentication.verifyInstance,
+      ...(options.publicUrl ? { publicUrl: options.publicUrl } : {}),
+    })
+    if (collaboration) return collaboration
     try {
       const actions = await actionsRoute(request)
       if (actions) return actions
@@ -894,7 +986,9 @@ export const createForge = (options: ForgeOptions): Forge => {
       packfileUris: (incoming, repo) => packfileUris(incoming, repo, authorize),
       onPush: async (repo, outcome) => {
         await compactAfterPush(waitUntil)(repo, outcome)
-        await afterPush(request, repo, outcome, waitUntil, await authenticateRequest(request, authentication))
+        const principal = await authenticateRequest(request, authentication)
+        await refreshCollaboration(request, repo, outcome, principal)
+        await afterPush(request, repo, outcome, waitUntil, principal)
       },
     })
     return git ?? json(404, { error: 'not found' })
@@ -914,6 +1008,7 @@ export const createForge = (options: ForgeOptions): Forge => {
         db,
         storage,
         urls: { serverUrl, serviceUrl: `${serverUrl}${ACTIONS_SERVICE_PATH}` },
+        checks: checkRuns,
         ...(options.actions.launcher && options.publicUrl ? { launcher: options.actions.launcher } : {}),
         now: () => now().getTime(),
         log: (event) => console.log(JSON.stringify(event)),

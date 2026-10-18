@@ -43,3 +43,24 @@ jobs:
       - run: go install github.com/versity/versitygw/cmd/versitygw@v1.9.0
       - run: pnpm install --frozen-lockfile
       - run: pnpm --filter @git-forge/s3 test:s3
+
+  node-binary:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y git-lfs
+      - run: git lfs install --skip-repo
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - run: pnpm install --frozen-lockfile
+      - run: sh apps/forge-node/build-executables.sh "$RUNNER_TEMP/node"
+      - run: pnpm --filter forge-node test:e2e
+        env:
+          GIT_FORGE_NODE_BINARY: ${{ runner.temp }}/node/git-forge-node-linux-x64

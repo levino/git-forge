@@ -1,90 +1,101 @@
 # git-forge instance
 
 A deployment of [git-forge](https://github.com/levino/git-forge), a serverless
-Git forge, on Cloudflare Workers with R2 and D1. This repository contains no
-forge code: it pins a release of git-forge and configures one instance.
+Git forge, on Cloudflare Workers with R2, D1 and Queues. This directory
+contains no forge code: its `wrangler.toml` pins a release of git-forge and
+configures one instance.
 
 | File | Purpose |
 |---|---|
-| `git-forge.json` | The pinned release: `version` and the `sha256` of the release's `SHA256SUMS` asset. |
-| `wrangler.jsonc` | The instance: Worker name, R2 bucket, D1 database, cron, vars, domain. |
+| `wrangler.toml` | The whole instance: Worker name, the pinned release in the `[build]` command, R2 bucket, D1 database, queues, cron, vars, domain. |
+| `.dev.vars.example` | The secret the Deploy button asks for (`BOOTSTRAP_TOKEN`), and the template for `.dev.vars` in local development. |
 | `runner/Dockerfile` | Image for CI jobs, used only when [CI is enabled](#ci-opt-in): the official `ghcr.io/actions/actions-runner` image plus Git and Node.js. |
-| `build.sh` | Downloads the pinned release, verifies every file against the pin and unpacks it into `dist/`. Needs only `sh`, `curl`, `sha256sum` and `tar`. |
-| `deploy.sh` | Applies the release's D1 migrations and deploys, in the right order also on the very first deploy. |
-| `renovate.json` | Lets Renovate propose updates when git-forge publishes a release. |
-| `.github/workflows/pin-checksum.yml` | Fills in the `sha256` on Renovate's update PRs and checks that the pin builds (not for the all-zero placeholder pin, which has no release). |
 
-There is no `package.json` and no lockfile. Nothing from npm ends up in the
-Worker: it runs the bundled `git-forge-worker.mjs` from the release, byte for
-byte, verified against the checksum committed here.
+There is no `package.json`, no lockfile and no script. Nothing from npm ends
+up in the Worker: it runs the bundled `git-forge-worker.mjs` from the release,
+byte for byte, verified against the checksum pinned in `wrangler.toml`.
 
-## Create an instance
+## How it deploys
+
+`wrangler deploy` (the default deploy command of Workers Builds) first runs
+the `[build]` command. It downloads the release's `SHA256SUMS` and
+`git-forge-worker.mjs` into `dist/`, checks `SHA256SUMS` against the pinned
+`S` and the bundle against `SHA256SUMS`, and fails the deploy on any mismatch.
+It needs only `sh`, `curl` and `sha256sum`.
+
+```toml
+[build]
+command = "V=0.8.0 S=baa0866b… && U=… && mkdir -p dist && cd dist && curl … && sha256sum -c …"
+```
+
+`V` is the release version, `S` the SHA-256 of the release's `SHA256SUMS`.
+
+Every Cloudflare resource is declared in `wrangler.toml` by name only, without
+ids: the first deploy creates the D1 database, the R2 bucket and the two
+queues (automatic resource provisioning), later deploys find them by name.
+The Worker applies pending database migrations itself when it starts, so
+there is no migration step in the deploy.
 
 A Workers **Paid** plan is required (indexing a push needs more than the 10 ms
 CPU of the Free plan, and `limits.cpu_ms` cannot be set on Free).
 
-Every Cloudflare resource of the instance is declared in `wrangler.jsonc` and
-created by Wrangler, never by hand: the D1 database and the R2 bucket have a
-name but no id, so the first `wrangler deploy` provisions them (automatic
-resource provisioning) and later deploys find them by name. Cron, vars, routes
-and the required secret are declared there too.
+## Create an instance
 
 ### With the Deploy button
 
-[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/levino/git-forge-instance)
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/levino/git-forge/tree/main/templates/instance)
 
-The button copies this repository into your GitHub or GitLab account, connects
-it to Workers Builds and deploys it. Then check the [build
-settings](#build-settings) and set [the first admin](#first-admin).
+The button copies this directory into a new repository in your GitHub or
+GitLab account (this directory becomes its root), lets you rename the Worker,
+the database, the bucket and the queues, asks for `BOOTSTRAP_TOKEN`, connects
+the repository to Workers Builds and deploys it. Every later push to the
+default branch deploys again. Leave the build command of Workers Builds empty
+and the deploy command at `npx wrangler deploy`; the `[build]` command in
+`wrangler.toml` does the build. Then set [the first admin](#first-admin).
 
-### From the template
+### By hand
 
-1. Create your own repository from this one ("Use this template" on GitHub, or
-   copy the files).
-2. Adjust `wrangler.jsonc`: `name`, `bucket_name`, `database_name`, `vars`
-   and, for your own domain, `routes` (see [Domain](#domain)).
+1. Copy this directory into a new repository.
+2. Adjust `wrangler.toml`: `name`, `bucket_name`, `database_name`, the queue
+   names (the jobs queue must end in `-jobs`) and, for your own domain,
+   `routes` (see [Domain](#domain)).
 3. In the Cloudflare dashboard, open **Workers & Pages → Create → Import a
-   repository**, pick your repository and use the [build
-   settings](#build-settings) below. Every push to the default branch now
-   deploys the instance; the first one creates the database and the bucket.
-
-### Build settings
-
-| Setting | Value |
-|---|---|
-| Build command | `sh build.sh` |
-| Deploy command | `sh deploy.sh` |
-| Root directory | `/` |
-
-`build.sh` fetches and verifies the release. `deploy.sh` applies new D1
-migrations from the release and then uploads the Worker, so new code never
-runs against an old schema. On the very first deploy the database does not
-exist yet; `deploy.sh` then deploys first (which provisions it) and applies
-the migrations right after. `wrangler deploy` also runs `build.sh` through
-`build.command` in `wrangler.jsonc`; it finds `dist/` already verified and does
-nothing. `deploy.sh` runs `npx wrangler@4`; set `WRANGLER` to use another
-Wrangler command.
+   repository**, pick your repository, leave the build command empty and keep
+   the deploy command `npx wrangler deploy`. Or run `npx wrangler@4 deploy`
+   locally.
 
 ### Domain
 
 Without `routes` the instance is reachable at
 `https://<name>.<account>.workers.dev`. For your own domain declare it as a
-custom domain in `wrangler.jsonc`; Wrangler creates the DNS record and the
-certificate on deploy (the zone must be on the same Cloudflare account):
+custom domain at the top of `wrangler.toml`; Wrangler creates the DNS record
+and the certificate on deploy (the zone must be on the same Cloudflare
+account):
 
-```jsonc
-"routes": [{ "pattern": "git.example.com", "custom_domain": true }]
+```toml
+routes = [{ pattern = "git.example.com", custom_domain = true }]
 ```
+
+and set the var `PUBLIC_URL` to `https://git.example.com`.
 
 ## First admin
 
-With OIDC configured, run `sh claim-admin.sh you@example.org` once after the
-first deploy and sign in with that (verified) address: the one-time claim in D1
-makes the account an instance admin and is deleted. Nothing stays in the config. Without OIDC: a fresh instance has no users. The secret `BOOTSTRAP_TOKEN` allows exactly one
-call that creates the first instance admin; without it `/api/bootstrap` answers
-`503`. It is not declared as required in `wrangler.jsonc`, because a secret can
-only be set once the Worker exists, i.e. after the first deploy. Its value never
-goes into the repository. Set it once after the first deploy:
+**With OIDC** (see [Login](#login)): open the instance once (any page, so the
+Worker creates its tables), then store a one-time claim for your verified
+email address or OIDC subject in D1, from the repository directory:
+
+```sh
+npx wrangler@4 d1 execute DB --remote --command "INSERT INTO instance_admin_claims (identity, created_at) VALUES ('you@example.org', unixepoch() * 1000)"
+```
+
+The first OIDC sign-in with that identity creates the account (even without
+self-signup), makes it an instance admin and deletes the claim. Nothing stays
+in the config.
+
+**Without OIDC:** the secret `BOOTSTRAP_TOKEN` allows exactly one call that
+creates the first instance admin; without it `/api/bootstrap` answers `503`.
+The Deploy button asks for it. Otherwise set it after the first deploy (a
+secret can only be set on an existing Worker):
 
 ```sh
 openssl rand -base64 32 | npx wrangler@4 secret put BOOTSTRAP_TOKEN
@@ -110,37 +121,45 @@ collaborators, instance federation and mirrors are described in the
 To mirror private repositories of other instances, also set the secret
 `INSTANCE_KEY` and the var `PUBLIC_URL` (see there).
 
-## Web UI
+## Vars
 
-The instance serves a web UI from the same Worker: `https://<your-instance>/`
-lists repositories, `https://<your-instance>/alice/site` shows the files, the
-README, commits, diffs, branches, tags and previews of LFS images, video,
-audio and PDFs. Public repositories are visible to everyone, private ones only
-with access. For a headless instance, for example a backup mirror, add
-`"UI": "false"` to `vars`; it then serves Git, LFS and the API only.
+All settings are optional `[vars]` in `wrangler.toml`; without them the
+defaults apply. For example:
+
+```toml
+[vars]
+PUBLIC_URL = "https://git.example.com"
+OIDC_ISSUER = "https://id.example.com"
+OIDC_CLIENT_ID = "1234567890"
+OIDC_NAME = "Example ID"
+```
+
+| Var | Default | Value |
+|---|---|---|
+| `PUBLIC_URL` | | `https://<your-instance>`: origin for passkeys, OIDC redirect URI, break-glass tokens and links in payloads and emails. Set it when the instance has a custom domain. |
+| `OIDC_ISSUER`, `OIDC_CLIENT_ID` | none: no OIDC | Issuer URL and client id of the OIDC application. |
+| `OIDC_NAME` | | Button label, e.g. `Dorf-ID`. |
+| `OIDC_SCOPES` | `openid profile email` | Requested scopes. |
+| `SELF_SIGNUP` | `false` | `true`: anyone who can sign in at the provider (or register a passkey) gets an account. `false`: only invited people. |
+| `BREAK_GLASS_PUBLIC_KEY` | | Public half of the offline break-glass key, see the [forge-worker README](https://github.com/levino/git-forge/tree/main/apps/forge-worker#break-glass-key). |
+| `UI` | `true` | `false` for a headless instance (for example a backup mirror): Git, LFS and the API only. |
+| `MAX_LFS_OBJECT_BYTES`, `MIRROR_INTERVAL_MINUTES`, `MIRROR_DEEP_CHECK_DAYS` | see the forge-worker README | Limits and mirror schedule. |
+| `EMAIL_PROVIDER` | `none` | `ses` or `console`, see [Email](#notifications-email-and-webhooks). |
 
 ## Login
 
 People sign in at `https://<your-instance>/login` with passkeys (built in),
 with an OIDC provider, or, as last resort, with the break-glass key. The
 command line uses `git forge auth login https://<your-instance>`, after which
-plain `git clone` and `git push` work without tokens in URLs. All settings are
-vars in `wrangler.jsonc`; only the OIDC client secret is a secret.
-
-| Var / secret | Value |
-|---|---|
-| `PUBLIC_URL` | `https://<your-instance>`: origin for passkeys, OIDC redirect URI and break-glass tokens. Set it when the instance has a custom domain. |
-| `OIDC_ISSUER`, `OIDC_CLIENT_ID` | Issuer URL and client id of the OIDC application, e.g. `https://dorf-id.example` (ZITADEL) and the app's client id. Empty: no OIDC. |
-| `OIDC_CLIENT_SECRET` (secret) | Only for a confidential client: `npx wrangler@4 secret put OIDC_CLIENT_SECRET`. A ZITADEL app with authentication method "PKCE" needs none. |
-| `OIDC_NAME` | Button label, e.g. `Dorf-ID`. |
-| `SELF_SIGNUP` | `true`: anyone who can sign in at the provider (or register a passkey) gets an account. `false` (default): only invited people. |
-| `BREAK_GLASS_PUBLIC_KEY` | Public half of the offline break-glass key, see the [forge-worker README](https://github.com/levino/git-forge/tree/main/apps/forge-worker#break-glass-key). |
+plain `git clone` and `git push` work without tokens in URLs. Only the OIDC
+client secret is a secret, and only for a confidential client:
+`npx wrangler@4 secret put OIDC_CLIENT_SECRET`.
 
 For ZITADEL create a **Web** application in a project with response type
 `code`, grant type authorization code, authentication method `PKCE` (or
 `Basic` with a client secret) and the redirect URI
-`https://<your-instance>/login/oidc/callback`. Then invite the people you
-want, or yourself (the bootstrap admin), with the admin token:
+`https://<your-instance>/login/oidc/callback`. Then invite people with an
+admin token:
 
 ```sh
 curl -X POST https://<your-instance>/api/admin/invites \
@@ -151,28 +170,35 @@ curl -X POST https://<your-instance>/api/admin/invites \
 Opening the invite URL links the OIDC identity or registers a passkey for
 `alice`. `{"login":"bob"}` invites a new account instead.
 
+## Web UI
+
+The instance serves a web UI from the same Worker: `https://<your-instance>/`
+lists repositories, `https://<your-instance>/alice/site` shows the files, the
+README, commits, diffs, branches, tags and previews of LFS images, video,
+audio and PDFs. Public repositories are visible to everyone, private ones only
+with access.
+
 ## Imports
 
 `POST /api/repos/<owner>/<name>/import` creates or updates a repository by
 pulling it from another Git server, without the request body limit of a push.
-Its steps run on the Cloudflare Queue `git-forge-imports`, declared in
-`wrangler.jsonc` and created by the first `wrangler deploy` like the bucket
-and the database.
+Its steps run on the imports queue.
 
 ## Notifications, email and webhooks
 
 Notifications (`/api/v3/notifications`), webhooks
 (`/api/v3/repos/<owner>/<name>/hooks`) and releases
 (`/api/v3/repos/<owner>/<name>/releases`) work without further setup; their
-jobs run on the `git-forge-jobs` queue. Set the var `PUBLIC_URL` so links in
-payloads and emails point to your domain.
+jobs run on the jobs queue (its name must end in `-jobs`).
 
-Emails are off (`"EMAIL_PROVIDER": "none"`). To send them through Amazon SES,
-verify the sender address or domain in SES, create an IAM user with
-`ses:SendEmail`, and set in `wrangler.jsonc`
+Emails are off. To send them through Amazon SES, verify the sender address or
+domain in SES, create an IAM user with `ses:SendEmail`, and set
 
-```jsonc
-  "vars": { "…": "…", "EMAIL_PROVIDER": "ses", "EMAIL_FROM": "Forge <forge@example.org>", "SES_REGION": "eu-central-1" },
+```toml
+[vars]
+EMAIL_PROVIDER = "ses"
+EMAIL_FROM = "Forge <forge@example.org>"
+SES_REGION = "eu-central-1"
 ```
 
 plus the two secrets:
@@ -182,64 +208,40 @@ npx wrangler@4 secret put SES_ACCESS_KEY_ID
 npx wrangler@4 secret put SES_SECRET_ACCESS_KEY
 ```
 
-`"EMAIL_PROVIDER": "console"` writes each email to the Worker logs instead,
+`EMAIL_PROVIDER = "console"` (with `EMAIL_FROM`) writes each email to the Worker logs instead,
 which is handy for a first test. Users choose `instant`, `hourly`, `daily` or
 `off` with `PATCH /api/v3/user/notification-settings`.
 
 ## Update
 
-An update is a change of `git-forge.json`:
-
-```json
-{
-  "version": "0.2.0",
-  "sha256": "…"
-}
-```
-
-Each [release](https://github.com/levino/git-forge/releases) states both
-values in its notes. `sha256` is the SHA-256 of the release's `SHA256SUMS`
-file, which lists the checksums of the bundle and the migrations, so one pin
-covers all assets. To compute it yourself:
+Set `V` and `S` at the start of the `[build]` command to a newer release and
+push; Workers Builds deploys it. Each
+[release](https://github.com/levino/git-forge/releases) states both values in
+its notes, together with the complete `[build]` command line. To compute `S`
+yourself:
 
 ```sh
-curl -fsSL https://github.com/levino/git-forge/releases/download/v0.2.0/SHA256SUMS | sha256sum
+curl -fsSL https://github.com/levino/git-forge/releases/download/v0.9.0/SHA256SUMS | sha256sum
 ```
 
-Commit and push; Workers Builds deploys the new version. To roll back, revert
-the commit. Migrations are only ever added, never rolled back, and stay
-compatible with the previous release.
+To roll back, revert the commit. Migrations are only ever added, never rolled
+back, and stay compatible with the previous release.
 
-Releases are built for the `compatibility_date` in this repository's
-`wrangler.jsonc`. When a release note asks for a newer date, change it in the
-same commit.
-
-### With Renovate
-
-Install the [Renovate GitHub app](https://github.com/apps/renovate) on your
-repository. `renovate.json` contains a regex manager that reads `version` from
-`git-forge.json` and looks up the GitHub releases of `levino/git-forge`.
-Renovate can only change the version: its `github-releases` datasource knows
-the commit of a tag, not the checksum of a file in the release. The
-`Pin checksum` workflow therefore runs on Renovate's pull requests, downloads
-the new `SHA256SUMS`, writes its SHA-256 into `git-forge.json`, pushes that
-to the pull request branch with the workflow's `GITHUB_TOKEN` and runs
-`build.sh` against it. Review the diff and merge.
+Releases are built for the `compatibility_date` in this `wrangler.toml`. When
+a release note asks for a newer date, change it in the same commit.
 
 ## Local development
 
 ```sh
 cp .dev.vars.example .dev.vars
-sh build.sh
-npx wrangler@4 d1 migrations apply DB --local
 npx wrangler@4 dev
 ```
 
-`wrangler dev` serves the release bundle in workerd with a local R2 bucket and
-D1 database under `.wrangler/`.
+`wrangler dev` runs the `[build]` command too and serves the release bundle in
+workerd with a local R2 bucket, D1 database and queues under `.wrangler/`.
 
-`build.sh` downloads from
-`https://github.com/levino/git-forge/releases/download/v<version>/`. Set
+The build command downloads from
+`https://github.com/levino/git-forge/releases/download/v$V/`. Set
 `GIT_FORGE_RELEASE_URL` to another base URL (also `file://…`) to use a mirror
 or a locally built release. In a checkout of `levino/git-forge`,
 
@@ -248,8 +250,8 @@ pnpm install
 sh release/build-release.sh /tmp/git-forge-release
 ```
 
-prints the `sha256` to put into `git-forge.json` (any `version` works); then
-`GIT_FORGE_RELEASE_URL=file:///tmp/git-forge-release sh build.sh`.
+prints the `S` to pin (any `V` works); then
+`GIT_FORGE_RELEASE_URL=file:///tmp/git-forge-release npx wrangler@4 dev`.
 
 ## CI (opt-in)
 
@@ -257,27 +259,44 @@ CI (GitHub Actions compatible, running the official `actions/runner`) is off
 by default, because its runner container makes `wrangler deploy` build a
 Docker image, and building container images in Workers Builds is not
 verified yet. To enable it where Docker is available, add to
-`wrangler.jsonc`:
+`wrangler.toml`:
 
-```jsonc
-  "vars": { "…": "…", "ACTIONS": "true" },
-  "triggers": { "crons": ["17 3 * * *", "*/5 * * * *"] },
-  "containers": [{ "class_name": "RunnerContainer", "image": "./runner/Dockerfile", "instance_type": "standard-1", "max_instances": 4 }],
-  "durable_objects": { "bindings": [{ "name": "RUNNER", "class_name": "RunnerContainer" }] },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["RunnerContainer"] }],
-  "dev": { "enable_containers": false }
+```toml
+[vars]
+ACTIONS = "true"
+
+[triggers]
+crons = ["17 3 * * *", "*/5 * * * *"]
+
+[[containers]]
+class_name = "RunnerContainer"
+image = "./runner/Dockerfile"
+instance_type = "standard-1"
+max_instances = 4
+
+[[durable_objects.bindings]]
+name = "RUNNER"
+class_name = "RunnerContainer"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["RunnerContainer"]
+
+[dev]
+enable_containers = false
 ```
 
-Every CI job then starts one container with the runner and a JIT config. With
-`ACTIONS` set but without the container entries, workflows are queued and
-picked up by runners you register yourself (`/api/v3/repos/…/actions/runners/generate-jitconfig`).
-The second cron runs scheduled workflows and cleans up timed-out jobs and
-dead runners. Instance-wide workflow secrets go into the `ACTIONS_SECRETS`
-secret, a JSON object such as `{"CLOUDFLARE_API_TOKEN": "…"}`. For
-repository and environment secrets set the `ACTIONS_SECRETS_KEY` secret to
-32 random bytes (`openssl rand -base64 32`); they are stored encrypted with
-it in D1. `uses:` actions are served from repositories on the instance, for
-example a mirror of `github.com/actions/checkout` named `actions/checkout`
+(merge `ACTIONS` into an existing `[vars]` table and replace the existing
+`[triggers]`). Every CI job then starts one container with the runner and a
+JIT config. With `ACTIONS` set but without the container entries, workflows
+are queued and picked up by runners you register yourself
+(`/api/v3/repos/…/actions/runners/generate-jitconfig`). The second cron runs
+scheduled workflows and cleans up timed-out jobs and dead runners.
+Instance-wide workflow secrets go into the `ACTIONS_SECRETS` secret, a JSON
+object such as `{"CLOUDFLARE_API_TOKEN": "…"}`. For repository and
+environment secrets set the `ACTIONS_SECRETS_KEY` secret to 32 random bytes
+(`openssl rand -base64 32`); they are stored encrypted with it in D1. `uses:`
+actions are served from repositories on the instance, for example a mirror of
+`github.com/actions/checkout` named `actions/checkout`
 (`ACTIONS_REPOSITORIES` maps other names, `ACTIONS_GITHUB_FALLBACK=true`
 downloads unmirrored actions from GitHub).
-

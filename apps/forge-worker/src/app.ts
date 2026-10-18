@@ -37,6 +37,7 @@ import {
   checkRepositoryAccess,
   checkSession,
   createAccountsStore,
+  createMirrorVerificationStore,
   createLoginHandler,
   createLoginStore,
   createOidcProvider,
@@ -96,6 +97,7 @@ import {
   handleGitRequest,
   type JobQueue,
   type ImportScheduler,
+  type ImportState,
   ImportRunningError,
   isValidImportUrl,
   isValidName,
@@ -159,6 +161,7 @@ import {
 } from '@git-forge/notifications'
 import { type AssetRow, createReleaseStore, handleReleasesRequest, type ReleaseRow } from '@git-forge/releases'
 import { activityEvent } from './collaboration-events.ts'
+import { mirrorOverview, recordChecksums, signOverview } from './mirror-verification.ts'
 import type { ForgeSettings } from './config.ts'
 import {
   enqueueDueMirrors,
@@ -211,6 +214,7 @@ export type ForgeServices = {
   readonly verifySessionWrite: (request: Request) => Promise<UiSession | null>
   readonly loginOptions: { readonly oidcName: string | null }
   readonly account: AccountOperations
+  readonly repositories: RepositoryOperations
   readonly inbox: InboxOperations
   readonly releases: ReleaseReads
   readonly collaboration: (request: Request, principal: Principal, owner: string, name: string) => Promise<CollaborationScope | null>
@@ -284,6 +288,29 @@ export type ReleaseReads = {
   readonly assets: (releaseIds: readonly number[]) => Promise<AssetRow[]>
 }
 
+export type NewRepository = { readonly owner: string; readonly name: string; readonly visibility?: string; readonly defaultBranch?: string }
+
+export type CreatedRepository = { readonly owner: string; readonly name: string; readonly visibility: string; readonly defaultBranch: string }
+
+export type NewImport = NewRepository & {
+  readonly url: string
+  readonly token?: string
+  readonly username?: string
+  readonly lfs?: boolean
+  readonly lfsUrl?: string
+  readonly commitsPerStep?: number
+}
+
+export type StartedImport = RepositoryName & { readonly state: ImportState }
+
+export type RepositoryOperations = {
+  readonly owners: (user: UserPrincipal) => Promise<string[]>
+  readonly create: (user: UserPrincipal, input: NewRepository) => Promise<CreatedRepository>
+  readonly importsEnabled: boolean
+  readonly startImport: (user: UserPrincipal, input: NewImport) => Promise<StartedImport>
+  readonly importStatus: (user: UserPrincipal, repo: RepositoryName) => Promise<ImportState | null>
+}
+
 export type UiSession = { readonly principal: UserPrincipal; readonly csrf: string; readonly sessionId: string }
 
 export type AccountOperations = {
@@ -313,7 +340,7 @@ export type Forge = {
   readonly notifications: Notifications
 }
 
-const HttpError = ForgeError
+export const HttpError = ForgeError
 
 const json = (status: number, body: unknown, headers: Record<string, string> = {}) =>
   new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', ...headers } })
@@ -386,6 +413,7 @@ export const createForge = (options: ForgeOptions): Forge => {
   const { storage, db } = options
   const now = options.now ?? (() => new Date())
   const store: AccountsStore = createAccountsStore(db, { now: () => now().getTime() })
+  const verification = createMirrorVerificationStore(db, { now: () => now().getTime() })
   const logins = createLoginStore(db, { now: () => now().getTime() })
   const outbound = (input: string, init?: RequestInit) => (options.fetch ? options.fetch(new Request(input, init)) : fetch(input, init))
   const oidc = options.login?.oidc ? createOidcProvider(options.login.oidc, outbound, () => now().getTime()) : null
@@ -465,13 +493,17 @@ export const createForge = (options: ForgeOptions): Forge => {
     return { decision: check.decision, access: check.access, repository: check.repository }
   }
 
+  const repositoryAdmin = async (principal: UserPrincipal, repo: RepositoryName): Promise<RepositorySubject> => {
+    const check = await repositoryAccess(principal, repo, 'admin')
+    if (check.repository && check.decision === 'allow') return check.repository
+    const [status, message] = DECISION_STATUS[check.decision === 'allow' ? 'not-found' : check.decision]
+    throw new HttpError(status, message)
+  }
+
   const adminOf = async (principal: Principal, repo: RepositoryName): Promise<{ principal: UserPrincipal; repository: RepositorySubject }> => {
     if (principal.kind === 'anonymous') throw new HttpError(401, 'authentication required', { 'WWW-Authenticate': 'Bearer' })
     if (!canManage(principal)) throw new HttpError(403, 'this needs a personal access token with the repo:admin scope')
-    const check = await repositoryAccess(principal, repo, 'admin')
-    if (check.repository && check.decision === 'allow') return { principal, repository: check.repository }
-    const [status, message] = DECISION_STATUS[check.decision === 'allow' ? 'not-found' : check.decision]
-    throw new HttpError(status, message)
+    return { principal, repository: await repositoryAdmin(principal, repo) }
   }
 
   const requireRepositoryAdmin = async (request: Request, repo: RepositoryName): Promise<{ principal: UserPrincipal; repository: RepositorySubject }> =>
@@ -539,6 +571,7 @@ export const createForge = (options: ForgeOptions): Forge => {
           instanceKey: options.instanceKey,
           jwks,
           jobs: options.jobs,
+          verification,
           canRead: async (principal, repo) => (await checkRepositoryAccess(store, principal, repo, 'read')).decision === 'allow',
           deepCheckDays: options.deepCheckDays,
           unitBytes: options.mirrorUnitBytes,
@@ -654,7 +687,7 @@ export const createForge = (options: ForgeOptions): Forge => {
     return new Response(null, { status: 204 })
   }
 
-  const mirrorOverview = async (request: Request): Promise<Response> => json(200, await instance.mirrors(await principalOf(request)))
+  const adminMirrorsRoute = async (request: Request): Promise<Response> => json(200, await instance.mirrors(await principalOf(request)))
 
   const organizations = createOrganizationOperations(store)
 
@@ -715,20 +748,32 @@ export const createForge = (options: ForgeOptions): Forge => {
   const createRepositoryRoute = async (request: Request): Promise<Response> => {
     const actor = await requireManager(request)
     const body = await readBody(request)
-    const created = await createRepositoryFor(actor, requiredString(body, 'owner'), requiredString(body, 'name'), body)
+    const created = await createRepositoryFor(actor, newRepository(body, requiredString(body, 'owner'), requiredString(body, 'name')))
     const cloneUrl = new URL(`/${created.owner}/${created.name}.git`, request.url).toString()
     return json(201, { ...created, cloneUrl })
   }
 
-  const createRepositoryFor = async (actor: UserPrincipal, owner: string, name: string, body: Body) => {
-    const visibility = optionalString(body, 'visibility') ?? 'private'
-    const defaultBranch = optionalString(body, 'defaultBranch') ?? 'main'
+  const newRepository = (body: Body, owner: string, name: string): NewRepository => {
+    const visibility = optionalString(body, 'visibility')
+    const defaultBranch = optionalString(body, 'defaultBranch')
+    return { owner, name, ...(visibility !== undefined ? { visibility } : {}), ...(defaultBranch !== undefined ? { defaultBranch } : {}) }
+  }
+
+  const repositoryOwners = async (actor: UserPrincipal): Promise<string[]> => {
+    if (await store.isInstanceAdmin(actor.id)) return store.listAccountLogins()
+    return [actor.login, ...(await store.ownedOrganizations(actor.id)).filter((login) => login.toLowerCase() !== actor.login.toLowerCase())]
+  }
+
+  const createRepositoryFor = async (actor: UserPrincipal, input: NewRepository): Promise<CreatedRepository> => {
+    const { owner, name } = input
+    const visibility = input.visibility ?? 'private'
+    const defaultBranch = input.defaultBranch ?? 'main'
     if (!isValidName(owner) || !isValidName(name)) throw new HttpError(400, 'owner and name must match [A-Za-z0-9][A-Za-z0-9._-]* and must not end in .git')
     if (visibility !== 'private' && visibility !== 'public') throw new HttpError(400, 'visibility must be private or public')
     if (!BRANCH.test(defaultBranch) || defaultBranch.includes('..')) throw new HttpError(400, 'invalid defaultBranch')
     const account = await store.findAccount(owner)
     if (!account) throw new HttpError(404, `no account ${owner}`)
-    const own = account.kind === 'user' && account.id === actor.id
+    const own = account.kind === 'user' ? account.id === actor.id : await store.isOrganizationOwner(account.id, actor.id)
     if (!own && !(await store.isInstanceAdmin(actor.id))) throw new HttpError(403, `you cannot create repositories for ${owner}`)
     if (await store.findRepository(owner, name)) throw new HttpError(409, `${owner}/${name} already exists`)
     try {
@@ -752,30 +797,23 @@ export const createForge = (options: ForgeOptions): Forge => {
     return value
   }
 
-  const importRepository = async (request: Request, params: string[]): Promise<Response> => {
-    const repo = repoName(params)
+  const importRepositoryFor = async (actor: UserPrincipal, input: NewImport): Promise<StartedImport> => {
     if (!options.scheduleImport) throw new HttpError(503, 'imports need a queue (IMPORTS binding)')
-    const body = await readBody(request)
-    const url = requiredString(body, 'url')
-    const token = optionalString(body, 'token')
-    const username = optionalString(body, 'username') ?? 'git'
-    const lfsUrl = optionalString(body, 'lfsUrl')
-    const commitsPerStep = optionalCount(body, 'commitsPerStep')
-    if (body.lfs !== undefined && typeof body.lfs !== 'boolean') throw new HttpError(400, 'lfs must be a boolean')
+    const { url, lfsUrl, token, commitsPerStep } = input
     if (!isValidImportUrl(url) || (lfsUrl !== undefined && !isValidImportUrl(lfsUrl))) throw new HttpError(400, 'url and lfsUrl must be http(s) URLs without credentials; pass a token instead')
     let target: RepositoryName
-    if (await store.findRepository(repo.owner, repo.name)) {
-      const { repository } = await requireRepositoryAdmin(request, repo)
+    if (await store.findRepository(input.owner, input.name)) {
+      const repository = await repositoryAdmin(actor, input)
       target = { owner: repository.owner, name: repository.name }
     } else {
-      const created = await createRepositoryFor(await requireManager(request), repo.owner, repo.name, body)
+      const created = await createRepositoryFor(actor, input)
       target = { owner: created.owner, name: created.name }
     }
-    let state
+    let state: ImportState
     try {
       state = await startImport(storage, target, {
         url,
-        ...(body.lfs !== undefined ? { lfs: body.lfs as boolean } : {}),
+        ...(input.lfs !== undefined ? { lfs: input.lfs } : {}),
         ...(lfsUrl ? { lfsUrl } : {}),
         ...(commitsPerStep ? { commitsPerStep } : {}),
       })
@@ -783,15 +821,42 @@ export const createForge = (options: ForgeOptions): Forge => {
       if (error instanceof ImportRunningError) throw new HttpError(409, error.message)
       throw new HttpError(400, (error as Error).message)
     }
-    await options.scheduleImport({ ...target, ...(token ? { authorization: basicAuthorization(username, token) } : {}) }, 0)
-    const statusUrl = new URL(`/api/repos/${target.owner}/${target.name}/import`, request.url).toString()
-    const cloneUrl = new URL(`/${target.owner}/${target.name}.git`, request.url).toString()
-    return json(202, { ...state, statusUrl, cloneUrl }, { Location: statusUrl })
+    await options.scheduleImport({ ...target, ...(token ? { authorization: basicAuthorization(input.username ?? 'git', token) } : {}) }, 0)
+    return { ...target, state }
+  }
+
+  const importStatusFor = async (actor: UserPrincipal, repo: RepositoryName): Promise<ImportState | null> => {
+    const repository = await repositoryAdmin(actor, repo)
+    return readImportState(storage, { owner: repository.owner, name: repository.name })
+  }
+
+  const importRepository = async (request: Request, params: string[]): Promise<Response> => {
+    const repo = repoName(params)
+    if (!options.scheduleImport) throw new HttpError(503, 'imports need a queue (IMPORTS binding)')
+    const body = await readBody(request)
+    const url = requiredString(body, 'url')
+    const token = optionalString(body, 'token')
+    const username = optionalString(body, 'username')
+    const lfsUrl = optionalString(body, 'lfsUrl')
+    const commitsPerStep = optionalCount(body, 'commitsPerStep')
+    if (body.lfs !== undefined && typeof body.lfs !== 'boolean') throw new HttpError(400, 'lfs must be a boolean')
+    const actor = await requireManager(request)
+    const started = await importRepositoryFor(actor, {
+      ...newRepository(body, repo.owner, repo.name),
+      url,
+      ...(token !== undefined ? { token } : {}),
+      ...(username !== undefined ? { username } : {}),
+      ...(lfsUrl !== undefined ? { lfsUrl } : {}),
+      ...(commitsPerStep !== undefined ? { commitsPerStep } : {}),
+      ...(body.lfs !== undefined ? { lfs: body.lfs as boolean } : {}),
+    })
+    const statusUrl = new URL(`/api/repos/${started.owner}/${started.name}/import`, request.url).toString()
+    const cloneUrl = new URL(`/${started.owner}/${started.name}.git`, request.url).toString()
+    return json(202, { ...started.state, statusUrl, cloneUrl }, { Location: statusUrl })
   }
 
   const importStatus = async (request: Request, params: string[]): Promise<Response> => {
-    const { repository } = await requireRepositoryAdmin(request, repoName(params))
-    const state = await readImportState(storage, { owner: repository.owner, name: repository.name })
+    const state = await importStatusFor(await requireManager(request), repoName(params))
     if (!state) throw new HttpError(404, 'no import for this repository')
     return json(200, state)
   }
@@ -927,6 +992,21 @@ export const createForge = (options: ForgeOptions): Forge => {
 
   const listMirrorsRoute = async (request: Request, params: string[]): Promise<Response> =>
     json(200, (await settings.read(await principalOf(request), repoName(params))).mirrors)
+
+  const mirrorOverviewRoute = async (request: Request, params: string[]): Promise<Response> => {
+    const repo = repoName(params)
+    const check = await repositoryAccess(await principalOf(request), repo, 'read')
+    if (!check.repository || check.decision !== 'allow') {
+      const [status, message] = DECISION_STATUS[check.decision === 'allow' ? 'not-found' : check.decision]
+      throw new HttpError(status, message)
+    }
+    const subject = { owner: check.repository.owner, name: check.repository.name }
+    const at = now()
+    const overview = await mirrorOverview({ storage, verification, subscribers: store.mirrorSubscriptions, now: at }, subject)
+    if (!overview) throw new HttpError(404, 'repository not found')
+    const signed = options.instanceKey && options.publicUrl ? await signOverview(options.instanceKey, options.publicUrl, overview, at) : null
+    return json(200, { ...overview, ...(signed ? { signed } : {}) })
+  }
 
   const addMirror = async (request: Request, params: string[]): Promise<Response> => {
     const principal = await principalOf(request)
@@ -1183,6 +1263,11 @@ export const createForge = (options: ForgeOptions): Forge => {
 
   const afterPush = async (request: Request, repo: RepositoryName, outcome: PushOutcome, waitUntil: WaitUntil | undefined, principal: Principal | null): Promise<void> => {
     if (federation) await notifyAfterPush(federation)(repo, outcome)
+    if (outcome.results.some((result) => result.ok)) {
+      await recordChecksums(verification, storage, repo).catch((error: unknown) =>
+        console.error(JSON.stringify({ event: 'ref-checksum-failed', repository: `${repo.owner}/${repo.name}`, error: String(error) })),
+      )
+    }
     if (options.actions) await queueRunsForPush(dispatchOptions(request), { repo, outcome, actor: principal?.kind === 'user' ? principal.login : (principal?.kind ?? 'unknown') })
     if (!outcome.results.some((result) => result.ok)) return
     const events = emitPushEvents(request, repo, outcome, principal).catch((error: unknown) =>
@@ -1252,7 +1337,7 @@ export const createForge = (options: ForgeOptions): Forge => {
     { method: 'GET', pattern: /^\/api\/admin\/admins$/, handler: listInstanceAdmins },
     { method: 'PUT', pattern: new RegExp(`^/api/admin/admins/${SEGMENT}$`), handler: setInstanceAdmin(true) },
     { method: 'DELETE', pattern: new RegExp(`^/api/admin/admins/${SEGMENT}$`), handler: setInstanceAdmin(false) },
-    { method: 'GET', pattern: /^\/api\/admin\/mirrors$/, handler: mirrorOverview },
+    { method: 'GET', pattern: /^\/api\/admin\/mirrors$/, handler: adminMirrorsRoute },
     { method: 'POST', pattern: /^\/api\/admin\/invites$/, handler: createInvite },
     { method: 'GET', pattern: /^\/api\/user$/, handler: currentUser },
     { method: 'POST', pattern: /^\/api\/orgs$/, handler: createOrganizationRoute },
@@ -1272,6 +1357,7 @@ export const createForge = (options: ForgeOptions): Forge => {
     { method: 'POST', pattern: new RegExp(`^${REPO}/import$`), handler: importRepository },
     { method: 'GET', pattern: new RegExp(`^${REPO}/import$`), handler: importStatus },
     { method: 'GET', pattern: new RegExp(`^${REPO}/mirrors$`), handler: listMirrorsRoute },
+    { method: 'GET', pattern: new RegExp(`^${REPO}/mirrors/overview$`), handler: mirrorOverviewRoute },
     { method: 'POST', pattern: new RegExp(`^${REPO}/mirrors$`), handler: addMirror },
     { method: 'POST', pattern: new RegExp(`^${REPO}/mirrors/${SEGMENT}/sync$`), handler: syncMirrorRoute },
     { method: 'POST', pattern: new RegExp(`^${REPO}/mirrors/${SEGMENT}/detach$`), handler: detachMirrorRoute },
@@ -1420,6 +1506,13 @@ export const createForge = (options: ForgeOptions): Forge => {
       },
       organizations,
       instance,
+      repositories: {
+        owners: repositoryOwners,
+        create: createRepositoryFor,
+        importsEnabled: options.scheduleImport !== undefined,
+        startImport: importRepositoryFor,
+        importStatus: importStatusFor,
+      },
       inbox: {
         threads: (user, filter) => notifications.store.threads(user.id, { ...filter, participating: false }),
         markRead: (user, id) => notifications.store.markThreadRead(user.id, id),

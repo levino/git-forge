@@ -388,6 +388,22 @@ export const createAccountsStore = (db: Database, options: AccountsStoreOptions 
     findAccount: async (login: string): Promise<{ readonly id: string; readonly kind: OwnerKind; readonly login: string } | null> =>
       first<{ id: string; kind: OwnerKind; login: string }>(db, sql('SELECT id, kind, login FROM accounts WHERE login = ?', login)),
 
+    isOrganizationOwner: async (organizationId: string, userId: string): Promise<boolean> =>
+      (await first(db, sql("SELECT 1 AS ok FROM organization_members WHERE organization_id = ? AND user_id = ? AND role = 'owner'", organizationId, userId))) !== null,
+
+    ownedOrganizations: async (userId: string): Promise<string[]> =>
+      (
+        await db.all<{ login: string }>(
+          sql(
+            "SELECT a.login FROM organization_members m JOIN accounts a ON a.id = m.organization_id WHERE m.user_id = ? AND m.role = 'owner' AND a.disabled_at IS NULL ORDER BY a.login",
+            userId,
+          ),
+        )
+      ).map((row) => row.login),
+
+    listAccountLogins: async (): Promise<string[]> =>
+      (await db.all<{ login: string }>(sql('SELECT login FROM accounts WHERE disabled_at IS NULL ORDER BY login'))).map((row) => row.login),
+
     setOrganizationMember: async (organizationId: string, userId: string, role: OrganizationRole, actor: AuditActor = SYSTEM): Promise<void> => {
       await requireAccount(organizationId, 'organization')
       await requireAccount(userId, 'user')

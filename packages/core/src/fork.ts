@@ -1,4 +1,5 @@
 import type { ObjectId } from './hash.ts'
+import type { LfsObjectSpec } from './lfs.ts'
 import { streamFrom } from './pack-indexer.ts'
 import { generatePack, withTrailer } from './pack-writer.ts'
 import {
@@ -44,18 +45,18 @@ export const forkRepository = async (storage: Storage, upstream: RepositoryName,
 export const sharesObjectsWith = async (storage: Storage, repo: RepositoryName, other: RepositoryName): Promise<boolean> =>
   (await alternateRepositories(storage, repo)).some((candidate) => candidate.owner === other.owner && candidate.name === other.name)
 
-export type TransferResult = { readonly objects: number; readonly pack: string | null }
+export type TransferResult = { readonly objects: number; readonly pack: string | null; readonly lfsPointers: readonly LfsObjectSpec[] }
 
 export const transferObjects = async (from: ObjectDatabase, to: ObjectDatabase, wants: readonly ObjectId[], haves: readonly ObjectId[]): Promise<TransferResult> => {
   const missingWants: ObjectId[] = []
   for (const id of wants) if (!(await to.has(id))) missingWants.push(id)
-  if (missingWants.length === 0) return { objects: 0, pack: null }
+  if (missingWants.length === 0) return { objects: 0, pack: null, lfsPointers: [] }
   const usableHaves: ObjectId[] = []
   for (const id of haves) if (await from.has(id)) usableHaves.push(id)
   const plan = await objectsToSend(from, missingWants, usableHaves)
   const ids: ObjectId[] = []
   for (const id of plan.ids) if (!(await to.has(id))) ids.push(id)
-  if (ids.length === 0) return { objects: 0, pack: null }
-  const { name } = await to.ingest(streamFrom(withTrailer(generatePack(from, ids, { sending: new Set(ids) }))))
-  return { objects: ids.length, pack: name }
+  if (ids.length === 0) return { objects: 0, pack: null, lfsPointers: [] }
+  const { name, pack } = await to.ingest(streamFrom(withTrailer(generatePack(from, ids, { sending: new Set(ids) }))))
+  return { objects: ids.length, pack: name, lfsPointers: pack.lfsPointers }
 }

@@ -1,0 +1,43 @@
+---
+import { listForks } from '@git-forge/collaboration'
+import EmptyState from '../../../components/EmptyState.astro'
+import Icon from '../../../components/Icon.astro'
+import NotFound from '../../../components/NotFound.astro'
+import RepoHeader from '../../../components/RepoHeader.astro'
+import Layout from '../../../layouts/Layout.astro'
+import { scopeFor } from '../../../ui/collaboration.ts'
+import { openRepository, repoUrl } from '../../../ui/repository.ts'
+
+const { forge, principal } = Astro.locals
+const repo = await openRepository(forge, principal, Astro.params.owner!, Astro.params.repo!)
+const scope = repo.kind === 'ok' ? await scopeFor(forge, Astro.request, principal, repo) : null
+const forks = scope ? await listForks(scope) : []
+---
+
+{
+  repo.kind !== 'ok' ? (
+    <NotFound />
+  ) : (
+    <Layout title={`Forks · ${repo.name.owner}/${repo.name.name}`}>
+      <RepoHeader repo={repo} tab="code" />
+      {forks.length === 0 ? (
+        <EmptyState icon="fork" title="No forks yet." />
+      ) : (
+        <ul class="border border-base-300 rounded-box divide-y divide-base-300 bg-base-100" aria-label="Forks">
+          {forks.map((fork) => (
+            <li class="flex items-center gap-2 px-4 py-3">
+              <Icon name="fork" class="size-4 text-base-content/50" />
+              <a href={repoUrl(fork)} class="link link-hover font-semibold">
+                {fork.owner}/{fork.name}
+              </a>
+              <a href={`${repoUrl(repo.name, 'pulls', 'new')}?head_repo=${encodeURIComponent(`${fork.owner}/${fork.name}`)}`} class="btn btn-xs btn-ghost ml-auto">
+                <Icon name="pull" class="size-3.5" />
+                Compare
+              </a>
+            </li>
+          ))}
+        </ul>
+      )}
+    </Layout>
+  )
+}

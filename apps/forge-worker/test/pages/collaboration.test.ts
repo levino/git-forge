@@ -6,6 +6,8 @@ import { experimental_AstroContainer as AstroContainer } from 'astro/container'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import type { UiSession } from '../../src/app.ts'
 import Discussion from '../../src/pages/[owner]/[repo]/discussions/[number].astro'
+import Fork from '../../src/pages/[owner]/[repo]/fork.astro'
+import Forks from '../../src/pages/[owner]/[repo]/forks.astro'
 import Discussions from '../../src/pages/[owner]/[repo]/discussions/index.astro'
 import NewDiscussion from '../../src/pages/[owner]/[repo]/discussions/new.astro'
 import Issue from '../../src/pages/[owner]/[repo]/issues/[number].astro'
@@ -27,6 +29,7 @@ let server: RunningServer
 let container: AstroContainer
 let owner: UserPrincipal
 let reader: UserPrincipal
+let readerToken: string
 
 const write = (root: string, path: string, content: string) => {
   mkdirSync(dirname(join(root, path)), { recursive: true })
@@ -60,7 +63,7 @@ beforeAll(async () => {
   const token = await bootstrap(forge, BASE, 'olivia')
   owner = await principalFor(token)
   expect((await call(forge, BASE, 'POST', '/api/admin/users', token, { login: 'rita' })).status).toBe(201)
-  const readerToken = ((await (await call(forge, BASE, 'POST', '/api/admin/users/rita/tokens', token, { scopes: ['repo:write'] })).json()) as { token: string }).token
+  readerToken = ((await (await call(forge, BASE, 'POST', '/api/admin/users/rita/tokens', token, { scopes: ['repo:write'] })).json()) as { token: string }).token
   reader = await principalFor(readerToken)
   expect((await call(forge, BASE, 'POST', '/api/repos', token, { owner: 'olivia', name: 'tracker', visibility: 'public' })).status).toBe(201)
   const dir = tempDir()
@@ -218,5 +221,35 @@ describe('discussion pages', () => {
     const list = await render(Discussions, '/olivia/tracker/discussions', params)
     expect(list.html).toContain('How do I run it?')
     expect(list.html).toContain('Answered')
+  })
+})
+
+describe('fork pages', () => {
+  it('forks from the form, shows the fork in the header and list and opens a pull request from it', async () => {
+    const params = { owner: 'olivia', repo: 'tracker' }
+    const reading = { principal: reader, session: sessionOf(reader) }
+    expect((await render(Forks, '/olivia/tracker/forks', params)).html).toContain('No forks yet.')
+    const created = await render(Fork, '/olivia/tracker/fork', params, { ...reading, form: { csrf: 'csrf-token', owner: 'rita', name: 'tracker' } })
+    expect(created).toMatchObject({ status: 303, location: '/rita/tracker' })
+    const list = await render(Forks, '/olivia/tracker/forks', params)
+    expect(list.html).toContain('href="/rita/tracker"')
+    expect(list.html).toContain('href="/olivia/tracker/fork"')
+    const forked = await render(Forks, '/rita/tracker/forks', { owner: 'rita', repo: 'tracker' })
+    expect(forked.html).toMatch(/forked from <a href="\/olivia\/tracker"/)
+    const dir = tempDir()
+    await git(dir, ['clone', '-q', `${server.url.replace('://', `://git:${readerToken}@`)}/rita/tracker.git`, 'work'])
+    const work = join(dir, 'work')
+    await git(work, ['checkout', '-q', '-b', 'typo'])
+    write(work, 'TYPO.md', 'fixed\n')
+    await git(work, ['add', '-A'])
+    await git(work, ['commit', '-q', '-m', 'Fix a typo'])
+    await git(work, ['push', '-q', 'origin', 'typo'])
+    const form = await render(NewPull, '/olivia/tracker/pulls/new?head_repo=rita/tracker', params, reading)
+    expect(form.html).toContain('<option selected>rita/tracker</option>')
+    expect(form.html).toContain('<option selected>typo</option>')
+    const opened = await render(NewPull, '/olivia/tracker/pulls/new?head_repo=rita/tracker', params, { ...reading, form: { csrf: 'csrf-token', base: 'main', head: 'typo', title: 'Fix a typo', maintainer_can_modify: 'on' } })
+    expect(opened.status).toBe(303)
+    const pull = await render(Pull, '', { ...params, number: opened.location!.split('/').pop()! })
+    expect(pull.html).toContain('rita:typo')
   })
 })

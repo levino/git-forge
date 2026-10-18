@@ -1,8 +1,16 @@
-import { writeFileSync, rmSync, mkdirSync } from 'node:fs'
+import { execFile } from 'node:child_process'
+import { createHash } from 'node:crypto'
+import { readFileSync, writeFileSync, rmSync, mkdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
+import { promisify } from 'node:util'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { git, gitFails, tempDir } from './history.ts'
+import { git, gitEnv, gitFails, tempDir } from './history.ts'
 import { startWranglerDev, type WranglerDev } from './wrangler-dev.ts'
+
+const LFS_CONFIG = ['filter.lfs.process=git-lfs filter-process', 'filter.lfs.required=true', 'lfs.locksverify=false']
+
+const lfsGit = async (cwd: string, args: readonly string[]): Promise<string> =>
+  (await promisify(execFile)('git', [...LFS_CONFIG.flatMap((entry) => ['-c', entry]), ...args], { cwd, env: { ...process.env, ...gitEnv }, maxBuffer: 64 * 1024 * 1024 })).stdout
 
 const BOOTSTRAP_TOKEN = `e2e-${crypto.randomUUID()}`
 
@@ -27,7 +35,7 @@ const remote = (token: string, repo: string) => `${dev.url.replace('http://', `h
 
 const lines = (tag: string, count = 30) => Array.from({ length: count }, (_, i) => `${tag} line ${i}\n`).join('')
 
-const write = (dir: string, name: string, content: string) => {
+const write = (dir: string, name: string, content: string | Uint8Array) => {
   mkdirSync(dirname(join(dir, name)), { recursive: true })
   writeFileSync(join(dir, name), content)
 }
@@ -44,6 +52,7 @@ beforeAll(async () => {
     headers: { Authorization: `Bearer ${BOOTSTRAP_TOKEN}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({ login: 'owner' }),
   })
+  expect(bootstrapped.status, await bootstrapped.clone().text()).toBe(201)
   owner = ((await bootstrapped.json()) as { token: string }).token
   for (const login of ['maintainer', 'outsider']) expect((await call('POST', '/api/admin/users', owner, { login })).status).toBe(201)
   maintainer = (await call('POST', '/api/admin/users/maintainer/tokens', owner, { scopes: ['repo:write'] })).body.token
@@ -115,5 +124,38 @@ describe('forks on wrangler dev with real git', () => {
     await git(verify, ['clone', '-q', remote(owner, 'owner/site'), 'site'])
     await git(join(verify, 'site'), ['fsck', '--strict', '--no-dangling'])
     rmSync(verify, { recursive: true, force: true })
+  })
+
+  it('merges a pull request from a fork with LFS objects that only the fork had', async () => {
+    expect((await call('POST', '/api/repos', owner, { owner: 'owner', name: 'media', visibility: 'public' })).status).toBe(201)
+    const seed = tempDir()
+    await git(seed, ['init', '-q', '-b', 'main'])
+    write(seed, 'README.md', 'media\n')
+    await commit(seed, 'initial')
+    await git(seed, ['push', '-q', remote(owner, 'owner/media'), 'main'])
+    expect((await call('POST', '/api/v3/repos/owner/media/forks', outsider, {})).status).toBe(202)
+
+    const contributor = tempDir()
+    await lfsGit(contributor, ['clone', '-q', remote(outsider, 'outsider/media'), 'media'])
+    const work = join(contributor, 'media')
+    await lfsGit(work, ['lfs', 'install', '--local'])
+    await lfsGit(work, ['checkout', '-q', '-b', 'photo'])
+    await lfsGit(work, ['lfs', 'track', '*.bin'])
+    const photo = new Uint8Array(Array.from({ length: 300_000 }, (_, i) => (i * 17 + (i >> 7)) % 256))
+    write(work, 'photo.bin', photo)
+    await lfsGit(work, ['add', '-A'])
+    await lfsGit(work, ['commit', '-q', '-m', 'Add a photo'])
+    await lfsGit(work, ['push', '-q', 'origin', 'photo'])
+    const oid = createHash('sha256').update(photo).digest('hex')
+    expect((await fetch(`${dev.url}/owner/media/media/${oid}`)).status).toBe(404)
+
+    const pull = await call('POST', '/api/v3/repos/owner/media/pulls', outsider, { title: 'Add a photo', head: 'outsider:photo', base: 'main' })
+    expect(pull.status).toBe(201)
+    expect((await call('PUT', `/api/v3/repos/owner/media/pulls/${pull.body.number}/merge`, owner, { merge_method: 'squash' })).status).toBe(200)
+
+    const verify = tempDir()
+    await lfsGit(verify, ['clone', '-q', remote(owner, 'owner/media'), 'media'])
+    expect(new Uint8Array(readFileSync(join(verify, 'media', 'photo.bin')))).toEqual(photo)
+    expect((await fetch(`${dev.url}/owner/media/media/${oid}`)).status).toBe(200)
   })
 })

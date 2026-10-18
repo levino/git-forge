@@ -1,5 +1,5 @@
 import { selectProtectionRule, sql, type Statement, first } from '@git-forge/accounts'
-import { advertisedRefs, type ObjectId, ObjectDatabase, type ObjectSource, parseCommit, readRefs, type RefsState, type RepositoryName, transferObjects } from '@git-forge/core'
+import { advertisedRefs, copyLfsObjects, type ObjectId, ObjectDatabase, type ObjectSource, parseCommit, readRefs, type RefsState, type RepositoryName, transferObjects } from '@git-forge/core'
 import { actorColumns } from './actors.ts'
 import { emitActivity, type EventActor, notFound, type Scope } from './context.ts'
 import { branchName, branchTip, objectDatabase } from './git.ts'
@@ -46,7 +46,8 @@ export const branchTips = (state: RefsState): ObjectId[] =>
 export const importHeadObjects = async (scope: Pick<Scope, 'storage' | 'repo'>, from: RepositoryName, head: ObjectId, state: RefsState): Promise<void> => {
   const target = objectDatabase(scope)
   if (await target.has(head)) return
-  await transferObjects(new ObjectDatabase(scope.storage, from), target, [head], branchTips(state))
+  const { lfsPointers } = await transferObjects(new ObjectDatabase(scope.storage, from), target, [head], branchTips(state))
+  await copyLfsObjects(scope.storage, from, scope.repo, lfsPointers)
 }
 
 export const pullRow = async (scope: Scope, number: number): Promise<PullRow> => {

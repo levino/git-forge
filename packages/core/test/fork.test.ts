@@ -4,7 +4,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { compactRepository } from '../src/compaction.ts'
 import { forkRepository, sharesObjectsWith, transferObjects } from '../src/fork.ts'
 import { handleGitRequest } from '../src/http.ts'
-import { lfsObjectSize } from '../src/lfs.ts'
+import { copyLfsObjects, lfsObjectKey, lfsObjectSize, storeLfsObject } from '../src/lfs.ts'
 import { MemoryStorage } from '../src/memory-storage.ts'
 import { alternatesKey, createRepository, ObjectDatabase, readRefs } from '../src/repository.ts'
 import { commitAll, gitEnv, initRepo, sampleHistory, tempDir, writeFile } from './git-helpers.ts'
@@ -94,5 +94,25 @@ describe('forks', () => {
     await storage.put(`repos/acme/site/lfs/objects/aa/aa/${oid}`, new Uint8Array(5), 5)
     expect(await lfsObjectSize(storage, fork, oid)).toBe(5)
     expect(await lfsObjectSize(storage, upstream, 'b'.repeat(64))).toBeNull()
+  })
+
+  it('copies the LFS objects of transferred pointers into the target', async () => {
+    const source = await seed()
+    await forkRepository(storage, upstream, fork)
+    const content = new TextEncoder().encode('only in the fork\n')
+    const oid = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', content)), (byte) => byte.toString(16).padStart(2, '0')).join('')
+    const spec = { oid, size: content.length }
+    expect((await storeLfsObject(storage, fork, spec, new Blob([content]).stream())).ok).toBe(true)
+    writeFile(source, 'photo.bin', `version https://git-lfs.github.com/spec/v1\noid sha256:${oid}\nsize ${content.length}\n`)
+    commitAll(source, 'pointer')
+    await gitAsync(source, ['push', '-q', remote(fork), 'HEAD:refs/heads/photo'])
+    const tip = (await readRefs(storage, fork))!.state.refs['refs/heads/photo']!
+    const main = (await readRefs(storage, upstream))!.state.refs['refs/heads/main']!
+    const moved = await transferObjects(new ObjectDatabase(storage, fork), new ObjectDatabase(storage, upstream), [tip], [main])
+    expect(moved.lfsPointers).toEqual([spec])
+    expect(await lfsObjectSize(storage, upstream, oid)).toBeNull()
+    expect(await copyLfsObjects(storage, fork, upstream, moved.lfsPointers)).toBe(1)
+    expect((await storage.head(lfsObjectKey(upstream, oid)))?.size).toBe(content.length)
+    expect(await copyLfsObjects(storage, fork, upstream, moved.lfsPointers)).toBe(0)
   })
 })

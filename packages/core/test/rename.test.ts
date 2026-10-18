@@ -169,6 +169,23 @@ describe('rename-aware merges against git merge', () => {
     ])
   })
 
+  it('adds into a deleted directory cleanly and reports adds into a renamed directory like git', async () => {
+    const deleted = initRepo()
+    base(deleted, { 'old/a.txt': body('a'), 'old/b.txt': body('b'), 'keep.txt': body('keep') })
+    branch(deleted, 'ours', 'main', () => rmSync(join(deleted, 'old'), { recursive: true }))
+    branch(deleted, 'theirs', 'main', () => writeFile(deleted, 'old/c.txt', body('c')))
+    const clean = await mergeBoth(deleted)
+    expect(clean.expected.clean).toBe(true)
+    expect(clean.outcome.ok && clean.outcome.commit).toBe(clean.expected.commit)
+    const renamed = initRepo()
+    base(renamed, { 'old/a.txt': body('a'), 'old/b.txt': body('b'), 'keep.txt': body('keep') })
+    branch(renamed, 'ours', 'main', () => git(renamed, ['mv', 'old', 'new']))
+    branch(renamed, 'theirs', 'main', () => writeFile(renamed, 'old/c.txt', body('c')))
+    const moved = await mergeBoth(renamed)
+    expect(moved.expected.clean).toBe(false)
+    expect(moved.outcome.ok ? [] : moved.outcome.reason === 'conflict' ? moved.outcome.conflicts : []).toEqual([{ path: 'old/c.txt', reason: 'directory-rename' }])
+  })
+
   it('agrees with git on randomized histories with renames, moves and edits', async () => {
     const rand = random(1234)
     const pick = <T>(items: readonly T[]): T => items[Math.floor(rand() * items.length)]!

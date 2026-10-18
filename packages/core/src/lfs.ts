@@ -304,3 +304,13 @@ export const lfsPushCheck =
     const [first] = missing as [LfsObjectSpec]
     return missing.length === 1 ? `missing LFS object ${first.oid}` : `missing ${missing.length} LFS objects, e.g. ${first.oid}`
   }
+
+export const copyLfsObjects = async (storage: Storage, from: RepositoryName, to: RepositoryName, pointers: readonly LfsObjectSpec[]): Promise<number> => {
+  let copied = 0
+  for (const pointer of await missingLfsPointers(storage, to, pointers)) {
+    const source = await locateLfsObject(storage, from, pointer.oid)
+    const object = source?.size === pointer.size ? await storage.get(source.key) : null
+    if (object && (await storeLfsObject(storage, to, pointer, object.body)).ok) copied++
+  }
+  return copied
+}

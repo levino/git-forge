@@ -304,6 +304,7 @@ the [accounts README](../packages/accounts/README.md#branch-protection).
     HEAD
     info/refs
     objects/info/packs              # the current pack set
+    objects/info/alternates         # forks only: ../../../../<owner>/<name>/git/objects
     objects/pack/pack-<sha>.pack
     objects/pack/pack-<sha>.idx
   lfs/
@@ -351,6 +352,18 @@ tmp/<repo>/<timestamp>-<uuid>/part/<nnnnn>  # its parts, 1-based, five digits
 - **CI caches and artifacts** are stored as the uploaded parts, each under a
   fresh key; which parts make up an entry lives only in the database (§15).
   Evicting or deleting only stops referencing them.
+- **Forks share objects through alternates.** A fork created on the same
+  instance gets its own `refs.json`, an empty pack list and
+  `objects/info/alternates` (git's format, a path relative to the objects
+  directory, so a plain bucket clone resolves it like git does). The object
+  database reads its own packs first, then the packs of the alternates
+  (recursively, at most five levels); LFS lookups fall back to the
+  alternates' `lfs/objects/`. Because packs are never deleted, the upstream's
+  objects stay readable for the fork whatever happens upstream. Compaction
+  only merges a repository's own packs. Over dumb HTTP a fork serves a
+  combined `objects/info/packs` and falls back to the alternates for
+  `objects/pack/*`, so dumb clients and copy-only mirrors get a
+  self-contained repository; the alternates file itself is not served.
 - **Release assets** are content-addressed like LFS objects
   (`lfs/objects/…`, §16). Which asset belongs to which release lives only in
   the database; a deleted asset or release leaves its bytes in place.
@@ -476,10 +489,11 @@ as a sequence of stateless steps, each persisting its progress in
    about 1 GiB at `cpu_ms` 60000.
 4. *lfs* — via the upstream's batch API, at most 100 objects and
    `maxLfsStepBytes` (512 MiB) per step, at least one object; objects are
-   streamed into storage with native SHA-256 (`DigestStream`, `node:crypto`),
-   so any size up to the storage's single `put` (5 GiB on R2) works;
-   `MAX_LFS_OBJECT_BYTES` only limits uploads. A 538 MB object costs about
-   1.7 s CPU. Missing objects are recorded, not fatal.
+   streamed into storage and verified by it (`putVerified`, §11) or with
+   native SHA-256 (`DigestStream`, `node:crypto`), so any size up to the
+   storage's single `put` (5 GiB on R2) works; `MAX_LFS_OBJECT_BYTES` only
+   limits uploads. On R2 an object costs almost no CPU. Missing objects are
+   recorded, not fatal.
    Endpoint precedence as in git-lfs: `lfsUrl`, then `.lfsconfig` of the
    default branch (other tips, then tags, only if it has none; `lfs.url`
    before `remote.origin.lfsurl`), then `<url>.git/info/lfs`. URLs are
@@ -578,7 +592,9 @@ objects via the Batch API and verify their hashes. Two strategies:
   stored. Then every upstream tip must be found in an index (otherwise the
   missing objects are fetched object by object as with any dumb remote).
   LFS pointers are found among the small blobs of the copied packs (entry
-  headers and delta result sizes, inflating only candidates ≤ 1 KiB). No
+  headers and delta result sizes, inflating only candidates ≤ 1 KiB) and
+  stored in `lfsPending` before the first download, so a sync that dies
+  half way (CPU limit, deploy) leaves them for the next one. No
   object is re-hashed and no index is recomputed, so the mirror's packs are
   byte-identical to the upstream's, down the whole chain. Copy-only trusts
   the upstream for connectivity; integrity of the bytes is verified.
@@ -602,7 +618,9 @@ objects via the Batch API and verify their hashes. Two strategies:
 - **Deep check** (`deepCheckRepository`, on demand via
   `POST /api/repos/{owner}/{repo}/mirrors/{remote}/verify` or scheduled
   rarely): inflate and hash every object of every pack, recompute every
-  index and compare it byte for byte, and walk every ref to its last object.
+  index and compare it byte for byte, walk every ref to its last object, and
+  check that the LFS object of every pointer in the packs is stored with its
+  size (missing ones go to `lfsPending`, so the next sync fetches them).
   The result is stored in the mirror status (`lastDeepCheck`). It costs
   roughly a full re-index (§12), which is why it is not part of every sync.
 
@@ -954,7 +972,7 @@ database.
 | Scheduling, jobs | Cron Triggers, Queues (Workflows for long jobs) | `Deno.cron`, systemd timers, job table, in-process queue |
 | Public LFS bucket (`LfsPublisher`) | second R2 bucket (`CDN_BUCKET`) | any `Storage`: S3 bucket, local directory (`LFS_PUBLISH_DIR`) |
 | Backup target (§19) | second R2 bucket (`BACKUP`) with a bucket lock | any `Storage` (`BACKUP_STORAGE`): S3 bucket with Object Lock, local directory |
-| Email | Amazon SES v2 HTTP API (`@git-forge/ses`, SigV4 via `aws4fetch`, runs on Workers and Node) | SMTP for the Node deployment (`@git-forge/smtp`); a console adapter for development |
+| Email | Cloudflare Email Service (`send_email` binding, `@git-forge/cloudflare`); Amazon SES v2 HTTP API (`@git-forge/ses`, SigV4 via `aws4fetch`, runs on Workers and Node) | SMTP for the Node deployment (`@git-forge/smtp`); a console adapter for development |
 | Compute for CI | Containers | external per-minute providers via the GHES API (WarpBuild, AWS CodeBuild, RunsOn), Fly Machines, a local process |
 
 **Jobs:** the core defines `JobQueue<J>` (`enqueue(job, { delaySeconds })`),
@@ -1021,6 +1039,14 @@ Contract every adapter must meet, checked by the shared conformance suite
   the stream errors, the call throws and the key keeps its previous state.
   Streaming adapters achieve this by withholding the last byte until the
   length is verified (`exactLength` in the core).
+- `putVerified` (optional) stores a stream only if its SHA-256 equals the
+  given one, checked by the storage itself, and throws
+  `ChecksumMismatchError` otherwise. `R2Storage` passes R2's `sha256` put
+  option (no Worker CPU; `withPresigner` keeps it). LFS objects and pack-upload
+  parts use it when present, else the hashing `verifyingStream`. On Workers a
+  `fetch` body arrives in 4 KiB chunks: hashing it in the Worker costs about
+  24 ms CPU per MiB even piped into `crypto.DigestStream`, 38 ms through a
+  `TransformStream`, so a 4 GB mirror never fit into one invocation.
 - Exactly one of several concurrent conditional writers wins.
 - ETags are unquoted and change on every write.
 - `list` yields keys in lexicographic order across pages.
@@ -1697,9 +1723,12 @@ update themselves.
   and tests. The production instance `levino/levins-git-forge` is a copy of it
   with its own names, domain and OIDC vars.
 - **Resources only from config:** every Cloudflare resource is declared in
-  `wrangler.toml` and created by Wrangler, never by hand. D1, R2 and the
-  queues have a name and no id, so the first `wrangler deploy` provisions them
-  (automatic resource provisioning) and later deploys find them by name. The
+  `wrangler.toml` by name, without id, so later deploys find it by name. The
+  first `wrangler deploy` would provision missing ones (automatic resource
+  provisioning) in an arbitrary region, so the README has them created first
+  with a location (`d1 create --location`, `r2 bucket create --location`,
+  `queues create --jurisdiction eu`); `[placement] mode = "smart"` keeps
+  requests next to them. The
   jobs queue is recognised by the suffix `-jobs`. Cron and routes (custom
   domains) are declared there as well. The `BOOTSTRAP_TOKEN` secret is
   deliberately not `secrets.required`: a secret can only be set on an existing
@@ -1832,7 +1861,14 @@ and `5xx` are retried by the job queue. SMTP (`@git-forge/smtp`, `node:net`
 and `node:tls`, Node only): one connection per message, STARTTLS (required),
 implicit TLS or plain without credentials, `AUTH PLAIN`/`LOGIN`, MIME with
 base64 parts. `5xx` throws `EmailRejectedError`, everything else `SmtpError`
-(retried).
+(retried). Cloudflare (`createCloudflareEmailSender`, `send_email` binding
+`EMAIL`): the structured `send()` form; rate, quota, internal and delivery
+errors are retried, every other error code is permanent. With the binding
+and no `EMAIL_PROVIDER` the Worker uses it, sending from `EMAIL_FROM` or
+`Forge <forge@<PUBLIC_URL host>>`; without either address email stays off.
+Arbitrary recipients need Workers Paid; on the free plan only verified
+Email Routing destinations receive mail. `POST /api/admin/email/test` (and
+the button on `/-/admin`) sends a test message through the same sender.
 
 Digests: when a notification should be emailed, the user's
 `digest_due_at` is claimed by compare-and-swap (`… WHERE digest_due_at IS
@@ -1961,20 +1997,40 @@ Issues, pull requests, reviews, commit statuses, check runs and discussions
   merge commit (parents base and head), squash (parent base), rebase
   (cherry-picks parents first, drops commits that become empty, refuses
   merge commits). Results are compared commit by commit with `git merge
-  --no-ff`, `git merge --squash` and `git rebase --force-rebase`. Rename
-  detection is not implemented; to stay safe, situations where git's rename
-  or directory-rename detection could change the outcome (a file deleted on
-  both sides while a similar file was added on one side, a directory removed
-  on one side while the other adds to it) are reported as conflicts. The
-  merge is therefore never clean where git conflicts, and identical where
-  both are clean.
+  --no-ff`, `git merge --squash` and `git rebase --force-rebase`. Renames
+  are detected like `merge-ort` does (`rename.ts`, a port of
+  `diffcore-rename`): per side, base→side deletions are rename sources and
+  additions destinations (empty files excluded); only sources whose other
+  side changed or removed the file are relevant; exact matches first, then
+  same-basename pairs at 75% similarity (with git's directory hint for
+  non-unique basenames), then the similarity matrix at 50% (git's span-hash
+  score, four candidates per destination, stable sort, greedy pairing,
+  rename limit 7000). A rename on one side with an edit on the other merges
+  the content at the new path; both sides renaming to the same path merge
+  there; rename/delete, rename/rename to different paths and rename/add are
+  conflicts. Similarity scores are checked against `git diff -M` and
+  randomized rename histories against `git merge`, `git merge --squash` and
+  `git rebase`. Where git's result could depend on its hash-map iteration or
+  traversal order (several identical files competing for one rename, tied
+  scores or tied directory hints) or the comparison budget (250 000 pairs) is
+  exceeded, the relevant sources are reported as conflicts instead.
+  Directory renames: a path the other side adds below a directory that one
+  side removed is a `directory-rename` conflict when a file of that
+  directory was renamed (git's default `merge.directoryRenames=conflict`),
+  and merges cleanly when it was only deleted. Sources in such directories
+  are always considered for renames. The merge is therefore never clean
+  where git conflicts, and identical where both are clean.
 - **Branch protection on merge.** The merge calls the same
   `evaluateBranchUpdate(rule, actor, update, { via: 'pull-request', … })` as
   receive-pack, with approvals from reviewers with write access (the
   author's own reviews never count), requested changes, the last-push
   approval, the strict up-to-date flag and the latest statuses and check
-  runs of the head. `require_code_owner_reviews` is only satisfiable while
-  the base has no `CODEOWNERS` file. Required status checks on direct pushes
+  runs of the head. `require_code_owner_reviews` reads `CODEOWNERS` from
+  the base branch (GitHub's locations and syntax; patterns are gitignore
+  patterns, checked against `git check-ignore`, except that a final `/*`
+  does not reach into subdirectories, as GitHub documents) and needs an
+  approval from an owner of every changed owned file; user owners are
+  requested as reviewers automatically. Required status checks on direct pushes
   still see no statuses (the push policy is synchronous); the pull request
   is the path that satisfies them.
 - **Statuses and check runs** are stored here and written by CI (directly
@@ -1984,9 +2040,29 @@ Issues, pull requests, reviews, commit statuses, check runs and discussions
   pipeline as a push (CI dispatch, mirror notifications, `push` events).
   Every mutation reports an activity (`onActivity`) that the Worker turns
   into notification events (§16: `issues`, `issue_comment`,
-  `pull_request`, `pull_request_review`, `pull_request_review_comment`);
+  `pull_request`, `pull_request_review`, `pull_request_review_comment`,
+  `discussion`, `discussion_comment`);
   the collaboration package itself does not depend on the notifications
   package.
+- **Forks.** `POST /repos/{o}/{r}/forks` creates a fork on the same
+  instance (bucket: alternates, §6; database: `repository_forks` with parent
+  and root, migration `0011_forks`). Anyone with read access may fork into
+  their own account or an organization they own; the fork has the
+  upstream's visibility and is an independent repository (its own
+  collaborators; upstream collaborators get no access to a private fork).
+  Pull requests may use a head from another repository of the same fork
+  network (`head: owner:branch`, `head_repo` when an owner has several).
+  Their head objects are copied into the base repository when the pull
+  request is opened and whenever the head moves (a pack streamed from the
+  head repository, like GitHub's `refs/pull/N/head` but without a ref), so
+  diffs, reviews, merges and CI read only the base repository and the base
+  never depends on the fork. LFS objects of pointers in the copied pack are
+  copied with it (content-addressed, written once, hash verified). Pushes to
+  a fork refresh the pull requests it heads. With `maintainer_can_modify` (set by the author) users with write
+  access to the base may push to that one head branch of the fork, and
+  read the fork, through a `delegatedBranches` hook of the git access check;
+  every other ref stays denied. CI for pull requests from forks runs
+  untrusted (`trusted: false`: no secrets, read-only token).
 - **Imported data** (§7 *metadata*). Numbers, authors and times are kept.
   Every imported item has an `imported_items` row (node id, source key
   such as `issue:7` or `review-comment:301`, original URL, author login,
@@ -1999,10 +2075,9 @@ Issues, pull requests, reviews, commit statuses, check runs and discussions
   that do not anchor (`validateAnchor` on their original commit and line)
   become issue comments quoting path and line. Releases keep their times;
   assets are deduplicated by name.
-- **Limits of v1.** Same-repository pull requests only (forks later),
-  computing mergeability and file lists loads the involved objects through
-  the in-memory object database, no reactions,
-  no CODEOWNERS parsing, no in-browser conflict resolution.
+- **Limits of v1.** Computing mergeability and file lists loads the involved
+  objects through the in-memory object database, no reactions, no
+  in-browser conflict resolution.
 
 ## 18. Web UI
 
@@ -2158,6 +2233,13 @@ goes through the service function, which checks the permission again, after
 `verifySessionWrite`. Collaboration errors are shown on the page with their
 status. Links that come from the API (check run `details_url`, status
 `target_url`) are rendered only for `http(s)` URLs.
+
+Forks: the repository header has a *Fork* button (`…/fork`: owner and
+name, `createFork`), the fork count (`…/forks`, with a *Compare* link per
+fork) and, on a fork, *forked from* with a *Contribute* link. *New pull
+request* takes `head_repo` (any readable repository of the fork network)
+and offers that repository's branches; *Allow edits by maintainers* sets
+`maintainer_can_modify`.
 
 Inline review comments on the *Files changed* tab use the only client script
 of these pages: a click on a line's `+` clones a `<template>` form below the

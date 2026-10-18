@@ -1,4 +1,4 @@
-import { type ByteRange, exactLength, type ObjectInfo, type PutBody, type PutOptions, type PutResult, type Storage, type StoredObject } from '@git-forge/core'
+import { type ByteRange, ChecksumMismatchError, exactLength, type ObjectInfo, type PutBody, type PutOptions, type PutResult, type Storage, type StoredObject } from '@git-forge/core'
 
 export type R2StorageOptions = {
   readonly prefix?: string
@@ -61,6 +61,21 @@ export class R2Storage implements Storage {
       ...(options.contentType ? { httpMetadata: { contentType: options.contentType } } : {}),
     })
     return object ? { ok: true, info: info(object, key) } : { ok: false, reason: 'precondition-failed' }
+  }
+
+  async putVerified(key: string, body: ReadableStream<Uint8Array>, size: number, sha256Hex: string, options: PutOptions = {}): Promise<PutResult> {
+    const onlyIf = conditions(options)
+    try {
+      const object = await this.#bucket.put(this.#prefix + key, body.pipeThrough(new FixedLengthStream(size) as unknown as ReadableWritablePair<Uint8Array, Uint8Array>), {
+        sha256: sha256Hex,
+        ...(onlyIf ? { onlyIf } : {}),
+        ...(options.contentType ? { httpMetadata: { contentType: options.contentType } } : {}),
+      })
+      return object ? { ok: true, info: info(object, key) } : { ok: false, reason: 'precondition-failed' }
+    } catch (error) {
+      if (error instanceof Error && error.message.includes('(10037)')) throw new ChecksumMismatchError(error.message)
+      throw error
+    }
   }
 
   async *list(prefix: string): AsyncIterable<ObjectInfo> {

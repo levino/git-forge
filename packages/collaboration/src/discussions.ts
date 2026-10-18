@@ -1,6 +1,6 @@
 import { type Database, first, sql, type Statement } from '@git-forge/accounts'
 import { actorColumns, loadUsers, type UserSummary } from './actors.ts'
-import { type ActorRef, CollaborationError, invalid, nodeId, notFound, refFromColumns, requirePermission, type Scope } from './context.ts'
+import { type ActorRef, CollaborationError, emitActivity, invalid, nodeId, notFound, refFromColumns, requirePermission, type Scope } from './context.ts'
 import { DEFAULT_PAGE, numberStatement, offset, type Page, type Paged, requireBody, requireTitle } from './issues.ts'
 
 export type DiscussionCategory = {
@@ -310,7 +310,9 @@ export const createDiscussion = async (scope: Scope, input: DiscussionInput): Pr
     ),
   ])
   const row = (await first<DiscussionRow>(scope.db, sql('SELECT * FROM discussions WHERE node_id = ?', node)))!
-  return (await hydrateDiscussions(scope.db, scope, [row]))[0]!
+  const created = (await hydrateDiscussions(scope.db, scope, [row]))[0]!
+  await emitActivity(scope, { kind: 'discussion', action: 'created', number: created.number, actor: author })
+  return created
 }
 
 const DISCUSSION_REASONS: readonly DiscussionStateReason[] = ['resolved', 'outdated', 'duplicate', 'reopened']
@@ -322,6 +324,7 @@ export const updateDiscussion = async (scope: Scope, number: number, input: Disc
   const author = refFromColumns(row.author_kind, row.author_id)
   const at = scope.now()
   const statements: Statement[] = []
+  const activities: Omit<Parameters<typeof emitActivity>[1], 'number' | 'actor'>[] = []
   if (input.title !== undefined || input.body !== undefined || input.category !== undefined) {
     requirePermission(scope, 'discussion:edit', { author })
     const title = input.title !== undefined ? requireTitle(input.title) : row.title
@@ -332,6 +335,12 @@ export const updateDiscussion = async (scope: Scope, number: number, input: Disc
       categoryId = (await categoryRow(scope, input.category)).id
     }
     statements.push(sql('UPDATE discussions SET title = ?, body = ?, category_id = ?, updated_at = ? WHERE id = ?', title, body, categoryId, at, row.id))
+    const changes: Record<string, unknown> = {
+      ...(title !== row.title ? { title: { from: row.title } } : {}),
+      ...(body !== row.body ? { body: { from: row.body } } : {}),
+    }
+    if (Object.keys(changes).length > 0) activities.push({ kind: 'discussion', action: 'edited', changes })
+    if (categoryId !== row.category_id) activities.push({ kind: 'discussion', action: 'category_changed', changes: { category: { from: { id: row.category_id } } } })
   }
   if (input.state !== undefined) {
     if (input.state !== 'open' && input.state !== 'closed') throw invalid('state must be open or closed')
@@ -342,16 +351,19 @@ export const updateDiscussion = async (scope: Scope, number: number, input: Disc
       statements.push(
         sql('UPDATE discussions SET state = ?, state_reason = ?, closed_at = ?, updated_at = ? WHERE id = ?', input.state, reason as string, input.state === 'closed' ? at : null, at, row.id),
       )
+      activities.push({ kind: 'discussion', action: input.state === 'closed' ? 'closed' : 'reopened' })
     }
   }
   if (statements.length > 0) await scope.db.batch(statements)
+  for (const activity of activities) await emitActivity(scope, { ...activity, number, actor: scope.actor.ref! })
   return getDiscussion(scope, number)
 }
 
 export const setDiscussionLocked = async (scope: Scope, number: number, locked: boolean): Promise<Discussion> => {
-  requirePermission(scope, 'discussion:lock')
+  const actor = requirePermission(scope, 'discussion:lock')
   const row = await discussionRow(scope, number)
   await scope.db.run(sql('UPDATE discussions SET locked = ?, updated_at = ? WHERE id = ?', locked ? 1 : 0, scope.now(), row.id))
+  if ((row.locked === 1) !== locked) await emitActivity(scope, { kind: 'discussion', action: locked ? 'locked' : 'unlocked', number, actor })
   return getDiscussion(scope, number)
 }
 
@@ -431,13 +443,16 @@ export const createDiscussionComment = async (scope: Scope, number: number, inpu
     sql('UPDATE discussions SET comment_count = comment_count + 1, updated_at = ? WHERE id = ?', at, discussion.id),
   ])
   const row = (await first<CommentRow>(scope.db, sql(`${COMMENT_SELECT} WHERE c.node_id = ?`, node)))!
-  return (await hydrateComments(scope.db, [row]))[0]!
+  const created = (await hydrateComments(scope.db, [row]))[0]!
+  await emitActivity(scope, { kind: 'discussion_comment', action: 'created', number, actor: author, commentId: created.id })
+  return created
 }
 
 export const updateDiscussionComment = async (scope: Scope, id: number, body: unknown): Promise<DiscussionComment> => {
   const row = await commentRow(scope, id)
-  requirePermission(scope, 'comment:edit', { author: refFromColumns(row.author_kind, row.author_id) })
+  const actor = requirePermission(scope, 'comment:edit', { author: refFromColumns(row.author_kind, row.author_id) })
   await scope.db.run(sql('UPDATE discussion_comments SET body = ?, updated_at = ? WHERE id = ?', requireBody(body), scope.now(), id))
+  await emitActivity(scope, { kind: 'discussion_comment', action: 'edited', number: row.number, actor, commentId: id, changes: { body: { from: row.body } } })
   return getDiscussionComment(scope, id)
 }
 
@@ -461,6 +476,7 @@ export const setAnswer = async (scope: Scope, number: number, commentId: number 
     await scope.db.run(
       sql('UPDATE discussions SET answer_comment_id = NULL, answer_chosen_at = NULL, answer_chosen_by_kind = NULL, answer_chosen_by_id = NULL, updated_at = ? WHERE id = ?', scope.now(), discussion.id),
     )
+    if (discussion.answer_comment_id !== null) await emitActivity(scope, { kind: 'discussion', action: 'unanswered', number, actor, commentId: discussion.answer_comment_id })
     return getDiscussion(scope, number)
   }
   const comment = await commentRow(scope, commentId)
@@ -471,6 +487,7 @@ export const setAnswer = async (scope: Scope, number: number, commentId: number 
   await scope.db.run(
     sql('UPDATE discussions SET answer_comment_id = ?, answer_chosen_at = ?, answer_chosen_by_kind = ?, answer_chosen_by_id = ?, updated_at = ? WHERE id = ?', commentId, at, kind, id, at, discussion.id),
   )
+  if (discussion.answer_comment_id !== commentId) await emitActivity(scope, { kind: 'discussion', action: 'answered', number, actor, commentId })
   return getDiscussion(scope, number)
 }
 

@@ -3,7 +3,7 @@ import type { DigestFactory } from './digest.ts'
 import { fetchDumb, lsRefsDumb } from './dumb-client.ts'
 import { type ObjectId, sha1 } from './hash.ts'
 import { connectRemote, type Protocol, type ProtocolPreference, type RemoteConnection } from './fetch-client.ts'
-import { LFS_POINTER_MAX_SIZE, parseLfsPointer } from './lfs.ts'
+import { LFS_POINTER_MAX_SIZE, lfsObjectKey, parseLfsPointer } from './lfs.ts'
 import { type LfsEndpoint, mayAuthorizeLfs, resolveLfsEndpoint } from './lfs-config.ts'
 import { lfsEndpointFor, type LfsMissing, type LfsMirrorResult, type LfsPointer, mirrorLfsObjects } from './lfs-mirror.ts'
 import { type CopiedPack, copyPack, listRemotePacks } from './pack-copy.ts'
@@ -652,6 +652,7 @@ export const syncMirror = async (options: SyncOptions): Promise<SyncResult> => {
       if (options.deferLfs) {
         lfsPending = deferred(pending, lfsFound)
       } else {
+        if (lfsFound.length > 0) await saveStatus(storage, repo, remoteName, (status) => ({ ...status, lfsPending: deferred(status.lfsPending, lfsFound) }))
         const lfs = await mirrorLfsObjects({
           storage,
           repo,
@@ -782,7 +783,20 @@ const copyUpstreamPacks = async (
   }
 }
 
-export const deepCheckRepository = async (storage: Storage, repo: RepositoryName, at = new Date()): Promise<DeepCheck> => {
+const missingLfsObjects = async (storage: Storage, repo: RepositoryName, odb: ObjectDatabase, names: readonly string[]): Promise<LfsPointer[]> => {
+  const missing = new Map<string, LfsPointer>()
+  for (const name of names) {
+    for (const blob of await odb.smallBlobs(name, LFS_POINTER_MAX_SIZE)) {
+      const pointer = parseLfsPointer(blob.data)
+      if (!pointer || missing.has(pointer.oid)) continue
+      const stored = await storage.head(lfsObjectKey(repo, pointer.oid))
+      if (!stored || stored.size !== pointer.size) missing.set(pointer.oid, pointer)
+    }
+  }
+  return [...missing.values()]
+}
+
+export const deepCheckRepository = async (storage: Storage, repo: RepositoryName, at = new Date(), lfs = true): Promise<DeepCheck & { readonly lfsMissing: readonly LfsPointer[] }> => {
   const odb = new ObjectDatabase(storage, repo)
   const problems: string[] = []
   const names = await odb.packNames()
@@ -806,12 +820,15 @@ export const deepCheckRepository = async (storage: Storage, repo: RepositoryName
     if (!(error instanceof MissingObjectError)) throw error
     problems.push(error.message)
   }
-  return { at: at.toISOString(), ok: problems.length === 0, packs: names.length, objects, problems }
+  const lfsMissing = lfs ? await missingLfsObjects(storage, repo, odb, names) : []
+  for (const pointer of lfsMissing) problems.push(`LFS object ${pointer.oid} is missing`)
+  return { at: at.toISOString(), ok: problems.length === 0, packs: names.length, objects, problems, lfsMissing }
 }
 
 export const deepCheckMirror = async (storage: Storage, repo: RepositoryName, remote = DEFAULT_REMOTE, now = new Date()): Promise<DeepCheck> => {
-  const check = await deepCheckRepository(storage, repo, now)
-  await saveStatus(storage, repo, remote, (status) => ({ ...status, lastDeepCheck: check }))
+  const config = await readMirrorConfig(storage, repo, remote)
+  const { lfsMissing, ...check } = await deepCheckRepository(storage, repo, now, config?.lfs ?? false)
+  await saveStatus(storage, repo, remote, (status) => ({ ...status, lastDeepCheck: check, lfsPending: deferred(status.lfsPending, lfsMissing) }))
   return check
 }
 

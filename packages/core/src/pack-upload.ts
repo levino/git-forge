@@ -1,6 +1,6 @@
 import { concat, fromUtf8, utf8 } from './bytes.ts'
 import { isObjectId, ZERO_ID } from './hash.ts'
-import { LfsIntegrityError, verifyingStream } from './lfs.ts'
+import { LfsIntegrityError, putVerifiedStream } from './lfs.ts'
 import { FLUSH, pkt } from './pktline.ts'
 import { type PushOutcome, receivePack, type ReceiveOptions, type RefCommand } from './receive-pack.ts'
 import { repositoryPrefix, type RepositoryName } from './repository.ts'
@@ -147,9 +147,7 @@ export const storeUploadPart = async (
     return { created: false }
   }
   try {
-    const result = await storage.put(key, body.pipeThrough(verifyingStream({ oid: spec.sha256, size: spec.size })), spec.size, {
-      contentType: 'application/octet-stream',
-    })
+    const result = await putVerifiedStream(storage, key, body, { oid: spec.sha256, size: spec.size }, { contentType: 'application/octet-stream' })
     return { created: result.ok }
   } catch (error) {
     if (error instanceof LfsIntegrityError) throw new UploadError(422, `part ${number}: ${error.message}`)

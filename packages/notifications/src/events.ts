@@ -376,6 +376,114 @@ export const pullRequestReviewCommentEvent = (context: EventContext, action: Com
   )
 }
 
+export type DiscussionInfo = {
+  readonly number: number
+  readonly title: string
+  readonly body?: string | null
+  readonly state: 'open' | 'closed'
+  readonly stateReason?: string | null
+  readonly locked?: boolean
+  readonly author: string
+  readonly category: { readonly slug: string; readonly name: string; readonly answerable: boolean }
+  readonly answerCommentId?: number | null
+  readonly comments?: number
+  readonly createdAt: string | number
+  readonly updatedAt: string | number
+}
+
+export type DiscussionCommentInfo = CommentInfo & {
+  readonly parentId?: number | null
+}
+
+const discussionObject = (context: EventContext, discussion: DiscussionInfo) => {
+  const path = repoPath(context.repository)
+  return {
+    number: discussion.number,
+    title: discussion.title,
+    body: discussion.body ?? null,
+    state: discussion.state,
+    state_reason: discussion.stateReason ?? null,
+    locked: discussion.locked ?? false,
+    user: userObject(context.baseUrl, discussion.author),
+    category: { slug: discussion.category.slug, name: discussion.category.name, is_answerable: discussion.category.answerable },
+    answer_html_url: discussion.answerCommentId ? htmlUrl(context.baseUrl, `/${path}/discussions/${discussion.number}#discussioncomment-${discussion.answerCommentId}`) : null,
+    comments: discussion.comments ?? 0,
+    created_at: iso(discussion.createdAt),
+    updated_at: iso(discussion.updatedAt),
+    url: apiUrl(context.baseUrl, `/repos/${path}/discussions/${discussion.number}`),
+    html_url: htmlUrl(context.baseUrl, `/${path}/discussions/${discussion.number}`),
+  }
+}
+
+const discussionSubject = (context: EventContext, discussion: DiscussionInfo, latestCommentUrl?: string): EventSubject => {
+  const path = repoPath(context.repository)
+  return {
+    key: `discussion:${discussion.number}`,
+    type: 'Discussion',
+    title: discussion.title,
+    url: apiUrl(context.baseUrl, `/repos/${path}/discussions/${discussion.number}`),
+    htmlUrl: htmlUrl(context.baseUrl, `/${path}/discussions/${discussion.number}`),
+    ...(latestCommentUrl ? { latestCommentUrl } : {}),
+  }
+}
+
+export type DiscussionAction = 'created' | 'edited' | 'deleted' | 'category_changed' | 'answered' | 'unanswered' | 'locked' | 'unlocked' | 'closed' | 'reopened'
+
+export const discussionEvent = (
+  context: EventContext,
+  action: DiscussionAction,
+  discussion: DiscussionInfo,
+  options: { readonly changes?: Record<string, unknown>; readonly answer?: DiscussionCommentInfo } = {},
+): ForgeEvent => {
+  const path = repoPath(context.repository)
+  const answer = options.answer
+  return event(
+    context,
+    'discussion',
+    action,
+    {
+      discussion: discussionObject(context, discussion),
+      ...(options.changes ? { changes: options.changes } : {}),
+      ...(answer
+        ? {
+            answer: {
+              ...commentObject(context, answer, `/${path}/discussions/${discussion.number}#discussioncomment-${answer.id}`, `/repos/${path}/discussions/comments/${answer.id}`),
+              parent_id: answer.parentId ?? null,
+            },
+          }
+        : {}),
+    },
+    {
+      subject: discussionSubject(context, discussion),
+      audience: {
+        author: discussion.author,
+        mentions: action === 'created' ? extractMentions(discussion.body) : [],
+        participants: action === 'answered' && answer ? [answer.author] : [],
+        watchers: action === 'created' || action === 'closed' || action === 'reopened' ? 'all' : 'none',
+      },
+    },
+  )
+}
+
+export const discussionCommentEvent = (context: EventContext, action: CommentAction, discussion: DiscussionInfo, comment: DiscussionCommentInfo): ForgeEvent => {
+  const path = repoPath(context.repository)
+  const apiPath = `/repos/${path}/discussions/comments/${comment.id}`
+  const htmlPath = `/${path}/discussions/${discussion.number}#discussioncomment-${comment.id}`
+  return event(
+    context,
+    'discussion_comment',
+    action,
+    { discussion: discussionObject(context, discussion), comment: { ...commentObject(context, comment, htmlPath, apiPath), parent_id: comment.parentId ?? null } },
+    {
+      subject: discussionSubject(context, discussion, apiUrl(context.baseUrl, apiPath)),
+      audience:
+        action === 'created'
+          ? { participants: [comment.author], mentions: extractMentions(comment.body), watchers: 'all' }
+          : { watchers: 'none', mentions: action === 'edited' ? extractMentions(comment.body) : [] },
+    },
+  )
+}
+
 export type PushCommit = {
   readonly id: string
   readonly message: string

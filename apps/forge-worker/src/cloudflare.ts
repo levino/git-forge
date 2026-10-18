@@ -1,5 +1,5 @@
 import { d1Database, MIGRATIONS, migrateOnStart } from '@git-forge/accounts'
-import { consumeJobs, digestStreams, QueueJobs, R2Storage } from '@git-forge/cloudflare'
+import { consumeJobs, createCloudflareEmailSender, digestStreams, QueueJobs, R2Storage } from '@git-forge/cloudflare'
 import { continueImport, createConsoleEmailSender, type EmailSender, type ImportJob, type ImportScheduler, storagePublisher } from '@git-forge/core'
 import { S3Storage } from '@git-forge/s3'
 import { createSesEmailSender } from '@git-forge/ses'
@@ -16,6 +16,7 @@ export type Env = ForgeVars & {
   readonly RUNNER?: DurableObjectNamespace
   readonly IMPORTS?: Queue<ImportJob>
   readonly JOBS?: Queue<AppJob>
+  readonly EMAIL?: SendEmail
 }
 
 const importScheduler =
@@ -24,9 +25,10 @@ const importScheduler =
     await queue.send(job, delaySeconds > 0 ? { delaySeconds } : {})
   }
 
-const emailSender = (settings: EmailSettings | undefined): EmailSender | undefined => {
+const emailSender = (settings: EmailSettings | undefined, binding: SendEmail | undefined): EmailSender | undefined => {
   if (!settings) return undefined
   if (settings.provider === 'console') return createConsoleEmailSender(settings.from)
+  if (settings.provider === 'cloudflare') return binding && createCloudflareEmailSender(binding, settings.from)
   return createSesEmailSender(settings)
 }
 
@@ -41,7 +43,7 @@ export const forgeFor = (env: Env): Promise<Forge> => {
       const actions = parseActionsSettings(env)
       const secretsKey = await loadSecretsKey(actions, env)
       const idTokenKeys = await loadIdTokenKeys(actions, settings.instanceKey)
-      const email = emailSender(parseEmailSettings(env))
+      const email = emailSender(parseEmailSettings(env, env.EMAIL !== undefined), env.EMAIL)
       const signing = parseR2Signing(env)
       return createForge({
         ...settings,

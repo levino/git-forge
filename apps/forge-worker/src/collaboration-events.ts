@@ -1,6 +1,26 @@
-import { type Activity, getComment, getIssue, getPullSummary, getReview, getReviewComment, type Issue, loadUsers, type PullRequest, type Scope } from '@git-forge/collaboration'
+import {
+  type Activity,
+  type Discussion,
+  type DiscussionComment,
+  getComment,
+  getDiscussion,
+  getDiscussionComment,
+  getIssue,
+  getPullSummary,
+  getReview,
+  getReviewComment,
+  type Issue,
+  loadUsers,
+  type PullRequest,
+  type Scope,
+} from '@git-forge/collaboration'
 import {
   type CommentAction,
+  type DiscussionAction,
+  discussionCommentEvent,
+  type DiscussionCommentInfo,
+  discussionEvent,
+  type DiscussionInfo,
   type EventActor,
   type ForgeEvent,
   issueCommentEvent,
@@ -40,6 +60,30 @@ const pullInfo = (pull: PullRequest): PullRequestInfo => ({
   mergedAt: pull.mergedAt,
   mergeCommitSha: pull.mergeCommitSha,
   requestedReviewers: pull.requestedReviewers.map((user) => user.login),
+})
+
+const discussionInfo = (discussion: Discussion): DiscussionInfo => ({
+  number: discussion.number,
+  title: discussion.title,
+  body: discussion.body,
+  state: discussion.state,
+  stateReason: discussion.stateReason,
+  locked: discussion.locked,
+  author: discussion.author.login,
+  category: { slug: discussion.category.slug, name: discussion.category.name, answerable: discussion.category.answerable },
+  answerCommentId: discussion.answerCommentId,
+  comments: discussion.comments,
+  createdAt: discussion.createdAt,
+  updatedAt: discussion.updatedAt,
+})
+
+const discussionCommentInfo = (comment: DiscussionComment): DiscussionCommentInfo => ({
+  id: comment.id,
+  body: comment.body,
+  author: comment.author.login,
+  createdAt: comment.createdAt,
+  updatedAt: comment.updatedAt,
+  parentId: comment.parentId,
 })
 
 const REVIEW_STATE: Readonly<Record<string, ReviewInfo['state']>> = {
@@ -103,5 +147,19 @@ export const activityEvent = async (scope: Scope, activity: Activity, baseUrl: s
         inReplyToId: comment.inReplyToId,
       })
     }
+    case 'discussion': {
+      const answer = activity.action === 'answered' && activity.commentId !== undefined ? discussionCommentInfo(await getDiscussionComment(scope, activity.commentId)) : undefined
+      return discussionEvent(context, activity.action as DiscussionAction, discussionInfo(await getDiscussion(scope, number)), {
+        ...(activity.changes ? { changes: activity.changes } : {}),
+        ...(answer ? { answer } : {}),
+      })
+    }
+    case 'discussion_comment':
+      return discussionCommentEvent(
+        context,
+        activity.action as CommentAction,
+        discussionInfo(await getDiscussion(scope, number)),
+        discussionCommentInfo(await getDiscussionComment(scope, activity.commentId!)),
+      )
   }
 }

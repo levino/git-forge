@@ -166,7 +166,10 @@ describe('pages on wrangler dev', () => {
     expect((await (await api('GET', `/api/v3/repos/e2e/docs/pages/deployments/${body.id}`)).json()) as { status: string }).toMatchObject({ status: 'succeed' })
     expect((await page(pagesHost('e2e'), '/docs/')).body.toString()).toBe('<h1>Built by CI</h1>')
     expect((await page(pagesHost('e2e'), '/docs/assets/app.js')).headers['content-type']).toBe('text/javascript; charset=utf-8')
-    expect((await api('POST', '/api/v3/repos/e2e/docs/pages/deployments', { artifact_id: 1 })).status).toBe(422)
+    const missing = await api('POST', '/api/v3/repos/e2e/docs/pages/deployments', { artifact_id: 999999 })
+    expect(missing.status).toBe(200)
+    const { id } = (await missing.json()) as { id: number }
+    await eventually(async () => ((await (await api('GET', `/api/v3/repos/e2e/docs/pages/deployments/${id}`)).json()) as { status: string }).status === 'deployment_failed')
   })
 
   it('keeps private pages for readers: sign-in redirect for visitors, tokens for readers', async () => {

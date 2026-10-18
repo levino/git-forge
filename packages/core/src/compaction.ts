@@ -46,7 +46,7 @@ export type CompactionResult = {
 
 export const compactRepository = async (storage: Storage, repo: RepositoryName, options: CompactionOptions = {}): Promise<CompactionResult | null> => {
   const odb = new ObjectDatabase(storage, repo)
-  const packs = await odb.packs()
+  const packs = await odb.ownPacks()
   const sizes: PackSize[] = []
   for (const pack of packs) sizes.push({ name: pack.name, size: await odb.packSize(pack) })
   const chosen = new Set(options.all ? (sizes.length > 1 ? sizes.map((pack) => pack.name) : []) : planCompaction(sizes, options.factor ?? 2))

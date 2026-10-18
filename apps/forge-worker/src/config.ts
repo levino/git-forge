@@ -105,6 +105,7 @@ export type ForgeSettings = {
 
 export type EmailSettings =
   | { readonly provider: 'console'; readonly from: string }
+  | { readonly provider: 'cloudflare'; readonly from: string }
   | {
       readonly provider: 'ses'
       readonly from: string
@@ -286,13 +287,22 @@ export const parseR2Signing = (vars: ForgeVars): R2SigningSettings | undefined =
   return { endpoint, bucket, accessKeyId, secretAccessKey }
 }
 
-export const parseEmailSettings = (vars: ForgeVars): EmailSettings | undefined => {
-  const provider = present(vars.EMAIL_PROVIDER)
+const hostOf = (url: string | undefined): string | undefined => (url && URL.canParse(url) ? new URL(url).hostname : undefined)
+
+export const parseEmailSettings = (vars: ForgeVars, sendEmailBinding = false): EmailSettings | undefined => {
+  const explicit = present(vars.EMAIL_PROVIDER)
+  const provider = explicit ?? (sendEmailBinding ? 'cloudflare' : undefined)
   if (provider === undefined || provider === 'none') return undefined
-  const from = present(vars.EMAIL_FROM)
+  const host = provider === 'cloudflare' ? hostOf(present(vars.PUBLIC_URL)) : undefined
+  const from = present(vars.EMAIL_FROM) ?? (host ? `Forge <forge@${host}>` : undefined)
+  if (!from && !explicit) return undefined
   if (!from) throw new ConfigurationError('EMAIL_FROM is required when EMAIL_PROVIDER is set')
   if (provider === 'console') return { provider, from }
-  if (provider !== 'ses') throw new ConfigurationError('EMAIL_PROVIDER must be none, console or ses')
+  if (provider === 'cloudflare') {
+    if (!sendEmailBinding) throw new ConfigurationError('EMAIL_PROVIDER=cloudflare needs a send_email binding named EMAIL')
+    return { provider, from }
+  }
+  if (provider !== 'ses') throw new ConfigurationError('EMAIL_PROVIDER must be none, console, cloudflare or ses')
   const region = present(vars.SES_REGION)
   const accessKeyId = present(vars.SES_ACCESS_KEY_ID)
   const secretAccessKey = present(vars.SES_SECRET_ACCESS_KEY)

@@ -6,6 +6,7 @@ import {
   lfsBatch,
   type LfsAction,
   lfsObjectKey,
+  locateLfsObject,
   type LfsLinks,
   type LfsObjectSpec,
   LfsRequestError,
@@ -76,7 +77,7 @@ const selfLinks = (request: Request, base: string, storage: Storage, repo: Repos
     },
     download: async (object) => {
       if (!storage.presignGet) return own(`/objects/${object.oid}`)
-      return { href: await storage.presignGet(lfsObjectKey(repo, object.oid), expiresIn), expires_in: expiresIn }
+      return { href: await storage.presignGet((await locateLfsObject(storage, repo, object.oid))?.key ?? lfsObjectKey(repo, object.oid), expiresIn), expires_in: expiresIn }
     },
     verify: async () => own('/objects/verify'),
   }
@@ -139,7 +140,7 @@ export const handleLfsRequest = async (request: Request, repo: RepositoryName, p
     if (request.method === 'GET' || request.method === 'HEAD') {
       const denied = await context.authorize?.(request, repo, 'read', 'lfs')
       if (denied) return denied
-      const key = lfsObjectKey(repo, oid)
+      const key = (await locateLfsObject(storage, repo, oid))?.key ?? lfsObjectKey(repo, oid)
       const stored = request.method === 'GET' ? await storage.get(key) : await storage.head(key)
       if (!stored) return failure(404, 'object does not exist')
       return new Response('body' in stored ? (stored.body as ReadableStream<Uint8Array<ArrayBuffer>>) : null, {

@@ -1,3 +1,4 @@
+import { createMemoryEmailSender } from '@git-forge/core'
 import { beforeAll, describe, expect, it } from 'vitest'
 import { bootstrap, call, type NodeForge, nodeForge } from '../support/node-forge.ts'
 
@@ -79,5 +80,21 @@ describe('instance admin API', () => {
     const mirrors = await json<{ repository: { owner: string; name: string }; config: { url: string } }[]>(await call(forge, BASE, 'GET', '/api/admin/mirrors', ada))
     expect(mirrors).toEqual([expect.objectContaining({ repository: { owner: 'ada', name: 'copy' }, config: expect.objectContaining({ url: 'http://127.0.0.1:9/upstream.git' }) })])
     expect((await call(forge, BASE, 'GET', '/api/admin/mirrors', bob)).status).toBe(403)
+  })
+
+  it('sends a test email through the configured provider', async () => {
+    expect((await call(forge, BASE, 'POST', '/api/admin/email/test', ada, { to: 'ada@example.org' })).status).toBe(422)
+    const email = createMemoryEmailSender('forge@example.org')
+    const mailing = await nodeForge({ email })
+    const admin = await bootstrap(mailing, BASE, 'ada')
+    expect((await call(mailing, BASE, 'POST', '/api/admin/email/test', admin, {})).status).toBe(422)
+    expect((await call(mailing, BASE, 'POST', '/api/admin/email/test', admin, { to: 'not-an-address' })).status).toBe(422)
+    expect(await json(await call(mailing, BASE, 'POST', '/api/admin/email/test', admin, { to: 'ada@example.org' }))).toEqual({ id: 'memory-1' })
+    expect(email.sent).toEqual([expect.objectContaining({ to: ['ada@example.org'], subject: 'git-forge test email' })])
+    const invite = await json<{ url: string; emailed: boolean }>(await call(mailing, BASE, 'POST', '/api/admin/invites', admin, { login: 'dora', email: 'dora@example.org' }))
+    expect(invite.emailed).toBe(true)
+    expect(email.sent[1]).toMatchObject({ to: ['dora@example.org'], text: expect.stringContaining(invite.url) })
+    expect(await json(await call(forge, BASE, 'POST', '/api/admin/invites', ada, { login: 'erin', email: 'erin@example.org' }))).toMatchObject({ emailed: false })
+    expect((await call(forge, BASE, 'POST', '/api/admin/email/test', carol, { to: 'carol@example.org' })).status).toBe(403)
   })
 })

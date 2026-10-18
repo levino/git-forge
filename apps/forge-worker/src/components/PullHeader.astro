@@ -24,7 +24,7 @@ const tabs = [
 
 <IssueHeader issue={pull} state={state} />
 <p class="-mt-3 mb-4 text-sm text-base-content/70 flex flex-wrap items-center gap-1.5">
-  wants to merge <code class="badge badge-sm font-mono text-primary">{pull.headRef}</code> into <code class="badge badge-sm font-mono text-primary">{pull.baseRef}</code>
+  wants to merge <code class="badge badge-sm font-mono text-primary">{pull.headRepository ? `${pull.headRepository.owner}:${pull.headRef}` : pull.headRef}</code> into <code class="badge badge-sm font-mono text-primary">{pull.baseRef}</code>
 </p>
 <nav class="tabs tabs-border mb-5 overflow-x-auto flex-nowrap border-b border-base-300" aria-label="Pull request">
   {

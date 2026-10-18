@@ -10,6 +10,9 @@ command = "V=0.8.4 S=f6a19ce16f9941e0e93277f5302bc7655b23610fbbf8a93daa0e325cb8b
 [limits]
 cpu_ms = 60000
 
+[placement]
+mode = "smart"
+
 [observability]
 enabled = true
 
@@ -43,3 +46,6 @@ max_retries = 10
 
 [triggers]
 crons = ["17 3 * * *"]
+
+[[send_email]]
+name = "EMAIL"

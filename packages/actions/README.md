@@ -36,7 +36,7 @@ actionsTick(dispatch)
 Both handlers return `null` for paths they do not own. `actionsTick` runs due
 scheduled workflows and the reaper; call it from a cron every few minutes.
 The tables are part of the D1 schema in `packages/accounts/migrations`
-(`0005_actions.sql`, `0009_actions_workflows.sql`, `0011_actions_results.sql`), applied by
+(`0005_actions.sql`, `0009_actions_workflows.sql`, `0013_actions_results.sql`), applied by
 `wrangler d1 migrations apply` (tests: `applyMigrations(db, MIGRATIONS)`).
 
 ## What runs

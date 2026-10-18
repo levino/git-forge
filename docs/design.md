@@ -1377,7 +1377,7 @@ same functions (`reviewDeployment`).
 #### Data
 
 - SQLite, migrations `packages/accounts/migrations/0005_actions.sql`,
-  `0009_actions_workflows.sql` and `0011_actions_results.sql` (blobs,
+  `0009_actions_workflows.sql` and `0013_actions_results.sql` (blobs,
   blocks, parts, blob grants, caches, artifacts; only new tables), applied by `wrangler d1 migrations apply`
   like every other migration and shipped in the release's
   `migrations.tar.gz`: `actions_runners`, `actions_tokens`,

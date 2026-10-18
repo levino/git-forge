@@ -108,6 +108,32 @@ describe('events from pushes and releases', () => {
     expect(inbox.map((thread) => thread.subject.type).sort()).toEqual(['Commit', 'Commit', 'Release'])
   })
 
+  it('emits issue, comment and pull request events and pushes merges through the push pipeline', async () => {
+    const issue = await call(forge, server.url, 'POST', '/api/v3/repos/admin/engine/issues', admin, { title: 'Valve leaks', body: '@bob can you look?' })
+    expect(issue.status).toBe(201)
+    await call(forge, server.url, 'POST', '/api/v3/repos/admin/engine/issues/1/comments', admin, { body: 'Still leaking' })
+    git(source, ['checkout', '-q', '-b', 'fix'])
+    writeFile(source, 'VALVE', 'tight\n')
+    commitAll(source, 'Tighten the valve\n\nFixes #1')
+    git(source, ['checkout', '-q', 'main'])
+    await push(['fix'])
+    expect((await call(forge, server.url, 'POST', '/api/v3/repos/admin/engine/pulls', admin, { title: 'Tighten', head: 'fix', base: 'main' })).status).toBe(201)
+    const merged = await call(forge, server.url, 'PUT', '/api/v3/repos/admin/engine/pulls/2/merge', admin, { merge_method: 'squash' })
+    const sha = (await json<{ sha: string }>(merged)).sha
+    const events = received.filter((hook) => ['issues', 'issue_comment', 'pull_request'].includes(hook.event ?? '')).map((hook) => [hook.event, hook.body.action])
+    expect(events).toEqual([
+      ['issues', 'opened'],
+      ['issue_comment', 'created'],
+      ['pull_request', 'opened'],
+      ['pull_request', 'closed'],
+      ['issues', 'closed'],
+    ])
+    expect(received.filter((hook) => hook.event === 'pull_request').at(-1)!.body).toMatchObject({ number: 2, pull_request: { merged: true, merge_commit_sha: sha } })
+    expect(received.filter((hook) => hook.event === 'push').at(-1)!.body).toMatchObject({ ref: 'refs/heads/main', after: sha, pusher: { name: 'admin' } })
+    const inbox = await json<{ reason: string; subject: { type: string; title: string } }[]>(await call(forge, server.url, 'GET', '/api/v3/notifications?all=true', bob))
+    expect(inbox).toContainEqual(expect.objectContaining({ reason: 'mention', subject: expect.objectContaining({ type: 'Issue', title: 'Valve leaks' }) }))
+  })
+
   it('keeps the existing JSON API and notification routes apart', async () => {
     expect((await call(forge, server.url, 'GET', '/api/v3/notifications')).status).toBe(401)
     expect((await call(forge, server.url, 'GET', '/api/v3/repos/admin/engine/hooks', bob)).status).toBe(403)

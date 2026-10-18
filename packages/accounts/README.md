@@ -101,6 +101,7 @@ triggers with `RAISE`), all of which D1, Durable Objects and libSQL support.
 | `device_authorizations` | device flow: hash of the device code, user code, status (`pending`, `approved`, `denied`, `consumed`), poll interval, issued token |
 | `invites` | hash of the invite code, fixed login or existing user, expiry, redemption |
 | `actions_*` | CI state of `@git-forge/actions`: runners, hashed CI tokens, sessions, runs, jobs, timeline records, log index (migration `0005`; the schema lives here so that all D1 migrations come from one directory) |
+| `collaboration_settings`, `repository_numbers`, `issues`, `issue_*`, `labels`, `milestones`, `pull_requests`, `pull_request_reviews`, `review_comments`, `review_requests`, `commit_statuses`, `check_runs`, `discussion*` | collaboration data of `@git-forge/collaboration` (migration `0008`); integer IDs for GitHub compatibility, never synced to mirrors |
 
 Timestamps are Unix milliseconds. IDs are random UUIDs. Logins and repository
 names are case-insensitive (`COLLATE NOCASE`).

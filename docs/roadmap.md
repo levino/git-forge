@@ -88,7 +88,7 @@ Design: [design.md §15](design.md#ci).
 - [ ] Expressions server-side: job-level `if`, `runs-on` expressions, `strategy`/`matrix`, job outputs across `needs`
 - [ ] Cancellation, job timeouts, reaper for expired locks and dead runners, re-runs
 - [ ] Per-repository and per-environment secrets (encrypted in SQLite), environments with required reviewers, no secrets for fork runs
-- [ ] `workflow_dispatch`, `pull_request`, `schedule` triggers; commit statuses / check runs (feeds required status checks)
+- [ ] `workflow_dispatch`, `pull_request`, `schedule` triggers; write commit statuses / check runs from CI (storage and API exist in `@git-forge/collaboration`)
 - [ ] Broker and run service (v2 flow), results service, message encryption; then cache, artifacts, OIDC id tokens
 - [ ] External providers: signed `workflow_job` webhook delivery, GitHub App auth (JWT → installation token, manifest flow) and PATs on `/api/v3`, org-level runners; try WarpBuild Enterprise, AWS CodeBuild, RunsOn
 - [ ] `container:` and `services:` (Docker-in-Docker in the runner container)
@@ -107,11 +107,23 @@ Design: [design.md §15](design.md#ci).
 
 ## M7 — Collaboration
 
-- [ ] Branch protection (in progress, v1)
-- [ ] Issues
-- [ ] Pull requests, reviews, conflict-free merge
-- [ ] Enforce required reviews and status checks on merge via `evaluateBranchUpdate(..., { via: 'pull-request' })`
-- [ ] Discussions
+Design: [design.md §17](design.md#17-collaboration).
+
+- [x] Branch protection (v1)
+- [x] Issues: create/edit/close/reopen, comments, labels, assignees, milestones, locking, events and timeline, `#N` cross references, numbering shared with pull requests and discussions
+- [x] Git diff and merge in core identical to git (xdiff port, tree diff, binary/LFS detection, merge bases incl. criss-cross, merge commit, squash, rebase, conflict detection)
+- [x] Pull requests from branches of the same repository: files, diff, commits, mergeability, merge methods, auto-close linked issues, manual merges detected on push
+- [x] Reviews (approve / request changes / comment, pending reviews, dismissal), line comments anchored to commit + path + line, requested reviewers, stale-review dismissal on push
+- [x] Enforce required reviews and status checks on merge via `evaluateBranchUpdate(..., { via: 'pull-request' })`
+- [x] Commit statuses and check runs (storage and API; CI writes them)
+- [x] Discussions: categories, threads, answers
+- [x] REST API under `/api/v3` with GitHub-compatible shapes, wired into the Worker
+- [ ] Pull requests from forks
+- [ ] CODEOWNERS parsing for `require_code_owner_reviews`
+- [ ] Rename detection in merges (renames are reported as conflicts today)
+- [ ] In-browser conflict resolution
+- [ ] Reactions, search (FTS5), notifications
+- [ ] Web UI for issues, pull requests and discussions (separate work package)
 - [ ] Submit via form
 
 ## Later

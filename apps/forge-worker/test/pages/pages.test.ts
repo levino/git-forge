@@ -15,6 +15,8 @@ import Explore from '../../src/pages/explore.astro'
 import Home from '../../src/pages/index.astro'
 import Login from '../../src/pages/-/login.astro'
 import Settings from '../../src/pages/settings.astro'
+import New from '../../src/pages/new.astro'
+import Import from '../../src/pages/[owner]/[repo]/import.astro'
 import Notifications from '../../src/pages/notifications.astro'
 import Releases from '../../src/pages/[owner]/[repo]/releases/index.astro'
 import ReleaseTag from '../../src/pages/[owner]/[repo]/releases/tag/[...tag].astro'
@@ -52,7 +54,7 @@ const render = async (page: Parameters<AstroContainer['renderToResponse']>[0], p
 }
 
 beforeAll(async () => {
-  forge = await nodeForge()
+  forge = await nodeForge({ scheduleImport: async () => {} })
   server = await startServer((request) => forge.fetch(request))
   const token = await bootstrap(forge, BASE, 'alice')
   admin = (await forge.services.authenticate(new Request(BASE, { headers: { Authorization: `Bearer ${token}` } })))!
@@ -330,6 +332,66 @@ describe('login and account pages', () => {
     expect((await post({ action: 'revoke-token', id })).html).toContain('Token revoked.')
     expect(await forge.services.authenticate(new Request(BASE, { headers: { Authorization: `Bearer ${token}` } }))).toBeNull()
     expect((await post({ action: 'revoke-token', id: 'someone-elses' })).status).toBe(400)
+  })
+})
+
+describe('new repository page', () => {
+  const user = () => admin as UserPrincipal
+  const session = (): UiSession => ({ principal: user(), csrf: 'csrf-token' })
+  const post = (fields: Record<string, string>, verified: UiSession | null = session()) =>
+    render(New, '/new', {}, user(), {
+      session: session(),
+      request: new Request(`${BASE}/new`, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams(fields) }),
+      services: { verifySessionWrite: async () => verified },
+    })
+
+  it('sends visitors without a session to the sign-in page', async () => {
+    expect(await render(New, '/new', {})).toMatchObject({ status: 302, location: '/login?return_to=%2Fnew' })
+  })
+
+  it('offers the accounts the user may create in and the import form', async () => {
+    const page = await render(New, '/new', {}, user(), { session: session() })
+    expect(page.status).toBe(200)
+    expect(page.html).toContain('<option value="alice" selected')
+    expect(page.html).toContain('name="csrf" value="csrf-token"')
+    expect(page.html).toContain('value="import"')
+    expect(page.html).toContain('href="/new"')
+    const plain = await render(New, '/new', {}, user(), { session: session(), services: { repositories: { ...forge.services.repositories, importsEnabled: false } } })
+    expect(plain.html).toContain('Imports are not available')
+  })
+
+  it('creates a repository from the session and redirects to its empty page', async () => {
+    expect((await post({ action: 'create', owner: 'alice', name: 'fresh' }, null)).status).toBe(403)
+    const created = await post({ action: 'create', owner: 'alice', name: 'fresh', visibility: 'private', defaultBranch: 'trunk' })
+    expect(created).toMatchObject({ status: 303, location: '/alice/fresh' })
+    expect(await forge.services.store.findRepository('alice', 'fresh')).toMatchObject({ visibility: 'private' })
+    const home = await render(RepoHome, '/alice/fresh', { owner: 'alice', repo: 'fresh' }, admin)
+    expect(home.html).toContain('This repository is empty')
+    expect(home.html).toContain('https://forge.example/alice/fresh.git')
+    expect(home.html).toContain('git push -u origin trunk')
+    expect((await render(RepoHome, '/alice/fresh', { owner: 'alice', repo: 'fresh' })).status).toBe(404)
+    const again = await post({ action: 'create', owner: 'alice', name: 'fresh' })
+    expect(again.status).toBe(409)
+    expect(again.html).toContain('alice/fresh already exists')
+    expect((await post({ action: 'create', owner: 'nobody', name: 'x' })).status).toBe(404)
+    expect((await post({ action: 'create', owner: 'alice', name: 'bad name' })).status).toBe(400)
+  })
+
+  it('starts an import and shows its status to repository admins', async () => {
+    const started = await post({ action: 'import', owner: 'alice', name: 'imported', url: 'https://example.org/up.git', token: 'secret', lfs: 'on', visibility: 'public' })
+    expect(started).toMatchObject({ status: 303, location: '/alice/imported/import' })
+    expect((await post({ action: 'import', owner: 'alice', name: 'other', url: 'https://user:pw@example.org/up.git' })).status).toBe(400)
+    const status = await render(Import, '/alice/imported/import', { owner: 'alice', repo: 'imported' }, admin, { session: session() })
+    expect(status.status).toBe(200)
+    expect(status.html).toContain('Listing upstream refs')
+    expect(status.html).toContain('https://example.org/up.git')
+    expect(status.html).toContain('http-equiv="refresh"')
+    expect(status.html).not.toContain('secret')
+    const empty = await render(RepoHome, '/alice/imported', { owner: 'alice', repo: 'imported' }, admin, { session: session() })
+    expect(empty.html).toContain('href="/alice/imported/import"')
+    expect((await render(RepoHome, '/alice/fresh', { owner: 'alice', repo: 'fresh' }, admin, { session: session() })).html).not.toContain('View the import status')
+    expect((await render(Import, '/alice/site/import', { owner: 'alice', repo: 'site' }, admin, { session: session() })).status).toBe(404)
+    expect((await render(Import, '/alice/imported/import', { owner: 'alice', repo: 'imported' })).status).toBe(302)
   })
 })
 

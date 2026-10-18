@@ -28,7 +28,7 @@ read functions of `@git-forge/core` and check access with the same
 | Name | Kind | Purpose |
 |---|---|---|
 | `BUCKET` | R2 binding | Repository data in the bucket layout of `docs/design.md` (`repos/<owner>/<name>/…`). |
-| `DB` | D1 binding | Accounts, tokens, repository roles, branch protection, instance trust, audit log (`@git-forge/accounts`). Migrations come from `packages/accounts/migrations` (`migrations_dir`) and are applied with `wrangler d1 migrations apply`. |
+| `DB` | D1 binding | Accounts, tokens, repository roles, branch protection, instance trust, audit log (`@git-forge/accounts`). Migrations come from `packages/accounts/migrations`; the Worker applies pending ones on start (also adopting those applied with `wrangler d1 migrations apply` through `migrations_dir`). |
 | `JOBS` | Queue binding, optional | Queue `git-forge-jobs` (`git-forge-<env>-jobs` per environment) for background jobs: mirror syncs, mirror notification deliveries, subscription renewals, deep checks (`src/mirror-federation.ts`), event fan-out, webhook deliveries and email digests (`@git-forge/notifications`). Without it, fan-out and deliveries run inline in the request. One message per invocation (`max_batch_size: 1`), retried with exponential backoff. With `JOBS`, `INSTANCE_KEY` and `PUBLIC_URL` set, push notifications are on. |
 | `IMPORTS` | Queue binding, optional | Queue `git-forge-imports` (`git-forge-<env>-imports` per environment), produced and consumed by this Worker. Each message is one step of a server-side import in its own invocation. Without it the import endpoint answers `503`. |
 | Cron `17 3 * * *` | trigger | Daily safety net: with `JOBS`, enqueues a sync (and a subscription renewal) for every due auto mirror and the periodic deep checks; without `JOBS`, syncs due mirrors inline. It also re-dispatches stuck webhook deliveries and due email digests. |
@@ -103,6 +103,8 @@ There is no global "public read" switch any more.
 | `POST\|DELETE /api/federation/subscriptions` `{repository, callback}` | trusted instance (instance JWT) | Subscribes to push notifications for a repository it may read; the callback must be below its own issuer URL. |
 | `POST /api/federation/notify/{owner}/{name}/{remote}` | trusted upstream (signed body, `application/jwt`) | Push notification. `401` for an untrusted issuer, unknown key, bad signature, wrong audience or expired token; `403` if this mirror does not follow that repository; `200 up-to-date` for a duplicate; `202 queued` otherwise. |
 | `POST /api/repos/{owner}/{name}/mirrors/{remote}/detach` | repository admin | Stops syncing. |
+| `GET /api/repos/{owner}/{name}/mirrors/overview` | read access | Mirror overview for the UI (`docs/design.md` §10): this repository's ref checksum, every mirror known from subscriptions or attestations with `state` (`current`, `behind`, `diverged`, `unknown`, `stale`, `unattested`), `lagSeconds`, `alarms`, the last signed attestation and spot check, and the repository's own upstreams. With an instance key, `signed` is the same summary as a JWT signed by this instance. |
+| `POST /api/federation/attestations` | trusted mirror (signed body, `application/jwt`) | A mirror's signed ref checksum after a sync. `401` for an untrusted issuer or invalid token, `404` if the issuer may not read the repository, `202` when recorded (and a spot check is enqueued at most once a day). |
 | `POST /api/repos/{owner}/{name}/import` `{url, token?, username?, lfs?, lfsUrl?, commitsPerStep?, visibility?, defaultBranch?}` | repository admin or instance admin; for a new repository the owner or an instance admin | Imports from a Git URL (smart HTTP v2 or dumb HTTP) without a request body limit, creating the repository first if needed (as `POST /api/repos`). `token` is sent as HTTP Basic password with `username` (default `git`), travels only in the queue messages and is never stored. Refs land in `refs/heads/*` and `refs/tags/*`; rewritten refs are archived, local refs missing upstream are kept. `202` with the state and a `Location`, `409` while an import runs; an import without progress for 30 minutes (its worker or process died) is taken over and continues from its last step. |
 | `GET /api/repos/{owner}/{name}/import` | repository admin | Import state: `phase` (`discover`, `graph`, `fetch`, `lfs`, `refs`, `done`, `failed`), progress, ref updates, missing LFS objects, last error. Starting a failed import again with the same URL resumes it. |
 | `POST /api/admin/invites` `{login?, user?, email?, expiresInDays?}` | instance admin | Invite for a new account (`login` fixed or chosen by the invitee) or for an existing `user` (to add a passkey or link OIDC). Returns `{code, url, expiresAt}`; the URL is `/login/invite/{code}`, valid once, 7 days by default. |
@@ -136,7 +138,12 @@ request origin when it is unset.
 Branch protection rules use the GitHub-style API of `@git-forge/accounts`
 (`GET /api/repos/{owner}/{name}/branch-protection`,
 `GET|PUT|DELETE /api/repos/{owner}/{name}/branches/{pattern}/protection`) and
-are enforced on every push and every pull request merge.
+are enforced on every push and every pull request merge. The rules live in
+D1 (`DB`); the API accepts `repo:admin` tokens, instance JWTs and browser
+sessions (CSRF token and same origin on `PUT` and `DELETE`), and
+`receive-pack` asks `createGitAccess(...).pushPolicy` before every ref
+transaction. `forge-node` runs the same `createForge` and gets the same
+wiring over its SQLite file.
 
 Issues, pull requests, reviews, statuses, check runs and discussions are
 served under `/api/v3/repos/{owner}/{name}/…` with GitHub-compatible shapes
@@ -244,14 +251,14 @@ Then `https://<zone>.b-cdn.net/acme/site/raw/main/photos/a.jpg` redirects to
 
 ## Deploying to Cloudflare
 
-[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/levino/git-forge-instance)
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/levino/git-forge/tree/main/templates/instance)
 
 New instances are deployed from the
-[instance template](../../templates/instance): the button copies it (as
-`levino/git-forge-instance`), connects Workers Builds, asks for
-`BOOTSTRAP_TOKEN` and creates the R2 bucket and the D1 database from its
-`wrangler.jsonc`. The template deploys a pinned, checksummed release bundle of
-this Worker and applies the D1 migrations before every upload
+[instance template](../../templates/instance): the button copies that
+self-contained subdirectory into a new repository, connects Workers Builds,
+asks for `BOOTSTRAP_TOKEN` and creates the R2 bucket, the D1 database and the
+queues from its `wrangler.toml`. The template deploys a pinned, checksummed
+release bundle of this Worker, which migrates its database on start
 (`docs/design.md` §15). A button pointing at this directory would not work:
 Cloudflare requires a subdirectory to be self-contained, and this Worker
 builds from the workspace packages.
@@ -282,9 +289,9 @@ npx wrangler r2 bucket lifecycle add git-forge expire-staging tmp/ --expire-days
 ```
 
 The first `wrangler deploy` creates the bucket, the database and the import
-queue from the binding names; no IDs need to be filled in. Later deployments apply new
-migrations first (`wrangler d1 migrations apply DB --remote`, then
-`wrangler deploy`). The Worker never migrates the database itself.
+queue from the binding names; no IDs need to be filled in. The Worker applies
+pending migrations itself when it starts; `wrangler d1 migrations apply DB
+--remote` before `wrangler deploy` still works and is adopted.
 
 ### First admin
 
@@ -331,6 +338,11 @@ mirror when the mirror is configured and renewed by the daily cron. After a
 push the upstream enqueues one notification per subscriber, the mirror
 enqueues a copy-only sync (`docs/design.md` §4, §7), and a mirror whose refs
 moved notifies its own subscribers, so chains propagate without cron.
+After every successful sync a mirror with `auth: "instance"` sends a signed
+attestation of the ref state it holds to the upstream, which checks it
+against its own ref checksum history and spot-checks random byte ranges of
+packs and LFS objects on the mirror (`GET …/mirrors/overview`). Spot checks
+of a private mirror need the mirror to grant the upstream read access too.
 
 To use your own domain, add a `routes` entry with `custom_domain: true` to
 `wrangler.jsonc` or attach the domain in the dashboard.
@@ -487,7 +499,8 @@ argument.
   the forge; with the UI, pages and the API answer and cross-site form posts
   are refused.
 - Unit tests (`test/unit`) run the app in Node with `MemoryStorage` and
-  `node:sqlite`: settings, media/raw authorization, branch protection API, bootstrap, admin API, PAT authorization, private
+  `node:sqlite`: settings, media/raw authorization, branch protection API and
+  push policy with the real `git` client, bootstrap, admin API, PAT authorization, private
   defaults, visibility and collaborators, the LFS size limit, the import
   endpoint's authorization and validation, federation and
   scheduled sync between two in-process instances over real HTTP, and the
@@ -527,6 +540,13 @@ argument.
   redelivery with the same delivery id, and a release whose asset is uploaded
   to R2, redirected from `browser_download_url` and served by the media URL,
   with the tag visible to `git ls-remote`.
+- `test/e2e/protection.e2e.test.ts` starts `wrangler dev` with a fresh D1
+  database, protects `main` and `release/*` through the API (only the
+  repository admin may), and checks with the real `git` client that a writer's
+  force push and deletion of `main` are rejected as `[remote rejected]`
+  (also with `--atomic`), that `release/*` allows force pushes but no
+  deletion, that fast-forwards still work, and that the admin bypasses the
+  rule until `enforce_admins` is set.
 - `test/e2e/forge.e2e.test.ts` starts `wrangler dev` with a fresh local R2
   bucket and D1 database, bootstraps an admin, creates repositories, pushes a
   generated history of 120 commits with the real `git` client, clones it with

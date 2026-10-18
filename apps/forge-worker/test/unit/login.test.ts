@@ -161,6 +161,27 @@ describe('sessions', () => {
     expect((await browser.fetch('/api/session')).status).toBe(401)
   })
 
+  it('manages branch protection with the session, CSRF token and same origin', async () => {
+    const forge = await loginForge({ selfSignup: true })
+    const browser = new Browser(forge)
+    await registerPasskey(browser, await createSoftAuthenticator({ origin: BASE }), { login: 'hana' })
+    const csrf = await browser.csrf()
+    const create = { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ owner: 'hana', name: 'notes' }), csrf }
+    expect((await browser.fetch('/api/repos', create)).status).toBe(201)
+    const path = '/api/repos/hana/notes/branches/main/protection'
+    const put = { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ allow_deletions: true }) }
+    expect((await browser.fetch(path, put)).status).toBe(401)
+    expect((await browser.fetch(path, { ...put, csrf, origin: 'https://evil.example' })).status).toBe(401)
+    const stored = await browser.fetch(path, { ...put, csrf })
+    expect(stored.status).toBe(200)
+    expect(await json(stored)).toMatchObject({ pattern: 'main', allow_deletions: { enabled: true }, allow_force_pushes: { enabled: false } })
+    expect(await json<unknown[]>(await browser.fetch('/api/repos/hana/notes/branch-protection'))).toHaveLength(1)
+    expect((await new Browser(forge).fetch(path)).status).toBe(401)
+    expect((await browser.fetch(path, { method: 'DELETE' })).status).toBe(401)
+    expect((await browser.fetch(path, { method: 'DELETE', csrf })).status).toBe(204)
+    expect((await browser.fetch(path)).status).toBe(404)
+  })
+
   it('serves a login page and refuses cross-origin form posts', async () => {
     const forge = await loginForge({ selfSignup: true })
     const page = await new Browser(forge).fetch('/login?return_to=//evil.example')

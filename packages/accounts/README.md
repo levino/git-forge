@@ -67,13 +67,13 @@ triggers with `RAISE`), all of which D1, Durable Objects and libSQL support.
 - Workers cannot read files, so `src/migrations.generated.ts` embeds the SQL.
   Regenerate it with `pnpm --filter @git-forge/accounts migrations:bundle`; a
   test fails if it is out of sync with `migrations/`.
-- Ledgers: on Cloudflare the files are applied by
-  `wrangler d1 migrations apply` (ledger `d1_migrations`): the instance
-  template's `deploy.sh` runs it before the upload, `apps/forge-worker` points
-  `migrations_dir` at this directory, and the Worker never migrates at
-  runtime. Everywhere else (node:sqlite, libSQL, tests) use
-  `applyMigrations(db, MIGRATIONS)` (ledger `schema_migrations`). One database
-  uses one of the two, never both.
+- Ledger: `applyMigrations(db, MIGRATIONS)` records applied files in
+  `schema_migrations` (node:sqlite, libSQL, tests). The Worker calls
+  `migrateOnStart`, which first copies the names that
+  `wrangler d1 migrations apply` recorded in `d1_migrations` (when
+  `apps/forge-worker` was migrated through `migrations_dir`) into
+  `schema_migrations` and then applies the pending ones; a concurrent run that
+  fails but leaves nothing pending counts as done.
 
 ## Data model
 
@@ -302,9 +302,13 @@ writes `refs/upstream/*` directly and is not subject to branch protection.
 
 ### API
 
-`handleBranchProtectionRequest(request, { store, verifyInstance?, prefix = '/api' })`
+`handleBranchProtectionRequest(request, { store, verifyInstance?, authenticate?, prefix = '/api' })`
 serves GitHub's REST shape under the prefix. All routes need `admin` access
-(`401` anonymous, `404` not visible, `403` otherwise).
+(`401` anonymous, `404` not visible, `403` otherwise). Without `authenticate`
+the principal comes from the `Authorization` header (`authenticateRequest`);
+`createForge` passes its API authenticator, which also accepts a browser
+session and returns no principal (`401`) when an unsafe request lacks the
+CSRF token or comes from another origin.
 
 | Method and path | Meaning |
 |---|---|

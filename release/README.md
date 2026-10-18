@@ -11,7 +11,7 @@ writes into `out-dir` (default `release/dist`):
 
 | File | Content |
 |---|---|
-| `git-forge-worker.mjs` | `apps/forge-worker` bundled by `wrangler deploy --dry-run --containers-rollout=none` (no container image build) into one ES module without imports. Instances upload it with `no_bundle: true`, unchanged. |
+| `git-forge-worker.mjs` | `apps/forge-worker` built by `astro build` (web UI included, stylesheet compiled in) and bundled by `wrangler deploy dist/server/entry.mjs --dry-run --containers-rollout=none` (no container image build) into one ES module whose only imports are workerd built-ins (`cloudflare:workers`). Instances upload it with `no_bundle: true`, unchanged. |
 | `migrations.tar.gz` | `migrations/*.sql` for D1, collected from the packages listed in `migration_dirs`. Built reproducibly (sorted, zero mtime, `gzip -n`). |
 | `SHA256SUMS` | `sha256sum` output for the two files above. |
 
@@ -35,8 +35,9 @@ marked as pre-releases.
 directory, copies `templates/instance`, pins the release and runs the
 template's `build.sh` against it via `GIT_FORGE_RELEASE_URL=file://…`. It
 checks that a wrong pin and a tampered bundle are refused, applies the D1
-migrations locally, starts the instance with `wrangler dev` and pushes and
-clones a repository with the real `git` client.
+migrations locally, starts the instance with `wrangler dev`, pushes and
+clones a repository with the real `git` client and requests its page in the
+web UI.
 
 ## Instance template repository
 

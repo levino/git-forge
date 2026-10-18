@@ -10,7 +10,9 @@ import {
   verifyToken,
 } from '@git-forge/actions'
 import {
+  type Access,
   type AccountsStore,
+  atLeast,
   AccountsError,
   authenticateRequest,
   checkRepositoryAccess,
@@ -29,6 +31,7 @@ import {
   parseAuthorization,
   type Principal,
   type RepositorySubject,
+  type Role,
   type UserPrincipal,
 } from '@git-forge/accounts'
 import {
@@ -91,8 +94,24 @@ export type ForgeOptions = ForgeSettings & {
 
 export const ACTIONS_SERVICE_PATH = '/_services/actions'
 
+export type ForgeServices = {
+  readonly storage: Storage
+  readonly store: AccountsStore
+  readonly authenticate: (request: Request) => Promise<Principal | null>
+  readonly issuer: (request: Request) => string
+  readonly repositoryAccess: (principal: Principal, repo: RepositoryName, required: Role) => Promise<RepositoryAccess>
+  readonly isInstanceAdmin: (principal: Principal) => Promise<boolean>
+}
+
+export type RepositoryAccess = {
+  readonly decision: Decision
+  readonly access: Access
+  readonly repository: RepositorySubject | null
+}
+
 export type Forge = {
   readonly fetch: (request: Request) => Promise<Response>
+  readonly services: ForgeServices
   readonly scheduled: (at?: Date) => Promise<ScheduledMirrorRun[]>
   readonly runJob: (job: ForgeJob) => Promise<void>
 }
@@ -211,12 +230,23 @@ export const createForge = (options: ForgeOptions): Forge => {
     return principal
   }
 
+  const repositoryAccess = async (principal: Principal, repo: RepositoryName, required: Role): Promise<RepositoryAccess> => {
+    const check = await checkRepositoryAccess(store, principal, repo, required)
+    if (!check.repository) return { decision: check.decision === 'allow' ? 'not-found' : check.decision, access: 'none', repository: null }
+    if (principal.kind === 'user' && (await store.isInstanceAdmin(principal.id))) {
+      const ceiling = principal.limits?.ceiling ?? 'admin'
+      const scoped = principal.limits?.repositoryIds ?? null
+      if (scoped === null || scoped.includes(check.repository.id)) {
+        return { decision: atLeast(ceiling, required) ? 'allow' : 'forbidden', access: ceiling, repository: check.repository }
+      }
+    }
+    return { decision: check.decision, access: check.access, repository: check.repository }
+  }
+
   const requireRepositoryAdmin = async (request: Request, repo: RepositoryName): Promise<{ principal: UserPrincipal; repository: RepositorySubject }> => {
     const principal = await requireManager(request)
-    const check = await checkRepositoryAccess(store, principal, repo, 'admin')
-    if (check.repository && (check.decision === 'allow' || (await store.isInstanceAdmin(principal.id)))) {
-      return { principal, repository: check.repository }
-    }
+    const check = await repositoryAccess(principal, repo, 'admin')
+    if (check.repository && check.decision === 'allow') return { principal, repository: check.repository }
     const [status, message] = DECISION_STATUS[check.decision === 'allow' ? 'not-found' : check.decision]
     throw new HttpError(status, message)
   }
@@ -620,6 +650,10 @@ export const createForge = (options: ForgeOptions): Forge => {
 
   return {
     fetch: handle,
+    services: { storage, store, authenticate: (request) => authenticateRequest(request, authenticateOptions(request)), issuer: issuerFor,
+      repositoryAccess,
+      isInstanceAdmin: async (principal) => principal.kind === 'user' && (await store.isInstanceAdmin(principal.id)),
+    },
     scheduled: (at = now()) =>
       federation ? enqueueDueMirrors(federation, at, options.mirrorIntervalMinutes) : syncDueMirrors(mirrorContext(options.publicUrl), at, options.mirrorIntervalMinutes),
     runJob: async (job) => {

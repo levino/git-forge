@@ -1,0 +1,55 @@
+---
+import CommitList from '../../../../components/CommitList.astro'
+import NotFound from '../../../../components/NotFound.astro'
+import RefPicker from '../../../../components/RefPicker.astro'
+import RepoHeader from '../../../../components/RepoHeader.astro'
+import Layout from '../../../../layouts/Layout.astro'
+import { history, parsePage } from '../../../../ui/history.ts'
+import { commitsUrl, openRepository } from '../../../../ui/repository.ts'
+
+const repo = await openRepository(Astro.locals.forge, Astro.locals.principal, Astro.params.owner!, Astro.params.repo!)
+const segments = (Astro.params.path ?? '').split('/').filter((segment) => segment !== '')
+const page = parsePage(Astro.url.searchParams.get('page'))
+const view = repo.kind === 'ok' ? await history(repo, segments, page) : null
+---
+
+{
+  repo.kind !== 'ok' || !view || view.kind === 'not-found' ? (
+    <NotFound />
+  ) : (
+    <Layout title={`Commits · ${repo.name.owner}/${repo.name.name}`}>
+      <RepoHeader repo={repo} tab="commits" />
+      {view.kind === 'empty' ? (
+        <p>No commits yet.</p>
+      ) : (
+        <>
+          <div class="flex flex-wrap items-center gap-3 mb-4">
+            <RefPicker repo={repo} current={view.target.ref} link={(ref: string) => commitsUrl(repo.name, ref, view.target.path)} />
+            {view.target.path.length > 0 && (
+              <span class="text-sm">
+                History for <span class="font-mono">{view.target.path.join('/')}</span>
+              </span>
+            )}
+          </div>
+          {view.commits.length === 0 ? <p>No commits found.</p> : <CommitList repo={repo.name} commits={view.commits} />}
+          <nav class="join mt-6 flex justify-center" aria-label="Pagination">
+            {view.page > 1 ? (
+              <a class="join-item btn btn-sm" href={`?page=${view.page - 1}`} rel="prev">
+                Newer
+              </a>
+            ) : (
+              <span class="join-item btn btn-sm btn-disabled" aria-disabled="true">Newer</span>
+            )}
+            {view.more ? (
+              <a class="join-item btn btn-sm" href={`?page=${view.page + 1}`} rel="next">
+                Older
+              </a>
+            ) : (
+              <span class="join-item btn btn-sm btn-disabled" aria-disabled="true">Older</span>
+            )}
+          </nav>
+        </>
+      )}
+    </Layout>
+  )
+}

@@ -6,8 +6,6 @@ import { type ForgeVars, parseActionsSettings, parseSettings } from './config.ts
 import type { ForgeJob } from './mirror-federation.ts'
 import { containerLauncher } from './runner-launcher.ts'
 
-export { RunnerContainer } from './runner-container.ts'
-
 export type Env = ForgeVars & {
   readonly BUCKET: R2Bucket
   readonly DB: D1Database
@@ -24,7 +22,7 @@ const importScheduler =
 
 let forge: Promise<Forge> | undefined
 
-const forgeFor = (env: Env): Promise<Forge> => {
+export const forgeFor = (env: Env): Promise<Forge> => {
   forge ??= parseSettings(env)
     .then((settings) => {
       const actions = parseActionsSettings(env)
@@ -55,10 +53,7 @@ const forgeFor = (env: Env): Promise<Forge> => {
 
 const isJobQueue = (name: string): boolean => name === 'git-forge-jobs' || /^git-forge-[a-z0-9-]+-jobs$/.test(name)
 
-export default {
-  async fetch(request, env): Promise<Response> {
-    return (await forgeFor(env)).fetch(request)
-  },
+export const backgroundHandlers = {
   async scheduled(controller, env): Promise<void> {
     const runs = await (await forgeFor(env)).scheduled(new Date(controller.scheduledTime))
     console.log(JSON.stringify({ event: 'scheduled', cron: controller.cron, at: new Date(controller.scheduledTime).toISOString(), task: 'mirror-sync', runs }))
@@ -78,4 +73,4 @@ export default {
       message.ack()
     }
   },
-} satisfies ExportedHandler<Env, ImportJob | ForgeJob>
+} satisfies Omit<ExportedHandler<Env, ImportJob | ForgeJob>, 'fetch'>

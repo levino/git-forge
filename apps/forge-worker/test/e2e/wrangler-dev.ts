@@ -4,6 +4,7 @@ import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { promisify } from 'node:util'
+import { BUILT_ENTRY } from './build.ts'
 
 const run = promisify(execFile)
 
@@ -36,12 +37,15 @@ export const startWranglerDev = async (options: WranglerDevOptions): Promise<Wra
   const persist = mkdtempSync(join(tmpdir(), 'git-forge-wrangler-'))
   const environment = { ...process.env, WRANGLER_SEND_METRICS: 'false', CI: '1', NO_COLOR: '1' }
   const envArgs = options.env ? ['--env', options.env] : []
-  await run(join(appRoot, 'node_modules/.bin/wrangler'), ['d1', 'migrations', 'apply', 'DB', '--local', '--persist-to', persist, ...envArgs], {
+  await run(join(appRoot, 'node_modules/.bin/wrangler'), ['d1', 'migrations', 'apply', 'DB', '--local', '--persist-to', persist, '--config', 'wrangler.jsonc', ...envArgs], {
     cwd: appRoot,
     env: environment,
   })
   const args = [
     'dev',
+    BUILT_ENTRY,
+    '--config',
+    'wrangler.jsonc',
     ...envArgs,
     '--inspector-port',
     String(await freePort()),

@@ -1,0 +1,74 @@
+---
+import { formatHunkHeader } from '@git-forge/core'
+import type { ChangedFile } from '../ui/history.ts'
+
+type Props = { file: ChangedFile; index: number; href: string | null }
+
+const { file, index, href } = Astro.props
+const { change, diff } = file
+const label = { added: 'Added', deleted: 'Deleted', modified: 'Modified' }[change.status]
+const badge = { added: 'badge-success', deleted: 'badge-error', modified: 'badge-warning' }[change.status]
+const sign = { context: ' ', added: '+', deleted: '-' }
+const rowClass = { context: '', added: 'bg-success/15', deleted: 'bg-error/15' }
+---
+
+<section id={`diff-${index}`} class="border border-base-300 rounded-box overflow-hidden" aria-label={`${label} ${change.path}`}>
+  <header class="flex flex-wrap items-center gap-2 px-4 py-2 bg-base-200 text-sm">
+    <span class:list={['badge badge-sm', badge]}>{label}</span>
+    {href ? <a href={href} class="font-mono link link-hover break-all">{change.path}</a> : <span class="font-mono break-all">{change.path}</span>}
+    {
+      diff?.kind === 'text' && diff.diff.kind === 'hunks' && (
+        <span class="ml-auto font-mono">
+          <span class="text-success">+{diff.diff.added}</span> <span class="text-error">-{diff.diff.deleted}</span>
+        </span>
+      )
+    }
+  </header>
+  {diff?.kind === 'binary' && <p class="px-4 py-3 text-sm text-base-content/70">Binary file not shown.</p>}
+  {diff?.kind === 'submodule' && <p class="px-4 py-3 text-sm text-base-content/70">Submodule changed.</p>}
+  {
+    diff?.kind === 'lfs' && (
+      <p class="px-4 py-3 text-sm text-base-content/70">
+        Git LFS object {diff.before && <span class="font-mono">{diff.before.oid.slice(0, 12)}</span>}
+        {diff.before && diff.after && ' → '}
+        {diff.after && <span class="font-mono">{diff.after.oid.slice(0, 12)}</span>}
+      </p>
+    )
+  }
+  {diff?.kind === 'text' && diff.diff.kind === 'too-large' && <p class="px-4 py-3 text-sm text-base-content/70">The diff is too large to show.</p>}
+  {
+    diff?.kind === 'text' && diff.diff.kind === 'hunks' && diff.diff.hunks.length === 0 && (
+      <p class="px-4 py-3 text-sm text-base-content/70">{change.status === 'modified' ? 'File mode changed.' : 'Empty file.'}</p>
+    )
+  }
+  {
+    diff?.kind === 'text' && diff.diff.kind === 'hunks' && diff.diff.hunks.length > 0 && (
+      <div class="overflow-x-auto">
+        <table class="font-mono text-xs leading-5 w-full border-separate border-spacing-0">
+          {diff.diff.hunks.map((hunk) => (
+            <tbody>
+              <tr class="bg-info/10 text-base-content/70">
+                <td colspan="3" class="px-4 py-1">
+                  {formatHunkHeader(hunk)}
+                </td>
+              </tr>
+              {hunk.lines.map((line) => (
+                <tr class={rowClass[line.kind]}>
+                  <td class="select-none text-right px-2 w-px text-base-content/50">{line.kind !== 'added' ? line.oldNumber : ''}</td>
+                  <td class="select-none text-right px-2 w-px text-base-content/50">{line.kind !== 'deleted' ? line.newNumber : ''}</td>
+                  <td class="whitespace-pre pr-4">
+                    <span class="select-none" aria-hidden="true">
+                      {sign[line.kind]}
+                    </span>
+                    <span class="sr-only">{line.kind === 'added' ? 'added: ' : line.kind === 'deleted' ? 'deleted: ' : ''}</span>
+                    {line.text}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          ))}
+        </table>
+      </div>
+    )
+  }
+</section>

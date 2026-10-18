@@ -1,0 +1,44 @@
+---
+import type { DirectoryEntry } from '@git-forge/core'
+import { blobUrl, type OpenRepository, treeUrl } from '../ui/repository.ts'
+
+type Props = { repo: OpenRepository; refName: string; path: readonly string[]; entries: readonly DirectoryEntry[] }
+
+const { repo, refName, path, entries } = Astro.props
+const icon = (entry: DirectoryEntry) => (entry.kind === 'tree' ? '📁' : entry.kind === 'submodule' ? '📦' : entry.kind === 'symlink' ? '🔗' : '📄')
+const href = (entry: DirectoryEntry) =>
+  entry.kind === 'tree' ? treeUrl(repo.name, refName, [...path, entry.name]) : entry.kind === 'submodule' ? null : blobUrl(repo.name, refName, [...path, entry.name])
+---
+
+<table class="table table-sm" aria-label="Files">
+  <tbody>
+    {
+      path.length > 0 && (
+        <tr>
+          <td>
+            <a href={treeUrl(repo.name, refName, path.slice(0, -1))} class="link link-hover" aria-label="Parent directory">
+              ..
+            </a>
+          </td>
+        </tr>
+      )
+    }
+    {
+      entries.map((entry) => (
+        <tr class="hover:bg-base-200">
+          <td class="flex items-center gap-2 min-w-0">
+            <span aria-hidden="true">{icon(entry)}</span>
+            {href(entry) ? (
+              <a href={href(entry)} class="link link-hover truncate">
+                {entry.name}
+              </a>
+            ) : (
+              <span class="truncate">{entry.name}</span>
+            )}
+            <span class="sr-only">{entry.kind === 'tree' ? '(directory)' : entry.kind === 'submodule' ? '(submodule)' : ''}</span>
+          </td>
+        </tr>
+      ))
+    }
+  </tbody>
+</table>

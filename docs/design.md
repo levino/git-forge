@@ -530,9 +530,9 @@ dev environments) need real machines, started on demand via API.
 
 Every building block is an interface; Cloudflare is the first implementation.
 
-**Cloudflare deployment.** One Worker serves Git, LFS, media and raw URLs, the
-JSON API and the well-known federation documents, and runs mirror sync from a
-Cron Trigger. It binds one R2 bucket (`BUCKET`) and one D1 database (`DB`).
+**Cloudflare deployment.** One Worker serves the web UI (§16), Git, LFS, media
+and raw URLs, the JSON API and the well-known federation documents, and runs
+mirror sync from a Cron Trigger. It binds one R2 bucket (`BUCKET`) and one D1 database (`DB`).
 The Worker never migrates its database: `wrangler d1 migrations apply` does,
 from `packages/accounts/migrations` (`migrations_dir` in
 `apps/forge-worker/wrangler.jsonc`, the release's `dist/migrations` in the
@@ -963,10 +963,12 @@ update themselves.
 
 - **Release artifact** (`release/build-release.sh`, run by
   `.github/workflows/release.yml` on every `v*` tag with `GITHUB_TOKEN` only):
-  - `git-forge-worker.mjs`: `apps/forge-worker` bundled by
-    `wrangler deploy --dry-run` into one ES module without imports, uploaded by
+  - `git-forge-worker.mjs`: `apps/forge-worker` built by `astro build` and the
+    result bundled by `wrangler deploy --dry-run` into one ES module whose
+    only imports are workerd built-ins (`cloudflare:workers`), uploaded by
     instances with `no_bundle: true`, so workerd runs exactly the released
-    bytes.
+    bytes. The web UI is part of it (§16); there is no separate asset
+    directory.
   - `migrations.tar.gz`: the D1 migrations (`migrations/*.sql`, currently from
     `packages/accounts`), built reproducibly.
   - `SHA256SUMS`: `sha256sum` output for both files.
@@ -1021,7 +1023,7 @@ update themselves.
   template's `build.sh` against it via `file://`, checks that wrong pins and
   tampered assets are refused, checks the order of `deploy.sh` with a stub
   Wrangler, applies the migrations and does a push/clone
-  smoke test against `wrangler dev` running the template.
+  smoke test and a page request against `wrangler dev` running the template.
 - The same bundle may additionally be published to npm later; the template
   never depends on it.
 
@@ -1031,3 +1033,97 @@ update themselves.
 `gamma`, each with its own D1 and R2. An E2E test runs all three locally and
 checks mirroring and federation across them (beta mirrors alpha, gamma mirrors
 beta).
+
+## 16. Web UI
+
+The web UI is server-rendered Astro (`@astrojs/cloudflare`) inside the same
+Worker as everything else. There is one Worker per instance and one release
+bundle.
+
+### Entry and routing
+
+- `apps/forge-worker/src/worker.ts` is the Worker entry (`main` in
+  `wrangler.jsonc`). Its `fetch` hands every request to Astro's handler; its
+  `scheduled` and `queue` handlers and the `RunnerContainer` export are the
+  same as before the UI (`src/cloudflare.ts`), so cron, queues and containers
+  are unaffected by Astro.
+- The Astro middleware (`src/middleware.ts`) is the router between the two
+  worlds. `isForgePath` (`src/routing.ts`, pure) sends to `createForge`:
+  `/api` and everything below (including `/api/v3`), `/_services/`,
+  `/.well-known/`, `/login/device/code` and `/login/oauth/` (device flow
+  endpoints), media and raw URLs (`matchContentRoute`), and Git paths
+  (`matchGitRoute` with a `.git` suffix, or one of `HEAD`, `info/refs`,
+  `git-upload-pack`, `git-receive-pack`, `objects/…`, `info/lfs/…`). Every
+  other path is a page. A catch-all page (`src/pages/[...path].astro`) makes
+  sure every request reaches the middleware; it renders the 404 page.
+- `UI=false` (var) skips Astro entirely: `fetch` goes straight to
+  `createForge`, as before. This is the headless mode for backup mirrors.
+  `createForge` itself knows nothing about the UI and stays usable on Node.
+- Reserved first path segments: `api`, `explore`, `login`, `settings`, `-`
+  (assets) and the other page routes. Account names must not use them.
+
+### Permissions
+
+Pages get `Astro.locals.forge` (`ForgeServices`: storage, accounts store,
+`authenticate`, `repositoryAccess`, `isInstanceAdmin`) and
+`Astro.locals.principal`, set by the middleware from the verified credential
+of the request (today the `Authorization` header, as for the API; the session
+cookie once login lands). Repository pages call `repositoryAccess(principal,
+repo, role)`, the same function the JSON API uses for its admin checks, which
+wraps `checkRepositoryAccess` from `@git-forge/accounts` and adds instance
+admins. Private repositories answer 404 to visitors who may not read them,
+like the Git endpoints. Lists (home, explore, profiles) filter with the same
+function.
+
+Writes from pages (settings forms) must come from the same origin:
+`isCrossSiteWrite` rejects UI requests whose `Origin` or `Sec-Fetch-Site`
+says otherwise (Astro's own `checkOrigin` is off because it would also apply
+to Git and API paths, which non-browser clients call without an `Origin`).
+
+### Read model
+
+Repository browsing uses pure functions in `@git-forge/core`
+(`browse.ts`, `diff.ts`): `resolveRefAndPath` (refs with slashes, tags,
+full commit ids; the mirror view of `advertisedRefs`), `resolveTarget`,
+`readBlobContent` (text, binary, LFS pointer), `commitLog` (date order,
+path filter, paging, at most 10 000 commits walked per call), `diffTrees`, `diffFile` and `diffLines` (Myers, capped
+edit distance, unified hunks identical to `git diff --diff-algorithm=myers`).
+They read through `ObjectDatabase` like the Git endpoints. The UI layer
+(`src/ui/*.ts`) only composes them into view models; `.astro` files only
+render.
+
+### Rendering
+
+- Tailwind CSS with daisyUI, themes `light` (default) and `dark`
+  (`prefers-color-scheme`). The stylesheet is compiled at build time
+  (`?inline`) and served by the Worker at `/-/style.css?v=<hash>` with an
+  immutable cache header, so pages stay small and the release needs no asset
+  directory.
+- Syntax highlighting is server-side with shiki's JavaScript regex engine (no
+  WebAssembly) and a fixed set of grammars; tokens carry light and dark
+  colours as CSS variables. Files above 256 KiB or with unknown types are
+  shown unhighlighted.
+- Markdown (README, `.md` files) goes through remark/rehype with GFM and
+  `rehype-sanitize` (GitHub's schema); relative links point to the blob view,
+  relative images to the raw endpoint.
+- LFS files are previewed through the media URL (images, video, audio, PDF),
+  binary files through the raw URL at the commit id.
+- No client-side framework. Interactive bits use native elements
+  (`<details>` dropdowns); islands are added only where a page needs them
+  (passkey ceremonies, diff line comments).
+
+### Tests
+
+- `packages/core/test/browse.test.ts`: read model against a real pushed
+  repository, line diffs compared with `git diff`.
+- `apps/forge-worker/test/unit/ui.test.ts`: routing split, origin check,
+  Markdown sanitizing and link rewriting, highlighting.
+- `apps/forge-worker/test/pages/`: pages rendered with Astro's container API
+  against a Node forge (SQLite, memory storage) with a pushed repository
+  (`vitest.pages.config.ts`).
+- `apps/forge-worker/test/browser/`: Playwright (desktop and mobile Chromium)
+  against `wrangler dev` running the built bundle, with a repository pushed by
+  the real `git` and `git-lfs` clients.
+- `apps/forge-worker/test/e2e/headless.e2e.test.ts`: the same bundle with
+  `UI=false` serves only the forge.
+- The release test requests a page from the template instance.

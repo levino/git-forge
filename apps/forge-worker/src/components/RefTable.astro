@@ -1,0 +1,38 @@
+---
+import type { CommitDetails, NamedRef } from '@git-forge/core'
+import { isoTime, relativeTime, shortId } from '../ui/format.ts'
+import { commitUrl, commitsUrl, type OpenRepository, treeUrl } from '../ui/repository.ts'
+
+type Props = { repo: OpenRepository; refs: readonly { ref: NamedRef; commit: CommitDetails | null }[]; label: string }
+
+const { repo, refs, label } = Astro.props
+const now = Math.floor(Date.now() / 1000)
+---
+
+{
+  refs.length === 0 ? (
+    <p>No {label.toLowerCase()} yet.</p>
+  ) : (
+    <ul class="border border-base-300 rounded-box divide-y divide-base-300" aria-label={label}>
+      {refs.map(({ ref, commit }) => (
+        <li class="flex flex-wrap items-center gap-x-4 gap-y-1 px-4 py-3">
+          <a href={treeUrl(repo.name, ref.name)} class="font-mono link link-hover font-semibold break-all">
+            {ref.name}
+          </a>
+          {ref.kind === 'branch' && ref.name === repo.defaultBranch && <span class="badge badge-sm">default</span>}
+          {commit && (
+            <span class="text-sm text-base-content/70 min-w-0 flex-1 truncate">
+              <a class="font-mono link link-hover" href={commitUrl(repo.name, commit.id)}>
+                {shortId(commit.id)}
+              </a>{' '}
+              {commit.summary} · <time datetime={isoTime(commit.committer.time)}>{relativeTime(commit.committer.time, now)}</time>
+            </span>
+          )}
+          <a href={commitsUrl(repo.name, ref.name)} class="btn btn-xs ml-auto">
+            Commits
+          </a>
+        </li>
+      ))}
+    </ul>
+  )
+}

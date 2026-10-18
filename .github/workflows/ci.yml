@@ -23,6 +23,7 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter forge-worker exec playwright install --with-deps chromium
       - run: pnpm run typecheck
       - run: pnpm test
 

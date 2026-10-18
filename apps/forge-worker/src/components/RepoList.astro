@@ -1,0 +1,25 @@
+---
+import type { RepositorySubject } from '@git-forge/accounts'
+import { repoUrl } from '../ui/repository.ts'
+
+type Props = { repositories: readonly RepositorySubject[]; showOwner?: boolean; empty?: string }
+
+const { repositories, showOwner = true, empty = 'No repositories yet.' } = Astro.props
+---
+
+{
+  repositories.length === 0 ? (
+    <p class="text-base-content/70">{empty}</p>
+  ) : (
+    <ul class="border border-base-300 rounded-box divide-y divide-base-300" aria-label="Repositories">
+      {repositories.map((repo) => (
+        <li class="flex flex-wrap items-center gap-2 px-4 py-3">
+          <a href={repoUrl(repo)} class="link link-hover font-semibold break-all">
+            {showOwner ? `${repo.owner}/${repo.name}` : repo.name}
+          </a>
+          <span class="badge badge-outline badge-sm">{repo.visibility === 'public' ? 'Public' : 'Private'}</span>
+        </li>
+      ))}
+    </ul>
+  )
+}

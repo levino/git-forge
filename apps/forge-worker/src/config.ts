@@ -13,6 +13,7 @@ export type ForgeVars = {
   readonly ACTIONS_SECRETS?: string
   readonly MIRROR_DEEP_CHECK_DAYS?: string
   readonly MIRROR_UNIT_BYTES?: string
+  readonly UI?: string
 }
 
 export type ForgeSettings = {
@@ -106,3 +107,5 @@ export const parseActionsSettings = (vars: ForgeVars): ActionsSettings | undefin
   if (instanceId !== undefined && !GUID.test(instanceId)) throw new ConfigurationError('ACTIONS_INSTANCE_ID must be a GUID')
   return { instanceId: instanceId ?? DEFAULT_ACTIONS_INSTANCE_ID, secrets: parseActionsSecrets(vars.ACTIONS_SECRETS) }
 }
+
+export const uiEnabled = (vars: ForgeVars): boolean => vars.UI?.trim().toLowerCase() !== 'false'

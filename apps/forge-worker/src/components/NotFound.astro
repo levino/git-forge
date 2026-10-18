@@ -1,0 +1,21 @@
+---
+import Layout from '../layouts/Layout.astro'
+
+type Props = { message?: string }
+
+const { message = 'There is nothing here, or you do not have access to it.' } = Astro.props
+const anonymous = Astro.locals.principal.kind === 'anonymous'
+Astro.response.status = 404
+---
+
+<Layout title="Not found">
+  <div class="hero py-16">
+    <div class="hero-content text-center">
+      <div class="max-w-md">
+        <h1 class="text-4xl font-bold">404</h1>
+        <p class="py-4">{message}</p>
+        {anonymous && <a class="btn btn-primary" href={`/login?return_to=${encodeURIComponent(Astro.url.pathname)}`}>Sign in</a>}
+      </div>
+    </div>
+  </div>
+</Layout>

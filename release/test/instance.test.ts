@@ -128,7 +128,9 @@ describe('release bundle', () => {
     ])
     const bundle = readFileSync(join(release, 'git-forge-worker.mjs'), 'utf8')
     expect(bundle).toMatch(/export\s*\{[^}]*\bas default\b/)
-    expect(bundle).not.toMatch(/^import\s/m)
+    const imports = [...bundle.matchAll(/^import\s[^;]*?["']([^"']+)["']/gm)].map((match) => match[1])
+    expect(imports.filter((specifier) => !specifier!.startsWith('cloudflare:'))).toEqual([])
+    expect(bundle).not.toMatch(/\bimport\(\s*["'](?!cloudflare:)/)
     const { stdout } = await run('tar', ['-tzf', join(release, 'migrations.tar.gz')])
     expect(stdout.split('\n')).toContain('migrations/0001_initial.sql')
   })
@@ -213,5 +215,15 @@ describe('instance on wrangler dev', () => {
     await git(target, ['clone', '-q', remote, 'out'])
     expect(await git(join(target, 'out'), ['log', '--format=%H %s'])).toBe(await git(source, ['log', '--format=%H %s']))
     expect(await git(join(target, 'out'), ['fsck', '--full', '--strict'])).toBe('')
+  })
+
+  it('serves the web UI from the same bundle', async () => {
+    const page = await fetch(`${url}/smoke/site`)
+    expect(page.status).toBe(200)
+    const html = await page.text()
+    expect(html).toContain('commit 2')
+    expect(html).toContain('file-0.txt')
+    const stylesheet = /<link rel="stylesheet" href="([^"]+)"/.exec(html)?.[1]
+    expect((await fetch(`${url}${stylesheet}`)).headers.get('Content-Type')).toContain('text/css')
   })
 })

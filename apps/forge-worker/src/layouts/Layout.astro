@@ -1,0 +1,56 @@
+---
+import { STYLESHEET_PATH } from '../ui/assets.ts'
+
+type Props = { title: string; description?: string; wide?: boolean }
+
+const { title, description, wide = false } = Astro.props
+const principal = Astro.locals.principal
+const login = principal.kind === 'user' ? principal.login : null
+const host = Astro.url.host
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <title>{title}</title>
+    <link rel="stylesheet" href={STYLESHEET_PATH} />
+    {description && <meta name="description" content={description} />}
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='4' cy='4' r='2.5' fill='%23f97316'/%3E%3Ccircle cx='12' cy='8' r='2.5' fill='%23f97316'/%3E%3Ccircle cx='4' cy='12' r='2.5' fill='%23f97316'/%3E%3Cpath d='M4 4v8M4 8h8' stroke='%23f97316' stroke-width='1.5' fill='none'/%3E%3C/svg%3E" />
+  </head>
+  <body class="min-h-screen bg-base-100 text-base-content flex flex-col">
+    <a href="#main" class="sr-only focus:not-sr-only focus:absolute focus:p-2 focus:bg-base-200">Skip to content</a>
+    <header class="border-b border-base-300 bg-base-200">
+      <nav class="navbar max-w-7xl mx-auto px-4 gap-2" aria-label="Main">
+        <div class="flex-1 gap-4 flex items-center min-w-0">
+          <a href="/" class="font-semibold text-lg truncate">{host}</a>
+          <a href="/explore" class="link link-hover text-sm">Explore</a>
+        </div>
+        <div class="flex-none flex items-center gap-2">
+          {
+            login ? (
+              <a href={`/${login}`} class="btn btn-ghost btn-sm" aria-label={`Your profile (${login})`}>
+                <span class="avatar avatar-placeholder">
+                  <span class="bg-neutral text-neutral-content w-6 rounded-full text-xs">{login.slice(0, 1).toUpperCase()}</span>
+                </span>
+                <span class="hidden sm:inline">{login}</span>
+              </a>
+            ) : (
+              <a href={`/login?return_to=${encodeURIComponent(Astro.url.pathname)}`} class="btn btn-sm btn-primary">
+                Sign in
+              </a>
+            )
+          }
+        </div>
+      </nav>
+    </header>
+    <main id="main" class:list={['w-full mx-auto px-4 py-6 flex-1', wide ? 'max-w-[96rem]' : 'max-w-7xl']}>
+      <slot />
+    </main>
+    <footer class="border-t border-base-300 text-sm text-base-content/60">
+      <div class="max-w-7xl mx-auto px-4 py-4">Powered by git-forge</div>
+    </footer>
+  </body>
+</html>

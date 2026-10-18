@@ -89,8 +89,8 @@ Design: [design.md §15](design.md#ci).
 - [x] Expressions server-side: job-level `if`, `runs-on` expressions, `strategy`/`matrix` (include/exclude, fail-fast, max-parallel), job outputs across `needs`, `env`/`defaults`, step `if`/`continue-on-error`/`timeout-minutes`, workflow `concurrency`
 - [x] Cancellation (`JobCancellation`), job timeouts, reaper for expired locks, dead runners and lost launches, re-runs (all, failed, one job) as new attempts
 - [x] Per-repository and per-environment secrets (AES-GCM in SQLite under an instance key), environments with required reviewers (`pending_deployments`), no secrets for untrusted runs
-- [x] `workflow_dispatch` (typed inputs), `schedule` (cron table + Worker cron), `pull_request` trigger function (`queueRunsForPullRequest`, to be wired by collaboration); check runs per job (`check_runs`, feeds required status checks)
-- [ ] Wire `pull_request` runs and the check-runs table into the collaboration package; `paths` filters; job-level `concurrency`; configuration variables (`vars`)
+- [x] `workflow_dispatch` (typed inputs), `schedule` (cron table + Worker cron), `pull_request` trigger function (`queueRunsForPullRequest`, to be wired by collaboration); check runs per job through a `CheckRunSink`
+- [ ] Wire `pull_request` runs and the check-run sink to the collaboration package (#26); `paths` filters; job-level `concurrency`; configuration variables (`vars`)
 - [ ] Broker and run service (v2 flow), results service, message encryption; then cache, artifacts, OIDC id tokens
 - [ ] External providers: signed `workflow_job` webhook delivery, GitHub App auth (JWT → installation token, manifest flow) and PATs on `/api/v3`, org-level runners; try WarpBuild Enterprise, AWS CodeBuild, RunsOn
 - [ ] `container:` and `services:` (Docker-in-Docker in the runner container)

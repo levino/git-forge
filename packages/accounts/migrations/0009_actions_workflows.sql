@@ -77,24 +77,3 @@ CREATE TABLE actions_schedules (
 );
 --> statement-breakpoint
 CREATE INDEX actions_schedules_due ON actions_schedules (next_run_at);
---> statement-breakpoint
-CREATE TABLE check_runs (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  owner TEXT NOT NULL,
-  repo TEXT NOT NULL,
-  head_sha TEXT NOT NULL,
-  name TEXT NOT NULL,
-  app TEXT NOT NULL,
-  status TEXT NOT NULL CHECK (status IN ('queued', 'in_progress', 'completed')),
-  conclusion TEXT CHECK (conclusion IS NULL OR conclusion IN ('success', 'failure', 'neutral', 'cancelled', 'skipped', 'timed_out', 'action_required', 'stale')),
-  external_id TEXT,
-  details_url TEXT,
-  title TEXT,
-  summary TEXT,
-  started_at INTEGER,
-  completed_at INTEGER,
-  created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL
-);
---> statement-breakpoint
-CREATE INDEX check_runs_commit ON check_runs (owner, repo, head_sha, name);

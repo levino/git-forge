@@ -1,4 +1,4 @@
-import { type CheckRunConclusion, type CheckRunStatus, createCheckRun, type Database, sql, updateCheckRun } from '@git-forge/accounts'
+import { type Database, sql } from '@git-forge/accounts'
 import {
   advertisedRefs,
   cronMatches,
@@ -139,11 +139,31 @@ export const createJitRunner = async (db: Database, urls: ServiceUrls, request: 
   return { runner, encodedJitConfig }
 }
 
+export type CheckRunStatus = 'queued' | 'in_progress' | 'completed'
+
+export type CheckRunConclusion = 'success' | 'failure' | 'neutral' | 'cancelled' | 'skipped' | 'timed_out' | 'action_required' | 'stale'
+
+export type CheckRunReport = {
+  readonly name: string
+  readonly headSha: string
+  readonly status: CheckRunStatus
+  readonly conclusion: CheckRunConclusion | null
+  readonly externalId: string
+  readonly detailsUrl: string
+  readonly title: string | null
+}
+
+export interface CheckRunSink {
+  create(repo: RepositoryName, check: CheckRunReport): Promise<number | null>
+  update(repo: RepositoryName, id: number, check: CheckRunReport): Promise<void>
+}
+
 export type DispatchOptions = {
   readonly db: Database
   readonly storage: Storage
   readonly urls: ServiceUrls
   readonly launcher?: RunnerLauncher
+  readonly checks?: CheckRunSink
   readonly now?: () => number
   readonly log?: (event: Record<string, unknown>) => void
 }
@@ -165,37 +185,28 @@ const checkConclusionOf = (job: JobRow): CheckRunConclusion | undefined => {
   return CHECK_CONCLUSIONS.has(job.conclusion ?? '') ? (job.conclusion as CheckRunConclusion) : 'failure'
 }
 
-export const recordCheck = async (db: Database, serverUrl: string, run: RunRow, job: JobRow, now: number): Promise<void> => {
-  if (job.expanded === 0 && job.status !== 'completed') return
-  const status = checkStatusOf(job)
-  const conclusion = checkConclusionOf(job)
+export const recordCheck = async (db: Database, checks: CheckRunSink | undefined, serverUrl: string, run: RunRow, job: JobRow): Promise<void> => {
+  if (!checks || (job.expanded === 0 && job.status !== 'completed')) return
   const definition = jobDefinitionOf(job)
-  const title = definition.error ?? (job.approval === 'waiting' ? `Waiting for review: ${job.environment} needs approval` : undefined)
-  if (job.check_run_id === null) {
-    const check = await createCheckRun(
-      db,
-      {
-        owner: run.owner,
-        repo: run.repo,
-        headSha: run.sha,
-        name: job.display_name,
-        app: 'actions',
-        status,
-        ...(conclusion ? { conclusion } : {}),
-        externalId: job.id,
-        detailsUrl: jobHtmlUrl(serverUrl, run, job),
-        ...(title ? { title } : {}),
-      },
-      now,
-    )
-    await setCheckRunId(db, job.request_id, check.id)
-  } else await updateCheckRun(db, job.check_run_id, { status, ...(conclusion ? { conclusion } : {}), ...(title ? { title } : {}) }, now)
+  const report: CheckRunReport = {
+    name: job.display_name,
+    headSha: run.sha,
+    status: checkStatusOf(job),
+    conclusion: checkConclusionOf(job) ?? null,
+    externalId: job.id,
+    detailsUrl: jobHtmlUrl(serverUrl, run, job),
+    title: definition.error ?? (job.approval === 'waiting' ? `Waiting for review: ${job.environment} needs approval` : null),
+  }
+  const repo = { owner: run.owner, name: run.repo }
+  if (job.check_run_id !== null) return checks.update(repo, job.check_run_id, report)
+  const id = await checks.create(repo, report)
+  if (id !== null) await setCheckRunId(db, job.request_id, id)
 }
 
 const recordChecks = async (options: DispatchOptions, run: RunRow, requestIds: Iterable<number>): Promise<void> => {
   for (const requestId of new Set(requestIds)) {
     const job = await getJob(options.db, requestId)
-    if (job) await recordCheck(options.db, options.urls.serverUrl, run, job, clock(options))
+    if (job) await recordCheck(options.db, options.checks, options.urls.serverUrl, run, job)
   }
 }
 
@@ -588,7 +599,7 @@ export const advanceRun = async (options: DispatchOptions, completed: JobRow): P
   const run = await getRun(options.db, completed.run_id)
   if (!run) return []
   const job = await getJob(options.db, completed.request_id)
-  if (job) await recordCheck(options.db, options.urls.serverUrl, run, job, clock(options))
+  if (job) await recordCheck(options.db, options.checks, options.urls.serverUrl, run, job)
   return advance(options, completed.run_id)
 }
 

@@ -2,7 +2,7 @@ import type { Database } from '@git-forge/accounts'
 import { readAll, repositoryPrefix, type Storage } from '@git-forge/core'
 import { type ActionReference, type ActionSources, resolveActionDownloads } from './actions-download.ts'
 import { jobDefinitionOf, runContextOf, runDefinitionOf } from './definitions.ts'
-import { recordCheck } from './dispatch.ts'
+import { type CheckRunSink, recordCheck } from './dispatch.ts'
 import { buildJobMessage, JOB_REQUEST_MESSAGE_TYPE } from './job-message.ts'
 import { verifyClientAssertion } from './keys.ts'
 import { readSecrets, type SecretsKey } from './secrets.ts'
@@ -54,6 +54,7 @@ export type ActionsServiceOptions = {
   readonly secrets?: SecretsProvider
   readonly secretsKey?: SecretsKey
   readonly actionSources?: ActionSources
+  readonly checks?: CheckRunSink
   readonly now?: () => number
   readonly messageWaitMs?: number
   readonly pollIntervalMs?: number
@@ -372,7 +373,7 @@ const agentRequestRoute = async (context: Context, runner: Runner, requestId: nu
   if (!renewed) return vssError(409, 'GitHub.DistributedTask.WebApi.TaskAgentJobTokenExpiredException', 'job request is no longer owned by this runner')
   if (job.status !== 'in_progress' && renewed.status === 'in_progress') {
     const run = await getRun(db, renewed.run_id)
-    if (run) await recordCheck(db, context.serverUrl, run, renewed, context.now)
+    if (run) await recordCheck(db, context.options.checks, context.serverUrl, run, renewed)
   }
   return json(200, jobRequestJson(renewed, runner))
 }

@@ -34,7 +34,7 @@ actionsTick(dispatch)
 Both handlers return `null` for paths they do not own. `actionsTick` runs due
 scheduled workflows and the reaper; call it from a cron every few minutes.
 The tables are part of the D1 schema in `packages/accounts/migrations`
-(`0005_actions.sql`, `0008_actions_workflows.sql`), applied by
+(`0005_actions.sql`, `0009_actions_workflows.sql`), applied by
 `wrangler d1 migrations apply` (tests: `applyMigrations(db, MIGRATIONS)`).
 
 ## What runs
@@ -57,8 +57,8 @@ The tables are part of the D1 schema in `packages/accounts/migrations`
 - Secrets: instance secrets (`SecretsProvider`), repository and environment
   secrets encrypted with AES-256-GCM under an instance key, masked by the
   runner; none for untrusted runs (pull requests from other repositories).
-- Check runs per job in the shared `check_runs` table of
-  `@git-forge/accounts` (`commitCheckStates` feeds required status checks).
+- Check runs per job through the `CheckRunSink` adapter (the Worker writes
+  them with the collaboration package's check-run store).
 
 ## REST (`/api/v3`, GitHub paths)
 
@@ -70,7 +70,6 @@ The tables are part of the D1 schema in `packages/accounts/migrations`
 | `GET/POST …/actions/runs/{id}/pending_deployments` (`{ environment_ids, state }`) | reviewer of the environment |
 | `GET/PUT/DELETE …/actions/secrets[/{name}]` (`{ value }`, no sealed boxes) | admin |
 | `GET/PUT/DELETE …/environments[/{name}]` (`{ reviewers: [{ type: "User", login }] }`), `…/environments/{name}/secrets[/{secret}]` | admin |
-| `GET …/commits/{ref}/check-runs`, `GET …/check-runs/{id}` | read |
 | `GET …/tarball/{ref}` | read (or the action token handed to the runner) |
 | runners, `generate-jitconfig`, `registration-token` | admin |
 

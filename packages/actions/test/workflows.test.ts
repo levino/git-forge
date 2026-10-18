@@ -154,8 +154,8 @@ jobs:
     const report = await (await h.runner(4)).run('succeeded')
     expect(contextValue(report.message.contextData.needs, 'build', 'result')).toBe('failure')
     expect(await getRun(h.forge.db, runId)).toMatchObject({ conclusion: 'failure' })
-    const checks = (await (await h.api(`/repos/acme/site/commits/${sha}/check-runs`)).json()) as { check_runs: { name: string; status: string; conclusion: string }[] }
-    expect(checks.check_runs.map((check) => [check.name, check.status, check.conclusion])).toEqual([
+    expect(h.forge.checks.every((check) => check.headSha === sha && check.repo === 'acme/site')).toBe(true)
+    expect(h.forge.checks.map((check) => [check.name, check.status, check.conclusion])).toEqual([
       ['plan', 'completed', 'success'],
       ['build (linux, 22)', 'completed', 'success'],
       ['build (mac, 22)', 'completed', 'failure'],
@@ -241,8 +241,7 @@ jobs:
     expect((await reapActions(h.forge.dispatch(h.server.url))).forceCancelled).toBe(1)
     expect(await getJob(h.forge.db, slow.requestId)).toMatchObject({ status: 'completed', conclusion: 'cancelled', cancel_reason: 'timeout' })
     expect(await getRun(h.forge.db, runId)).toMatchObject({ conclusion: 'cancelled' })
-    const checks = (await (await h.api(`/repos/acme/site/commits/main/check-runs`)).json()) as { check_runs: { name: string; conclusion: string }[] }
-    expect(checks.check_runs.map((check) => [check.name, check.conclusion])).toEqual([
+    expect(h.forge.checks.map((check) => [check.name, check.conclusion])).toEqual([
       ['slow', 'timed_out'],
       ['waiting', 'cancelled'],
     ])

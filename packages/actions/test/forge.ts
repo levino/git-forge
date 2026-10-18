@@ -4,6 +4,8 @@ import { handleGitRequest, MemoryStorage, type Storage } from '@git-forge/core'
 import {
   type ActionSources,
   advanceRun,
+  type CheckRunReport,
+  type CheckRunSink,
   type DispatchOptions,
   handleActionsService,
   handleGhesApi,
@@ -19,6 +21,22 @@ export const ADMIN_TOKEN = 'admin-secret'
 
 export const REVIEWER_TOKEN = 'reviewer-secret'
 
+export type RecordedCheck = CheckRunReport & { readonly id: number; readonly repo: string }
+
+export const memoryChecks = (): CheckRunSink & { readonly runs: RecordedCheck[] } => {
+  const runs: RecordedCheck[] = []
+  return {
+    runs,
+    create: async (repo, check) => {
+      runs.push({ ...check, id: runs.length + 1, repo: `${repo.owner}/${repo.name}` })
+      return runs.length
+    },
+    update: async (repo, id, check) => {
+      runs[id - 1] = { ...check, id, repo: `${repo.owner}/${repo.name}` }
+    },
+  }
+}
+
 export const SERVICE_PATH = '/_services/actions'
 
 export type TestForge = {
@@ -27,6 +45,7 @@ export type TestForge = {
   readonly runs: QueuedRun[]
   readonly handler: (request: Request) => Promise<Response>
   readonly dispatch: (origin: string) => DispatchOptions
+  readonly checks: RecordedCheck[]
 }
 
 export type TestForgeOptions = {
@@ -54,6 +73,7 @@ export const createTestForge = async (options: TestForgeOptions = {}): Promise<T
   await applyMigrations(db, MIGRATIONS)
   const storage = new MemoryStorage()
   const runs: QueuedRun[] = []
+  const checks = memoryChecks()
   const urlsFor = (request: Request) => {
     const origin = options.publicUrl?.() ?? new URL(request.url).origin
     return { serverUrl: origin, serviceUrl: `${origin}${SERVICE_PATH}` }
@@ -62,6 +82,7 @@ export const createTestForge = async (options: TestForgeOptions = {}): Promise<T
     db,
     storage,
     urls,
+    checks,
     ...(options.launcher ? { launcher: options.launcher } : {}),
     ...(options.now ? { now: options.now } : {}),
   })
@@ -80,6 +101,7 @@ export const createTestForge = async (options: TestForgeOptions = {}): Promise<T
       basePath: SERVICE_PATH,
       instanceId: '6a0f2b8e-5b5e-4c1a-9d43-0c6f3d8f2a11',
       serverUrl: urls.serverUrl,
+      checks,
       ...(options.now ? { now: options.now } : {}),
       ...(options.secrets ? { secrets: options.secrets } : {}),
       ...(options.secretsKey ? { secretsKey: options.secretsKey } : {}),
@@ -101,6 +123,7 @@ export const createTestForge = async (options: TestForgeOptions = {}): Promise<T
       actor: async (incoming) => (presented(incoming) === ADMIN_TOKEN ? 'admin' : presented(incoming) === REVIEWER_TOKEN ? 'reviewer' : null),
       ...(options.secretsKey ? { secretsKey: options.secretsKey } : {}),
       ...(options.launcher ? { launcher: options.launcher } : {}),
+      checks,
       ...(options.now ? { now: options.now } : {}),
     })
     if (api) return api
@@ -119,5 +142,5 @@ export const createTestForge = async (options: TestForgeOptions = {}): Promise<T
     })
     return git ?? new Response('not found', { status: 404 })
   }
-  return { db, storage, runs, handler, dispatch: (origin) => dispatchFor({ serverUrl: origin, serviceUrl: `${origin}${SERVICE_PATH}` }) }
+  return { db, storage, runs, handler, checks: checks.runs, dispatch: (origin) => dispatchFor({ serverUrl: origin, serviceUrl: `${origin}${SERVICE_PATH}` }) }
 }

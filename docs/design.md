@@ -963,7 +963,7 @@ Pieces and where they live:
 | YAML subset parser, workflow/job model, trigger filters, reading workflow files from a commit | `@git-forge/core` (`yaml.ts`, `workflow.ts`) | Pure functions. Unsupported YAML (anchors, tags, multi-document, multi-line plain scalars) and unsupported workflow keys are rejected with all problems listed, never silently ignored. |
 | Expression evaluator, matrix expansion, cron | `@git-forge/core` (`expression.ts`, `matrix.ts`, `cron.ts`) | Pure. The GitHub expression language (literals, contexts, `.`/`[]`/`.*`, operators with GitHub's loose equality, `contains`/`startsWith`/`endsWith`/`format`/`join`/`toJSON`/`fromJSON`, status functions), used server-side for job `if`, `runs-on`, `strategy`, job names, `environment`, `concurrency`. |
 | Commit tarballs, shallow fetch | `@git-forge/core` (`tarball.ts`, `upload-pack.ts`) | `uses:` actions are downloaded as `tar.gz` streamed from a commit; `deepen <n>` and `deepen-relative` in upload-pack because `actions/checkout` fetches with depth 1. |
-| Check runs | `@git-forge/accounts` (`checks.ts`) | One row per job, shared with collaboration (required status checks). |
+| Check runs | `CheckRunSink` adapter (`dispatch.ts`) | One check run per job, written through the collaboration package's check-run store (required status checks). |
 | Actions service (runner protocol) | `@git-forge/actions` (`service.ts`) | Mounted at `/_services/actions`; that URL is the runner's `ServerUrl`. |
 | GHES REST subset | `@git-forge/actions` (`rest.ts`) | Under `/api/v3`. |
 | Job message, template tokens, context data | `@git-forge/actions` (`job-message.ts`, `template.ts`) | Pure. `${{ }}` in strings becomes a `format()` expression token, so the runner evaluates expressions exactly as on GitHub. |
@@ -1104,14 +1104,15 @@ upload-pack supports `deepen <n>`, `deepen-relative` and `shallow` lines
 
 #### Check runs
 
-Every job leg writes a check run (`check_runs` in `@git-forge/accounts`,
-migration `0008`): name = job display name, `head_sha` = run SHA,
-`status` queued → in_progress (first lock renewal) → completed, conclusion
-from the job (`timed_out` for timeouts), `external_id` = job ID,
-`details_url` = job URL. `commitCheckStates(db, owner, repo, sha)` returns
-the latest state per name as `CheckState` for `evaluateBranchUpdate`; the
-collaboration package reuses the table for its status API. Read API:
-`GET /api/v3/repos/{o}/{r}/commits/{ref}/check-runs`, `…/check-runs/{id}`.
+Every job leg reports a check run through the `CheckRunSink` adapter
+(`create(repo, report) → id`, `update(repo, id, report)`): name = job
+display name, `head_sha` = run SHA, `status` queued → in_progress (first
+lock renewal) → completed, conclusion from the job (`timed_out` for
+timeouts), `external_id` = job ID, `details_url` = job URL; the id is kept
+in `actions_jobs.check_run_id`. The collaboration package owns the
+`check_runs` table, its API and the evaluation of required status checks;
+the Worker implements the sink with its `recordCheckRun` /
+`updateCheckRunRecord`. Without a sink no check runs are written.
 
 #### GHES API (`/api/v3`)
 
@@ -1124,8 +1125,7 @@ Implemented for repositories: `POST …/actions/runners/generate-jitconfig`,
 …/actions/jobs/{id}/rerun`, `GET/POST …/actions/runs/{id}/pending_deployments`,
 `POST …/actions/workflows/{file}/dispatches`, `…/actions/secrets[/{name}]`,
 `…/environments[/{name}[/secrets[/{name}]]]`, `GET
-…/commits/{ref}/check-runs`, `GET …/check-runs/{id}`, `GET
-…/tarball/{ref}`, `GET /api/v3/meta`. Reading runs, jobs, logs, check runs
+…/tarball/{ref}`, `GET /api/v3/meta`. Reading runs, jobs, logs
 and tarballs needs read access, cancel/re-run/dispatch need write access,
 runners, secrets and environments need admin access. Pure functions for signed `workflow_job` webhooks
 (`X-Hub-Signature-256`) exist; delivering them to providers, GitHub App auth
@@ -1215,7 +1215,7 @@ same functions (`reviewDeployment`).
 #### Data
 
 - SQLite, migrations `packages/accounts/migrations/0005_actions.sql` and
-  `0008_actions_workflows.sql`, applied by `wrangler d1 migrations apply`
+  `0009_actions_workflows.sql`, applied by `wrangler d1 migrations apply`
   like every other migration and shipped in the release's
   `migrations.tar.gz`: `actions_runners`, `actions_tokens`,
   `actions_sessions`, `actions_runs` (plus definition, attempt, trusted,
@@ -1223,7 +1223,7 @@ same functions (`reviewDeployment`).
   attempt, `expanded`, matrix, outputs, environment, approval,
   cancellation, launches, check run), `actions_timeline_records`,
   `actions_logs`, `actions_secrets`, `actions_environments`,
-  `actions_schedules`, `check_runs`. `0008` only adds columns and tables,
+  `actions_schedules`. `0009` only adds columns and tables,
   so the previous release keeps working on the new schema.
 - Bucket, append-only, written with `If-None-Match: *`:
   `repos/<owner>/<repo>/actions/jobs/<jobId>/logs/<logId>/<chunk>`,

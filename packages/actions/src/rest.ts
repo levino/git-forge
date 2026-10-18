@@ -1,9 +1,10 @@
-import { type CheckRunRow, type Database, getCheckRun, listCheckRuns } from '@git-forge/accounts'
+import type { Database } from '@git-forge/accounts'
 import { commitTarball, gzipStream, isValidName, ObjectDatabase, readAll, resolveCommitish, type Storage } from '@git-forge/core'
 import { jobDefinitionOf } from './definitions.ts'
 import {
   ApprovalError,
   cancelRun,
+  type CheckRunSink,
   createJitRunner,
   DispatchError,
   type DispatchOptions,
@@ -63,6 +64,7 @@ export type GhesApiOptions = {
   readonly actor?: (request: Request) => Promise<string | null>
   readonly secretsKey?: SecretsKey
   readonly launcher?: RunnerLauncher
+  readonly checks?: CheckRunSink
   readonly log?: (event: Record<string, unknown>) => void
   readonly now?: () => number
 }
@@ -159,22 +161,6 @@ const jobJson = (job: JobRow, run: RunRow | null, urls: ServiceUrls) => {
   }
 }
 
-const checkRunJson = (check: CheckRunRow, urls: ServiceUrls) => ({
-  id: check.id,
-  head_sha: check.head_sha,
-  name: check.name,
-  status: check.status,
-  conclusion: check.conclusion,
-  external_id: check.external_id,
-  details_url: check.details_url,
-  html_url: check.details_url,
-  url: `${urls.serverUrl}/api/v3/repos/${check.owner}/${check.repo}/check-runs/${check.id}`,
-  started_at: iso(check.started_at),
-  completed_at: iso(check.completed_at),
-  output: { title: check.title, summary: check.summary },
-  app: { slug: check.app, name: check.app === 'actions' ? 'GitHub Actions' : check.app },
-})
-
 const secretJson = (secret: SecretInfo) => ({ name: secret.name, created_at: new Date(secret.createdAt).toISOString(), updated_at: new Date(secret.updatedAt).toISOString() })
 
 const environmentJson = (environment: Environment, urls: ServiceUrls) => ({
@@ -255,6 +241,7 @@ const dispatchOptionsOf = (options: GhesApiOptions): DispatchOptions => ({
   storage: options.storage,
   urls: options.urls,
   ...(options.launcher ? { launcher: options.launcher } : {}),
+  ...(options.checks ? { checks: options.checks } : {}),
   ...(options.now ? { now: options.now } : {}),
   ...(options.log ? { log: options.log } : {}),
 })
@@ -526,17 +513,6 @@ export const handleGhesApi = async (request: Request, options: GhesApiOptions): 
   if ((area === 'tarball' || area === 'zipball') && collection && rest.length === 0 && (method === 'GET' || method === 'HEAD')) {
     if (!(await read(request, owner, repo))) return error(404, 'Not Found')
     return area === 'tarball' ? tarball(context, collection) : error(501, 'zipballs are not supported; use the tarball')
-  }
-  if (area === 'commits' && collection && rest.length === 1 && rest[0] === 'check-runs' && method === 'GET') {
-    if (!(await read(request, owner, repo))) return error(404, 'Not Found')
-    const sha = (await resolveCommitish(options.storage, { owner, name: repo }, decodeURIComponent(collection))) ?? decodeURIComponent(collection)
-    const checks = await listCheckRuns(options.db, owner, repo, sha)
-    return json(200, { total_count: checks.length, check_runs: checks.map((check) => checkRunJson(check, options.urls)) })
-  }
-  if (area === 'check-runs' && collection && /^\d+$/.test(collection) && rest.length === 0 && method === 'GET') {
-    const check = await getCheckRun(options.db, Number(collection))
-    if (!check || check.owner !== owner || check.repo !== repo || !(await read(request, owner, repo))) return error(404, 'Not Found')
-    return json(200, checkRunJson(check, options.urls))
   }
   if (area === 'environments') {
     if (!(await options.authorize(request, owner, repo))) return error(404, 'Not Found')

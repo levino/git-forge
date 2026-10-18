@@ -1,4 +1,4 @@
-import { d1Database } from '@git-forge/accounts'
+import { d1Database, MIGRATIONS, migrateOnStart } from '@git-forge/accounts'
 import { consumeJobs, digestStreams, QueueJobs, R2Storage } from '@git-forge/cloudflare'
 import { continueImport, createConsoleEmailSender, type EmailSender, type ImportJob, type ImportScheduler, storagePublisher } from '@git-forge/core'
 import { createSesEmailSender } from '@git-forge/ses'
@@ -33,6 +33,7 @@ let forge: Promise<Forge> | undefined
 export const forgeFor = (env: Env): Promise<Forge> => {
   forge ??= parseSettings(env)
     .then(async (settings) => {
+      await migrateOnStart(d1Database(env.DB), MIGRATIONS)
       const actions = parseActionsSettings(env)
       const secretsKey = await loadSecretsKey(actions)
       const email = emailSender(parseEmailSettings(env))
@@ -67,7 +68,7 @@ export const forgeFor = (env: Env): Promise<Forge> => {
   return forge
 }
 
-const isJobQueue = (name: string): boolean => name === 'git-forge-jobs' || /^git-forge-[a-z0-9-]+-jobs$/.test(name)
+const isJobQueue = (name: string): boolean => name.endsWith('-jobs')
 
 export const backgroundHandlers = {
   async scheduled(controller, env): Promise<void> {

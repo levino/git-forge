@@ -1,0 +1,56 @@
+---
+import { can, listPulls } from '@git-forge/collaboration'
+import IssueList from '../../../../components/IssueList.astro'
+import NotFound from '../../../../components/NotFound.astro'
+import RepoHeader from '../../../../components/RepoHeader.astro'
+import Layout from '../../../../layouts/Layout.astro'
+import { scopeFor } from '../../../../ui/collaboration.ts'
+import { parsePage } from '../../../../ui/history.ts'
+import { openRepository, repoUrl } from '../../../../ui/repository.ts'
+
+const { forge, principal } = Astro.locals
+const repo = await openRepository(forge, principal, Astro.params.owner!, Astro.params.repo!)
+const scope = repo.kind === 'ok' ? await scopeFor(forge, Astro.request, principal, repo) : null
+const state = Astro.url.searchParams.get('state') === 'closed' ? 'closed' : 'open'
+const page = parsePage(Astro.url.searchParams.get('page'))
+const PER_PAGE = 25
+const [list, open, closed] = scope
+  ? await Promise.all([
+      listPulls(scope, { state }, { page, perPage: PER_PAGE }),
+      listPulls(scope, { state: 'open' }, { page: 1, perPage: 1 }),
+      listPulls(scope, { state: 'closed' }, { page: 1, perPage: 1 }),
+    ])
+  : [null, null, null]
+---
+
+{
+  repo.kind !== 'ok' || !scope || !list || !open || !closed ? (
+    <NotFound />
+  ) : (
+    <Layout title={`Pull requests · ${repo.name.owner}/${repo.name.name}`}>
+      <RepoHeader repo={repo} tab="pulls" />
+      <div class="flex flex-wrap items-center gap-3 mb-4">
+        <nav class="join" aria-label="State">
+          <a class:list={['join-item btn btn-sm', { 'btn-active': state === 'open' }]} href="?state=open" aria-current={state === 'open' ? 'page' : undefined}>
+            {open.total} Open
+          </a>
+          <a class:list={['join-item btn btn-sm', { 'btn-active': state === 'closed' }]} href="?state=closed" aria-current={state === 'closed' ? 'page' : undefined}>
+            {closed.total} Closed
+          </a>
+        </nav>
+        {can(scope, 'pull:create') && repo.branches.length > 1 && (
+          <a class="btn btn-sm btn-primary ml-auto" href={repoUrl(repo.name, 'pulls', 'new')}>
+            New pull request
+          </a>
+        )}
+      </div>
+      {list.items.length === 0 ? <p class="text-base-content/70">No {state} pull requests.</p> : <IssueList repo={repo} issues={list.items} kind="pull" />}
+      {(page > 1 || page * PER_PAGE < list.total) && (
+        <nav class="join mt-6 flex justify-center" aria-label="Pagination">
+          {page > 1 ? <a class="join-item btn btn-sm" href={`?state=${state}&page=${page - 1}`} rel="prev">Previous</a> : <span class="join-item btn btn-sm btn-disabled">Previous</span>}
+          {page * PER_PAGE < list.total ? <a class="join-item btn btn-sm" href={`?state=${state}&page=${page + 1}`} rel="next">Next</a> : <span class="join-item btn btn-sm btn-disabled">Next</span>}
+        </nav>
+      )}
+    </Layout>
+  )
+}

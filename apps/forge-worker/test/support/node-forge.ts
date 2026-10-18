@@ -1,4 +1,4 @@
-import { applyMigrations, MIGRATIONS } from '@git-forge/accounts'
+import { applyMigrations, type Database, MIGRATIONS } from '@git-forge/accounts'
 import { openSqliteDatabase } from '@git-forge/accounts-node'
 import { MemoryStorage } from '@git-forge/core'
 import { createForge, type Forge, type ForgeOptions } from '../../src/app.ts'
@@ -6,7 +6,7 @@ import { DEFAULT_MAX_LFS_OBJECT_BYTES } from '../../src/config.ts'
 
 export const BOOTSTRAP_TOKEN = 'bootstrap-secret'
 
-export type NodeForge = Forge & { readonly storage: MemoryStorage }
+export type NodeForge = Forge & { readonly storage: MemoryStorage; readonly db: Database }
 
 export const nodeForge = async (overrides: Partial<ForgeOptions> = {}): Promise<NodeForge> => {
   const storage = new MemoryStorage()
@@ -28,7 +28,7 @@ export const nodeForge = async (overrides: Partial<ForgeOptions> = {}): Promise<
     mirrorUnitBytes: 0,
     ...overrides,
   })
-  return { ...forge, storage }
+  return { ...forge, storage, db }
 }
 
 export const call = (forge: Forge, base: string, method: string, path: string, token?: string, body?: unknown): Promise<Response> =>

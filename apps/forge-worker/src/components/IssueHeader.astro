@@ -1,0 +1,30 @@
+---
+import type { Issue } from '@git-forge/collaboration'
+import { isoTime, plural, relativeTime } from '../ui/format.ts'
+
+type Props = { issue: Issue; state: { label: string; badge: string } }
+
+const { issue, state } = Astro.props
+const now = Math.floor(Date.now() / 1000)
+const created = Math.floor(issue.createdAt / 1000)
+---
+
+<header class="mb-6 pb-4 border-b border-base-300">
+  <h2 class="text-2xl break-words">
+    {issue.title} <span class="text-base-content/50">#{issue.number}</span>
+  </h2>
+  <p class="mt-2 flex flex-wrap items-center gap-2 text-sm">
+    <span class:list={['badge', state.badge]}>{state.label}</span>
+    <span>
+      <span class="font-semibold">{issue.author.login}</span> opened this <time datetime={isoTime(created)}>{relativeTime(created, now)}</time> · {plural(issue.comments, 'comment')}
+    </span>
+    {issue.locked && <span class="badge badge-outline badge-sm">Locked</span>}
+    {
+      issue.labels.map((label) => (
+        <span class="badge badge-sm" style={`background-color:#${label.color};color:#000`}>
+          {label.name}
+        </span>
+      ))
+    }
+  </p>
+</header>

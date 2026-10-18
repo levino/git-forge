@@ -42,6 +42,5 @@
     "PAGES_DOMAINS": "",
     "PAGES_MAX_AGE": "60",
     "LFS_PUBLISH_PREFIX": ""
-  },
-  "secrets": { "required": ["BOOTSTRAP_TOKEN"] }
+  }
 }

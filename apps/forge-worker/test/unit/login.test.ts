@@ -1,3 +1,4 @@
+import { createAccountsStore } from '@git-forge/accounts'
 import { generateSigningKey, type PrivateJwk, signBreakGlassToken } from '@git-forge/accounts'
 import { createMockOidc, type MockOidc } from '@git-forge/accounts/test/support/mock-oidc.ts'
 import { createSoftAuthenticator } from '@git-forge/accounts/test/support/soft-authenticator.ts'
@@ -202,6 +203,18 @@ describe('OIDC', () => {
     const second = await signIn(again)
     expect(second.headers.get('Location')).toBe('/acme')
     expect(await json(await again.fetch('/api/session'))).toMatchObject({ login: 'alice' })
+  })
+
+  it('redeems a one-time instance admin claim on the first matching OIDC sign-in', async () => {
+    mock.user = { sub: 'zitadel-7', preferred_username: 'levin', email: 'Levin@Example.org', email_verified: true }
+    const forge = await loginForge(oidcSettings(false), mock)
+    await createAccountsStore(forge.db).addInstanceAdminClaim('levin@example.org')
+    const browser = new Browser(forge)
+    expect((await signIn(browser)).status).toBe(303)
+    expect(await json(await browser.fetch('/api/session'))).toMatchObject({ login: 'levin', admin: true })
+
+    mock.user = { sub: 'zitadel-8', preferred_username: 'mallory', email: 'levin@example.org', email_verified: true }
+    expect((await signIn(new Browser(forge))).status).toBe(403)
   })
 
   it('links an existing account through an invite for that user', async () => {

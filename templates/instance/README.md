@@ -104,10 +104,13 @@ URLs needs none of this.
 
 ## First admin
 
-A fresh instance has no users. The secret `BOOTSTRAP_TOKEN` allows exactly one
-call that creates the first instance admin. `wrangler.jsonc` declares it as
-required (`secrets.required`); its value never goes into the repository. Set
-it once (the Deploy button asks for it):
+With OIDC configured, run `sh claim-admin.sh you@example.org` once after the
+first deploy and sign in with that (verified) address: the one-time claim in D1
+makes the account an instance admin and is deleted. Nothing stays in the config. Without OIDC: a fresh instance has no users. The secret `BOOTSTRAP_TOKEN` allows exactly one
+call that creates the first instance admin; without it `/api/bootstrap` answers
+`503`. It is not declared as required in `wrangler.jsonc`, because a secret can
+only be set once the Worker exists, i.e. after the first deploy. Its value never
+goes into the repository. Set it once after the first deploy:
 
 ```sh
 openssl rand -base64 32 | npx wrangler@4 secret put BOOTSTRAP_TOKEN

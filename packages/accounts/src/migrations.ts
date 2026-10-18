@@ -64,3 +64,25 @@ export const applyMigrations = async (db: Database, migrations: readonly Migrati
   }
   return newlyApplied
 }
+
+export const adoptWranglerMigrations = async (db: Database, migrations: readonly Migration[], now: number = Date.now()): Promise<string[]> => {
+  const table = await db.all<{ name: string }>(sql("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'd1_migrations'"))
+  if (table.length === 0) return []
+  const rows = await db.all<{ name: string }>(sql('SELECT name FROM d1_migrations'))
+  const known = await hashes(migrations)
+  const names = rows.map((row) => row.name.replace(/\.sql$/, '')).filter((name) => known.has(name))
+  if (names.length === 0) return []
+  await db.run(sql('CREATE TABLE IF NOT EXISTS schema_migrations (name TEXT PRIMARY KEY, sha256 TEXT NOT NULL, applied_at INTEGER NOT NULL)'))
+  await db.batch(names.map((name) => sql('INSERT INTO schema_migrations (name, sha256, applied_at) VALUES (?, ?, ?) ON CONFLICT (name) DO NOTHING', name, known.get(name)!, now)))
+  return names
+}
+
+export const migrateOnStart = async (db: Database, migrations: readonly Migration[]): Promise<string[]> => {
+  await adoptWranglerMigrations(db, migrations)
+  try {
+    return await applyMigrations(db, migrations)
+  } catch (error) {
+    if ((await pendingMigrations(db, migrations)).length === 0) return []
+    throw error
+  }
+}

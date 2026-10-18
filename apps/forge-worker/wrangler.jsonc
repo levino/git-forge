@@ -71,11 +71,6 @@
     "PAGES_DOMAINS": "",
     "PAGES_MAX_AGE": "60"
   },
-  "secrets": {
-    "required": [
-      "BOOTSTRAP_TOKEN"
-    ]
-  },
   "containers": [
     {
       "class_name": "RunnerContainer",
@@ -162,11 +157,6 @@
         "PAGES_DOMAINS": "",
         "PAGES_MAX_AGE": "60"
       },
-      "secrets": {
-        "required": [
-          "BOOTSTRAP_TOKEN"
-        ]
-      },
       "containers": [
         {
           "class_name": "RunnerContainer",
@@ -250,11 +240,6 @@
         "PAGES_DOMAINS": "",
         "PAGES_MAX_AGE": "60"
       },
-      "secrets": {
-        "required": [
-          "BOOTSTRAP_TOKEN"
-        ]
-      },
       "containers": [
         {
           "class_name": "RunnerContainer",
@@ -337,11 +322,6 @@
         "PAGES_HOST": "",
         "PAGES_DOMAINS": "",
         "PAGES_MAX_AGE": "60"
-      },
-      "secrets": {
-        "required": [
-          "BOOTSTRAP_TOKEN"
-        ]
       },
       "containers": [
         {

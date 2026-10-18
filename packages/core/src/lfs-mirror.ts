@@ -1,6 +1,6 @@
 import { utf8 } from './bytes.ts'
 import type { DigestFactory } from './digest.ts'
-import { LfsIntegrityError, lfsObjectKey, type LfsObjectSpec, verifyingStream } from './lfs.ts'
+import { LfsIntegrityError, lfsObjectKey, type LfsObjectSpec, putVerifiedStream } from './lfs.ts'
 import { expectOk, type Remote, RemoteError, remoteRequest } from './remote.ts'
 import type { RepositoryName } from './repository.ts'
 import type { Storage } from './storage.ts'
@@ -87,10 +87,7 @@ const download = async (
     return { ok: false, reason: `download failed with HTTP ${response.status}` }
   }
   try {
-    await options.storage.put(lfsObjectKey(options.repo, pointer.oid), response.body.pipeThrough(verifyingStream(pointer, options.digests)), pointer.size, {
-      ifNoneMatch: '*',
-      contentType: 'application/octet-stream',
-    })
+    await putVerifiedStream(options.storage, lfsObjectKey(options.repo, pointer.oid), response.body, pointer, { ifNoneMatch: '*', contentType: 'application/octet-stream' }, options.digests)
   } catch (error) {
     if (error instanceof LfsIntegrityError) return { ok: false, reason: error.message }
     throw error

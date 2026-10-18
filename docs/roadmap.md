@@ -62,6 +62,9 @@ discussions.
 - [x] Mirror overview API: signed attestations from mirrors, ref checksum history, state/lag/alarms, spot checks (design §10); UI in M6
 - [x] Non-forge upstreams: stepped fetch shared with imports (commit ranges, split commits, across queued jobs, refs move when complete), `.lfsconfig` endpoint
 - [x] GitHub backups: push webhooks per mirror (HMAC-SHA256, optional registration via the GitHub API), sealed upstream tokens, bulk "mirror all repositories of a user/org" API and form
+- [x] Federation between two real Workers deployments (forge.levinkeller.de ↔ forge-test.levinkeller.de): trust both ways, public and private mirrors, push-notified sync in 6–30 s, force push archive and alarm, attestations and spot checks, a 4.3 GB LFS mirror
+- [x] Interrupted LFS copies resume: pointers of copied packs are pending before the first download; the deep check queues missing LFS objects
+- [x] Storage-verified LFS puts (`putVerified`, R2 `sha256`): no Worker CPU for hashing LFS objects and upload parts
 
 ## M5 — Deployment and adapters
 

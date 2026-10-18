@@ -33,6 +33,8 @@ command = "V=0.8.0 S=baa0866b… && U=… && mkdir -p dist && cd dist && curl �
 Every Cloudflare resource is declared in `wrangler.toml` by name only, without
 ids: the first deploy creates the D1 database, the R2 bucket and the two
 queues (automatic resource provisioning), later deploys find them by name.
+Provisioning picks no region, so create them yourself first (see
+[Region](#region)).
 The Worker applies pending database migrations itself when it starts, so
 there is no migration step in the deploy.
 
@@ -40,6 +42,29 @@ A Workers **Paid** plan is required (indexing a push needs more than the 10 ms
 CPU of the Free plan, and `limits.cpu_ms` cannot be set on Free).
 
 ## Create an instance
+
+### Region
+
+Automatically provisioned resources land wherever Cloudflare puts them (often
+another continent), and every request then pays the round trip. Create them
+with the names from `wrangler.toml` before the first deploy, here in Western
+Europe:
+
+```sh
+npx wrangler@4 d1 create git-forge --location weur
+npx wrangler@4 r2 bucket create git-forge --location weur
+npx wrangler@4 queues create git-forge-imports --jurisdiction eu
+npx wrangler@4 queues create git-forge-jobs --jurisdiction eu
+```
+
+Locations: `wnam`, `enam`, `weur`, `eeur`, `apac`, `oc`. Queues take no
+location, only the jurisdiction `eu`; without it their consumers (mirror
+syncs, notifications) may run on another continent. `[placement] mode =
+"smart"` moves requests next to the data once it has seen some traffic; after
+the first deploy (Cloudflare refuses it on the one that creates the Worker)
+add `hint = "weur"` (your location) for immediate effect. A resource cannot
+be moved later, only recreated under a new name. With the Deploy button,
+create them under the names you are going to enter.
 
 ### With the Deploy button
 
@@ -59,7 +84,8 @@ and the deploy command at `npx wrangler deploy`; the `[build]` command in
 2. Adjust `wrangler.toml`: `name`, `bucket_name`, `database_name`, the queue
    names (the jobs queue must end in `-jobs`) and, for your own domain,
    `routes` (see [Domain](#domain)).
-3. In the Cloudflare dashboard, open **Workers & Pages → Create → Import a
+3. Create the resources in your [region](#region).
+4. In the Cloudflare dashboard, open **Workers & Pages → Create → Import a
    repository**, pick your repository, leave the build command empty and keep
    the deploy command `npx wrangler deploy`. Or run `npx wrangler@4 deploy`
    locally.
@@ -152,7 +178,7 @@ The first OIDC sign-in with that identity creates the account (even without
 self-signup), makes it an instance admin and deletes the claim. Nothing stays
 in the config.
 
-**Without OIDC:** the secret `BOOTSTRAP_TOKEN` allows exactly one call that
+**With or without OIDC:** the secret `BOOTSTRAP_TOKEN` allows exactly one call that
 creates the first instance admin; without it `/api/bootstrap` answers `503`.
 The Deploy button asks for it. Otherwise set it after the first deploy (a
 secret can only be set on an existing Worker):
@@ -175,11 +201,35 @@ git push https://git:$TOKEN@<your-instance>/alice/site.git main
 ```
 
 Repositories are private by default (`"visibility": "public"` on creation or
-`PATCH /api/repos/{owner}/{name}` changes that). Further users, tokens,
-collaborators, instance federation and mirrors are described in the
+`PATCH /api/repos/{owner}/{name}` changes that). This admin has only the
+token; to sign in on the web, open an invite for it
+(`POST /api/admin/invites` with `{"user":"alice"}`, see [Login](#login)) and
+link an OIDC identity or register a passkey. Further users, tokens and
+collaborators are described in the
 [forge-worker README](https://github.com/levino/git-forge/tree/main/apps/forge-worker#api).
-To mirror private repositories of other instances, also set the secret
-`INSTANCE_KEY` and the var `PUBLIC_URL` (see there).
+
+## Federation
+
+Mirrors between instances, push notifications and attestations need, on both
+instances, the var `PUBLIC_URL` and an instance key:
+
+```sh
+node -e "crypto.subtle.generateKey('Ed25519',true,['sign']).then(k=>crypto.subtle.exportKey('jwk',k.privateKey)).then(({kty,crv,x,d})=>console.log(JSON.stringify({kty,crv,x,d})))" | npx wrangler@4 secret put INSTANCE_KEY
+```
+
+`https://<your-instance>/.well-known/jwks.json` then shows its public key.
+Trust is mutual: an instance admin on each side trusts the other one
+(**Admin → Trust an instance**, or `POST /api/admin/instances`
+`{"issuer":"https://<other-instance>"}`). For a private repository, its admin
+on the upstream grants the mirror read access (**Settings → Federation**, or
+`POST /api/repos/{owner}/{name}/instances` `{"issuer":"https://<mirror>"}`).
+On the mirror, create a repository and add the mirror (**Settings → Mirrors**,
+authentication "instance token", or `POST /api/repos/{owner}/{name}/mirrors`
+`{"url":"https://<upstream>/{owner}/{name}.git","auth":"instance"}`). It syncs
+Git and LFS, subscribes to push notifications, follows each push within
+seconds and attests its state to the upstream (`GET
+/api/repos/{owner}/{name}/mirrors/overview` there). Details:
+[forge-worker README, Federation](https://github.com/levino/git-forge/tree/main/apps/forge-worker#federation).
 
 ## Vars
 

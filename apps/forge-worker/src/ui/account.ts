@@ -7,6 +7,7 @@ export type AccountAction =
   | { readonly kind: 'passkey-removed' }
   | { readonly kind: 'identity-unlinked' }
   | { readonly kind: 'session-revoked' }
+  | { readonly kind: 'renamed'; readonly login: string }
   | { readonly kind: 'error'; readonly message: string }
 
 const DAY_MS = 24 * 60 * 60 * 1000
@@ -42,6 +43,14 @@ export const accountAction = async (forge: ForgeServices, session: UiSession, fo
   if (action === 'unlink-identity') {
     try {
       return (await forge.account.unlinkIdentity(user, String(form.get('issuer') ?? ''), String(form.get('subject') ?? ''))) ? { kind: 'identity-unlinked' } : { kind: 'error', message: 'Unknown linked account.' }
+    } catch (error) {
+      if (error instanceof ForgeError) return { kind: 'error', message: error.message }
+      throw error
+    }
+  }
+  if (action === 'rename') {
+    try {
+      return { kind: 'renamed', login: (await forge.renameAccount(user, user.login, String(form.get('login') ?? '').trim())).login }
     } catch (error) {
       if (error instanceof ForgeError) return { kind: 'error', message: error.message }
       throw error

@@ -81,7 +81,7 @@ export const createGitAccess = (options: AuthenticateOptions & { readonly direct
       const principal = await principalOf(request)
       if (!principal) return challenge('invalid credentials\n')
       const check = await checkRepositoryAccess(options.directory, principal, repo, access === 'write' ? 'write' : 'read', surface)
-      return decisionResponse(check.decision, principal)
+      return decisionResponse(check.decision, principal, check.repository)
     },
     pushPolicy: async (request, repo) => {
       const principal = await principalOf(request)

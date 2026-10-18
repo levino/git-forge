@@ -9,6 +9,7 @@ import { S3Storage } from '@git-forge/s3'
 import { createSesEmailSender } from '@git-forge/ses'
 import { createSmtpEmailSender } from '@git-forge/smtp'
 import { type AppJob, createForge, type Forge } from 'forge-worker/app'
+import { type RestoreResult, restoreBackup, restoreSql, verifyBackup } from 'forge-worker/backup'
 import { ConfigurationError, loadIdTokenKeys, loadSecretsKey, parseActionsSettings, parseSettings } from 'forge-worker/config'
 import { type NodeConfig, type NodeEmailSettings, type NodeVars, parseNodeConfig, type StorageConfig } from './config.ts'
 import { createSqliteJobQueue, type SqliteJobQueue } from './jobs.ts'
@@ -57,6 +58,36 @@ export const migrate = async (vars: NodeVars): Promise<string[]> => {
   }
 }
 
+const backupTarget = async (config: NodeConfig): Promise<Storage> => {
+  if (!config.backup) throw new ConfigurationError('this command needs a backup target: set BACKUP_STORAGE (fs or s3) and its BACKUP_* settings')
+  return openStorage(config.backup)
+}
+
+export const restore = async (vars: NodeVars, id?: string): Promise<RestoreResult & { readonly migrated: string[] }> => {
+  const config = parseNodeConfig(vars)
+  const target = await backupTarget(config)
+  const { db, handle } = await openDatabase(config.databasePath)
+  try {
+    const result = await restoreBackup(target, await openStorage(config.storage), db, nodeDigests, id)
+    return { ...result, migrated: await applyMigrations(db, MIGRATIONS) }
+  } finally {
+    handle.close()
+  }
+}
+
+export const restoreSqlFrom = async (vars: NodeVars, id?: string): Promise<AsyncIterable<Uint8Array>> => restoreSql(await backupTarget(parseNodeConfig(vars)), id)
+
+export const verify = async (vars: NodeVars, sample: number): Promise<{ readonly checked: number; readonly failures: string[] }> => {
+  const config = parseNodeConfig(vars)
+  const target = await backupTarget(config)
+  const { db, handle } = await openDatabase(config.databasePath)
+  try {
+    return await verifyBackup(db, target, nodeDigests, sample)
+  } finally {
+    handle.close()
+  }
+}
+
 export const openStorage = async (config: StorageConfig): Promise<Storage> => {
   if (config.kind === 's3') return new S3Storage(config.config)
   await mkdir(config.dir, { recursive: true })
@@ -94,6 +125,7 @@ export const createInstance = async (vars: NodeVars, overrides: InstanceOverride
     throw error
   }
   const storage = await openStorage(config.storage)
+  const backup = config.backup ? await openStorage(config.backup) : undefined
   let forge: Forge | undefined
   const queueOptions = {
     db,
@@ -112,7 +144,13 @@ export const createInstance = async (vars: NodeVars, overrides: InstanceOverride
     ...queueOptions,
     queue: 'imports',
     handler: async (job) => {
-      const state = await continueImport(job, { storage, digests: nodeDigests, schedule: (next, delaySeconds) => imports.enqueue(next, { delaySeconds }), scheduleLfs: (lfs) => jobs.enqueue(lfs) })
+      const state = await continueImport(job, {
+        storage: forge!.services.storage,
+        digests: nodeDigests,
+        schedule: (next, delaySeconds) => imports.enqueue(next, { delaySeconds }),
+        scheduleLfs: (lfs) => jobs.enqueue(lfs),
+        metadata: (next, current) => forge!.importMetadata(next, current),
+      })
       await forge!.refreshRepository(job)
       log({ event: 'import-step', repo: `${job.owner}/${job.name}`, phase: state.phase, steps: state.steps, error: state.error })
     },
@@ -130,6 +168,7 @@ export const createInstance = async (vars: NodeVars, overrides: InstanceOverride
     ...(secretsKey ? { secretsKey } : {}),
     clientAddress: (request) => request.headers.get(CLIENT_ADDRESS_HEADER),
     jobs,
+    ...(backup ? { backup } : {}),
     scheduleImport: (job, delaySeconds) => imports.enqueue(job, { delaySeconds }),
     ...(config.lfsPublishDir ? { lfsPublisher: storagePublisher(new FsStorage(config.lfsPublishDir), vars.LFS_PUBLISH_PREFIX?.trim() ?? '') } : {}),
     ...(overrides.fetch ? { fetch: overrides.fetch } : {}),

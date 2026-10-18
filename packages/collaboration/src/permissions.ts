@@ -44,6 +44,7 @@ export type Permission =
   | 'discussion:answer'
   | 'discussion:category'
   | 'settings:manage'
+  | 'import'
 
 export type PermissionSubject = {
   readonly access: Access
@@ -89,6 +90,7 @@ const RULES: Readonly<Record<Permission, Rule>> = {
   'discussion:answer': { role: 'triage', author: 'read' },
   'discussion:category': { role: 'maintain' },
   'settings:manage': { role: 'admin' },
+  import: { role: 'admin' },
 }
 
 export const allowed = (permission: Permission, subject: PermissionSubject): boolean => {

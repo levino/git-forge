@@ -113,6 +113,31 @@ binding = "CDN_BUCKET"
 bucket_name = "git-forge-cdn"
 ```
 
+### Backups
+
+Add a second bucket to `wrangler.toml`; the next deploy creates it:
+
+```toml
+[[r2_buckets]]
+binding = "BACKUP"
+bucket_name = "git-forge-backup"
+```
+
+Every cron run then copies a database dump and every repository object into
+it, verified by SHA-256, in small queued steps. Status, lag, size, errors,
+"Run now" and "Verify a sample" are under **Backup** on `/-/admin`
+(`GET|POST /api/admin/backup`, `POST /api/admin/backup/verify`).
+
+Lock it so nothing can delete or overwrite a backup, not even this Worker:
+in the dashboard, **R2 → git-forge-backup → Settings → Bucket lock rules →
+Add rule**, all objects, retention e.g. 90 days. The backup only writes new
+keys, so it works with the lock.
+
+Restore into a new instance: see
+[design §19](https://github.com/levino/git-forge/blob/main/docs/design.md#19-backups)
+(`git-forge-node restore` and `restore-sql` with R2's S3 API, then
+`npx wrangler@4 d1 execute DB --remote --file restore.sql`).
+
 ## First admin
 
 **With OIDC** (see [Login](#login)): open the instance once (any page, so the
@@ -181,7 +206,7 @@ OIDC_NAME = "Example ID"
 | `UI` | `true` | `false` for a headless instance (for example a backup mirror): Git, LFS and the API only. |
 | `MAX_LFS_OBJECT_BYTES`, `MIRROR_INTERVAL_MINUTES`, `MIRROR_DEEP_CHECK_DAYS` | see the forge-worker README | Limits and mirror schedule. |
 | `R2_S3_ENDPOINT`, `R2_BUCKET_NAME` | none: LFS through the Worker | Presigned uploads straight to R2, see [Large LFS objects](#large-lfs-objects). |
-| `EMAIL_PROVIDER`, `EMAIL_FROM` | `cloudflare`; `Forge <forge@<PUBLIC_URL host>>` | `none`, `ses` or `console`, see [Email](#notifications-email-and-webhooks). |
+| `EMAIL_PROVIDER`, `EMAIL_FROM` | `cloudflare` with an `EMAIL` binding, else `none`; `Forge <forge@<PUBLIC_URL host>>` | `none`, `ses` or `console`, see [Email](#notifications-email-and-webhooks). |
 | `PAGES_HOST`, `PAGES_DOMAINS`, `PAGES_MAX_AGE` | none: no Pages; `60` | Pages hosts, custom domains and cache lifetime, see [Pages](#pages). |
 | `LFS_PUBLISH_PREFIX` | | Key prefix in `CDN_BUCKET`, see [Public LFS bucket](#public-lfs-bucket). |
 
@@ -255,18 +280,25 @@ Notifications (`/api/v3/notifications`), webhooks
 (`/api/v3/repos/<owner>/<name>/releases`) work without further setup; their
 jobs run on the jobs queue (its name must end in `-jobs`).
 
-Emails (notification digests, mentions, review requests, invites; test with **Send test
-email** on `/-/admin`) go through Cloudflare Email Service via the `EMAIL`
-binding, from `EMAIL_FROM` or `Forge <forge@<PUBLIC_URL host>>`. Without
-`PUBLIC_URL` or `EMAIL_FROM` they are off. Onboard the sender domain (it must
-use Cloudflare DNS) once:
+Emails (notification digests, mentions, review requests, invites) are off
+until you add an email binding. To send through Cloudflare Email Service,
+onboard the sender domain (it must use Cloudflare DNS) once:
 
 ```sh
 npx wrangler@4 email sending enable git.example.com
 ```
 
-or in the dashboard (Compute > Email Service > Email Sending > Onboard Domain),
-or with the API: `POST /zones/{zone_id}/email/sending/subdomains`, then the
+then add to `wrangler.toml` and deploy:
+
+```toml
+[[send_email]]
+name = "EMAIL"
+```
+
+Mail goes out from `EMAIL_FROM` or `Forge <forge@<PUBLIC_URL host>>`; test
+with **Send test email** on `/-/admin`. Onboarding also works in the
+dashboard (Compute > Email Service > Email Sending > Onboard Domain) or with
+the API: `POST /zones/{zone_id}/email/sending/subdomains`, then the
 records from `GET …/subdomains/{id}/dns`. It adds MX, SPF and DKIM on
 `cf-bounce.<domain>` and DMARC on `_dmarc.<domain>`.
 

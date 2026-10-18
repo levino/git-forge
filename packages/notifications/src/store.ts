@@ -176,7 +176,7 @@ export const createNotificationStore = (db: Database, now: () => number = Date.n
       first<RepositoryRow>(
         db,
         sql(
-          'SELECT r.id, r.name, r.visibility, r.owner_id, a.login AS owner_login, a.kind AS owner_kind, r.created_at FROM repositories r JOIN accounts a ON a.id = r.owner_id WHERE a.login = ? AND r.name = ?',
+          'SELECT r.id, r.name, r.visibility, r.owner_id, a.login AS owner_login, a.kind AS owner_kind, r.created_at FROM repositories r JOIN accounts a ON a.id = r.owner_id WHERE a.login = ? AND r.name = ? AND r.deleted_at IS NULL',
           owner,
           name,
         ),

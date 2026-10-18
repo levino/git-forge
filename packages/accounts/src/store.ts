@@ -1,4 +1,4 @@
-import { isValidName } from '@git-forge/core'
+import { isValidName, LOCATION_CACHE_MS, type RepositoryLocation, type RepositoryName } from '@git-forge/core'
 import { type Database, first, sql, type Statement } from './database.ts'
 import { randomId } from './encoding.ts'
 import { normalizeIssuer, type TrustedIssuer } from './federation.ts'
@@ -101,6 +101,10 @@ type RepositoryRow = {
   owner_login: string
   owner_kind: OwnerKind
   default_repository_role: Role | null
+  description: string | null
+  homepage: string | null
+  topics: string
+  archived_at: number | null
 }
 
 type TokenRow = {
@@ -203,10 +207,78 @@ const toSubject = (row: RepositoryRow): RepositorySubject => ({
   ownerKind: row.owner_kind,
   visibility: row.visibility,
   defaultRole: row.default_repository_role,
+  description: row.description,
+  homepage: row.homepage,
+  topics: JSON.parse(row.topics) as string[],
+  archived: row.archived_at !== null,
 })
 
-const REPOSITORY_SELECT = `SELECT r.id, r.name, r.visibility, r.owner_id, a.login AS owner_login, a.kind AS owner_kind, a.default_repository_role
+const REPOSITORY_SELECT = `SELECT r.id, r.name, r.visibility, r.owner_id, a.login AS owner_login, a.kind AS owner_kind, a.default_repository_role, r.description, r.homepage, r.topics, r.archived_at
 FROM repositories r JOIN accounts a ON a.id = r.owner_id`
+
+const LIVE = 'r.deleted_at IS NULL AND a.disabled_at IS NULL'
+
+const STORAGE_PATH = "COALESCE(r.storage_path, a.login || '/' || r.name)"
+
+const ACTIONS_TABLES = ['actions_runs', 'actions_runners', 'actions_tokens', 'actions_secrets', 'actions_environments', 'actions_schedules']
+
+const MIRROR_TABLES = ['mirror_subscriptions', 'mirror_attestations', 'ref_checksums', 'mirror_spot_checks']
+
+export const DELETE_GRACE_MS = 7 * 24 * 60 * 60 * 1000
+
+export const MOVE_HOLD_MS = 4 * LOCATION_CACHE_MS
+
+const repositoryReferences = (from: RepositoryName, to: RepositoryName): Statement[] => [
+  ...ACTIONS_TABLES.map((table) => sql(`UPDATE OR REPLACE ${table} SET owner = ?, repo = ? WHERE lower(owner) = lower(?) AND lower(repo) = lower(?)`, to.owner, to.name, from.owner, from.name)),
+  ...MIRROR_TABLES.map((table) => sql(`UPDATE OR REPLACE ${table} SET repository = ? WHERE repository = ?`, `${to.owner}/${to.name}`, `${from.owner}/${from.name}`)),
+]
+
+const ownerReferences = (from: string, to: string): Statement[] => [
+  ...ACTIONS_TABLES.map((table) => sql(`UPDATE OR REPLACE ${table} SET owner = ? WHERE lower(owner) = lower(?)`, to, from)),
+  ...MIRROR_TABLES.map((table) =>
+    sql(`UPDATE OR REPLACE ${table} SET repository = ? || substr(repository, ?) WHERE lower(substr(repository, 1, ?)) = lower(?)`, to, from.length + 1, from.length + 1, `${from}/`),
+  ),
+]
+
+const redirectRepository = (owner: string, name: string, repositoryId: string, at: number): Statement =>
+  sql(
+    'INSERT INTO repository_redirects (owner, name, repository_id, created_at) VALUES (?, ?, ?, ?) ON CONFLICT (owner, name) DO UPDATE SET repository_id = excluded.repository_id, created_at = excluded.created_at',
+    owner,
+    name,
+    repositoryId,
+    at,
+  )
+
+const freeRepositoryName = (ownerId: string, owner: string, name: string, at: number): Statement[] => [
+  sql("UPDATE repositories SET name = name || '~' || id WHERE owner_id = ? AND name = ? AND deleted_at IS NOT NULL AND deleted_at <= ?", ownerId, name, at - DELETE_GRACE_MS),
+  sql('DELETE FROM repository_redirects WHERE owner = ? AND name = ?', owner, name),
+]
+
+export type RepositoryMetadata = { readonly description?: string | null; readonly homepage?: string | null; readonly topics?: readonly string[] }
+
+const TOPIC = /^[a-z0-9][a-z0-9-]{0,49}$/
+
+export const parseRepositoryMetadata = (input: Record<string, unknown>): RepositoryMetadata => {
+  const text = (key: string, max: number): string | null | undefined => {
+    const value = input[key]
+    if (value === undefined) return undefined
+    if (value === null || value === '') return null
+    if (typeof value !== 'string' || value.length > max) throw new AccountsError(`${key} must be a string of at most ${max} characters`)
+    return value.trim() || null
+  }
+  const description = text('description', 350)
+  const homepage = text('homepage', 255)
+  if (homepage && !/^https?:\/\/[^\s]+$/i.test(homepage)) throw new AccountsError('homepage must be an http(s) URL')
+  const topics = input.topics
+  if (topics !== undefined && (!Array.isArray(topics) || topics.length > 20 || !topics.every((topic) => typeof topic === 'string' && TOPIC.test(topic.toLowerCase())))) {
+    throw new AccountsError('topics must be at most 20 lowercase names of letters, digits and hyphens')
+  }
+  return {
+    ...(description !== undefined ? { description } : {}),
+    ...(homepage !== undefined ? { homepage } : {}),
+    ...(topics !== undefined ? { topics: [...new Set((topics as string[]).map((topic) => topic.toLowerCase()))] } : {}),
+  }
+}
 
 export const auditStatement = (actor: AuditActor, entry: AuditInput, at: number): Statement =>
   sql(
@@ -258,6 +330,7 @@ export const createAccountsStore = (db: Database, options: AccountsStoreOptions 
         input.defaultRepositoryRole ?? null,
         now(),
       ),
+      sql('DELETE FROM account_redirects WHERE login = ?', input.login),
     ])
     return { id }
   }
@@ -488,7 +561,7 @@ export const createAccountsStore = (db: Database, options: AccountsStoreOptions 
     listTeamRepositories: async (teamId: string): Promise<{ readonly id: string; readonly name: string; readonly role: Role }[]> =>
       (
         await db.all<{ id: string; name: string; role: string }>(
-          sql('SELECT r.id, r.name, t.role FROM repository_teams t JOIN repositories r ON r.id = t.repository_id WHERE t.team_id = ? ORDER BY r.name', teamId),
+          sql('SELECT r.id, r.name, t.role FROM repository_teams t JOIN repositories r ON r.id = t.repository_id WHERE t.team_id = ? AND r.deleted_at IS NULL ORDER BY r.name', teamId),
         )
       ).flatMap((row) => (isRole(row.role) ? [{ id: row.id, name: row.name, role: row.role }] : [])),
 
@@ -515,19 +588,134 @@ export const createAccountsStore = (db: Database, options: AccountsStoreOptions 
     },
 
     createRepository: async (
-      input: { readonly ownerId: string; readonly name: string; readonly visibility: Visibility },
+      input: { readonly ownerId: string; readonly name: string; readonly visibility: Visibility; readonly storagePath?: string },
       actor: AuditActor = SYSTEM,
     ): Promise<{ readonly id: string }> => {
       if (!isValidName(input.name)) throw new AccountsError(`invalid repository name ${input.name}`)
       if (input.visibility !== 'public' && input.visibility !== 'private') throw new AccountsError(`invalid visibility ${String(input.visibility)}`)
-      const owner = await first(db, sql('SELECT 1 AS ok FROM accounts WHERE id = ?', input.ownerId))
+      const owner = await first<{ login: string }>(db, sql('SELECT login FROM accounts WHERE id = ?', input.ownerId))
       if (!owner) throw new AccountsError(`no account ${input.ownerId}`)
       const id = randomId()
+      const at = now()
       await write(actor, { action: 'repository.create', subjectKind: 'repository', subjectId: id, repositoryId: id, data: { name: input.name, visibility: input.visibility } }, [
-        sql('INSERT INTO repositories (id, owner_id, name, visibility, created_at) VALUES (?, ?, ?, ?, ?)', id, input.ownerId, input.name, input.visibility, now()),
+        ...freeRepositoryName(input.ownerId, owner.login, input.name, at),
+        sql(
+          'INSERT INTO repositories (id, owner_id, name, visibility, created_at, storage_path) VALUES (?, ?, ?, ?, ?, ?)',
+          id,
+          input.ownerId,
+          input.name,
+          input.visibility,
+          at,
+          input.storagePath ?? `${owner.login}/${input.name}`,
+        ),
       ])
       return { id }
     },
+
+    repositoryNameBlock: async (ownerId: string, name: string, self: string | null = null): Promise<string | null> => {
+      const owner = await first<{ login: string }>(db, sql('SELECT login FROM accounts WHERE id = ?', ownerId))
+      if (!owner) return `no account ${ownerId}`
+      const at = now()
+      const taken = await first<{ id: string; deleted_at: number | null }>(db, sql('SELECT id, deleted_at FROM repositories WHERE owner_id = ? AND name = ? AND (deleted_at IS NULL OR deleted_at > ?)', ownerId, name, at - DELETE_GRACE_MS))
+      if (taken && taken.id !== self) return taken.deleted_at === null ? `${owner.login}/${name} already exists` : `${owner.login}/${name} was deleted recently; the name is free again after ${new Date(taken.deleted_at + DELETE_GRACE_MS).toISOString()}`
+      const moved = await first<{ repository_id: string }>(db, sql('SELECT repository_id FROM repository_redirects WHERE owner = ? AND name = ? AND created_at > ?', owner.login, name, at - MOVE_HOLD_MS))
+      return moved && moved.repository_id !== self ? `${owner.login}/${name} was renamed a moment ago; try again in a few minutes` : null
+    },
+
+    storagePathClaimed: async (path: string): Promise<boolean> => (await first(db, sql('SELECT 1 AS ok FROM repositories WHERE storage_path = ?', path))) !== null,
+
+    locateRepository: async (owner: string, name: string): Promise<RepositoryLocation | null> => {
+      const row = await first<{ path: string | null; live: number }>(
+        db,
+        sql(
+          `SELECT path, live FROM (
+             SELECT ${STORAGE_PATH} AS path, 1 AS live, 0 AS rank FROM repositories r JOIN accounts a ON a.id = r.owner_id WHERE a.login = ? AND r.name = ? AND ${LIVE}
+             UNION ALL SELECT ${STORAGE_PATH}, 0, 1 FROM repository_redirects d JOIN repositories r ON r.id = d.repository_id JOIN accounts a ON a.id = r.owner_id WHERE d.owner = ? AND d.name = ? AND ${LIVE}
+             UNION ALL SELECT NULL, 0, 2 FROM repositories r WHERE r.storage_path = ?
+           ) ORDER BY rank LIMIT 1`,
+          owner,
+          name,
+          owner,
+          name,
+          `${owner}/${name}`,
+        ),
+      )
+      return row ? { path: row.path, live: row.live === 1 } : null
+    },
+
+    repositoryRedirect: async (owner: string, name: string): Promise<RepositorySubject | null> => {
+      const row = await first<RepositoryRow>(db, sql(`${REPOSITORY_SELECT} JOIN repository_redirects d ON d.repository_id = r.id WHERE d.owner = ? AND d.name = ? AND ${LIVE}`, owner, name))
+      return row ? toSubject(row) : null
+    },
+
+    accountRedirect: async (login: string): Promise<string | null> =>
+      (await first<{ login: string }>(db, sql('SELECT a.login FROM account_redirects d JOIN accounts a ON a.id = d.account_id WHERE d.login = ? AND a.disabled_at IS NULL', login)))?.login ?? null,
+
+    setRepositoryMetadata: async (repositoryId: string, metadata: RepositoryMetadata, actor: AuditActor = SYSTEM): Promise<void> => {
+      const columns = Object.entries({ description: metadata.description, homepage: metadata.homepage, topics: metadata.topics && JSON.stringify(metadata.topics) }).filter(([, value]) => value !== undefined)
+      if (columns.length === 0) return
+      await write(actor, { action: 'repository.metadata', subjectKind: 'repository', subjectId: repositoryId, repositoryId, data: { ...metadata } }, [
+        sql(`UPDATE repositories SET ${columns.map(([column]) => `${column} = ?`).join(', ')} WHERE id = ?`, ...columns.map(([, value]) => value as string | null), repositoryId),
+      ])
+    },
+
+    setRepositoryArchived: async (repositoryId: string, archived: boolean, actor: AuditActor = SYSTEM): Promise<void> => {
+      await write(actor, { action: archived ? 'repository.archive' : 'repository.unarchive', subjectKind: 'repository', subjectId: repositoryId, repositoryId }, [
+        sql('UPDATE repositories SET archived_at = ? WHERE id = ?', archived ? now() : null, repositoryId),
+      ])
+    },
+
+    deleteRepository: async (repositoryId: string, actor: AuditActor = SYSTEM): Promise<void> => {
+      await write(actor, { action: 'repository.delete', subjectKind: 'repository', subjectId: repositoryId, repositoryId }, [
+        sql('UPDATE repositories SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL', now(), repositoryId),
+      ])
+    },
+
+    moveRepository: async (repository: RepositorySubject, target: { readonly ownerId: string; readonly owner: string; readonly name: string }, actor: AuditActor = SYSTEM): Promise<void> => {
+      if (!isValidName(target.name)) throw new AccountsError(`invalid repository name ${target.name}`)
+      const at = now()
+      await write(
+        actor,
+        { action: 'repository.move', subjectKind: 'repository', subjectId: repository.id, repositoryId: repository.id, data: { from: `${repository.owner}/${repository.name}`, to: `${target.owner}/${target.name}` } },
+        [
+          sql('UPDATE repositories SET storage_path = ? WHERE id = ? AND storage_path IS NULL', `${repository.owner}/${repository.name}`, repository.id),
+          redirectRepository(repository.owner, repository.name, repository.id, at),
+          ...freeRepositoryName(target.ownerId, target.owner, target.name, at),
+          sql('UPDATE repositories SET owner_id = ?, name = ? WHERE id = ?', target.ownerId, target.name, repository.id),
+          ...repositoryReferences(repository, target),
+        ],
+      )
+    },
+
+    renameAccount: async (accountId: string, login: string, actor: AuditActor = SYSTEM): Promise<void> => {
+      requireLogin(login)
+      const account = await first<{ login: string }>(db, sql('SELECT login FROM accounts WHERE id = ?', accountId))
+      if (!account) throw new AccountsError(`no account ${accountId}`)
+      const at = now()
+      await write(actor, { action: 'account.rename', subjectKind: 'account', subjectId: accountId, data: { from: account.login, to: login } }, [
+        sql('UPDATE repositories SET storage_path = ? || \'/\' || name WHERE owner_id = ? AND storage_path IS NULL', account.login, accountId),
+        sql(
+          'INSERT INTO account_redirects (login, account_id, created_at) VALUES (?, ?, ?) ON CONFLICT (login) DO UPDATE SET account_id = excluded.account_id, created_at = excluded.created_at',
+          account.login,
+          accountId,
+          at,
+        ),
+        sql('DELETE FROM account_redirects WHERE login = ?', login),
+        sql(
+          `INSERT INTO repository_redirects (owner, name, repository_id, created_at) SELECT ?, name, id, ? FROM repositories WHERE owner_id = ? AND deleted_at IS NULL
+           ON CONFLICT (owner, name) DO UPDATE SET repository_id = excluded.repository_id, created_at = excluded.created_at`,
+          account.login,
+          at,
+          accountId,
+        ),
+        sql('DELETE FROM repository_redirects WHERE owner = ? AND name IN (SELECT name FROM repositories WHERE owner_id = ? AND deleted_at IS NULL)', login, accountId),
+        sql('UPDATE accounts SET login = ? WHERE id = ?', login, accountId),
+        ...ownerReferences(account.login, login),
+      ])
+    },
+
+    loginMoveBlock: async (login: string): Promise<boolean> =>
+      (await first(db, sql('SELECT 1 AS ok FROM repository_redirects WHERE owner = ? AND created_at > ?', login, now() - MOVE_HOLD_MS))) !== null,
 
     setRepositoryVisibility: async (repositoryId: string, visibility: Visibility, actor: AuditActor = SYSTEM): Promise<void> => {
       await write(actor, { action: 'repository.visibility', subjectKind: 'repository', subjectId: repositoryId, repositoryId, data: { visibility } }, [
@@ -536,19 +724,19 @@ export const createAccountsStore = (db: Database, options: AccountsStoreOptions 
     },
 
     findRepository: async (owner: string, name: string): Promise<RepositorySubject | null> => {
-      const row = await first<RepositoryRow>(db, sql(`${REPOSITORY_SELECT} WHERE a.login = ? AND r.name = ? AND a.disabled_at IS NULL`, owner, name))
+      const row = await first<RepositoryRow>(db, sql(`${REPOSITORY_SELECT} WHERE a.login = ? AND r.name = ? AND ${LIVE}`, owner, name))
       return row ? toSubject(row) : null
     },
 
     listRepositories: async (): Promise<RepositorySubject[]> =>
-      (await db.all<RepositoryRow>(sql(`${REPOSITORY_SELECT} WHERE a.disabled_at IS NULL ORDER BY a.login, r.name`))).map(toSubject),
+      (await db.all<RepositoryRow>(sql(`${REPOSITORY_SELECT} WHERE ${LIVE} ORDER BY a.login, r.name`))).map(toSubject),
 
     bootstrapInstanceAdmin: async (input: { readonly login: string; readonly email?: string }): Promise<{ readonly id: string } | null> => {
       requireLogin(input.login)
       const id = randomId()
       const at = now()
       const entry = auditStatement(SYSTEM, { action: 'instance.bootstrap', subjectKind: 'user', subjectId: id, data: { login: input.login } }, at)
-      const results = await db.batch([
+      await db.batch([
         sql(
           `INSERT INTO accounts (id, kind, login, email, created_at) SELECT ?, 'user', ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM instance_admins)`,
           id,
@@ -564,7 +752,7 @@ export const createAccountsStore = (db: Database, options: AccountsStoreOptions 
         ),
         sql(`${entry.sql.replace('VALUES (?, ?, ?, ?, ?, ?, ?, ?)', 'SELECT ?, ?, ?, ?, ?, ?, ?, ?')} WHERE EXISTS (SELECT 1 FROM instance_admins WHERE user_id = ?)`, ...entry.params, id),
       ])
-      return results[1]!.changes === 1 ? { id } : null
+      return (await first(db, sql('SELECT 1 AS ok FROM instance_admins WHERE user_id = ?', id))) ? { id } : null
     },
 
     setInstanceAdmin: async (userId: string, admin: boolean, actor: AuditActor = SYSTEM): Promise<void> => {

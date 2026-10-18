@@ -22,6 +22,10 @@ const userRepo = (visibility: 'public' | 'private'): RepositorySubject => ({
   ownerKind: 'user',
   visibility,
   defaultRole: null,
+  description: null,
+  homepage: null,
+  topics: [],
+  archived: false,
 })
 
 const orgRepo = (visibility: 'public' | 'private', defaultRole: Role | null = null): RepositorySubject => ({
@@ -32,6 +36,10 @@ const orgRepo = (visibility: 'public' | 'private', defaultRole: Role | null = nu
   ownerKind: 'organization',
   visibility,
   defaultRole,
+  description: null,
+  homepage: null,
+  topics: [],
+  archived: false,
 })
 
 const grants = (overrides: Partial<Grants>): Grants => ({ ...NO_GRANTS, ...overrides })

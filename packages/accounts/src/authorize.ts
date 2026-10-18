@@ -3,6 +3,7 @@ import { fromUtf8, base64UrlDecode } from './encoding.ts'
 import { looksLikeJwt } from './jwt.ts'
 import {
   ANONYMOUS,
+  archivedBlocks,
   type Decision,
   decide,
   type Grants,
@@ -12,7 +13,7 @@ import {
   type RepositorySubject,
   resolveAccess,
 } from './permissions.ts'
-import type { Access, Role } from './roles.ts'
+import { type Access, atLeast, type Role } from './roles.ts'
 
 export const REALM = 'git-forge'
 
@@ -81,7 +82,7 @@ export const checkRepositoryAccess = async (
   const usable = principal.kind !== 'instance' || principal.scopes.includes(`${surface}:read`)
   const grants = usable ? await directory.grantsFor(principal, repository) : NO_GRANTS
   const access = resolveAccess(principal, repository, grants)
-  return { decision: decide(principal, access, required), access, repository }
+  return { decision: archivedBlocks(repository, required) && atLeast(access, required) ? 'forbidden' : decide(principal, access, required), access, repository }
 }
 
 const plain = (status: number, body: string, headers: Record<string, string> = {}) =>
@@ -89,13 +90,14 @@ const plain = (status: number, body: string, headers: Record<string, string> = {
 
 export const challenge = (message = 'authentication required\n') => plain(401, message, { 'WWW-Authenticate': `Basic realm="${REALM}"` })
 
-export const decisionResponse = (decision: Decision, principal: Principal): Response | null => {
+export const decisionResponse = (decision: Decision, principal: Principal, repository: RepositorySubject | null = null): Response | null => {
   switch (decision) {
     case 'allow':
       return null
     case 'unauthenticated':
       return challenge()
     case 'forbidden':
+      if (repository?.archived) return plain(403, 'this repository is archived and read-only\n')
       return plain(403, principal.kind === 'user' ? `permission denied to ${principal.login}\n` : 'permission denied\n')
     case 'not-found':
       return plain(404, 'repository not found\n')
@@ -106,5 +108,5 @@ export const createGitAuthorizer = (options: AuthenticateOptions): Authorize => 
   const principal = await authenticateRequest(request, options)
   if (!principal) return challenge('invalid credentials\n')
   const check = await checkRepositoryAccess(options.directory, principal, repo, access === 'write' ? 'write' : 'read', surface)
-  return decisionResponse(check.decision, principal)
+  return decisionResponse(check.decision, principal, check.repository)
 }

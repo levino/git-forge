@@ -1,6 +1,6 @@
 import { concat, utf8 } from './bytes.ts'
 import { isObjectId, type ObjectId } from './hash.ts'
-import { parseTag } from './objects.ts'
+import { parseCommit, parseTag } from './objects.ts'
 import { writePack } from './pack.ts'
 import { DELIM, FLUSH, packetText, parsePackets, pkt, sideband, SIDEBAND_DATA, SIDEBAND_ERROR, SIDEBAND_PROGRESS } from './pktline.ts'
 import { AGENT } from './receive-pack.ts'
@@ -15,7 +15,7 @@ export const advertiseUploadPackV2 = (): Uint8Array =>
     pkt('version 2\n'),
     pkt(`agent=${AGENT}\n`),
     pkt('ls-refs=unborn\n'),
-    pkt('fetch\n'),
+    pkt('fetch=shallow\n'),
     pkt('server-option\n'),
     pkt('object-format=sha1\n'),
     FLUSH,
@@ -75,17 +75,80 @@ const lsRefs = async (state: AdvertisedRefs, odb: ObjectDatabase, args: readonly
 
 const errorResponse = (message: string): Uint8Array => concat([pkt(`ERR ${message}\n`), FLUSH])
 
+const shallowWalk = async (odb: ObjectDatabase, wants: Iterable<ObjectId>, depth: number): Promise<{ readonly commits: ObjectId[]; readonly tags: ObjectId[]; readonly boundary: Set<ObjectId> }> => {
+  const tags: ObjectId[] = []
+  let level: ObjectId[] = []
+  for (let id of wants) {
+    for (;;) {
+      const object = await odb.read(id)
+      if (!object) throw new MissingObjectError(id)
+      if (object.type !== 'tag') {
+        if (object.type === 'commit') level.push(id)
+        break
+      }
+      tags.push(id)
+      id = parseTag(object.data).object
+    }
+  }
+  const seen = new Set<ObjectId>()
+  const commits: ObjectId[] = []
+  const boundary = new Set<ObjectId>()
+  for (let current = 1; level.length > 0; current++) {
+    const next: ObjectId[] = []
+    for (const id of level) {
+      if (seen.has(id)) continue
+      seen.add(id)
+      commits.push(id)
+      const object = await odb.read(id)
+      if (!object) throw new MissingObjectError(id)
+      const { parents } = parseCommit(object.data)
+      if (current >= depth) {
+        if (parents.length > 0) boundary.add(id)
+      } else next.push(...parents)
+    }
+    level = next
+  }
+  return { commits, tags, boundary }
+}
+
+const relativeWalk = async (
+  odb: ObjectDatabase,
+  wants: Iterable<ObjectId>,
+  clientShallow: ReadonlySet<ObjectId>,
+  depth: number,
+  excluded: ReadonlySet<ObjectId>,
+  behindShallow: ReadonlySet<ObjectId>,
+): Promise<{ readonly commits: ObjectId[]; readonly tags: ObjectId[]; readonly boundary: Set<ObjectId> }> => {
+  const beyond = await shallowWalk(odb, clientShallow, depth + 1)
+  const commits = new Set(beyond.commits)
+  const tags: ObjectId[] = []
+  for (const id of await reachable(odb, wants, (candidate) => excluded.has(candidate) || behindShallow.has(candidate) || commits.has(candidate))) {
+    const object = await odb.read(id)
+    if (object?.type === 'commit') commits.add(id)
+    else if (object?.type === 'tag') tags.push(id)
+  }
+  return { commits: [...commits], tags, boundary: beyond.boundary }
+}
+
 const fetch = async (state: AdvertisedRefs, odb: ObjectDatabase, args: readonly string[]): Promise<Uint8Array> => {
   const wants = new Set<ObjectId>()
   const haves: ObjectId[] = []
+  const clientShallow = new Set<ObjectId>()
+  let depth: number | undefined
+  let relative = false
   let done = false
   const noProgress = args.includes('no-progress')
   for (const arg of args) {
     if (arg.startsWith('want ')) wants.add(arg.slice(5))
     else if (arg.startsWith('have ')) haves.push(arg.slice(5))
     else if (arg === 'done') done = true
-    else if (arg.startsWith('deepen') || arg.startsWith('shallow ') || arg.startsWith('filter ')) {
-      return errorResponse('shallow and partial clones are not supported')
+    else if (arg.startsWith('shallow ')) clientShallow.add(arg.slice(8))
+    else if (arg.startsWith('deepen ')) {
+      depth = Number(arg.slice(7))
+      if (!Number.isSafeInteger(depth) || depth < 1) return errorResponse(`invalid depth ${arg.slice(7)}`)
+    } else if (arg === 'deepen-relative') relative = true
+    else if (arg.startsWith('deepen') || arg.startsWith('filter ')) {
+      return errorResponse('only "deepen <depth>" shallow fetches are supported; partial clones are not')
     }
   }
   for (const id of wants) {
@@ -102,8 +165,38 @@ const fetch = async (state: AdvertisedRefs, odb: ObjectDatabase, args: readonly 
   }
   let ids: ObjectId[]
   try {
-    const excluded = new Set(await reachable(odb, common))
-    ids = await reachable(odb, wants, (id) => excluded.has(id))
+    const behindShallow = new Set<ObjectId>()
+    for (const id of clientShallow) {
+      const object = isObjectId(id) ? await odb.read(id) : null
+      if (object?.type === 'commit') for (const parent of parseCommit(object.data).parents) behindShallow.add(parent)
+    }
+    const excluded = new Set(await reachable(odb, common, (id) => behindShallow.has(id)))
+    if (depth !== undefined || clientShallow.size > 0) {
+      const walk = depth === undefined ? null : relative ? await relativeWalk(odb, wants, clientShallow, depth, excluded, behindShallow) : await shallowWalk(odb, wants, depth)
+      const lines: Uint8Array[] = []
+      if (walk) {
+        for (const id of walk.boundary) if (!clientShallow.has(id)) lines.push(pkt(`shallow ${id}\n`))
+        for (const id of clientShallow) if (walk.commits.includes(id) && !walk.boundary.has(id)) lines.push(pkt(`unshallow ${id}\n`))
+      }
+      sections.push(pkt('shallow-info\n'), ...lines, DELIM)
+      if (walk) {
+        const sent = new Set<ObjectId>()
+        ids = []
+        for (const id of [...walk.tags, ...walk.commits]) {
+          if (excluded.has(id) && !clientShallow.has(id)) continue
+          if (!excluded.has(id)) {
+            sent.add(id)
+            ids.push(id)
+          }
+          const object = await odb.read(id)
+          if (object?.type !== 'commit') continue
+          for (const treeObject of await reachable(odb, [parseCommit(object.data).tree], (candidate) => sent.has(candidate) || excluded.has(candidate))) {
+            sent.add(treeObject)
+            ids.push(treeObject)
+          }
+        }
+      } else ids = await reachable(odb, wants, (id) => excluded.has(id) || behindShallow.has(id))
+    } else ids = await reachable(odb, wants, (id) => excluded.has(id))
     if (args.includes('include-tag')) {
       const sent = new Set(ids)
       for (const [, id] of sortedRefs(state)) {

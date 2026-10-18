@@ -2,6 +2,7 @@ import { fromUtf8 } from './bytes.ts'
 import type { ObjectId } from './hash.ts'
 import { isTreeMode, parseCommit, parseTree } from './objects.ts'
 import type { ObjectDatabase } from './repository.ts'
+import { parseCron } from './cron.ts'
 import { parseYaml, YamlError, type YamlValue } from './yaml.ts'
 
 export type WorkflowEnv = Readonly<Record<string, string>>
@@ -11,8 +12,8 @@ type StepCommon = {
   readonly name?: string
   readonly if?: string
   readonly env: WorkflowEnv
-  readonly continueOnError: boolean
-  readonly timeoutMinutes?: number
+  readonly continueOnError: boolean | string
+  readonly timeoutMinutes?: number | string
 }
 
 export type RunStep = StepCommon & {
@@ -30,12 +31,40 @@ export type UsesStep = StepCommon & {
 
 export type WorkflowStep = RunStep | UsesStep
 
+export type RunDefaults = {
+  readonly shell?: string
+  readonly workingDirectory?: string
+}
+
+export type JobStrategy = {
+  readonly matrix: YamlValue
+  readonly failFast: YamlValue
+  readonly maxParallel?: YamlValue
+}
+
+export type JobEnvironment = {
+  readonly name: string
+  readonly url?: string
+}
+
+export type Concurrency = {
+  readonly group: string
+  readonly cancelInProgress: YamlValue
+}
+
 export type WorkflowJob = {
   readonly id: string
   readonly name: string
+  readonly explicitName: boolean
+  readonly if?: string
   readonly runsOn: readonly string[]
   readonly needs: readonly string[]
   readonly env: WorkflowEnv
+  readonly defaults: RunDefaults
+  readonly outputs: WorkflowEnv
+  readonly strategy?: JobStrategy
+  readonly environment?: JobEnvironment
+  readonly continueOnError: boolean | string
   readonly timeoutMinutes: number
   readonly steps: readonly WorkflowStep[]
 }
@@ -47,14 +76,29 @@ export type BranchFilter = {
   readonly tagsIgnore?: readonly string[]
 }
 
+export type DispatchInputType = 'string' | 'boolean' | 'number' | 'choice' | 'environment'
+
+export type DispatchInput = {
+  readonly description?: string
+  readonly required: boolean
+  readonly default?: string | number | boolean
+  readonly type: DispatchInputType
+  readonly options?: readonly string[]
+}
+
 export type WorkflowTrigger = BranchFilter & {
   readonly event: string
+  readonly types?: readonly string[]
+  readonly inputs?: Readonly<Record<string, DispatchInput>>
+  readonly crons?: readonly string[]
 }
 
 export type Workflow = {
   readonly name?: string
   readonly triggers: readonly WorkflowTrigger[]
   readonly env: WorkflowEnv
+  readonly defaults: RunDefaults
+  readonly concurrency?: Concurrency
   readonly jobs: readonly WorkflowJob[]
 }
 
@@ -75,9 +119,19 @@ const JOB_ID = /^[A-Za-z_][A-Za-z0-9_-]*$/
 
 const DEFAULT_TIMEOUT_MINUTES = 360
 
-const WORKFLOW_KEYS = new Set(['name', 'on', 'env', 'jobs', 'permissions'])
+const WORKFLOW_KEYS = new Set(['name', 'on', 'env', 'defaults', 'concurrency', 'jobs', 'permissions'])
 
-const JOB_KEYS = new Set(['name', 'runs-on', 'needs', 'env', 'timeout-minutes', 'steps', 'permissions'])
+const JOB_KEYS = new Set(['name', 'if', 'runs-on', 'needs', 'env', 'defaults', 'outputs', 'strategy', 'environment', 'continue-on-error', 'timeout-minutes', 'steps', 'permissions'])
+
+const STRATEGY_KEYS = new Set(['matrix', 'fail-fast', 'max-parallel'])
+
+const INPUT_TYPES: ReadonlySet<string> = new Set(['string', 'boolean', 'number', 'choice', 'environment'])
+
+const TRIGGER_FILTER_KEYS: Readonly<Record<string, ReadonlySet<string>>> = {
+  push: new Set(['branches', 'branches-ignore', 'tags', 'tags-ignore']),
+  pull_request: new Set(['branches', 'branches-ignore', 'types']),
+  workflow_dispatch: new Set(['inputs']),
+}
 
 const STEP_KEYS = new Set(['id', 'name', 'if', 'env', 'continue-on-error', 'timeout-minutes', 'run', 'shell', 'working-directory', 'uses', 'with'])
 
@@ -126,6 +180,39 @@ class Collector {
     return undefined
   }
 
+  booleanish(value: YamlValue | undefined, path: string): boolean | string {
+    if (value === undefined || value === null) return false
+    if (typeof value === 'boolean') return value
+    if (typeof value === 'string' && /\$\{\{[\s\S]*\}\}/.test(value)) return value
+    this.fail(path, 'expected true, false or an expression')
+    return false
+  }
+
+  minutes(value: YamlValue | undefined, path: string): number | string | undefined {
+    if (typeof value === 'string' && /\$\{\{[\s\S]*\}\}/.test(value)) return value
+    return this.positiveNumber(value, path)
+  }
+
+  defaults(value: YamlValue | undefined, path: string): RunDefaults {
+    if (value === undefined || value === null) return {}
+    if (!isMapping(value)) {
+      this.fail(path, 'expected a mapping')
+      return {}
+    }
+    this.unsupported(value, new Set(['run']), path)
+    const run = value['run']
+    if (run === undefined || run === null) return {}
+    if (!isMapping(run)) {
+      this.fail(`${path}.run`, 'expected a mapping')
+      return {}
+    }
+    this.unsupported(run, new Set(['shell', 'working-directory']), `${path}.run`)
+    return {
+      ...optional('shell', this.scalarString(run['shell'], `${path}.run.shell`)),
+      ...optional('workingDirectory', this.scalarString(run['working-directory'], `${path}.run.working-directory`)),
+    }
+  }
+
   condition(value: YamlValue | undefined, path: string): string | undefined {
     const text = this.scalarString(value, path)
     if (text === undefined) return undefined
@@ -149,16 +236,70 @@ const parseTriggers = (value: YamlValue | undefined, c: Collector): WorkflowTrig
     return []
   }
   return Object.entries(value).map(([event, filter]) => {
+    if (event === 'schedule') return { event, crons: parseSchedule(filter, c) }
     if (!isMapping(filter)) return { event }
     const path = `on.${event}`
+    const allowed = TRIGGER_FILTER_KEYS[event]
+    if (allowed) c.unsupported(filter, allowed, path)
     return {
       event,
       ...optional('branches', c.stringList(filter['branches'], `${path}.branches`)),
       ...optional('branchesIgnore', c.stringList(filter['branches-ignore'], `${path}.branches-ignore`)),
       ...optional('tags', c.stringList(filter['tags'], `${path}.tags`)),
       ...optional('tagsIgnore', c.stringList(filter['tags-ignore'], `${path}.tags-ignore`)),
+      ...optional('types', c.stringList(filter['types'], `${path}.types`)),
+      ...optional('inputs', event === 'workflow_dispatch' ? parseInputs(filter['inputs'], `${path}.inputs`, c) : undefined),
     }
   })
+}
+
+const parseSchedule = (value: YamlValue | undefined, c: Collector): string[] => {
+  if (!Array.isArray(value) || value.length === 0) {
+    c.fail('on.schedule', 'expected a list of { cron } entries')
+    return []
+  }
+  return value.flatMap((entry, index) => {
+    const cron = isMapping(entry) ? c.scalarString(entry['cron'], `on.schedule[${index}].cron`) : undefined
+    if (cron === undefined) {
+      c.fail(`on.schedule[${index}]`, 'expected a mapping with "cron"')
+      return []
+    }
+    try {
+      parseCron(cron)
+    } catch (error) {
+      c.fail(`on.schedule[${index}].cron`, (error as Error).message)
+      return []
+    }
+    return [cron]
+  })
+}
+
+const parseInputs = (value: YamlValue | undefined, path: string, c: Collector): Record<string, DispatchInput> | undefined => {
+  if (value === undefined || value === null) return undefined
+  if (!isMapping(value)) {
+    c.fail(path, 'expected a mapping')
+    return undefined
+  }
+  const inputs: Record<string, DispatchInput> = {}
+  for (const [name, spec] of Object.entries(value)) {
+    const inputPath = `${path}.${name}`
+    const definition = isMapping(spec) ? spec : {}
+    if (spec !== null && !isMapping(spec)) c.fail(inputPath, 'expected a mapping')
+    c.unsupported(definition, new Set(['description', 'required', 'default', 'type', 'options']), inputPath)
+    const type = c.scalarString(definition['type'], `${inputPath}.type`) ?? 'string'
+    if (!INPUT_TYPES.has(type)) c.fail(`${inputPath}.type`, 'must be string, boolean, number, choice or environment')
+    const options = c.stringList(definition['options'], `${inputPath}.options`)
+    if (type === 'choice' && (!options || options.length === 0)) c.fail(`${inputPath}.options`, 'a choice input needs options')
+    const fallback = definition['default']
+    inputs[name] = {
+      ...optional('description', c.scalarString(definition['description'], `${inputPath}.description`)),
+      required: definition['required'] === true,
+      ...optional('default', typeof fallback === 'string' || typeof fallback === 'number' || typeof fallback === 'boolean' ? fallback : undefined),
+      type: type as DispatchInputType,
+      ...optional('options', options),
+    }
+  }
+  return inputs
 }
 
 const parseStep = (value: YamlValue, path: string, c: Collector): WorkflowStep | null => {
@@ -172,8 +313,8 @@ const parseStep = (value: YamlValue, path: string, c: Collector): WorkflowStep |
     ...optional('name', c.scalarString(value['name'], `${path}.name`)),
     ...optional('if', c.condition(value['if'], `${path}.if`)),
     env: c.env(value['env'], `${path}.env`),
-    continueOnError: value['continue-on-error'] === true,
-    ...optional('timeoutMinutes', c.positiveNumber(value['timeout-minutes'], `${path}.timeout-minutes`)),
+    continueOnError: c.booleanish(value['continue-on-error'], `${path}.continue-on-error`),
+    ...optional('timeoutMinutes', c.minutes(value['timeout-minutes'], `${path}.timeout-minutes`)),
   }
   const run = c.scalarString(value['run'], `${path}.run`)
   const uses = c.scalarString(value['uses'], `${path}.uses`)
@@ -211,15 +352,74 @@ const parseJob = (id: string, value: YamlValue, c: Collector): WorkflowJob | nul
   else c.unsupported(value, JOB_KEYS, path)
   const steps = Array.isArray(value['steps']) ? value['steps'] : []
   if (steps.length === 0) c.fail(`${path}.steps`, 'needs at least one step')
+  const name = c.scalarString(value['name'], `${path}.name`)
   return {
     id,
-    name: c.scalarString(value['name'], `${path}.name`) ?? id,
+    name: name ?? id,
+    explicitName: name !== undefined,
+    ...optional('if', c.condition(value['if'], `${path}.if`)),
     runsOn: parseRunsOn(value['runs-on'], `${path}.runs-on`, c),
     needs: c.stringList(value['needs'], `${path}.needs`) ?? [],
     env: c.env(value['env'], `${path}.env`),
+    defaults: c.defaults(value['defaults'], `${path}.defaults`),
+    outputs: c.env(value['outputs'], `${path}.outputs`),
+    ...optional('strategy', parseStrategy(value['strategy'], `${path}.strategy`, c)),
+    ...optional('environment', parseEnvironment(value['environment'], `${path}.environment`, c)),
+    continueOnError: c.booleanish(value['continue-on-error'], `${path}.continue-on-error`),
     timeoutMinutes: c.positiveNumber(value['timeout-minutes'], `${path}.timeout-minutes`) ?? DEFAULT_TIMEOUT_MINUTES,
     steps: steps.flatMap((step, index) => parseStep(step, `${path}.steps[${index}]`, c) ?? []),
   }
+}
+
+const isExpression = (value: YamlValue | undefined): boolean => typeof value === 'string' && /^\s*\$\{\{[\s\S]*\}\}\s*$/.test(value)
+
+const parseStrategy = (value: YamlValue | undefined, path: string, c: Collector): JobStrategy | undefined => {
+  if (value === undefined || value === null) return undefined
+  if (!isMapping(value)) {
+    c.fail(path, 'expected a mapping')
+    return undefined
+  }
+  c.unsupported(value, STRATEGY_KEYS, path)
+  const matrix = value['matrix']
+  if (!isMapping(matrix) && !isExpression(matrix)) c.fail(`${path}.matrix`, 'expected a mapping or an expression')
+  if (isMapping(matrix)) {
+    for (const [key, vector] of Object.entries(matrix)) {
+      if (!Array.isArray(vector) && !isExpression(vector)) c.fail(`${path}.matrix.${key}`, 'expected a list or an expression')
+    }
+  }
+  const failFast = value['fail-fast'] ?? true
+  if (typeof failFast !== 'boolean' && !isExpression(failFast)) c.fail(`${path}.fail-fast`, 'expected true, false or an expression')
+  const maxParallel = value['max-parallel']
+  if (maxParallel !== undefined && maxParallel !== null && !(typeof maxParallel === 'number' && maxParallel >= 1) && !isExpression(maxParallel)) {
+    c.fail(`${path}.max-parallel`, 'expected a positive number or an expression')
+  }
+  return { matrix: matrix ?? null, failFast, ...optional('maxParallel', maxParallel ?? undefined) }
+}
+
+const parseEnvironment = (value: YamlValue | undefined, path: string, c: Collector): JobEnvironment | undefined => {
+  if (value === undefined || value === null) return undefined
+  if (isMapping(value)) {
+    c.unsupported(value, new Set(['name', 'url']), path)
+    const name = c.scalarString(value['name'], `${path}.name`)
+    if (name === undefined) c.fail(`${path}.name`, 'is required')
+    return { name: name ?? '', ...optional('url', c.scalarString(value['url'], `${path}.url`)) }
+  }
+  const name = c.scalarString(value, path)
+  return name === undefined ? undefined : { name }
+}
+
+const parseConcurrency = (value: YamlValue | undefined, path: string, c: Collector): Concurrency | undefined => {
+  if (value === undefined || value === null) return undefined
+  if (isMapping(value)) {
+    c.unsupported(value, new Set(['group', 'cancel-in-progress']), path)
+    const group = c.scalarString(value['group'], `${path}.group`)
+    if (group === undefined) c.fail(`${path}.group`, 'is required')
+    const cancel = value['cancel-in-progress'] ?? false
+    if (typeof cancel !== 'boolean' && !isExpression(cancel)) c.fail(`${path}.cancel-in-progress`, 'expected true, false or an expression')
+    return { group: group ?? '', cancelInProgress: cancel }
+  }
+  const group = c.scalarString(value, path)
+  return group === undefined ? undefined : { group, cancelInProgress: false }
 }
 
 export const jobLevels = (jobs: readonly WorkflowJob[]): WorkflowJob[][] => {
@@ -254,6 +454,8 @@ export const parseWorkflow = (source: string): Workflow => {
     ...optional('name', c.scalarString(document['name'], 'name')),
     triggers: parseTriggers(document['on'], c),
     env: c.env(document['env'], 'env'),
+    defaults: c.defaults(document['defaults'], 'defaults'),
+    ...optional('concurrency', parseConcurrency(document['concurrency'], 'concurrency', c)),
     jobs,
   }
   if (c.problems.length > 0) throw new WorkflowError(c.problems)
@@ -302,6 +504,53 @@ export const triggeredByPush = (workflow: Workflow, ref: string): boolean =>
     }
     return false
   })
+
+export const DEFAULT_PULL_REQUEST_TYPES = ['opened', 'synchronize', 'reopened']
+
+export const triggeredByPullRequest = (workflow: Workflow, baseBranch: string, action: string): boolean =>
+  workflow.triggers.some(
+    (trigger) =>
+      trigger.event === 'pull_request' &&
+      (trigger.types ?? DEFAULT_PULL_REQUEST_TYPES).includes(action) &&
+      matchesFilters(baseBranch, trigger.branches, trigger.branchesIgnore),
+  )
+
+export const dispatchTrigger = (workflow: Workflow): WorkflowTrigger | undefined => workflow.triggers.find((trigger) => trigger.event === 'workflow_dispatch')
+
+export const scheduleCrons = (workflow: Workflow): readonly string[] => workflow.triggers.flatMap((trigger) => (trigger.event === 'schedule' ? (trigger.crons ?? []) : []))
+
+export class DispatchInputError extends Error {}
+
+export const resolveDispatchInputs = (
+  definitions: Readonly<Record<string, DispatchInput>>,
+  given: Readonly<Record<string, unknown>>,
+): Record<string, string | number | boolean> => {
+  const unknown = Object.keys(given).filter((name) => !(name in definitions))
+  if (unknown.length > 0) throw new DispatchInputError(`unexpected inputs: ${unknown.join(', ')}`)
+  const resolved: Record<string, string | number | boolean> = {}
+  for (const [name, definition] of Object.entries(definitions)) {
+    const raw = given[name] ?? definition.default
+    if (raw === undefined || raw === '') {
+      if (definition.required) throw new DispatchInputError(`input "${name}" is required`)
+      resolved[name] = definition.type === 'boolean' ? false : ''
+      continue
+    }
+    if (typeof raw !== 'string' && typeof raw !== 'number' && typeof raw !== 'boolean') throw new DispatchInputError(`input "${name}" must be a scalar`)
+    if (definition.type === 'boolean') {
+      if (raw !== true && raw !== false && raw !== 'true' && raw !== 'false') throw new DispatchInputError(`input "${name}" must be a boolean`)
+      resolved[name] = raw === true || raw === 'true'
+    } else if (definition.type === 'number') {
+      const number = Number(raw)
+      if (raw === '' || !Number.isFinite(number)) throw new DispatchInputError(`input "${name}" must be a number`)
+      resolved[name] = number
+    } else {
+      const text = String(raw)
+      if (definition.type === 'choice' && !(definition.options ?? []).includes(text)) throw new DispatchInputError(`input "${name}" must be one of ${(definition.options ?? []).join(', ')}`)
+      resolved[name] = text
+    }
+  }
+  return resolved
+}
 
 export type WorkflowFile = {
   readonly path: string

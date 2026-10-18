@@ -140,6 +140,9 @@ export const beginOidcLogin = async (context: LoginContext, input: { readonly re
 
 export type OidcCompletion = LoggedInUser & { readonly returnTo: string; readonly linked: boolean }
 
+const claimIdentities = (identity: { readonly subject: string; readonly email: string | null }): readonly string[] =>
+  identity.email === null ? [identity.subject] : [identity.subject, identity.email]
+
 const resolveOidcUser = async (
   context: LoginContext,
   intent: OidcIntent,
@@ -168,7 +171,9 @@ const resolveOidcUser = async (
     const login = invite.login ? await requireFreeLogin(context, invite.login) : await chooseLogin(identity.candidates, isTaken(context))
     return createLinkedUser(context, { login, email: invite.email ?? identity.email, displayName: identity.displayName, link, invite: intent.code })
   }
-  if (!context.selfSignup) throw new LoginError('no_account', 'there is no account for this identity; ask an instance admin for an invite')
+  if (!context.selfSignup && !(await context.store.hasInstanceAdminClaim(claimIdentities(identity)))) {
+    throw new LoginError('no_account', 'there is no account for this identity; ask an instance admin for an invite')
+  }
   const login = await chooseLogin(identity.candidates, isTaken(context))
   return createLinkedUser(context, { login, email: identity.email, displayName: identity.displayName, link, invite: null })
 }
@@ -225,13 +230,15 @@ export const completeOidcLogin = async (
     if (error instanceof OidcError) throw new LoginError('verification_failed', error.message)
     throw error
   }
-  const user = await resolveOidcUser(context, intentOf(data.intent), {
+  const identity = {
     issuer: provider.config.issuer,
     subject: claims.sub,
     email: claims.email && claims.emailVerified ? claims.email : null,
     candidates: loginCandidates(claims),
     displayName: claims.name,
-  })
+  }
+  const user = await resolveOidcUser(context, intentOf(data.intent), identity)
+  await context.store.redeemInstanceAdminClaim(user.userId, claimIdentities(identity))
   await context.logins.touchExternalIdentity(provider.config.issuer, claims.sub)
   return { ...user, returnTo: typeof data.returnTo === 'string' ? data.returnTo : '/' }
 }

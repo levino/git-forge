@@ -380,8 +380,8 @@ path has not been deployed yet. `wrangler dev` runs with
 R2 bucket and D1 database (`git-forge-alpha`, …). Every Cloudflare resource
 comes from the config, nothing is created in the dashboard: buckets and
 databases have names but no IDs and queues are declared by name, so the
-first `wrangler deploy` provisions them; migrations come from `migrations_dir`; cron, vars and the required
-secret (`secrets.required`) are declared as well. An environment goes from
+first `wrangler deploy` provisions them; migrations come from `migrations_dir`; cron and vars are declared as well
+(`BOOTSTRAP_TOKEN` is set after the first deploy, see below). An environment goes from
 nothing to running with:
 
 ```sh

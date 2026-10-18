@@ -333,6 +333,35 @@ export const createAccountsStore = (db: Database, options: AccountsStoreOptions 
       ])
     },
 
+    addInstanceAdminClaim: async (identity: string): Promise<void> => {
+      await db.run(sql('INSERT INTO instance_admin_claims (identity, created_at) VALUES (?, ?) ON CONFLICT (identity) DO NOTHING', identity, now()))
+    },
+
+    hasInstanceAdminClaim: async (identities: readonly string[]): Promise<boolean> => {
+      const wanted = identities.filter((identity) => identity !== '')
+      if (wanted.length === 0) return false
+      const row = await first<{ ok: number }>(db, sql(`SELECT 1 AS ok FROM instance_admin_claims WHERE identity IN (${wanted.map(() => '?').join(', ')})`, ...wanted))
+      return row !== null
+    },
+
+    redeemInstanceAdminClaim: async (userId: string, identities: readonly string[]): Promise<boolean> => {
+      const wanted = identities.filter((identity) => identity !== '')
+      if (wanted.length === 0) return false
+      const at = now()
+      const results = await db.batch([
+        sql(
+          `INSERT INTO instance_admins (user_id, created_at) SELECT ?, ? WHERE EXISTS (SELECT 1 FROM instance_admin_claims WHERE identity IN (${wanted.map(() => '?').join(', ')}))
+           ON CONFLICT (user_id) DO NOTHING`,
+          userId,
+          at,
+          ...wanted,
+        ),
+        sql(`DELETE FROM instance_admin_claims WHERE identity IN (${wanted.map(() => '?').join(', ')})`, ...wanted),
+        auditStatement(SYSTEM, { action: 'instance.admin.claim', subjectKind: 'user', subjectId: userId }, at),
+      ])
+      return results[1]!.changes > 0
+    },
+
     findUserByExternalIdentity: async (issuer: string, subject: string): Promise<{ readonly id: string; readonly login: string } | null> =>
       first<{ id: string; login: string }>(
         db,

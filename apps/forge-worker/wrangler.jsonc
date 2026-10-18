@@ -68,11 +68,6 @@
     "EMAIL_PROVIDER": "console",
     "EMAIL_FROM": "forge@example.org"
   },
-  "secrets": {
-    "required": [
-      "BOOTSTRAP_TOKEN"
-    ]
-  },
   "containers": [
     {
       "class_name": "RunnerContainer",
@@ -156,11 +151,6 @@
         "EMAIL_PROVIDER": "console",
         "EMAIL_FROM": "forge@example.org"
       },
-      "secrets": {
-        "required": [
-          "BOOTSTRAP_TOKEN"
-        ]
-      },
       "containers": [
         {
           "class_name": "RunnerContainer",
@@ -241,11 +231,6 @@
         "EMAIL_PROVIDER": "console",
         "EMAIL_FROM": "forge@example.org"
       },
-      "secrets": {
-        "required": [
-          "BOOTSTRAP_TOKEN"
-        ]
-      },
       "containers": [
         {
           "class_name": "RunnerContainer",
@@ -325,11 +310,6 @@
         "BREAK_GLASS_PUBLIC_KEY": "",
         "EMAIL_PROVIDER": "console",
         "EMAIL_FROM": "forge@example.org"
-      },
-      "secrets": {
-        "required": [
-          "BOOTSTRAP_TOKEN"
-        ]
       },
       "containers": [
         {

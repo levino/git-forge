@@ -190,6 +190,7 @@ verified yet. To enable it where Docker is available, add to
 
 ```jsonc
   "vars": { "…": "…", "ACTIONS": "true" },
+  "triggers": { "crons": ["17 3 * * *", "*/5 * * * *"] },
   "containers": [{ "class_name": "RunnerContainer", "image": "./runner/Dockerfile", "instance_type": "standard-1", "max_instances": 4 }],
   "durable_objects": { "bindings": [{ "name": "RUNNER", "class_name": "RunnerContainer" }] },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["RunnerContainer"] }],
@@ -199,6 +200,13 @@ verified yet. To enable it where Docker is available, add to
 Every CI job then starts one container with the runner and a JIT config. With
 `ACTIONS` set but without the container entries, workflows are queued and
 picked up by runners you register yourself (`/api/v3/repos/…/actions/runners/generate-jitconfig`).
-Workflow secrets go into the `ACTIONS_SECRETS` secret, a JSON object such as
-`{"CLOUDFLARE_API_TOKEN": "…"}`.
+The second cron runs scheduled workflows and cleans up timed-out jobs and
+dead runners. Instance-wide workflow secrets go into the `ACTIONS_SECRETS`
+secret, a JSON object such as `{"CLOUDFLARE_API_TOKEN": "…"}`. For
+repository and environment secrets set the `ACTIONS_SECRETS_KEY` secret to
+32 random bytes (`openssl rand -base64 32`); they are stored encrypted with
+it in D1. `uses:` actions are served from repositories on the instance, for
+example a mirror of `github.com/actions/checkout` named `actions/checkout`
+(`ACTIONS_REPOSITORIES` maps other names, `ACTIONS_GITHUB_FALLBACK=true`
+downloads unmirrored actions from GitHub).
 

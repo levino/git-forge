@@ -3,7 +3,13 @@ import { describe, expect, it } from 'vitest'
 import {
   type AccountsStore,
   applyMigrations,
+  checkStateOf,
+  commitCheckStates,
   createAccountsStore,
+  createCheckRun,
+  getCheckRun,
+  listCheckRuns,
+  updateCheckRun,
   d1Database,
   type D1DatabaseLike,
   type D1PreparedStatementLike,
@@ -26,7 +32,7 @@ const tables = (db: Database) => db.all<{ name: string }>(sql("SELECT name FROM 
 describe('migrations on node:sqlite', () => {
   it('creates the schema once and is idempotent', async () => {
     const { db } = openSqliteDatabase()
-    expect(await applyMigrations(db, MIGRATIONS)).toEqual(['0001_initial', '0002_branch_protection', '0003_instance_admins', '0004_mirror_subscriptions', '0005_actions'])
+    expect(await applyMigrations(db, MIGRATIONS)).toEqual(['0001_initial', '0002_branch_protection', '0003_instance_admins', '0004_mirror_subscriptions', '0005_actions', '0006_actions_workflows'])
     expect(await applyMigrations(db, MIGRATIONS)).toEqual([])
     expect((await tables(db)).map((row) => row.name)).toEqual(
       expect.arrayContaining([
@@ -48,9 +54,29 @@ describe('migrations on node:sqlite', () => {
         'branch_protection_push_allowances',
         'branch_protection_status_checks',
         'instance_admins',
+        'check_runs',
+        'actions_secrets',
+        'actions_environments',
+        'actions_schedules',
         'schema_migrations',
       ]),
     )
+  })
+
+  it('keeps check runs per commit and reports the latest state per name for required status checks', async () => {
+    const { db } = openSqliteDatabase()
+    await applyMigrations(db, MIGRATIONS)
+    const base = { owner: 'acme', repo: 'site', headSha: 'a'.repeat(40), app: 'actions' }
+    const build = await createCheckRun(db, { ...base, name: 'build', status: 'queued' }, 1)
+    await updateCheckRun(db, build.id, { status: 'in_progress' }, 2)
+    await createCheckRun(db, { ...base, name: 'lint', status: 'completed', conclusion: 'skipped' }, 3)
+    expect(await commitCheckStates(db, 'acme', 'site', base.headSha)).toEqual({ build: 'pending', lint: 'skipped' })
+    await updateCheckRun(db, build.id, { status: 'completed', conclusion: 'failure' }, 4)
+    await createCheckRun(db, { ...base, name: 'build', status: 'completed', conclusion: 'success' }, 5)
+    expect(await commitCheckStates(db, 'acme', 'site', base.headSha)).toEqual({ build: 'success', lint: 'skipped' })
+    expect(await getCheckRun(db, build.id)).toMatchObject({ status: 'completed', conclusion: 'failure', started_at: 2, completed_at: 4 })
+    expect(checkStateOf({ status: 'completed', conclusion: 'timed_out' })).toBe('failure')
+    expect(await listCheckRuns(db, 'acme', 'site', 'b'.repeat(40))).toEqual([])
   })
 
   it('refuses to run when an applied migration was edited or is unknown', async () => {
@@ -313,7 +339,7 @@ describe('D1 adapter', () => {
     const handle = new DatabaseSync(':memory:')
     handle.exec('PRAGMA foreign_keys = ON')
     const db = d1Database(fakeD1(handle))
-    expect(await applyMigrations(db, MIGRATIONS)).toEqual(['0001_initial', '0002_branch_protection', '0003_instance_admins', '0004_mirror_subscriptions', '0005_actions'])
+    expect(await applyMigrations(db, MIGRATIONS)).toEqual(['0001_initial', '0002_branch_protection', '0003_instance_admins', '0004_mirror_subscriptions', '0005_actions', '0006_actions_workflows'])
     const store = createAccountsStore(db)
     const { alice } = await seed(store)
     const { token } = await store.createPersonalAccessToken(alice.id, { name: 'd1', scopes: ['repo:admin'], expiresAt: null })

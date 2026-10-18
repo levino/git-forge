@@ -11,6 +11,9 @@ export type ForgeVars = {
   readonly ACTIONS?: string
   readonly ACTIONS_INSTANCE_ID?: string
   readonly ACTIONS_SECRETS?: string
+  readonly ACTIONS_SECRETS_KEY?: string
+  readonly ACTIONS_REPOSITORIES?: string
+  readonly ACTIONS_GITHUB_FALLBACK?: string
   readonly MIRROR_DEEP_CHECK_DAYS?: string
   readonly MIRROR_UNIT_BYTES?: string
 }
@@ -30,6 +33,44 @@ export type ForgeSettings = {
 export type ActionsSettings = {
   readonly instanceId: string
   readonly secrets: Readonly<Record<string, string>>
+  readonly secretsKey: string | undefined
+  readonly repositories: Readonly<Record<string, string>>
+  readonly githubFallback: string | null
+}
+
+export const ACTIONS_CRON = '*/5 * * * *'
+
+const ACTION_REPOSITORY = /^[A-Za-z0-9][A-Za-z0-9._-]*\/(\*|[A-Za-z0-9][A-Za-z0-9._-]*)$/
+
+export const parseActionRepositories = (value: string | undefined): Record<string, string> => {
+  const text = present(value)
+  if (!text) return {}
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    throw new ConfigurationError('ACTIONS_REPOSITORIES must be a JSON object like {"actions/*": "mirrors/*"}')
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) throw new ConfigurationError('ACTIONS_REPOSITORIES must be a JSON object like {"actions/*": "mirrors/*"}')
+  for (const [pattern, target] of Object.entries(parsed)) {
+    if (typeof target !== 'string' || !ACTION_REPOSITORY.test(pattern) || !ACTION_REPOSITORY.test(target) || (target.endsWith('/*') && !pattern.endsWith('/*'))) {
+      throw new ConfigurationError(`ACTIONS_REPOSITORIES: invalid mapping ${pattern} -> ${String(target)}`)
+    }
+  }
+  return parsed as Record<string, string>
+}
+
+export const parseGithubFallback = (value: string | undefined): string | null => {
+  const text = present(value)
+  if (!text || text === 'false') return null
+  if (text === 'true') return 'https://api.github.com'
+  try {
+    const url = new URL(text)
+    if (url.protocol !== 'https:') throw new Error('not https')
+    return text.replace(/\/$/, '')
+  } catch {
+    throw new ConfigurationError('ACTIONS_GITHUB_FALLBACK must be true, false or an https API base URL')
+  }
 }
 
 export const DEFAULT_ACTIONS_INSTANCE_ID = '00000000-0000-0000-0000-000000000000'
@@ -104,5 +145,11 @@ export const parseActionsSettings = (vars: ForgeVars): ActionsSettings | undefin
   if (vars.ACTIONS !== 'true') return undefined
   const instanceId = present(vars.ACTIONS_INSTANCE_ID)
   if (instanceId !== undefined && !GUID.test(instanceId)) throw new ConfigurationError('ACTIONS_INSTANCE_ID must be a GUID')
-  return { instanceId: instanceId ?? DEFAULT_ACTIONS_INSTANCE_ID, secrets: parseActionsSecrets(vars.ACTIONS_SECRETS) }
+  return {
+    instanceId: instanceId ?? DEFAULT_ACTIONS_INSTANCE_ID,
+    secrets: parseActionsSecrets(vars.ACTIONS_SECRETS),
+    secretsKey: present(vars.ACTIONS_SECRETS_KEY),
+    repositories: parseActionRepositories(vars.ACTIONS_REPOSITORIES),
+    githubFallback: parseGithubFallback(vars.ACTIONS_GITHUB_FALLBACK),
+  }
 }

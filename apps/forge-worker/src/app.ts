@@ -1,7 +1,10 @@
 import {
+  type ActionsTick,
+  actionsTick,
   advanceRun,
   type DispatchOptions,
   handleActionsService,
+  type SecretsKey,
   handleGhesApi,
   queueRunsForPush,
   type RunnerLauncher,
@@ -76,6 +79,9 @@ export type ActionsOptions = {
   readonly instanceId: string
   readonly launcher?: RunnerLauncher
   readonly secrets?: SecretsProvider
+  readonly secretsKey?: SecretsKey
+  readonly repositories?: Readonly<Record<string, string>>
+  readonly githubFallback?: string | null
 }
 
 export type ForgeOptions = ForgeSettings & {
@@ -94,6 +100,7 @@ export const ACTIONS_SERVICE_PATH = '/_services/actions'
 export type Forge = {
   readonly fetch: (request: Request) => Promise<Response>
   readonly scheduled: (at?: Date) => Promise<ScheduledMirrorRun[]>
+  readonly actionsTick: () => Promise<ActionsTick | null>
   readonly runJob: (job: ForgeJob) => Promise<void>
 }
 
@@ -504,6 +511,24 @@ export const createForge = (options: ForgeOptions): Forge => {
     }
   }
 
+  const hasRepositoryAccess = async (request: Request, owner: string, name: string, required: 'read' | 'write'): Promise<boolean> => {
+    if (!isValidName(owner) || !isValidName(name)) return false
+    if (required === 'read') return (await withJobTokens(createGitAccess(authenticateOptions(request)).authorize)(request, { owner, name }, 'read', 'git')) === null
+    const principal = await authenticateRequest(request, authenticateOptions(request))
+    if (!principal) return false
+    return (await checkRepositoryAccess(store, principal, { owner, name }, 'write')).decision === 'allow'
+  }
+
+  const userLogin = async (request: Request): Promise<string | null> => {
+    const principal = await authenticateRequest(request, authenticateOptions(request))
+    return principal?.kind === 'user' ? principal.login : null
+  }
+
+  const canUseAction = async (job: RepositoryName, action: RepositoryName): Promise<boolean> => {
+    if (job.owner === action.owner) return true
+    return (await store.findRepository(action.owner, action.name))?.visibility === 'public'
+  }
+
   const actionsRoute = async (request: Request): Promise<Response | null> => {
     const { actions } = options
     const { pathname } = new URL(request.url)
@@ -518,10 +543,29 @@ export const createForge = (options: ForgeOptions): Forge => {
         serverUrl: dispatch.urls.serverUrl,
         now: () => now().getTime(),
         ...(actions.secrets ? { secrets: actions.secrets } : {}),
+        ...(actions.secretsKey ? { secretsKey: actions.secretsKey } : {}),
+        actionSources: {
+          ...(actions.repositories ? { repositories: actions.repositories } : {}),
+          githubFallback: actions.githubFallback ?? null,
+          canUse: canUseAction,
+        },
         onJobCompleted: async (job) => {
           await advanceRun(dispatch, job)
         },
-      })) ?? (await handleGhesApi(request, { db, storage, urls: dispatch.urls, authorize: isRepositoryAdmin, now: () => now().getTime() }))
+      })) ??
+      (await handleGhesApi(request, {
+        db,
+        storage,
+        urls: dispatch.urls,
+        authorize: isRepositoryAdmin,
+        authorizeRead: (incoming, owner, name) => hasRepositoryAccess(incoming, owner, name, 'read'),
+        authorizeWrite: (incoming, owner, name) => hasRepositoryAccess(incoming, owner, name, 'write'),
+        actor: userLogin,
+        ...(actions.secretsKey ? { secretsKey: actions.secretsKey } : {}),
+        ...(actions.launcher ? { launcher: actions.launcher } : {}),
+        log: dispatch.log!,
+        now: () => now().getTime(),
+      }))
     )
   }
 
@@ -622,6 +666,18 @@ export const createForge = (options: ForgeOptions): Forge => {
     fetch: handle,
     scheduled: (at = now()) =>
       federation ? enqueueDueMirrors(federation, at, options.mirrorIntervalMinutes) : syncDueMirrors(mirrorContext(options.publicUrl), at, options.mirrorIntervalMinutes),
+    actionsTick: async () => {
+      if (!options.actions) return null
+      const serverUrl = options.publicUrl ?? 'http://localhost'
+      return actionsTick({
+        db,
+        storage,
+        urls: { serverUrl, serviceUrl: `${serverUrl}${ACTIONS_SERVICE_PATH}` },
+        ...(options.actions.launcher && options.publicUrl ? { launcher: options.actions.launcher } : {}),
+        now: () => now().getTime(),
+        log: (event) => console.log(JSON.stringify(event)),
+      })
+    },
     runJob: async (job) => {
       if (!federation) throw new Error('jobs need PUBLIC_URL, INSTANCE_KEY and a job queue')
       await runJob(federation, job)

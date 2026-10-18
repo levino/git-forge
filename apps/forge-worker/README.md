@@ -31,8 +31,11 @@ tests and the benchmark.
 | `MIRROR_UNIT_BYTES` | var | `0` (default): a mirror sync copies all new packs and LFS objects in one job. Otherwise a byte budget per invocation: one job per pack and per LFS object, a final job moves the refs, units above the budget stay pending (`docs/design.md` §12). For a mirror on the Workers Free plan. |
 | `MIRROR_DEEP_CHECK_DAYS` | var | Every how many days a mirror gets the full re-verification (re-hash every object, recompute every index), default 30, `0` = only on demand. |
 | `ALLOW_INSECURE_FEDERATION` | var | `true` lets the instance fetch other instances' JWKS over plain HTTP. Only for local tests. |
-| `ACTIONS` | var | `true` (default in every environment): CI is on. Pushes queue workflow runs, `/_services/actions` (Actions service for `actions/runner`) and `/api/v3` (GHES-style runner, run and job API, repository admins) are served. The CI tables come from `packages/accounts/migrations/0005_actions.sql`. |
-| `ACTIONS_SECRETS` | secret, optional | JSON object of instance secrets for workflows, e.g. `{"CLOUDFLARE_API_TOKEN":"…"}`. Sent only to the runner of a job, as secret variables. |
+| `ACTIONS` | var | `true` (default in every environment): CI is on. Pushes queue workflow runs, `/_services/actions` (Actions service for `actions/runner`) and `/api/v3` (GHES-style runner, run, job, secrets, environments, check-run and tarball API) are served. The CI tables come from `packages/accounts/migrations/0005_actions.sql` and `0006_actions_workflows.sql`. The `*/5 * * * *` cron runs scheduled workflows and the reaper (timeouts, dead runners, expired tokens); it needs `PUBLIC_URL` to launch runners. |
+| `ACTIONS_SECRETS` | secret, optional | JSON object of instance secrets for workflows, e.g. `{"CLOUDFLARE_API_TOKEN":"…"}`. Sent only to the runner of a job of a trusted run, as secret variables. |
+| `ACTIONS_SECRETS_KEY` | secret, optional | 32 random bytes, base64 or hex (`openssl rand -base64 32`). Encrypts repository and environment secrets in D1 (AES-256-GCM). Without it the secrets API answers `503`. Changing it makes stored secrets unreadable. |
+| `ACTIONS_REPOSITORIES` | var, optional | Where `uses: owner/repo@ref` is looked up on this forge, as JSON, e.g. `{"actions/*": "mirrors/*"}`. Without a mapping, `actions/checkout` is looked up as the repository `actions/checkout`. |
+| `ACTIONS_GITHUB_FALLBACK` | var, optional | `true` (or an API base URL): actions that have no repository on this forge are downloaded from `api.github.com` tarballs. Default: off, unresolved actions fail the job. |
 | `ACTIONS_INSTANCE_ID` | var, optional | Stable GUID reported by the Actions location service. |
 | `RUNNER` | Durable Object + Container | `RunnerContainer` (`src/runner-container.ts`, image `runner/Dockerfile`): one container per CI job with the official `actions/runner` and a JIT config. Declared in every environment; without the binding, jobs wait for a runner registered by hand. |
 
@@ -211,6 +214,26 @@ curl -sX POST https://forge.example/api/v3/repos/acme/site/actions/runners/gener
 ./run.sh --jitconfig "$(cat jit)"
 ```
 
+Jobs can use actions with `uses:`: the runner asks the forge for a tarball,
+which the forge serves from a repository on the forge, typically a mirror of
+the action's GitHub repository. With `ACTIONS_REPOSITORIES` set to
+`{"actions/*": "mirrors/*"}`, `actions/checkout@v4` is served from a public
+mirror `mirrors/checkout`:
+
+```sh
+curl -sX POST https://forge.example/api/admin/users -H "Authorization: Bearer $ADMIN_PAT" -d '{"login":"mirrors"}'
+curl -sX POST https://forge.example/api/repos -H "Authorization: Bearer $ADMIN_PAT" -d '{"owner":"mirrors","name":"checkout","visibility":"public"}'
+curl -sX POST https://forge.example/api/repos/mirrors/checkout/mirrors -H "Authorization: Bearer $ADMIN_PAT" -d '{"url":"https://github.com/actions/checkout.git","lfs":false}'
+```
+
+Jobs may use action repositories of their own owner and public ones.
+
+Secrets, environments, cancellation and re-runs use the GitHub REST paths
+under `/api/v3` (`actions/secrets/{name}` with `{"value": "…"}`,
+`environments/{name}`, `actions/runs/{id}/cancel`, `…/rerun-failed-jobs`,
+`actions/workflows/{file}/dispatches`, `commits/{ref}/check-runs`); see
+[`@git-forge/actions`](../../packages/actions).
+
 The runner container is declared in `wrangler.jsonc` for every environment
 (`containers`, the `RUNNER` Durable Object binding, its migration), so
 `wrangler deploy` builds `runner/Dockerfile` (the official
@@ -316,11 +339,13 @@ database (Miniflare), persisted under `.wrangler/`. `.dev.vars` is gitignored.
   rejected; subscriptions from untrusted instances or with foreign callbacks
   are refused; a force push is archived with an alarm on both mirrors; the
   deep check passes; and a push still succeeds when the job queue is down.
-- `test/e2e/actions.e2e.test.ts` pushes a workflow to a private repository,
-  checks that the run is queued in D1, registers a JIT runner through
-  `/api/v3`, takes the job over the Actions protocol (OAuth assertion,
-  session, message, renew) and clones the repository with the job's
-  `GITHUB_TOKEN`.
+- `test/e2e/actions.e2e.test.ts` stores a repository secret, pushes a
+  matrix workflow to a private repository, checks that the run is queued in
+  D1, registers a JIT runner through `/api/v3`, takes the job over the
+  Actions protocol (OAuth assertion, session, message, renew) with instance
+  and repository secrets, checks the check runs, clones the repository with
+  the job's `GITHUB_TOKEN` and cancels the run (the runner receives a
+  `JobCancellation` message, the queued leg is cancelled).
 - `test/e2e/media.e2e.test.ts` starts an instance, issues a `repo:read`
   token, uploads a JPEG to a private repository with the real `git lfs push`
   and reads it back through the media and raw URLs (headers, Range, HEAD,

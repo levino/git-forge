@@ -1,5 +1,5 @@
 import { AccountsError } from '@git-forge/accounts'
-import type { ImportPhase, ImportState } from '@git-forge/core'
+import type { ImportPhase, ImportState, RepositoryName } from '@git-forge/core'
 import { HttpError, type ForgeServices, type NewRepository, type UiSession } from '../app.ts'
 import { repoUrl } from './repository.ts'
 
@@ -51,3 +51,13 @@ export const IMPORT_PHASES: Readonly<Record<ImportPhase, string>> = {
 }
 
 export const importRunning = (state: ImportState): boolean => state.phase !== 'done' && state.phase !== 'failed'
+
+export const importStateFor = async (forge: ForgeServices, session: UiSession | null, repo: RepositoryName): Promise<ImportState | null> => {
+  if (!session) return null
+  try {
+    return await forge.repositories.importStatus(session.principal, repo)
+  } catch (error) {
+    if (error instanceof HttpError) return null
+    throw error
+  }
+}

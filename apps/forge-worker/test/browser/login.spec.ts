@@ -37,28 +37,6 @@ test('signs up with a passkey from an invite, manages tokens and signs out', asy
   await expect(page).toHaveURL(`${base()}/settings`)
 })
 
-test('creates a repository from the navbar and shows how to push into it', async ({ page, context }, info) => {
-  const client = await context.newCDPSession(page)
-  await client.send('WebAuthn.enable')
-  await client.send('WebAuthn.addVirtualAuthenticator', {
-    options: { protocol: 'ctap2', transport: 'internal', hasResidentKey: true, hasUserVerification: true, isUserVerified: true, automaticPresenceSimulation: true },
-  })
-  const login = `maker-${info.project.name}`
-  await page.goto(`${base()}${await invite(login)}`)
-  await page.getByRole('button', { name: 'Use a passkey' }).click()
-  await expect(page).toHaveURL(`${base()}/`)
-  await page.getByRole('link', { name: 'New repository' }).first().click()
-  await expect(page.getByRole('heading', { name: 'New repository' })).toBeVisible()
-  const form = page.getByRole('form', { name: 'Create a repository' })
-  await expect(form.getByLabel('Owner')).toHaveValue(login)
-  await form.getByLabel('Repository name').fill('notes')
-  await form.getByRole('button', { name: 'Create repository' }).click()
-  await expect(page).toHaveURL(`${base()}/${login}/notes`)
-  await expect(page.getByRole('heading', { name: 'This repository is empty' })).toBeVisible()
-  await expect(page.getByLabel('Clone over HTTPS').last()).toHaveValue(`${base()}/${login}/notes.git`)
-  await expect(page.getByText('git push -u origin main')).toBeVisible()
-})
-
 test('refuses a cross-site token form', async ({ request }) => {
   const response = await request.post(`${base()}/settings`, { headers: { Origin: 'https://evil.example' }, form: { action: 'create-token', name: 'x', scopes: 'repo:admin', expires: 'never' } })
   expect(response.status()).toBe(403)

@@ -2,6 +2,8 @@ import { execFile } from 'node:child_process'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { promisify } from 'node:util'
+import { startServer } from '@git-forge/core/test/http-server.ts'
+import { basicAuth, chain, httpBackendHandler, requireAuthorization } from '@git-forge/core/test/mirror-helpers.ts'
 import build from '../e2e/build.ts'
 import { gitEnv, tempDir } from '../e2e/history.ts'
 import { startWranglerDev } from '../e2e/wrangler-dev.ts'
@@ -34,6 +36,8 @@ const PNG = Uint8Array.from(
   (character) => character.charCodeAt(0),
 )
 
+const UPSTREAM_TOKEN = `upstream-${crypto.randomUUID()}`
+
 export default async function setup(): Promise<() => Promise<void>> {
   await build()
   const bootstrapToken = `browser-${crypto.randomUUID()}`
@@ -65,9 +69,25 @@ export default async function setup(): Promise<() => Promise<void>> {
   await git(dir, ['lfs', 'push', '--all', 'origin'])
   await git(dir, ['push', '-q', 'origin', 'main', 'polish'])
   await post('/api/v3/repos/octo/gallery/pulls', token, { title: 'Say goodbye', head: 'polish', base: 'main' })
+  const upstreamRoot = tempDir()
+  const upstreamSource = join(upstreamRoot, 'source')
+  mkdirSync(upstreamSource)
+  await git(upstreamSource, ['init', '-q', '-b', 'main'])
+  write(upstreamSource, 'README.md', '# Upstream\n\nImported from a local fixture.\n')
+  await git(upstreamSource, ['add', '-A'])
+  await git(upstreamSource, ['commit', '-q', '-m', 'Start upstream'])
+  write(upstreamSource, 'notes.txt', 'second commit\n')
+  await git(upstreamSource, ['add', '-A'])
+  await git(upstreamSource, ['commit', '-q', '-m', 'Add notes'])
+  await git(upstreamSource, ['tag', 'v1.0.0'])
+  await git(upstreamRoot, ['clone', '-q', '--bare', upstreamSource, 'upstream.git'])
+  const upstream = await startServer(chain(requireAuthorization(basicAuth('git', UPSTREAM_TOKEN)), httpBackendHandler(upstreamRoot)))
   process.env.FORGE_URL = dev.url
   process.env.FORGE_ADMIN_TOKEN = token
+  process.env.UPSTREAM_URL = `${upstream.url}/upstream.git`
+  process.env.UPSTREAM_TOKEN = UPSTREAM_TOKEN
   return async () => {
+    await upstream.close()
     await dev.stop()
   }
 }

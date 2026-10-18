@@ -1660,7 +1660,10 @@ call; the API additionally requires a session or a token with `repo:admin`
 (`requireManager`), the page `/new` a session write. A user may create
 repositories in their own account and in organizations they own; instance
 admins in any account. The import status page `/{owner}/{repo}/import` needs
-repository admin and refreshes itself while the import runs.
+repository admin and refreshes itself while the import runs; an empty
+repository links to it for repository admins while an import exists. The
+access token entered for an import goes only into the queued job, never into
+the stored import state or a page.
 
 All UI writes must also come from the same origin:
 `isCrossSiteWrite` rejects UI requests whose `Origin` or `Sec-Fetch-Site`

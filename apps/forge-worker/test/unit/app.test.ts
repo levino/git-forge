@@ -156,6 +156,20 @@ describe('repositories with accounts', () => {
     expect((await call(forge, BASE, 'POST', '/api/repos', admin, { owner: 'bob', name: 'tools' })).status).toBe(201)
   })
 
+  it('lets organization owners, but not members, create repositories in the organization', async () => {
+    const { store } = forge.services
+    const org = await store.createOrganization({ login: 'acme' })
+    const [aliceId, bobId] = await Promise.all(['alice', 'bob'].map(async (login) => (await store.findAccount(login))!.id))
+    await store.setOrganizationMember(org.id, aliceId!, 'owner')
+    await store.setOrganizationMember(org.id, bobId!, 'member')
+    expect((await call(forge, BASE, 'POST', '/api/repos', alice, { owner: 'acme', name: 'site' })).status).toBe(201)
+    const bobAdmin = (await json<{ token: string }>(await call(forge, BASE, 'POST', '/api/admin/users/bob/tokens', admin, { scopes: ['repo:admin'] }))).token
+    expect((await call(forge, BASE, 'POST', '/api/repos', bobAdmin, { owner: 'acme', name: 'other' })).status).toBe(403)
+    const aliceUser = { kind: 'user', id: aliceId!, login: 'alice', limits: null, tokenId: null } as const
+    expect(await forge.services.repositories.owners(aliceUser)).toEqual(['alice', 'acme'])
+    expect(await forge.services.repositories.owners({ ...aliceUser, id: bobId!, login: 'bob' })).toEqual(['bob'])
+  })
+
   it('authorizes git with personal access tokens', async () => {
     const challenge = await advertise(forge, 'alice/notes', 'git-upload-pack')
     expect(challenge.status).toBe(401)

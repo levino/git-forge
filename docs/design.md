@@ -90,8 +90,6 @@ issues, pull requests and discussions.
 
 - Pages.
 - Partial visibility within a repository (levels, derived views).
-- Encrypted full backups for mirrors without read access to plaintext.
-- External verification of mirrors (§10).
 - SSH-to-HTTPS gateway (§9).
 
 ## 4. Instances and mirrors
@@ -142,7 +140,8 @@ example on a Raspberry Pi.
   disappear, the mirror stays usable with its own users and can simply be
   detached and continue as the primary.
 - **Mirror overview:** each instance shows for its repositories which mirrors
-  it knows of (§10).
+  it knows of, whether they hold the current state and whether their bytes
+  match (signed attestations and spot checks, §10).
 
 ### Push notifications
 
@@ -739,12 +738,62 @@ convenient by `git forge auth login` (credential helper, device flow, §8).
 
 ## 10. Mirror overview and verification
 
-- Each instance lists, per repository, the mirrors it has granted access to
-  and when they last synced.
-- Later: external verification of public data via range requests on random
-  blocks compared to known hashes, with signed results. Redirecting and Sybil
-  mirrors cannot be fully excluded; only count confirmed mirrors with
-  different providers or known operators.
+Each instance can tell, per repository, which mirrors hold it, whether they
+hold the current state, how far behind they are and whether their bytes are
+what the upstream has. Nothing here trusts a claim alone (§2.4): attestations
+are signed and checked against the upstream's own history, bytes are
+sampled and compared.
+
+- **Ref checksum.** XOR over `SHA-1(refname ‖ value)` of all `refs/heads/*`
+  and `refs/tags/*` (the advertised refs, §4), as in GitHub Spokes
+  (`refsChecksum`, `namespacedChecksum` in core). Order-independent and
+  incremental; the value is 40 hex characters, so `name ‖ value` is
+  unambiguous. A mirror computes it over what it *holds* in
+  `refs/upstream/{remote}/` mapped back through its namespace, so a mirror of
+  a mirror compares with its upstream's `refs/upstream/{remote}/` view.
+- **History.** The upstream records every checksum it has had
+  (`ref_checksums`: repository, namespace, checksum, first seen) after
+  pushes, mirror syncs, received attestations and overview requests.
+- **Attestations.** After every successful sync, a mirror with
+  `auth: "instance"` signs a JWT with its instance key (`sub:
+  mirror-attestation`, `aud` = upstream, ≤ 300 s) with repository, checksum,
+  ref count, namespace, last sync time, number of alarms, pending units, last
+  deep check and its own Git URL, and POSTs it to
+  `/api/federation/attestations` (job `mirror-attest`). The upstream verifies
+  it like a notification (trust table, JWKS, optional pinned thumbprint),
+  requires that the issuer may read the repository (instance grant or
+  public), and keeps the latest per mirror including the token, so the
+  signed claim can be shown to anyone (`mirror_attestations`).
+- **Evaluation** (`evaluateMirror`, pure): the attested checksum equals the
+  current one → `current`; equals an older one → `behind`, lag = time since
+  the upstream moved past that state; unknown to a non-empty history →
+  `diverged` (the mirror holds a state the upstream never had: tampering or
+  rewritten history); no attestation for three days → `stale`. Alarms:
+  `stale`, `diverged`, `lagging` (behind for more than 26 h), `mirror-alarms`
+  (the mirror reported rewritten upstream history), `deep-check-failed`,
+  `pending-units` (oversized packs or LFS objects not copied, §12),
+  `spot-check-failed`.
+- **Spot checks.** At most once a day per mirror, after an attestation, the
+  upstream samples eight random 4 KiB ranges of its current packs and LFS
+  objects and fetches the same ranges from the mirror (dumb HTTP
+  `objects/pack/*` with `Range`, media URLs), with an instance token. Copy-only
+  mirrors (§7) store packs byte-identically, so every sample must match; a
+  pack the mirror does not have (fetch strategy) is skipped, as is a mirror
+  that does not let the upstream read. Differing bytes or failing requests
+  fail the check.
+- **Overview API.** `GET /api/repos/{owner}/{name}/mirrors/overview` (read
+  access) returns the repository's checksum, the mirrors known from
+  subscriptions and attestations with state, lag, alarms, last attestation
+  (with its token) and spot check, and the repository's own upstreams (sync
+  status, held checksum). With an instance key it adds `signed`, a JWT of
+  the summary signed by this instance (`sub: mirror-overview`), so a third
+  party can archive the upstream's view of its mirrors. The web UI (M6) will
+  render this.
+- **Limits.** Redirecting and Sybil mirrors cannot be fully excluded: a
+  mirror could proxy the upstream's bytes. Count only confirmed mirrors with
+  different providers or known operators. Anonymous mirrors (no trust) can
+  neither attest nor be spot-checked; anyone can still compare the public
+  `info/refs` of two instances.
 
 ## 11. Building blocks and provider adapters
 
@@ -973,8 +1022,6 @@ What was done about it:
   suite against them; see `packages/s3/README.md`.)
 - Signed append-only log of ref/pack/LFS changes (e.g. C2SP tlog-tiles with
   cosigning instances as witnesses): still useful as audit trail, format open.
-- Ref checksum à la GitHub Spokes (XOR over `hash(refname, value)`) for cheap
-  mirror comparison.
 - Name.
 
 ## 14. Prior art and references
@@ -1721,8 +1768,8 @@ bundle.
   `/-/login`, which renders the model with the site layout. Without the UI
   (or on Node) the plain built-in pages are used. The passkey ceremony script
   is the one exported by `@git-forge/accounts` (`PASSKEY_SCRIPT`).
-- Reserved first path segments: `api`, `explore`, `login`, `settings`, `-`
-  (assets) and the other page routes. Account names must not use them.
+- Reserved first path segments: `api`, `explore`, `login`, `new`,
+  `settings`, `-` (assets) and the other page routes. Account names must not use them.
 
 ### Permissions
 
@@ -1749,6 +1796,18 @@ the release store after the repository's read check, drafts only with write
 access, as in the releases API. Media and raw URLs also accept a browser
 session for reads (`GET`/`HEAD`, checked with `repositoryAccess`), so LFS
 previews work in private repositories.
+
+Repositories are created and imported through `services.repositories`
+(`owners`, `create`, `startImport`, `importStatus`), the same functions the
+API routes `POST /api/repos` and `POST|GET /api/repos/{owner}/{repo}/import`
+call; the API additionally requires a session or a token with `repo:admin`
+(`requireManager`), the page `/new` a session write. A user may create
+repositories in their own account and in organizations they own; instance
+admins in any account. The import status page `/{owner}/{repo}/import` needs
+repository admin and refreshes itself while the import runs; an empty
+repository links to it for repository admins while an import exists. The
+access token entered for an import goes only into the queued job, never into
+the stored import state or a page.
 
 All UI writes must also come from the same origin:
 `isCrossSiteWrite` rejects UI requests whose `Origin` or `Sec-Fetch-Site`
@@ -1822,3 +1881,61 @@ other form.
 - `apps/forge-worker/test/e2e/headless.e2e.test.ts`: the same bundle with
   `UI=false` serves only the forge.
 - The release test requests a page from the template instance.
+
+## 19. Backups
+
+Decision: backups are made at the bucket and database level with the
+providers' own tools; the forge has no backup code of its own. Mirrors (§4)
+are the federated copies; a backup is the operator's copy of their own
+instance, kept somewhere that cannot be rewritten.
+
+- **Repository data.** The bucket is append-only by design (§6): packs, idx
+  files and LFS objects are written once under their hash, only a few small
+  files (`refs.json`, `objects/info/packs`, `info/refs`, `HEAD`, mirror
+  status) are rewritten. Replicate it to a second bucket with Object Lock
+  (compliance mode, versioning on), so every rewritten file keeps its old
+  versions for the retention period and nothing can be deleted early, not
+  even with the backup credentials. The target can be another R2 bucket with
+  a bucket lock rule, or B2, Hetzner or any S3 bucket with Object Lock; the
+  copy runs with `rclone` on a schedule, since R2 has no built-in
+  bucket-to-bucket replication. `tmp/` is not needed.
+- **Database.** D1 Time Travel restores any minute of the last 30 days
+  (Workers Paid; 7 days on Free). For longer retention export the database
+  daily and put the dump into the same locked bucket. On Node, take an online
+  copy of the SQLite file.
+- **Consistency.** Copy the database first, then the bucket: every row
+  refers only to objects that exist by then, and objects are never removed.
+- **No encryption.** Backups are plain copies of the bucket and the
+  database, restorable without git-forge and without keys that could be
+  lost. Encrypted full backups were built and dropped (PR #28): they added
+  key management and a restore path of their own for no gain over a locked
+  bucket at a provider the operator trusts.
+
+Commands (Cloudflare instance; `lock:` is an rclone S3 remote for B2,
+Hetzner or any S3 bucket with Object Lock, `r2:` one for the instance's R2
+bucket):
+
+```sh
+# once: a bucket with Object Lock and 90 days default retention
+aws s3api create-bucket --bucket forge-backup --object-lock-enabled-for-bucket --endpoint-url "$S3_ENDPOINT"
+aws s3api put-object-lock-configuration --bucket forge-backup --endpoint-url "$S3_ENDPOINT" \
+  --object-lock-configuration '{"ObjectLockEnabled":"Enabled","Rule":{"DefaultRetention":{"Mode":"COMPLIANCE","Days":90}}}'
+
+# daily (cron, CI): database first, then the repositories
+npx wrangler d1 export git-forge --remote --output "d1-$(date -u +%F).sql"
+rclone copy "d1-$(date -u +%F).sql" lock:forge-backup/d1/
+rclone copy r2:git-forge lock:forge-backup/bucket/ --exclude 'tmp/**' --checksum
+
+# Node instance (apps/forge-node)
+sqlite3 /data/git-forge.sqlite ".backup /tmp/git-forge-$(date -u +%F).sqlite"
+rclone copy /tmp/git-forge-$(date -u +%F).sqlite lock:forge-backup/db/
+rclone copy /data/objects lock:forge-backup/bucket/ --exclude 'tmp/**' --checksum
+```
+
+Restore: `npx wrangler d1 time-travel restore git-forge --timestamp <iso>`
+within the Time Travel window, otherwise `npx wrangler d1 execute <new db>
+--remote --file d1-<date>.sql` into a freshly created database; then
+`rclone copy lock:forge-backup/bucket/ r2:<new bucket>/` (an older state with
+`--s3-version-at <time>`). A repository can also be cloned straight from the
+copied bucket over dumb HTTP or after `rclone copy` to a directory, without
+any git-forge software (§2).

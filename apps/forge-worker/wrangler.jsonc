@@ -58,7 +58,9 @@
     "MIRROR_INTERVAL_MINUTES": "1440",
     "MIRROR_DEEP_CHECK_DAYS": "30",
     "MIRROR_UNIT_BYTES": "0",
-    "ACTIONS": "true"
+    "ACTIONS": "true",
+    "EMAIL_PROVIDER": "console",
+    "EMAIL_FROM": "forge@example.org"
   },
   "secrets": {
     "required": [
@@ -139,7 +141,9 @@
         "MIRROR_INTERVAL_MINUTES": "1440",
         "MIRROR_DEEP_CHECK_DAYS": "30",
         "MIRROR_UNIT_BYTES": "0",
-        "ACTIONS": "true"
+        "ACTIONS": "true",
+        "EMAIL_PROVIDER": "console",
+        "EMAIL_FROM": "forge@example.org"
       },
       "secrets": {
         "required": [
@@ -217,7 +221,9 @@
         "MIRROR_INTERVAL_MINUTES": "1440",
         "MIRROR_DEEP_CHECK_DAYS": "30",
         "MIRROR_UNIT_BYTES": "0",
-        "ACTIONS": "true"
+        "ACTIONS": "true",
+        "EMAIL_PROVIDER": "console",
+        "EMAIL_FROM": "forge@example.org"
       },
       "secrets": {
         "required": [
@@ -295,7 +301,9 @@
         "MIRROR_INTERVAL_MINUTES": "1440",
         "MIRROR_DEEP_CHECK_DAYS": "30",
         "MIRROR_UNIT_BYTES": "0",
-        "ACTIONS": "true"
+        "ACTIONS": "true",
+        "EMAIL_PROVIDER": "console",
+        "EMAIL_FROM": "forge@example.org"
       },
       "secrets": {
         "required": [

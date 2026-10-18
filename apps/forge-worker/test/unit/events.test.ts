@@ -3,6 +3,7 @@ import { commitAll, initRepo, sampleHistory, writeFile } from '@git-forge/core/t
 import { type RunningServer, startServer } from '@git-forge/core/test/http-server.ts'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { git } from '../e2e/history.ts'
+import { ConfigurationError, parseEmailSettings, parseSettings } from '../../src/config.ts'
 import { bootstrap, call, type NodeForge, nodeForge } from '../support/node-forge.ts'
 
 type Hook = { url: string; event: string | null; body: Record<string, unknown> }
@@ -14,6 +15,22 @@ const hookFetch = (received: Hook[]) => async (request: Request) => {
   received.push({ url: request.url, event: request.headers.get('X-GitHub-Event'), body: JSON.parse(await request.text()) as Record<string, unknown> })
   return new Response('ok')
 }
+
+describe('email and webhook settings', () => {
+  it('parses the email provider from vars and secrets', async () => {
+    expect(parseEmailSettings({})).toBeUndefined()
+    expect(parseEmailSettings({ EMAIL_PROVIDER: 'none' })).toBeUndefined()
+    expect(parseEmailSettings({ EMAIL_PROVIDER: 'console', EMAIL_FROM: 'forge@example.org' })).toEqual({ provider: 'console', from: 'forge@example.org' })
+    expect(
+      parseEmailSettings({ EMAIL_PROVIDER: 'ses', EMAIL_FROM: 'forge@example.org', SES_REGION: 'eu-west-1', SES_ACCESS_KEY_ID: 'AKID', SES_SECRET_ACCESS_KEY: 's', SES_ENDPOINT: '' }),
+    ).toEqual({ provider: 'ses', from: 'forge@example.org', region: 'eu-west-1', accessKeyId: 'AKID', secretAccessKey: 's' })
+    expect(() => parseEmailSettings({ EMAIL_PROVIDER: 'console' })).toThrow(ConfigurationError)
+    expect(() => parseEmailSettings({ EMAIL_PROVIDER: 'ses', EMAIL_FROM: 'forge@example.org', SES_REGION: 'eu-west-1' })).toThrow('SES_ACCESS_KEY_ID')
+    expect(() => parseEmailSettings({ EMAIL_PROVIDER: 'smtp', EMAIL_FROM: 'forge@example.org' })).toThrow('none, console or ses')
+    expect((await parseSettings({})).allowInsecureWebhooks).toBe(false)
+    expect((await parseSettings({ ALLOW_INSECURE_WEBHOOKS: 'true' })).allowInsecureWebhooks).toBe(true)
+  })
+})
 
 describe('events from pushes and releases', () => {
   let server: RunningServer

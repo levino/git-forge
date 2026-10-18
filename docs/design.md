@@ -1624,8 +1624,9 @@ bundle.
   `/-/login`, which renders the model with the site layout. Without the UI
   (or on Node) the plain built-in pages are used. The passkey ceremony script
   is the one exported by `@git-forge/accounts` (`PASSKEY_SCRIPT`).
-- Reserved first path segments: `api`, `explore`, `login`, `settings`, `-`
-  (assets) and the other page routes. Account names must not use them.
+- Reserved first path segments: `api`, `explore`, `login`, `logout`,
+  `settings`, `notifications`, `organizations`, `orgs`, `-` (assets) and the
+  other page routes. Account names must not use them.
 
 ### Permissions
 
@@ -1703,6 +1704,20 @@ translated into the GitHub-shaped JSON body and parsed by
 `parseBranchProtectionSettings` of `@git-forge/accounts`, the parser of the
 protection API. Errors carry the API's status (`ForgeError`) and are shown
 on the page.
+
+### Organizations and accounts
+
+Organizations are managed through `createOrganizationOperations` of
+`@git-forge/accounts`: any signed-in user (session, or a token with
+`repo:admin`) may create one and becomes its first owner; owners and instance
+admins (`canAdministerOrganization`) add and remove members, change roles
+(the last owner cannot be demoted or removed), create teams, and set team
+members and team repository roles; members see people and teams, everyone
+else gets 404. `/organizations/new`, `/orgs/{org}` and
+`/orgs/{org}/teams/{slug}` call these operations; a JSON API on the same
+functions can follow. The account page `/settings` also lists linked OIDC
+identities (unlinking the last way to sign in is refused) and active
+sessions (ending any but the current one).
 
 ### Actions pages
 

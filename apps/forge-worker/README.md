@@ -472,6 +472,9 @@ argument.
 - `test/pages/settings.test.ts`: repository settings as admin and non-admin
   (visibility, collaborators, branch protection read back through the API,
   mirrors, federation grants).
+- `test/pages/organizations.test.ts`: creating an organization, people,
+  teams and team members as owner, member and outsider; sessions on the
+  account page.
 - `test/pages/actions.test.ts`: workflow runs and jobs from a real push, the
   live job log (escape codes removed, polling URL), runs of other
   repositories hidden.

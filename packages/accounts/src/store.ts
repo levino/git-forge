@@ -433,6 +433,67 @@ export const createAccountsStore = (db: Database, options: AccountsStoreOptions 
       ])
     },
 
+    organizationRole: async (organizationId: string, userId: string): Promise<OrganizationRole | null> =>
+      (await first<{ role: OrganizationRole }>(db, sql('SELECT role FROM organization_members WHERE organization_id = ? AND user_id = ?', organizationId, userId)))?.role ?? null,
+
+    listOrganizationMembers: async (organizationId: string): Promise<{ readonly id: string; readonly login: string; readonly role: OrganizationRole }[]> =>
+      db.all<{ id: string; login: string; role: OrganizationRole }>(
+        sql('SELECT a.id, a.login, m.role FROM organization_members m JOIN accounts a ON a.id = m.user_id WHERE m.organization_id = ? ORDER BY a.login', organizationId),
+      ),
+
+    organizationsOf: async (userId: string): Promise<{ readonly id: string; readonly login: string; readonly role: OrganizationRole }[]> =>
+      db.all<{ id: string; login: string; role: OrganizationRole }>(
+        sql('SELECT a.id, a.login, m.role FROM organization_members m JOIN accounts a ON a.id = m.organization_id WHERE m.user_id = ? AND a.disabled_at IS NULL ORDER BY a.login', userId),
+      ),
+
+    listTeams: async (organizationId: string): Promise<{ readonly id: string; readonly slug: string; readonly name: string; readonly members: number }[]> =>
+      db.all<{ id: string; slug: string; name: string; members: number }>(
+        sql(
+          'SELECT t.id, t.slug, t.name, (SELECT COUNT(*) FROM team_members m WHERE m.team_id = t.id) AS members FROM teams t WHERE t.organization_id = ? ORDER BY t.slug',
+          organizationId,
+        ),
+      ),
+
+    listTeamMembers: async (teamId: string): Promise<{ readonly id: string; readonly login: string; readonly role: 'member' | 'maintainer' }[]> =>
+      db.all<{ id: string; login: string; role: 'member' | 'maintainer' }>(
+        sql('SELECT a.id, a.login, m.role FROM team_members m JOIN accounts a ON a.id = m.user_id WHERE m.team_id = ? ORDER BY a.login', teamId),
+      ),
+
+    removeTeamMember: async (teamId: string, userId: string, actor: AuditActor = SYSTEM): Promise<void> => {
+      await write(actor, { action: 'team.member.remove', subjectKind: 'user', subjectId: userId, data: { teamId } }, [
+        sql('DELETE FROM team_members WHERE team_id = ? AND user_id = ?', teamId, userId),
+      ])
+    },
+
+    listTeamRepositories: async (teamId: string): Promise<{ readonly id: string; readonly name: string; readonly role: Role }[]> =>
+      (
+        await db.all<{ id: string; name: string; role: string }>(
+          sql('SELECT r.id, r.name, t.role FROM repository_teams t JOIN repositories r ON r.id = t.repository_id WHERE t.team_id = ? ORDER BY r.name', teamId),
+        )
+      ).flatMap((row) => (isRole(row.role) ? [{ id: row.id, name: row.name, role: row.role }] : [])),
+
+    removeTeamRepository: async (repositoryId: string, teamId: string, actor: AuditActor = SYSTEM): Promise<void> => {
+      await write(actor, { action: 'repository.team.remove', subjectKind: 'team', subjectId: teamId, repositoryId }, [
+        sql('DELETE FROM repository_teams WHERE repository_id = ? AND team_id = ?', repositoryId, teamId),
+      ])
+    },
+
+    listExternalIdentities: async (userId: string): Promise<{ readonly issuer: string; readonly subject: string; readonly email: string | null; readonly createdAt: number }[]> =>
+      (
+        await db.all<{ issuer: string; subject: string; email: string | null; created_at: number }>(
+          sql('SELECT issuer, subject, email, created_at FROM external_identities WHERE account_id = ? ORDER BY created_at', userId),
+        )
+      ).map((row) => ({ issuer: row.issuer, subject: row.subject, email: row.email, createdAt: row.created_at })),
+
+    unlinkExternalIdentity: async (userId: string, issuer: string, subject: string, actor: AuditActor = SYSTEM): Promise<boolean> => {
+      const linked = await first(db, sql('SELECT 1 AS ok FROM external_identities WHERE account_id = ? AND issuer = ? AND subject = ?', userId, issuer, subject))
+      if (!linked) return false
+      await write(actor, { action: 'identity.unlink', subjectKind: 'user', subjectId: userId, data: { issuer, subject } }, [
+        sql('DELETE FROM external_identities WHERE account_id = ? AND issuer = ? AND subject = ?', userId, issuer, subject),
+      ])
+      return true
+    },
+
     createRepository: async (
       input: { readonly ownerId: string; readonly name: string; readonly visibility: Visibility },
       actor: AuditActor = SYSTEM,

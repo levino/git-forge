@@ -210,7 +210,7 @@ describe('instance pages', () => {
 
 describe('login and account pages', () => {
   const user = () => admin as UserPrincipal
-  const session = (): UiSession => ({ principal: user(), csrf: 'csrf-token' })
+  const session = (): UiSession => ({ principal: user(), csrf: 'csrf-token', sessionId: 'session-1' })
 
   it('renders the sign-in page model from the login core', async () => {
     const page = await render(Login, '/login', {}, ANONYMOUS, {
@@ -301,7 +301,7 @@ describe('releases and notifications', () => {
   })
 
   it('shows the inbox of the session user and applies its actions', async () => {
-    const session: UiSession = { principal: admin as UserPrincipal, csrf: 'csrf-token' }
+    const session: UiSession = { principal: admin as UserPrincipal, csrf: 'csrf-token', sessionId: 'session-1' }
     const done: number[] = []
     const thread = {
       id: 7, user_id: 'x', repository_id: 'r', subject_key: 'k', subject_type: 'Release', subject_title: 'First release', subject_url: null, latest_comment_url: null,

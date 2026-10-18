@@ -59,6 +59,9 @@ import {
   isUnsafeMethod,
   type CreatedToken,
   type CredentialSummary,
+  createOrganizationOperations,
+  type OrganizationOperations,
+  type LoginStore,
   type BranchProtectionRule,
   type NamedAllowances,
   validateBranchPattern,
@@ -202,6 +205,7 @@ export type ForgeServices = {
   readonly collaboration: (request: Request, principal: Principal, owner: string, name: string) => Promise<CollaborationScope | null>
   readonly actions: ActionsReads
   readonly settings: RepositorySettingsOperations
+  readonly organizations: OrganizationOperations
 }
 
 export type InboxOperations = {
@@ -256,7 +260,7 @@ export type ReleaseReads = {
   readonly assets: (releaseIds: readonly number[]) => Promise<AssetRow[]>
 }
 
-export type UiSession = { readonly principal: UserPrincipal; readonly csrf: string }
+export type UiSession = { readonly principal: UserPrincipal; readonly csrf: string; readonly sessionId: string }
 
 export type AccountOperations = {
   readonly listTokens: (user: UserPrincipal) => ReturnType<AccountsStore['listTokens']>
@@ -264,6 +268,10 @@ export type AccountOperations = {
   readonly revokeToken: (user: UserPrincipal, tokenId: string) => Promise<boolean>
   readonly listPasskeys: (user: UserPrincipal) => Promise<CredentialSummary[]>
   readonly revokePasskey: (user: UserPrincipal, id: string) => Promise<boolean>
+  readonly listIdentities: (user: UserPrincipal) => ReturnType<AccountsStore['listExternalIdentities']>
+  readonly unlinkIdentity: (user: UserPrincipal, issuer: string, subject: string) => Promise<boolean>
+  readonly listSessions: (user: UserPrincipal) => ReturnType<LoginStore['listSessions']>
+  readonly revokeSession: (user: UserPrincipal, id: string) => Promise<boolean>
 }
 
 export type RepositoryAccess = {
@@ -1209,11 +1217,11 @@ export const createForge = (options: ForgeOptions): Forge => {
       isInstanceAdmin: async (principal) => principal.kind === 'user' && (await store.isInstanceAdmin(principal.id)),
       session: async (request) => {
         const active = await readActiveSession(request, loginOptions(request))
-        return active ? { principal: sessionUserPrincipal(active.session), csrf: active.csrf } : null
+        return active ? { principal: sessionUserPrincipal(active.session), csrf: active.csrf, sessionId: active.session.id } : null
       },
       verifySessionWrite: async (request) => {
         const check = await checkSession(request, loginOptions(request))
-        return check.kind === 'session' ? { principal: sessionUserPrincipal(check.active.session), csrf: check.active.csrf } : null
+        return check.kind === 'session' ? { principal: sessionUserPrincipal(check.active.session), csrf: check.active.csrf, sessionId: check.active.session.id } : null
       },
       loginOptions: { oidcName: oidc?.config.name ?? null },
       account: {
@@ -1226,7 +1234,17 @@ export const createForge = (options: ForgeOptions): Forge => {
         },
         listPasskeys: (user) => logins.listCredentials(user.id),
         revokePasskey: (user, id) => logins.revokeCredential(user.id, id),
+        listIdentities: (user) => store.listExternalIdentities(user.id),
+        unlinkIdentity: async (user, issuer, subject) => {
+          const identities = await store.listExternalIdentities(user.id)
+          const passkeys = await logins.listCredentials(user.id)
+          if (identities.length <= 1 && passkeys.length === 0) throw new HttpError(422, 'keep at least one way to sign in: add a passkey first')
+          return store.unlinkExternalIdentity(user.id, issuer, subject, { kind: 'user', id: user.id })
+        },
+        listSessions: (user) => logins.listSessions(user.id),
+        revokeSession: (user, id) => logins.revokeUserSession(user.id, id),
       },
+      organizations: createOrganizationOperations(store),
       inbox: {
         threads: (user, filter) => notifications.store.threads(user.id, { ...filter, participating: false }),
         markRead: (user, id) => notifications.store.markThreadRead(user.id, id),

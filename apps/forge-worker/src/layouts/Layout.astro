@@ -61,6 +61,11 @@ const returnTo = Astro.url.pathname.startsWith('/-/') ? '/' : Astro.url.pathname
                   )}
                   {session && (
                     <li>
+                      <a href="/organizations/new">New organization</a>
+                    </li>
+                  )}
+                  {session && (
+                    <li>
                       <form method="post" action="/logout" class="p-0">
                         <input type="hidden" name="csrf" value={session.csrf} />
                         <button class="w-full text-left px-3 py-1.5">Sign out</button>

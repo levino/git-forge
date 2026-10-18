@@ -1,10 +1,12 @@
 import { isTokenScope, type TokenScope } from '@git-forge/accounts'
-import type { ForgeServices, UiSession } from '../app.ts'
+import { ForgeError, type ForgeServices, type UiSession } from '../app.ts'
 
 export type AccountAction =
   | { readonly kind: 'token-created'; readonly name: string; readonly token: string }
   | { readonly kind: 'token-revoked' }
   | { readonly kind: 'passkey-removed' }
+  | { readonly kind: 'identity-unlinked' }
+  | { readonly kind: 'session-revoked' }
   | { readonly kind: 'error'; readonly message: string }
 
 const DAY_MS = 24 * 60 * 60 * 1000
@@ -35,6 +37,17 @@ export const accountAction = async (forge: ForgeServices, session: UiSession, fo
   }
   if (action === 'remove-passkey') {
     return (await forge.account.revokePasskey(user, String(form.get('id') ?? ''))) ? { kind: 'passkey-removed' } : { kind: 'error', message: 'Unknown passkey.' }
+  }
+  if (action === 'unlink-identity') {
+    try {
+      return (await forge.account.unlinkIdentity(user, String(form.get('issuer') ?? ''), String(form.get('subject') ?? ''))) ? { kind: 'identity-unlinked' } : { kind: 'error', message: 'Unknown linked account.' }
+    } catch (error) {
+      if (error instanceof ForgeError) return { kind: 'error', message: error.message }
+      throw error
+    }
+  }
+  if (action === 'revoke-session') {
+    return (await forge.account.revokeSession(user, String(form.get('id') ?? ''))) ? { kind: 'session-revoked' } : { kind: 'error', message: 'Unknown session.' }
   }
   return { kind: 'error', message: 'Unknown action.' }
 }

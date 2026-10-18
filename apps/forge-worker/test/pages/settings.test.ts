@@ -16,7 +16,7 @@ let ownerToken: string
 const principalFor = async (token: string) => (await forge.services.authenticate(new Request(BASE, { headers: { Authorization: `Bearer ${token}` } }))) as UserPrincipal
 
 const page = async (principal: UserPrincipal, form?: Record<string, string>) => {
-  const session: UiSession = { principal, csrf: 'csrf-token' }
+  const session: UiSession = { principal, csrf: 'csrf-token', sessionId: 'session-1' }
   const response = await container.renderToResponse(Settings, {
     request: form
       ? new Request(`${BASE}/alice/site/settings`, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ csrf: 'csrf-token', ...form }) })

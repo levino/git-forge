@@ -113,8 +113,9 @@ Design: [design.md §18](design.md#18-web-ui).
 - [x] Login pages (sign-in, invite, device code entry, break-glass) rendered by the UI from the login package's page models; sessions in the middleware; account menu with sign-out
 - [x] Account settings: personal access tokens (create, revoke), passkeys (add, remove), linking an OIDC identity
 - [x] Notifications inbox (unread/all, mark read, done, all read) and repository releases (list, tag page, notes, asset downloads)
-- [ ] List and unlink linked OIDC identities, list and end sessions
-- [ ] Organizations and teams
+- [x] List and unlink linked OIDC identities, list and end sessions
+- [x] Organizations and teams (create, members and owners, teams, team members, team repository roles)
+- [ ] JSON API for organizations and teams on the same operations
 - [x] Repository settings (visibility, collaborators, branch protection, federation trust)
 - [x] Mirror settings, status and alarms (add, sync, deep check, detach)
 - [ ] Blame, syntax highlighting in diffs and Markdown code blocks

@@ -1,5 +1,7 @@
 import { readAll, SizeLimitError } from './bytes.ts'
 import { advertiseReceivePack, type PushOutcome, receivePack, type ReceiveOptions } from './receive-pack.ts'
+import { handleLfsRequest, type LfsHttpOptions } from './lfs-http.ts'
+import { lfsPushCheck } from './lfs.ts'
 import { gitPrefix, isValidName, readRefs, type RepositoryName } from './repository.ts'
 import type { Storage } from './storage.ts'
 import { advertiseUploadPackV2, uploadPackV2 } from './upload-pack.ts'
@@ -14,6 +16,7 @@ export type GitHttpOptions = {
   readonly maxRequestBytes?: number
   readonly receive?: Omit<ReceiveOptions, 'storage' | 'repo'>
   readonly onPush?: (repo: RepositoryName, outcome: PushOutcome) => Promise<void>
+  readonly lfs?: LfsHttpOptions | false
 }
 
 export type GitRoute = {
@@ -69,12 +72,26 @@ const dumbContentType = (path: string): string => {
   return 'text/plain; charset=utf-8'
 }
 
+const withLfsCheck = (options: GitHttpOptions, repo: RepositoryName): NonNullable<ReceiveOptions['beforeUpdate']> => {
+  const custom = options.receive?.beforeUpdate
+  const lfs = options.lfs === false ? null : lfsPushCheck(options.storage, repo)
+  return async (objects, commands) => (await lfs?.(objects)) ?? (await custom?.(objects, commands)) ?? null
+}
+
 export const handleGitRequest = async (request: Request, options: GitHttpOptions): Promise<Response | null> => {
   const url = new URL(request.url)
   const route = matchGitRoute(url.pathname)
   if (!route) return null
   const { repo, path } = route
   const { storage } = options
+  if (options.lfs !== false) {
+    const lfs = await handleLfsRequest(request, repo, path, {
+      storage,
+      ...(options.authorize ? { authorize: options.authorize } : {}),
+      ...(options.lfs ? { lfs: options.lfs } : {}),
+    })
+    if (lfs) return lfs
+  }
   const limit = options.maxRequestBytes ?? 64 * 1024 * 1024
   const service = url.searchParams.get('service')
   const isReceive = service === 'git-receive-pack' || path === '/git-receive-pack'
@@ -120,7 +137,7 @@ export const handleGitRequest = async (request: Request, options: GitHttpOptions
       if (error instanceof SizeLimitError) return text(413, `push exceeds ${limit} bytes; use Git LFS for large files\n`)
       throw error
     }
-    const { response, outcome } = await receivePack({ ...options.receive, storage, repo }, body)
+    const { response, outcome } = await receivePack({ ...options.receive, storage, repo, beforeUpdate: withLfsCheck(options, repo) }, body)
     if (options.onPush) await options.onPush(repo, outcome)
     return new Response(binary(response), { headers: { 'Content-Type': 'application/x-git-receive-pack-result', ...noCache } })
   }

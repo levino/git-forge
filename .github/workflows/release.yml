@@ -113,6 +113,51 @@ jobs:
             "$RUNNER_TEMP"/node/* \
             $verify --title "$TAG" --notes-file "$RUNNER_TEMP/notes.md" $prerelease
 
+  image:
+    needs: [prepare, release]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    env:
+      TAG: ${{ needs.prepare.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: tags
+        env:
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          image="ghcr.io/$(echo "$OWNER" | tr '[:upper:]' '[:lower:]')/git-forge-node"
+          version=${TAG#v}
+          tags="$image:$version"
+          case "$version" in
+            *-*) ;;
+            *) tags="$tags,$image:${version%.*},$image:latest" ;;
+          esac
+          echo "tags=$tags" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: apps/forge-node/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.tags.outputs.tags }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.version=${{ env.TAG }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.licenses=MIT
+            org.opencontainers.image.description=git-forge without Cloudflare (apps/forge-node)
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
   pin-template:
     needs: [prepare, release]
     if: ${{ !contains(needs.prepare.outputs.tag, '-') }}

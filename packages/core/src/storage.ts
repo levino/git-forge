@@ -37,3 +37,14 @@ export interface Storage {
   presignGet?(key: string, expiresInSeconds: number): Promise<string>
   presignPut?(key: string, size: number, sha256Hex: string, expiresInSeconds: number): Promise<PresignedPut>
 }
+
+export type Presigner = Required<Pick<Storage, 'presignGet' | 'presignPut'>>
+
+export const withPresigner = (storage: Storage, presigner: Presigner): Storage => ({
+  get: (key, range) => storage.get(key, range),
+  head: (key) => storage.head(key),
+  put: (key, body, size, options) => storage.put(key, body, size, options),
+  list: (prefix) => storage.list(prefix),
+  presignGet: (key, expiresInSeconds) => presigner.presignGet(key, expiresInSeconds),
+  presignPut: (key, size, sha256Hex, expiresInSeconds) => presigner.presignPut(key, size, sha256Hex, expiresInSeconds),
+})

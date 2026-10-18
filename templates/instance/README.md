@@ -180,6 +180,7 @@ OIDC_NAME = "Example ID"
 | `BREAK_GLASS_PUBLIC_KEY` | | Public half of the offline break-glass key, see the [forge-worker README](https://github.com/levino/git-forge/tree/main/apps/forge-worker#break-glass-key). |
 | `UI` | `true` | `false` for a headless instance (for example a backup mirror): Git, LFS and the API only. |
 | `MAX_LFS_OBJECT_BYTES`, `MIRROR_INTERVAL_MINUTES`, `MIRROR_DEEP_CHECK_DAYS` | see the forge-worker README | Limits and mirror schedule. |
+| `R2_S3_ENDPOINT`, `R2_BUCKET_NAME` | none: LFS through the Worker | Presigned uploads straight to R2, see [Large LFS objects](#large-lfs-objects). |
 | `EMAIL_PROVIDER` | `none` | `ses` or `console`, see [Email](#notifications-email-and-webhooks). |
 | `PAGES_HOST`, `PAGES_DOMAINS`, `PAGES_MAX_AGE` | none: no Pages; `60` | Pages hosts, custom domains and cache lifetime, see [Pages](#pages). |
 | `LFS_PUBLISH_PREFIX` | | Key prefix in `CDN_BUCKET`, see [Public LFS bucket](#public-lfs-bucket). |
@@ -215,6 +216,31 @@ lists repositories, `https://<your-instance>/alice/site` shows the files, the
 README, commits, diffs, branches, tags and previews of LFS images, video,
 audio and PDFs. Public repositories are visible to everyone, private ones only
 with access.
+
+## Large LFS objects
+
+Without an R2 key, LFS uploads are proxied and limited by the request body
+limit (100 MB on Free/Pro). With a bucket-scoped key, clients upload straight
+to R2 via presigned URLs. Create it (`CF_API_TOKEN` needs "Account API
+Tokens: Edit"):
+
+```sh
+ACCOUNT_ID=<account id>; BUCKET=<bucket_name of BUCKET>
+RESPONSE=$(curl -fsS "https://api.cloudflare.com/client/v4/accounts/$ACCOUNT_ID/tokens" \
+  -H "Authorization: Bearer $CF_API_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"name":"git-forge LFS '"$BUCKET"'","policies":[{"effect":"allow",
+    "permission_groups":[{"id":"6a018a9f2fc74eb6b293b0c548f38b39"},{"id":"2efd5506f9c8494dacb1fa10a3e7d5b6"}],
+    "resources":{"com.cloudflare.edge.r2.bucket.'"$ACCOUNT_ID"'_default_'"$BUCKET"'":"*"}}]}')
+echo "$RESPONSE" | jq -r .result.id | npx wrangler@4 secret put R2_ACCESS_KEY_ID
+echo "$RESPONSE" | jq -r .result.value | tr -d '\n' | sha256sum | cut -d' ' -f1 | npx wrangler@4 secret put R2_SECRET_ACCESS_KEY
+```
+
+Dashboard alternative: **R2 → Manage API tokens → Create Account API token**,
+"Object Read & Write" on this bucket only, then put the shown access key id
+and secret with the same two `wrangler secret put` commands. Then set the
+vars `R2_S3_ENDPOINT` (`https://<account id>.r2.cloudflarestorage.com`, or
+the jurisdiction endpoint), `R2_BUCKET_NAME` and raise `MAX_LFS_OBJECT_BYTES`
+(up to about 5 GiB).
 
 ## Imports
 

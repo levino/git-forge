@@ -19,10 +19,12 @@ discussions.
 ## M2 — Git LFS
 
 - [x] Batch API (presigned URLs where the storage can sign, upload through the function otherwise)
+- [x] Presigned R2 URLs in the Worker (`R2_*` S3 credentials, `withPresigner` over the binding), LFS objects up to R2's single-PUT limit
 - [x] Verify step (size, SHA-256) before an object counts as present
 - [x] Reject pushes referencing missing LFS objects
 - [x] Per-object size limit (`MAX_LFS_OBJECT_BYTES` in the Worker)
 - [x] Media URLs `/{owner}/{repo}/media/{oid}` and raw endpoint `/{owner}/{repo}/raw/{ref}/{path}` resolving LFS pointers (CDN pull-zone friendly: immutable caching, ETag, Range, HEAD)
+- [ ] Keyless large LFS uploads: `git forge` as a git-lfs custom transfer agent (set up by `git forge auth login`), uploading parts of at most 64 MB through the Worker into an R2 multipart upload via the binding (resumable, size and SHA-256 verified before the object counts as present); plain git-lfs keeps the single PUT up to the body limit
 - [x] Optional: publish public LFS objects to a CDN bucket on push (`LfsPublisher` adapter, keyed by oid, `CDN_BUCKET` / `LFS_PUBLISH_DIR`, backfill endpoint; design §7)
 
 ## M3 — Accounts and federation

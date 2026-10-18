@@ -8,7 +8,8 @@ import { type Authorize, handleGitRequest } from '../src/http.ts'
 import { LFS_CONTENT_TYPE, lfsObjectKey } from '../src/lfs.ts'
 import { MemoryStorage } from '../src/memory-storage.ts'
 import { createRepository, readRefs } from '../src/repository.ts'
-import type { PresignedPut } from '../src/storage.ts'
+import { type PresignedPut, withPresigner } from '../src/storage.ts'
+import { type DigestFactory, javascriptDigests } from '../src/digest.ts'
 import { gitEnv, tempDir, writeFile } from './git-helpers.ts'
 import { type RunningServer, startServer } from './http-server.ts'
 
@@ -293,6 +294,47 @@ describe('git lfs with presigning storage', () => {
       { storage: presigning, authorize },
     )
     expect(verify?.status).toBe(422)
+  })
+})
+
+describe('presigner composed onto a storage', () => {
+  it('presigns through the presigner, stores through the storage and re-hashes on verify with the given digests', async () => {
+    const base = new MemoryStorage()
+    const signed: string[] = []
+    const storage = withPresigner(base, {
+      presignGet: async (key) => `https://s3.test/${key}?get`,
+      presignPut: async (key, size, sha256) => {
+        signed.push(`${key}:${size}:${sha256}`)
+        return { url: `https://s3.test/${key}?put`, headers: { 'content-length': String(size) }, expiresAt: new Date(Date.now() + 60_000) }
+      },
+    })
+    let hashed = 0
+    const digests: DigestFactory = (algorithm) => {
+      const inner = javascriptDigests(algorithm)
+      return { update: (chunk) => ((hashed += chunk.length), inner.update(chunk)), digest: () => inner.digest() }
+    }
+    const repo = { owner: 'test', name: 'composed' }
+    await createRepository(storage, repo)
+    expect(await readRefs(base, repo)).not.toBeNull()
+    const data = utf8('composed object')
+    const oid = sha256Hex(data)
+    const call = (path: string, body: unknown) =>
+      handleGitRequest(new Request(`https://forge.test/test/composed.git/info/lfs${path}`, { method: 'POST', headers: { Authorization: WRITER }, body: JSON.stringify(body) }), {
+        storage,
+        authorize,
+        lfs: { digests },
+      })
+    const upload = (await (await call('/objects/batch', { operation: 'upload', objects: [{ oid, size: data.length }] }))?.json()) as {
+      objects: { actions: { upload: { href: string } } }[]
+    }
+    expect(upload.objects[0]?.actions.upload.href).toBe(`https://s3.test/${lfsObjectKey(repo, oid)}?put`)
+    expect(signed).toEqual([`${lfsObjectKey(repo, oid)}:${data.length}:${oid}`])
+    expect((await call('/objects/verify', { oid, size: data.length }))?.status).toBe(404)
+    await base.put(lfsObjectKey(repo, oid), data, data.length)
+    expect((await call('/objects/verify', { oid, size: data.length }))?.status).toBe(200)
+    expect(hashed).toBe(data.length)
+    await base.put(lfsObjectKey(repo, 'e'.repeat(64)), data, data.length)
+    expect((await call('/objects/verify', { oid: 'e'.repeat(64), size: data.length }))?.status).toBe(422)
   })
 })
 

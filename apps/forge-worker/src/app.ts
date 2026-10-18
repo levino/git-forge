@@ -98,7 +98,6 @@ import {
   handleGitRequest,
   type JobQueue,
   type ImportScheduler,
-  type PresignPut,
   type ImportState,
   ImportRunningError,
   isValidImportUrl,
@@ -114,6 +113,7 @@ import {
   MirrorNotFoundError,
   ObjectDatabase,
   type PackfileUri,
+  type Presigner,
   publicPackfileUris,
   publishLfsObjects,
   type PushOutcome,
@@ -128,6 +128,7 @@ import {
   startImport,
   type Storage,
   type SyncResult,
+  withPresigner,
   ZERO_ID,
 } from '@git-forge/core'
 import {
@@ -198,8 +199,8 @@ export type ForgeOptions = ForgeSettings & {
   readonly actions?: ActionsOptions
   readonly jobs?: JobQueue<AppJob>
   readonly digests?: DigestFactory
+  readonly presigner?: Presigner
   readonly scheduleImport?: ImportScheduler
-  readonly presignUploads?: PresignPut
   readonly email?: EmailSender
   readonly renderLoginPage?: LoginPageRenderer
   readonly clientAddress?: (request: Request) => string | null
@@ -216,6 +217,11 @@ export const LFS_PUBLISH_BATCH = 100
 export type WaitUntil = (promise: Promise<unknown>) => void
 
 export const ACTIONS_SERVICE_PATH = '/_services/actions'
+
+export const PRESIGN_HINT =
+  'the instance admin can let larger objects go straight to R2 by setting R2_S3_ENDPOINT, R2_BUCKET_NAME, R2_ACCESS_KEY_ID and R2_SECRET_ACCESS_KEY and raising MAX_LFS_OBJECT_BYTES (see "Large LFS objects" in the instance README)'
+
+export const RAISE_LIMIT_HINT = 'the instance admin can raise MAX_LFS_OBJECT_BYTES up to about 5 GiB'
 
 export type ForgeServices = {
   readonly storage: Storage
@@ -426,6 +432,7 @@ type Route = { readonly pattern: RegExp; readonly method: string; readonly handl
 
 export const createForge = (options: ForgeOptions): Forge => {
   const { storage, db } = options
+  const presigningStorage = options.presigner ? withPresigner(storage, options.presigner) : storage
   const now = options.now ?? (() => new Date())
   const store: AccountsStore = createAccountsStore(db, { now: () => now().getTime() })
   const verification = createMirrorVerificationStore(db, { now: () => now().getTime() })
@@ -1552,12 +1559,12 @@ export const createForge = (options: ForgeOptions): Forge => {
     const content = await handleContentRequest(request, { storage, authorize: withSessionReads(authorize) })
     if (content) return content
     const git = await handleGitRequest(request, {
-      storage,
+      storage: presigningStorage,
       authorize,
       pushPolicy: access.pushPolicy,
       ...(options.maxPushBytes !== undefined ? { maxPushBytes: options.maxPushBytes } : {}),
-      lfs: { maxObjectBytes: options.maxLfsObjectBytes },
-      ...(options.presignUploads ? { uploads: { presignPut: options.presignUploads } } : {}),
+      lfs: { maxObjectBytes: options.maxLfsObjectBytes, oversizeHint: options.presigner ? RAISE_LIMIT_HINT : PRESIGN_HINT, ...(options.digests ? { digests: options.digests } : {}) },
+      ...(options.presigner ? { uploads: { presignPut: options.presigner.presignPut.bind(options.presigner) } } : {}),
       packfileUris: (incoming, repo) => packfileUris(incoming, repo, authorize),
       onPush: async (repo, outcome) => {
         await compactAfterPush(waitUntil)(repo, outcome)

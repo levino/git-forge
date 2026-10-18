@@ -36,10 +36,10 @@ read functions of `@git-forge/core` and check access with the same
 | `INSTANCE_KEY` | secret, optional | Ed25519 private JWK of this instance. Needed to mirror private repositories from other instances; also publishes `/.well-known/openid-configuration` and `/.well-known/jwks.json`. Generate with `pnpm --filter forge-worker instance-key`. |
 | `PUBLIC_URL` | var, optional | Base URL of the instance, used as its issuer (when minting) and audience (when verifying instance tokens). Defaults to the origin of the request; scheduled sync with instance tokens needs it set. |
 | `MAX_PUSH_BYTES` | var, optional | Largest accepted push request. Unset by default: pushes are streamed, so only Cloudflare's request body limit applies (see Large pushes). |
-| `R2_S3_ENDPOINT`, `R2_BUCKET_NAME`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` | vars/secrets, optional | All four or none. S3 endpoint and name of the `BUCKET` bucket plus an R2 token: `git-remote-forge` parts go directly to R2 via presigned URLs instead of through the Worker. |
+| `R2_S3_ENDPOINT`, `R2_BUCKET_NAME`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` | vars/secrets, optional | All four or none. `https://<account>.r2.cloudflarestorage.com`, the `BUCKET` bucket name and a bucket-scoped R2 key (token id, hex SHA-256 of the token value; see the instance README). `git-remote-forge` parts and LFS objects go directly to R2 via presigned URLs (LFS verify re-hashes through the binding). |
 | `PACKFILE_URI_BASE` | var, optional | Base URL for `packfile-uris` (e.g. a CDN in front of the forge). Defaults to the origin of the request. Pack URIs are only offered for repositories anyone may read. |
 | `COMPACT_MAX_BYTES` | var, optional | Largest pack compaction run after a push through `waitUntil`, default 128 MiB; `0` disables it. |
-| `MAX_LFS_OBJECT_BYTES` | var | Largest accepted LFS object, default 100 MiB (Cloudflare's request body limit on the Free and Pro plans). Larger objects get a per-object error in the batch API and `413` on `PUT`. |
+| `MAX_LFS_OBJECT_BYTES` | var | Largest accepted LFS object, default 100 MiB (Cloudflare's request body limit on the Free and Pro plans). Larger objects get a per-object error in the batch API and `413` on `PUT`. With presigned R2 URLs up to about 5 GiB. |
 | `MIRROR_INTERVAL_MINUTES` | var | Minimum time between two scheduled syncs of a mirror, default 30; `wrangler.jsonc` sets 1440 (daily) because notifications carry the real-time updates; `0` syncs on every cron tick. |
 | `MIRROR_UNIT_BYTES` | var | `0` (default): a mirror sync copies all new packs and LFS objects in one job. Otherwise a byte budget per invocation: one job per pack and per LFS object, a final job moves the refs, units above the budget stay pending (`docs/design.md` §12). For a mirror on the Workers Free plan. |
 | `MIRROR_DEEP_CHECK_DAYS` | var | Every how many days a mirror gets the full re-verification (re-hash every object, recompute every index), default 30, `0` = only on demand. |
@@ -536,8 +536,8 @@ and Pro, 200 MB on Business and 500 MB by default on Enterprise (check the
 current Workers limits). A push larger than that fails with HTTP 413 before it
 reaches the Worker. Ways around it:
 
-- **Git LFS for large files.** LFS objects go straight to the bucket through
-  presigned URLs and never pass through the Worker.
+- **Git LFS for large files.** With the `R2_*` key, LFS objects go straight to
+  the bucket through presigned URLs; without it they are proxied.
 - **The remote helper.** `git push forge::https://forge.example/acme/site main`
   (`git-remote-forge`, `packages/cli`) uploads resumable parts; finalize is
   bounded by `limits.cpu_ms`, not the body limit.
@@ -644,7 +644,7 @@ argument.
 - Unit tests (`test/unit`) run the app in Node with `MemoryStorage` and
   `node:sqlite`: settings, media/raw authorization, branch protection API and
   push policy with the real `git` client, bootstrap, admin API, PAT authorization, private
-  defaults, visibility and collaborators, the LFS size limit, the import
+  defaults, visibility and collaborators, the LFS size limit, presigned R2 LFS URLs, the import
   endpoint's authorization and validation, federation and
   scheduled sync between two in-process instances over real HTTP, and the
   shape of the wrangler environments. `test/unit/login.test.ts` drives every
@@ -734,6 +734,8 @@ argument.
   token, uploads a JPEG to a private repository with the real `git lfs push`
   and reads it back through the media and raw URLs (headers, Range, HEAD,
   `304`, redirect).
+- `test/e2e/presigned-lfs.e2e.test.ts`: real `git` and `git-lfs` against
+  presigned URLs to a stand-in bucket, verify through the binding in workerd.
 - `pnpm --filter forge-worker bench` measures CPU time and memory per
   operation (below); `pnpm --filter forge-worker bench:mirror` measures a pure
   mirror per invocation (further below).

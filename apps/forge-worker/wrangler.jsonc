@@ -3,20 +3,134 @@
   "name": "git-forge",
   "main": "src/index.ts",
   "compatibility_date": "2026-10-01",
-  "observability": { "enabled": true },
-  "limits": { "cpu_ms": 60000 },
-  "r2_buckets": [{ "binding": "BUCKET", "bucket_name": "git-forge" }],
-  "d1_databases": [
-    {
-      "binding": "DB",
-      "database_name": "git-forge",
-      "database_id": "00000000-0000-0000-0000-000000000000"
-    }
-  ],
+  "observability": {
+    "enabled": true
+  },
+  "limits": {
+    "cpu_ms": 60000
+  },
+  "triggers": {
+    "crons": [
+      "*/30 * * * *"
+    ]
+  },
   "queues": {
     "producers": [{ "binding": "IMPORTS", "queue": "git-forge-imports" }],
     "consumers": [{ "queue": "git-forge-imports", "max_batch_size": 1, "max_batch_timeout": 1, "max_retries": 3 }]
   },
-  "triggers": { "crons": ["*/30 * * * *"] },
-  "vars": { "PUBLIC_READ": "true", "MAX_PUSH_BYTES": "16777216" }
+  "r2_buckets": [
+    {
+      "binding": "BUCKET",
+      "bucket_name": "git-forge"
+    }
+  ],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "git-forge",
+      "migrations_dir": "../../packages/accounts/migrations"
+    }
+  ],
+  "vars": {
+    "MAX_PUSH_BYTES": "16777216",
+    "MAX_LFS_OBJECT_BYTES": "104857600",
+    "MIRROR_INTERVAL_MINUTES": "30"
+  },
+  "secrets": {
+    "required": [
+      "BOOTSTRAP_TOKEN"
+    ]
+  },
+  "env": {
+    "alpha": {
+      "name": "git-forge-alpha",
+      "queues": {
+        "producers": [{ "binding": "IMPORTS", "queue": "git-forge-alpha-imports" }],
+        "consumers": [{ "queue": "git-forge-alpha-imports", "max_batch_size": 1, "max_batch_timeout": 1, "max_retries": 3 }]
+      },
+      "r2_buckets": [
+        {
+          "binding": "BUCKET",
+          "bucket_name": "git-forge-alpha"
+        }
+      ],
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "git-forge-alpha",
+          "migrations_dir": "../../packages/accounts/migrations"
+        }
+      ],
+      "vars": {
+        "MAX_PUSH_BYTES": "16777216",
+        "MAX_LFS_OBJECT_BYTES": "104857600",
+        "MIRROR_INTERVAL_MINUTES": "30"
+      },
+      "secrets": {
+        "required": [
+          "BOOTSTRAP_TOKEN"
+        ]
+      }
+    },
+    "beta": {
+      "name": "git-forge-beta",
+      "queues": {
+        "producers": [{ "binding": "IMPORTS", "queue": "git-forge-beta-imports" }],
+        "consumers": [{ "queue": "git-forge-beta-imports", "max_batch_size": 1, "max_batch_timeout": 1, "max_retries": 3 }]
+      },
+      "r2_buckets": [
+        {
+          "binding": "BUCKET",
+          "bucket_name": "git-forge-beta"
+        }
+      ],
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "git-forge-beta",
+          "migrations_dir": "../../packages/accounts/migrations"
+        }
+      ],
+      "vars": {
+        "MAX_PUSH_BYTES": "16777216",
+        "MAX_LFS_OBJECT_BYTES": "104857600",
+        "MIRROR_INTERVAL_MINUTES": "30"
+      },
+      "secrets": {
+        "required": [
+          "BOOTSTRAP_TOKEN"
+        ]
+      }
+    },
+    "gamma": {
+      "name": "git-forge-gamma",
+      "queues": {
+        "producers": [{ "binding": "IMPORTS", "queue": "git-forge-gamma-imports" }],
+        "consumers": [{ "queue": "git-forge-gamma-imports", "max_batch_size": 1, "max_batch_timeout": 1, "max_retries": 3 }]
+      },
+      "r2_buckets": [
+        {
+          "binding": "BUCKET",
+          "bucket_name": "git-forge-gamma"
+        }
+      ],
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "git-forge-gamma",
+          "migrations_dir": "../../packages/accounts/migrations"
+        }
+      ],
+      "vars": {
+        "MAX_PUSH_BYTES": "16777216",
+        "MAX_LFS_OBJECT_BYTES": "104857600",
+        "MIRROR_INTERVAL_MINUTES": "30"
+      },
+      "secrets": {
+        "required": [
+          "BOOTSTRAP_TOKEN"
+        ]
+      }
+    }
+  }
 }

@@ -77,27 +77,34 @@ certificate on deploy (the zone must be on the same Cloudflare account):
 
 ## First admin
 
-Until accounts are wired up, one secret protects all writes. `wrangler.jsonc`
-declares it as required (`secrets.required`); its value never goes into the
-repository. Set it once:
+A fresh instance has no users. The secret `BOOTSTRAP_TOKEN` allows exactly one
+call that creates the first instance admin. `wrangler.jsonc` declares it as
+required (`secrets.required`); its value never goes into the repository. Set
+it once (the Deploy button asks for it):
 
 ```sh
-openssl rand -base64 32 | npx wrangler@4 secret put ADMIN_TOKEN
+openssl rand -base64 32 | npx wrangler@4 secret put BOOTSTRAP_TOKEN
 ```
 
 or in the dashboard under the Worker's **Settings → Variables and Secrets**.
-Then create a repository and push to it:
+Then create the admin, a repository, and push:
 
 ```sh
-curl -X POST https://<your-instance>/api/admin/repos \
-  -H "Authorization: Bearer $ADMIN_TOKEN" \
-  -d '{"owner":"acme","name":"site"}'
-git push https://git:$ADMIN_TOKEN@<your-instance>/acme/site.git main
-git clone https://<your-instance>/acme/site.git
+curl -X POST https://<your-instance>/api/bootstrap \
+  -H "Authorization: Bearer $BOOTSTRAP_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"login":"alice"}'
+# {"login":"alice","token":"gfp_…"}  keep this token, it is shown once
+curl -X POST https://<your-instance>/api/repos \
+  -H "Authorization: Bearer $TOKEN" -d '{"owner":"alice","name":"site"}'
+git push https://git:$TOKEN@<your-instance>/alice/site.git main
 ```
 
-`PUBLIC_READ` in `wrangler.jsonc` decides whether anyone may clone (`"true"`)
-or only holders of the token (`"false"`).
+Repositories are private by default (`"visibility": "public"` on creation or
+`PATCH /api/repos/{owner}/{name}` changes that). Further users, tokens,
+collaborators, instance federation and mirrors are described in the
+[forge-worker README](https://github.com/levino/git-forge/tree/main/apps/forge-worker#api).
+To mirror private repositories of other instances, also set the secret
+`INSTANCE_KEY` and the var `PUBLIC_URL` (see there).
 
 ## Imports (optional)
 

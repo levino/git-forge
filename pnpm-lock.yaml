@@ -168,6 +168,9 @@ importers:
 
   apps/forge-worker:
     dependencies:
+      '@git-forge/accounts':
+        specifier: workspace:*
+        version: link:../../packages/accounts
       '@git-forge/cloudflare':
         specifier: workspace:*
         version: link:../../packages/cloudflare
@@ -178,6 +181,9 @@ importers:
       '@cloudflare/workers-types':
         specifier: 5.20261012.1
         version: 5.20261012.1
+      '@git-forge/accounts-node':
+        specifier: workspace:*
+        version: link:../../packages/accounts-node
       '@types/node':
         specifier: 22.20.5
         version: 22.20.5

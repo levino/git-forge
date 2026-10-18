@@ -8,7 +8,9 @@ import { advertiseUploadPackV2, uploadPackV2 } from './upload-pack.ts'
 
 export type Access = 'read' | 'write'
 
-export type Authorize = (request: Request, repo: RepositoryName, access: Access) => Promise<Response | null>
+export type Surface = 'git' | 'lfs'
+
+export type Authorize = (request: Request, repo: RepositoryName, access: Access, surface: Surface) => Promise<Response | null>
 
 export type PushPolicy = (request: Request, repo: RepositoryName) => Promise<RefPolicy | null>
 
@@ -110,7 +112,7 @@ export const handleGitRequest = async (request: Request, options: GitHttpOptions
   const isReceive = service === 'git-receive-pack' || path === '/git-receive-pack'
   const isGitPath = path === '/git-upload-pack' || path === '/git-receive-pack' || DUMB_PATHS.some((pattern) => pattern.test(path))
   if (!isGitPath) return null
-  const denied = await options.authorize?.(request, repo, isReceive ? 'write' : 'read')
+  const denied = await options.authorize?.(request, repo, isReceive ? 'write' : 'read', 'git')
   if (denied) return denied
   const refs = await readRefs(storage, repo)
   if (!refs) return text(404, 'repository not found\n')

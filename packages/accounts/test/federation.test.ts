@@ -168,6 +168,19 @@ describe('instance tokens', () => {
       reason: 'jwks-unavailable',
       detail: expect.stringMatching(/different origin/),
     })
+    const redirects: RequestInit[] = []
+    const redirecting = createJwksCache({
+      fetch: (async (_input: string, init: RequestInit) => {
+        redirects.push(init)
+        return new Response(null, { status: 302, headers: { Location: 'https://evil.example/' } })
+      }) as unknown as typeof fetch,
+    })
+    expect(await verifyInstanceToken(token, { audience: SOURCE, trust, jwks: redirecting, now: NOW })).toMatchObject({
+      ok: false,
+      reason: 'jwks-unavailable',
+      detail: expect.stringMatching(/redirects/),
+    })
+    expect(redirects[0]?.redirect).toBe('manual')
     const plainHttp = 'http://b.example'
     const insecure = await mintInstanceToken({ key, issuer: plainHttp, audience: SOURCE, repositories: ['village/archive'], now: NOW })
     expect(await verifyInstanceToken(insecure, { audience: SOURCE, trust, jwks: createJwksCache({ fetch: network([]) }), now: NOW })).toMatchObject({

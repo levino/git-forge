@@ -9,17 +9,18 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { generateHistory, git, gitEnv, gitFails, tempDir } from './history.ts'
 import { startWranglerDev, type WranglerDev } from './wrangler-dev.ts'
 
-const ADMIN_TOKEN = `e2e-${crypto.randomUUID()}`
+const BOOTSTRAP_TOKEN = `e2e-${crypto.randomUUID()}`
 
 let dev: WranglerDev
 let source: string
 let remote: string
 let pushRemote: string
+let token: string
 
-const admin = (body: unknown, token = ADMIN_TOKEN) =>
-  fetch(`${dev.url}/api/admin/repos`, {
+const api = (path: string, body: unknown, authorization = token) =>
+  fetch(`${dev.url}${path}`, {
     method: 'POST',
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    headers: { Authorization: `Bearer ${authorization}`, 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   })
 
@@ -33,12 +34,11 @@ const requestsSince = (mark: number) =>
     .filter((line) => /\b(GET|POST|HEAD) \//.test(line))
 
 beforeAll(async () => {
-  dev = await startWranglerDev({ ADMIN_TOKEN })
+  dev = await startWranglerDev({ vars: { BOOTSTRAP_TOKEN } })
   source = tempDir()
   await git(source, ['init', '-q', '-b', 'main'])
   generateHistory(source, { commits: 120, files: 40, binaryBytes: 48 * 1024, seed: 1 })
   remote = `${dev.url}/e2e/history.git`
-  pushRemote = remote.replace('http://', `http://git:${ADMIN_TOKEN}@`)
 }, 90_000)
 
 afterAll(async () => {
@@ -46,18 +46,30 @@ afterAll(async () => {
 })
 
 describe('forge worker on wrangler dev', () => {
-  it('protects the admin endpoint and creates a repository', async () => {
-    expect((await admin({ owner: 'e2e', name: 'history' }, 'wrong')).status).toBe(401)
-    expect((await admin({ owner: 'e2e', name: 'bad.git' })).status).toBe(400)
-    const created = await admin({ owner: 'e2e', name: 'history' })
+  it('bootstraps the first admin and creates a repository', async () => {
+    expect((await api('/api/bootstrap', { login: 'e2e' }, 'wrong')).status).toBe(401)
+    const bootstrapped = await api('/api/bootstrap', { login: 'e2e' }, BOOTSTRAP_TOKEN)
+    expect(bootstrapped.status).toBe(201)
+    token = ((await bootstrapped.json()) as { token: string }).token
+    pushRemote = remote.replace('http://', `http://git:${token}@`)
+    expect((await api('/api/bootstrap', { login: 'other' }, BOOTSTRAP_TOKEN)).status).toBe(409)
+    expect((await api('/api/repos', { owner: 'e2e', name: 'history' }, 'wrong')).status).toBe(401)
+    expect((await api('/api/repos', { owner: 'e2e', name: 'bad.git' })).status).toBe(400)
+    const created = await api('/api/repos', { owner: 'e2e', name: 'history', visibility: 'public' })
     expect(created.status).toBe(201)
-    expect(await created.json()).toMatchObject({ owner: 'e2e', name: 'history', defaultBranch: 'main', cloneUrl: `${dev.url}/e2e/history.git` })
-    expect((await admin({ owner: 'e2e', name: 'history' })).status).toBe(409)
+    expect(await created.json()).toMatchObject({ owner: 'e2e', name: 'history', defaultBranch: 'main', visibility: 'public', cloneUrl: `${dev.url}/e2e/history.git` })
+    expect((await api('/api/repos', { owner: 'e2e', name: 'history' })).status).toBe(409)
   })
 
-  it('rejects pushes without the token', async () => {
+  it('rejects pushes without a token', async () => {
     const message = await gitFails(source, ['push', remote, 'main'])
     expect(message).toMatch(/401|Authentication failed|could not read Username/i)
+  })
+
+  it('keeps repositories private by default', async () => {
+    expect((await api('/api/repos', { owner: 'e2e', name: 'private' })).status).toBe(201)
+    expect(await gitFails(tempDir(), ['clone', '-q', `${dev.url}/e2e/private.git`, 'out'])).toMatch(/401|Authentication failed|could not read Username/i)
+    await git(tempDir(), ['clone', '-q', `${dev.url}/e2e/private.git`.replace('http://', `http://git:${token}@`), 'out'])
   })
 
   it('accepts a push of a generated history with the real git client', async () => {
@@ -125,14 +137,10 @@ describe('forge worker on wrangler dev', () => {
     await git(`${root}/upstream.git`, ['config', 'uploadpack.allowFilter', 'true'])
     const upstream = await startServer(chain(requireAuthorization(basicAuth('git', 'upstream-token')), httpBackendHandler(root)))
     try {
-      const response = await fetch(`${dev.url}/api/admin/repos/e2e/imported/import`, {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${ADMIN_TOKEN}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: `${upstream.url}/upstream.git`, token: 'upstream-token', commitsPerStep: 40 }),
-      })
+      const response = await api('/api/repos/e2e/imported/import', { url: `${upstream.url}/upstream.git`, token: 'upstream-token', commitsPerStep: 40 })
       expect(response.status).toBe(202)
       const status = async () =>
-        (await (await fetch(`${dev.url}/api/admin/repos/e2e/imported/import`, { headers: { Authorization: `Bearer ${ADMIN_TOKEN}` } })).json()) as {
+        (await (await fetch(`${dev.url}/api/repos/e2e/imported/import`, { headers: { Authorization: `Bearer ${token}` } })).json()) as {
           phase: string
           steps: number
           stepped: boolean
@@ -143,7 +151,7 @@ describe('forge worker on wrangler dev', () => {
       expect(final.stepped).toBe(true)
       expect(final.steps).toBeGreaterThan(4)
       const target = tempDir()
-      await git(target, ['clone', '-q', '--mirror', `${dev.url}/e2e/imported.git`, 'out.git'])
+      await git(target, ['clone', '-q', '--mirror', `${dev.url}/e2e/imported.git`.replace('http://', `http://git:${token}@`), 'out.git'])
       expect(await git(`${target}/out.git`, ['fsck', '--full', '--strict'])).toBe('')
       const heads = async (dir: string) => git(dir, ['for-each-ref', '--format=%(objectname) %(refname)', 'refs/heads', 'refs/tags'])
       expect(await heads(`${target}/out.git`)).toBe(await heads(`${root}/upstream.git`))
@@ -153,8 +161,7 @@ describe('forge worker on wrangler dev', () => {
   })
 
   it('splits a push above the worker limit with git forge push', async () => {
-    const created = await admin({ owner: 'e2e', name: 'large' })
-    expect(created.status).toBe(201)
+    expect((await api('/api/repos', { owner: 'e2e', name: 'large' })).status).toBe(201)
     const large = tempDir()
     await git(large, ['init', '-q', '-b', 'main'])
     for (let i = 0; i < 12; i++) {
@@ -162,7 +169,7 @@ describe('forge worker on wrangler dev', () => {
       await git(large, ['add', '-A'])
       await git(large, ['commit', '-q', '-m', `large ${i}`])
     }
-    const url = `${dev.url}/e2e/large.git`.replace('http://', `http://git:${ADMIN_TOKEN}@`)
+    const url = `${dev.url}/e2e/large.git`.replace('http://', `http://git:${token}@`)
     expect(await gitFails(large, ['push', url, 'main'])).toMatch(/413|exceeds|RPC failed|unexpected disconnect/i)
     const cli = resolve(import.meta.dirname, '../../../../packages/cli/src/main.ts')
     const { stderr } = await promisify(execFile)(process.execPath, ['--no-warnings', cli, 'push', '--max-bytes', '8MiB', url, 'main'], {
@@ -170,12 +177,12 @@ describe('forge worker on wrangler dev', () => {
       env: { ...process.env, ...gitEnv },
     })
     expect(stderr).toContain('chunk 2')
-    expect(await git(large, ['ls-remote', `${dev.url}/e2e/large.git`, 'refs/heads/main'])).toContain((await git(large, ['rev-parse', 'main'])).trim())
+    expect(await git(large, ['ls-remote', url, 'refs/heads/main'])).toContain((await git(large, ['rev-parse', 'main'])).trim())
   })
 
-  it('runs the scheduled handler stub', async () => {
+  it('runs the scheduled mirror sync', async () => {
     const response = await fetch(`${dev.url}/__scheduled?cron=${encodeURIComponent('*/30 * * * *')}`)
     expect(response.status).toBe(200)
-    await expect.poll(() => dev.output()).toContain('"task":"mirror-sync"')
+    await expect.poll(() => dev.output()).toContain('"task":"mirror-sync","runs":[]')
   })
 })

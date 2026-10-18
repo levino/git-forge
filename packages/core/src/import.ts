@@ -104,7 +104,7 @@ const writeState = async (storage: Storage, repo: RepositoryName, state: ImportS
 export const readImportState = async (storage: Storage, repo: RepositoryName): Promise<ImportState | null> =>
   (await readState(storage, repo))?.value ?? null
 
-const validUrl = (url: string): boolean => {
+export const isValidImportUrl = (url: string): boolean => {
   try {
     const parsed = new URL(url)
     return (parsed.protocol === 'https:' || parsed.protocol === 'http:') && parsed.username === '' && parsed.password === ''
@@ -139,8 +139,8 @@ const freshState = (settings: ImportSettings, at: string): ImportState => ({
 
 export const startImport = async (storage: Storage, repo: RepositoryName, settings: ImportSettings, now = new Date()): Promise<ImportState> => {
   if (!isValidName(repo.owner) || !isValidName(repo.name)) throw new Error('invalid repository name')
-  if (!validUrl(settings.url)) throw new Error(`invalid import URL ${settings.url}; pass credentials separately`)
-  if (settings.lfsUrl !== undefined && !validUrl(settings.lfsUrl)) throw new Error(`invalid LFS URL ${settings.lfsUrl}`)
+  if (!isValidImportUrl(settings.url)) throw new Error(`invalid import URL ${settings.url}; pass credentials separately`)
+  if (settings.lfsUrl !== undefined && !isValidImportUrl(settings.lfsUrl)) throw new Error(`invalid LFS URL ${settings.lfsUrl}`)
   try {
     await createRepository(storage, repo, settings.defaultBranch ?? 'main')
   } catch (error) {

@@ -136,6 +136,16 @@ OIDC-style, modelled on GitHub Actions OIDC:
 - The target fetches the issuer's JWKS over HTTPS; the trust anchor is the
   issuer's domain. Optionally a key thumbprint is pinned per grant.
 - Public repositories need no grant.
+- The token carries the scopes `git:read` and `lfs:read`. The core tells the
+  authorization hook whether a request is a Git or an LFS request, so both are
+  checked separately.
+- A mirror marks in its config (`auth: "instance"`) that it presents an
+  instance token to its upstream; otherwise it fetches anonymously. A mirror
+  of a mirror reads the upstream's `refs/upstream/{remote}/*` by setting the
+  namespace to `upstream/{remote}/`.
+- JWKS documents are fetched without following redirects (`redirect:
+  "manual"`, any 3xx is an error), because Workers do not implement
+  `redirect: "error"`.
 - There are no push certificates. The instance signs; trust is
   server-to-server.
 
@@ -332,9 +342,9 @@ there is no upload or publish step.
   Rule "Set Request Header" or origin header setting). Everything the CDN
   caches is then readable by whoever can reach the CDN URL, so for private
   repositories the pull zone itself must restrict access (e.g. Bunny token
-  authentication / signed URLs) or the repository should be public. Until
-  accounts are wired in, the Worker offers a single `READ_TOKEN` for this;
-  later a PAT or app token with the `read` role.
+  authentication / signed URLs) or the repository should be public. The
+  Worker has no special token for this: a personal access token with the
+  scope `repo:read` of a user with read access does it.
 - Core: `matchContentRoute`, `resolveRevision`, `resolvePath`, `resolveRaw`,
   `parseRange` and the content-type helpers are pure functions;
   `handleContentRequest` builds the HTTP responses. Plain blobs are read
@@ -371,11 +381,28 @@ SQLite database. A new instance works without an external identity provider.
 For the village archive: people log in via OIDC with ZITADEL; apps and
 automations use app tokens; mirrors use instance federation (§4).
 
+**Instance admins and bootstrap.** Instance admins (table `instance_admins`)
+create users and tokens, trust other instances and count as admins of every
+repository. A fresh instance has none: one call of `POST /api/bootstrap`,
+authenticated with the deployment secret `BOOTSTRAP_TOKEN`, creates the first
+admin atomically and returns a personal access token; further calls answer
+`409`. Until login methods exist, the JSON API is used with personal access
+tokens that carry the scope `repo:admin`.
+
+**Visibility.** Repositories are private by default; visibility is a
+per-repository setting in the database. There is no instance-wide public read
+switch.
+
+**Size limits.** Git pushes are limited by `MAX_PUSH_BYTES`; single LFS
+objects by `MAX_LFS_OBJECT_BYTES` (default 100 MiB, the request body limit of
+Cloudflare's Free and Pro plans), enforced in the batch API and on `PUT`.
+
 ## 9. Git over SSH
 
-Not supported: serverless functions accept only HTTP. Git uses HTTPS with
-tokens, later also a device flow. An optional SSH-to-HTTPS gateway could run
-on a Pi or VPS later.
+Not supported, by decision. Serverless functions accept only HTTP; SSH would
+need an always-on host or a TCP-capable container platform, and SSH over
+WebSocket needs client-side configuration. Git uses HTTPS with tokens, made
+convenient by `git forge auth login` (credential helper, device flow).
 
 ## 10. Mirror overview and verification
 
@@ -404,6 +431,16 @@ dev environments) need real machines, started on demand via API.
 | CI (later) | Compute adapter, e.g. with `act` |
 
 Every building block is an interface; Cloudflare is the first implementation.
+
+**Cloudflare deployment.** One Worker serves Git, LFS, media and raw URLs, the
+JSON API and the well-known federation documents, and runs mirror sync from a
+Cron Trigger. It binds one R2 bucket (`BUCKET`) and one D1 database (`DB`).
+The Worker never migrates its database: `wrangler d1 migrations apply` does,
+from `packages/accounts/migrations` (`migrations_dir` in
+`apps/forge-worker/wrangler.jsonc`, the release's `dist/migrations` in the
+instance template; see §15). Several instances on one account are Wrangler
+environments (`alpha`, `beta`, `gamma`), each with its own Worker, bucket and
+database.
 
 | Building block | Cloudflare | Others |
 |---|---|---|
@@ -563,7 +600,7 @@ update themselves.
   `wrangler.jsonc` and created by Wrangler, never by hand. D1 and R2 have a
   name and no id, so the first `wrangler deploy` provisions them (automatic
   resource provisioning) and later commands find them by name. Cron, vars,
-  routes (custom domains) and the required `ADMIN_TOKEN` secret
+  routes (custom domains) and the required `BOOTSTRAP_TOKEN` secret
   (`secrets.required`) are declared there as well; only the secret's value is
   set outside the repository.
 - **Build on Cloudflare (Workers Builds):** build command `sh build.sh`,
@@ -576,8 +613,9 @@ update themselves.
   a no-op.
 - **First install:** "Deploy to Cloudflare" button (copies the template and
   connects Workers Builds) or "Use this template" plus importing the
-  repository in the dashboard. The first admin is the `ADMIN_TOKEN` secret
-  until accounts are wired up.
+  repository in the dashboard. The setup page asks for `BOOTSTRAP_TOKEN`
+  (from `.dev.vars.example`); one call of `POST /api/bootstrap` with it
+  creates the first instance admin (§8).
 - **Update:** bump `version` and `sha256` in `git-forge.json` and push.
   Renovate proposes the version via a regex manager on the GitHub releases of
   `levino/git-forge`. It cannot compute the checksum (the `github-releases`

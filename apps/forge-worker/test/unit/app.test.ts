@@ -1,6 +1,6 @@
-import { MemoryStorage, readRefs } from '@git-forge/core'
+import { type ImportJob, MemoryStorage, readImportState, readRefs } from '@git-forge/core'
 import { describe, expect, it } from 'vitest'
-import { type ForgeConfig, handleRequest, presentedToken, tokenMatches } from '../../src/app.ts'
+import { basicAuthorization, type ForgeConfig, handleRequest, presentedToken, tokenMatches } from '../../src/app.ts'
 
 const config = (overrides: Partial<ForgeConfig> = {}): ForgeConfig => ({
   storage: new MemoryStorage(),
@@ -97,5 +97,60 @@ describe('git routes', () => {
     const forge = config()
     expect((await handleRequest(new Request('https://forge.example/api/health'), forge)).status).toBe(200)
     expect((await handleRequest(new Request('https://forge.example/acme/site/blob/main'), forge)).status).toBe(404)
+  })
+})
+
+describe('import endpoint', () => {
+  const importRequest = (forge: ForgeConfig, body: unknown, { token = 'secret', method = 'POST', path = '/api/admin/repos/acme/site/import' } = {}) =>
+    handleRequest(
+      new Request(`https://forge.example${path}`, {
+        method,
+        headers: { Authorization: `Bearer ${token}` },
+        ...(method === 'POST' ? { body: typeof body === 'string' ? body : JSON.stringify(body) } : {}),
+      }),
+      forge,
+    )
+
+  const withQueue = () => {
+    const jobs: { job: ImportJob; delay: number }[] = []
+    const forge = config({ scheduleImport: async (job, delay) => void jobs.push({ job, delay }) })
+    return { forge, jobs }
+  }
+
+  it('starts an import, creates the repository and schedules the first step with the credentials', async () => {
+    const { forge, jobs } = withQueue()
+    const response = await importRequest(forge, { url: 'https://github.com/acme/site.git', token: 'ghp_x', commitsPerStep: 50, defaultBranch: 'trunk' })
+    expect(response.status).toBe(202)
+    expect(response.headers.get('Location')).toBe('https://forge.example/api/admin/repos/acme/site/import')
+    expect(await response.json()).toMatchObject({ phase: 'discover', url: 'https://github.com/acme/site.git', commitsPerStep: 50, cloneUrl: 'https://forge.example/acme/site.git' })
+    expect(jobs).toEqual([{ job: { owner: 'acme', name: 'site', authorization: basicAuthorization('git', 'ghp_x') }, delay: 0 }])
+    expect((await readRefs(forge.storage, { owner: 'acme', name: 'site' }))?.state.head).toBe('refs/heads/trunk')
+    expect(JSON.stringify(await readImportState(forge.storage, { owner: 'acme', name: 'site' }))).not.toContain('ghp_x')
+    const status = await importRequest(forge, null, { method: 'GET' })
+    expect(status.status).toBe(200)
+    expect(await status.json()).toMatchObject({ phase: 'discover' })
+    expect((await importRequest(forge, { url: 'https://github.com/acme/site.git' })).status).toBe(409)
+  })
+
+  it('validates the request', async () => {
+    const { forge, jobs } = withQueue()
+    expect((await importRequest(forge, { url: 'https://x/y.git' }, { token: 'nope' })).status).toBe(401)
+    expect((await importRequest(forge, 'nope')).status).toBe(400)
+    expect((await importRequest(forge, { url: 'ftp://x/y.git' })).status).toBe(400)
+    expect((await importRequest(forge, { url: 'https://user:pw@x/y.git' })).status).toBe(400)
+    expect((await importRequest(forge, { url: 'https://x/y.git', commitsPerStep: -1 })).status).toBe(400)
+    expect((await importRequest(forge, { url: 'https://x/y.git', token: 5 })).status).toBe(400)
+    expect((await importRequest(forge, { url: 'https://x/y.git' }, { path: '/api/admin/repos/acme/x.git/import' })).status).toBe(400)
+    expect((await importRequest(forge, null, { method: 'GET' })).status).toBe(404)
+    expect((await importRequest(forge, null, { method: 'DELETE' })).status).toBe(405)
+    expect(jobs).toEqual([])
+  })
+
+  it('needs a queue', async () => {
+    expect((await importRequest(config(), { url: 'https://x/y.git' })).status).toBe(503)
+  })
+
+  it('encodes non-ASCII credentials as UTF-8', () => {
+    expect(basicAuthorization('git', 'pässword')).toBe(`Basic ${Buffer.from('git:pässword').toString('base64')}`)
   })
 })

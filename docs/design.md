@@ -1688,6 +1688,22 @@ of these pages: a click on a line's `+` clones a `<template>` form below the
 row with path, line and side filled in; the form posts to the page like every
 other form.
 
+### Repository settings
+
+`/{owner}/{repo}/settings` (repository admins) changes visibility,
+collaborators, branch protection, mirrors and federation grants. The JSON
+API routes and the page call the same principal-based operations in
+`createForge` (`services.settings`: `read`, `setVisibility`,
+`setCollaborator`, `removeCollaborator`, `grantInstance`, `revokeInstance`,
+`addMirror`, `syncMirror`, `verifyMirror`, `detachMirror`,
+`branchProtection`, `setBranchProtection`, `deleteBranchProtection`); each
+starts with the same admin check (`adminOf`: authenticated user, token with
+`repo:admin`, `repositoryAccess(…, 'admin')`). Branch protection forms are
+translated into the GitHub-shaped JSON body and parsed by
+`parseBranchProtectionSettings` of `@git-forge/accounts`, the parser of the
+protection API. Errors carry the API's status (`ForgeError`) and are shown
+on the page.
+
 ### Actions pages
 
 `/{owner}/{repo}/actions` lists workflow runs, a run page lists its jobs

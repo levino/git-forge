@@ -655,6 +655,16 @@ export const createAccountsStore = (db: Database, options: AccountsStoreOptions 
       ])
     },
 
+    listCollaborators: async (repositoryId: string): Promise<{ readonly id: string; readonly login: string; readonly role: Role }[]> =>
+      (
+        await db.all<{ id: string; login: string; role: string }>(
+          sql('SELECT a.id, a.login, c.role FROM repository_collaborators c JOIN accounts a ON a.id = c.user_id WHERE c.repository_id = ? ORDER BY a.login', repositoryId),
+        )
+      ).flatMap((row) => (isRole(row.role) ? [{ id: row.id, login: row.login, role: row.role }] : [])),
+
+    listInstanceGrants: async (repositoryId: string): Promise<{ readonly issuer: string; readonly role: string }[]> =>
+      db.all<{ issuer: string; role: string }>(sql('SELECT issuer, role FROM instance_repositories WHERE repository_id = ? ORDER BY issuer', repositoryId)),
+
     grantInstanceRepository: async (issuer: string, repositoryId: string, actor: AuditActor = SYSTEM): Promise<void> => {
       const normalized = normalizeIssuer(issuer)
       await write(actor, { action: 'instance.repository.grant', subjectKind: 'instance', subjectId: normalized, repositoryId, data: { role: 'read' } }, [

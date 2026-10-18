@@ -59,6 +59,13 @@ import {
   isUnsafeMethod,
   type CreatedToken,
   type CredentialSummary,
+  type BranchProtectionRule,
+  type NamedAllowances,
+  validateBranchPattern,
+  parseBranchProtectionSettings,
+  protectionAuditActor,
+  ProtectionValidationError,
+  BranchPatternError,
   type TokenScope,
 } from '@git-forge/accounts'
 import {
@@ -80,6 +87,9 @@ import {
   isValidName,
   listMirrors,
   type MirrorConfig,
+  type MirrorSettings,
+  type MirrorStatus,
+  type DeepCheck,
   MirrorExistsError,
   MirrorNotFoundError,
   ObjectDatabase,
@@ -191,6 +201,7 @@ export type ForgeServices = {
   readonly releases: ReleaseReads
   readonly collaboration: (request: Request, principal: Principal, owner: string, name: string) => Promise<CollaborationScope | null>
   readonly actions: ActionsReads
+  readonly settings: RepositorySettingsOperations
 }
 
 export type InboxOperations = {
@@ -198,6 +209,39 @@ export type InboxOperations = {
   readonly markRead: (user: UserPrincipal, id: number) => Promise<boolean>
   readonly markDone: (user: UserPrincipal, id: number) => Promise<boolean>
   readonly markAllRead: (user: UserPrincipal) => Promise<number>
+}
+
+export type RepositorySettings = {
+  readonly repository: RepositorySubject
+  readonly collaborators: readonly { readonly id: string; readonly login: string; readonly role: Role }[]
+  readonly instances: readonly { readonly issuer: string; readonly role: string }[]
+  readonly mirrors: readonly { readonly config: MirrorConfig; readonly status: MirrorStatus | null }[]
+}
+
+export type RepositorySettingsOperations = {
+  readonly read: (principal: Principal, repo: RepositoryName) => Promise<RepositorySettings>
+  readonly setVisibility: (principal: Principal, repo: RepositoryName, visibility: string) => Promise<{ readonly owner: string; readonly name: string; readonly visibility: string }>
+  readonly setCollaborator: (principal: Principal, repo: RepositoryName, login: string, role: string) => Promise<{ readonly login: string; readonly role: Role }>
+  readonly removeCollaborator: (principal: Principal, repo: RepositoryName, login: string) => Promise<void>
+  readonly grantInstance: (principal: Principal, repo: RepositoryName, issuer: string) => Promise<{ readonly issuer: string; readonly role: string }>
+  readonly revokeInstance: (principal: Principal, repo: RepositoryName, issuer: string) => Promise<void>
+  readonly addMirror: (principal: Principal, repo: RepositoryName, input: MirrorSettings) => Promise<MirrorConfig>
+  readonly syncMirror: (principal: Principal, repo: RepositoryName, remote: string, issuer: string | undefined) => Promise<SyncResult>
+  readonly verifyMirror: (principal: Principal, repo: RepositoryName, remote: string) => Promise<DeepCheck>
+  readonly detachMirror: (principal: Principal, repo: RepositoryName, remote: string) => Promise<MirrorConfig>
+  readonly branchProtection: (principal: Principal, repo: RepositoryName) => Promise<readonly { readonly rule: BranchProtectionRule; readonly names: NamedAllowances }[]>
+  readonly setBranchProtection: (principal: Principal, repo: RepositoryName, pattern: string, body: Record<string, unknown>) => Promise<BranchProtectionRule>
+  readonly deleteBranchProtection: (principal: Principal, repo: RepositoryName, pattern: string) => Promise<boolean>
+}
+
+export class ForgeError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+    readonly headers: Record<string, string> = {},
+  ) {
+    super(message)
+  }
 }
 
 export type ActionsReads = {
@@ -237,15 +281,7 @@ export type Forge = {
   readonly notifications: Notifications
 }
 
-class HttpError extends Error {
-  constructor(
-    readonly status: number,
-    message: string,
-    readonly headers: Record<string, string> = {},
-  ) {
-    super(message)
-  }
-}
+const HttpError = ForgeError
 
 const json = (status: number, body: unknown, headers: Record<string, string> = {}) =>
   new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', ...headers } })
@@ -397,13 +433,17 @@ export const createForge = (options: ForgeOptions): Forge => {
     return { decision: check.decision, access: check.access, repository: check.repository }
   }
 
-  const requireRepositoryAdmin = async (request: Request, repo: RepositoryName): Promise<{ principal: UserPrincipal; repository: RepositorySubject }> => {
-    const principal = await requireManager(request)
+  const adminOf = async (principal: Principal, repo: RepositoryName): Promise<{ principal: UserPrincipal; repository: RepositorySubject }> => {
+    if (principal.kind === 'anonymous') throw new HttpError(401, 'authentication required', { 'WWW-Authenticate': 'Bearer' })
+    if (!canManage(principal)) throw new HttpError(403, 'this needs a personal access token with the repo:admin scope')
     const check = await repositoryAccess(principal, repo, 'admin')
     if (check.repository && check.decision === 'allow') return { principal, repository: check.repository }
     const [status, message] = DECISION_STATUS[check.decision === 'allow' ? 'not-found' : check.decision]
     throw new HttpError(status, message)
   }
+
+  const requireRepositoryAdmin = async (request: Request, repo: RepositoryName): Promise<{ principal: UserPrincipal; repository: RepositorySubject }> =>
+    adminOf(await principalOf(request), repo)
 
   const releaseStore = createReleaseStore(db, () => now().getTime())
   const notifications = createNotifications({
@@ -639,45 +679,142 @@ export const createForge = (options: ForgeOptions): Forge => {
     return json(200, state)
   }
 
+  const settings: RepositorySettingsOperations = {
+    read: async (principal, repo) => {
+      const { repository } = await adminOf(principal, repo)
+      const name = { owner: repository.owner, name: repository.name }
+      const mirrors = await listMirrors(storage, name)
+      return {
+        repository,
+        collaborators: await store.listCollaborators(repository.id),
+        instances: await store.listInstanceGrants(repository.id),
+        mirrors: await Promise.all(mirrors.map(async (config) => ({ config, status: await readMirrorStatus(storage, name, config.remote) }))),
+      }
+    },
+    setVisibility: async (principal, repo, visibility) => {
+      const admin = await adminOf(principal, repo)
+      if (visibility !== 'private' && visibility !== 'public') throw new HttpError(400, 'visibility must be private or public')
+      await store.setRepositoryVisibility(admin.repository.id, visibility, { kind: 'user', id: admin.principal.id })
+      return { owner: admin.repository.owner, name: admin.repository.name, visibility }
+    },
+    setCollaborator: async (principal, repo, login, role) => {
+      const admin = await adminOf(principal, repo)
+      const account = await store.findAccount(login)
+      if (!account || account.kind !== 'user') throw new HttpError(404, 'user not found')
+      if (!isRole(role)) throw new HttpError(400, 'role must be read, triage, write, maintain or admin')
+      await store.setCollaborator(admin.repository.id, account.id, role, { kind: 'user', id: admin.principal.id })
+      return { login: account.login, role }
+    },
+    removeCollaborator: async (principal, repo, login) => {
+      const admin = await adminOf(principal, repo)
+      const account = await store.findAccount(login)
+      if (!account || account.kind !== 'user') throw new HttpError(404, 'user not found')
+      await store.removeCollaborator(admin.repository.id, account.id, { kind: 'user', id: admin.principal.id })
+    },
+    grantInstance: async (principal, repo, issuerInput) => {
+      const admin = await adminOf(principal, repo)
+      const issuer = normalizeIssuer(issuerInput)
+      if (!(await store.lookupTrustedIssuer(issuer))) throw new HttpError(422, `${issuer} is not a trusted instance; an instance admin must trust it first`)
+      await store.grantInstanceRepository(issuer, admin.repository.id, { kind: 'user', id: admin.principal.id })
+      return { issuer, role: 'read' }
+    },
+    revokeInstance: async (principal, repo, issuerInput) => {
+      const admin = await adminOf(principal, repo)
+      await store.revokeInstanceRepository(normalizeIssuer(issuerInput), admin.repository.id, { kind: 'user', id: admin.principal.id })
+    },
+    addMirror: async (principal, repo, input) => {
+      const { repository } = await adminOf(principal, repo)
+      const name = { owner: repository.owner, name: repository.name }
+      try {
+        const config = await configureMirror(storage, name, input)
+        if (federation) await enqueueMirrorSetup(federation, name, config)
+        return config
+      } catch (error) {
+        if (error instanceof MirrorExistsError) throw new HttpError(409, error.message)
+        if (error instanceof HttpError) throw error
+        throw new HttpError(400, (error as Error).message)
+      }
+    },
+    syncMirror: async (principal, repo, remote, issuer) => {
+      const { repository } = await adminOf(principal, repo)
+      const name = { owner: repository.owner, name: repository.name }
+      const config = await readMirrorConfig(storage, name, remote)
+      if (!config) throw new HttpError(404, 'mirror not configured')
+      try {
+        return federation ? await syncAndNotify(federation, name, config) : await runMirrorSync(mirrorContext(issuer), name, config)
+      } catch (error) {
+        if (error instanceof MirrorAuthError) throw new HttpError(409, error.message)
+        throw error
+      }
+    },
+    verifyMirror: async (principal, repo, remote) => {
+      const { repository } = await adminOf(principal, repo)
+      const name = { owner: repository.owner, name: repository.name }
+      if (!(await readMirrorConfig(storage, name, remote))) throw new HttpError(404, 'mirror not configured')
+      return deepCheckMirror(storage, name, remote, now())
+    },
+    detachMirror: async (principal, repo, remote) => {
+      const { repository } = await adminOf(principal, repo)
+      try {
+        return await detachMirror(storage, { owner: repository.owner, name: repository.name }, remote, now())
+      } catch (error) {
+        if (error instanceof MirrorNotFoundError) throw new HttpError(404, 'mirror not configured')
+        throw error
+      }
+    },
+    branchProtection: async (principal, repo) => {
+      const { repository } = await adminOf(principal, repo)
+      const rules = await store.branchProtectionRules(repository.id)
+      return Promise.all(rules.map(async (rule) => ({ rule, names: await store.namedAllowances(rule) })))
+    },
+    setBranchProtection: async (principal, repo, pattern, body) => {
+      const { repository } = await adminOf(principal, repo)
+      try {
+        validateBranchPattern(pattern)
+        return await store.setBranchProtection(repository.id, pattern, await parseBranchProtectionSettings(body, store, repository), protectionAuditActor(principal))
+      } catch (error) {
+        if (error instanceof ProtectionValidationError || error instanceof BranchPatternError || error instanceof AccountsError) throw new HttpError(422, error.message)
+        throw error
+      }
+    },
+    deleteBranchProtection: async (principal, repo, pattern) => {
+      const { repository } = await adminOf(principal, repo)
+      return store.deleteBranchProtection(repository.id, pattern, protectionAuditActor(principal))
+    },
+  }
+
   const updateRepository = async (request: Request, params: string[]): Promise<Response> => {
-    const { principal, repository } = await requireRepositoryAdmin(request, repoName(params))
+    const principal = await principalOf(request)
+    const repo = repoName(params)
     const body = await readBody(request)
     const visibility = optionalString(body, 'visibility')
-    if (visibility !== undefined) {
-      if (visibility !== 'private' && visibility !== 'public') throw new HttpError(400, 'visibility must be private or public')
-      await store.setRepositoryVisibility(repository.id, visibility, { kind: 'user', id: principal.id })
-    }
-    return json(200, { owner: repository.owner, name: repository.name, visibility: visibility ?? repository.visibility })
+    if (visibility !== undefined) return json(200, await settings.setVisibility(principal, repo, visibility))
+    const { repository } = await adminOf(principal, repo)
+    return json(200, { owner: repository.owner, name: repository.name, visibility: repository.visibility })
   }
 
   const setCollaborator = async (request: Request, params: string[]): Promise<Response> => {
-    const { principal, repository } = await requireRepositoryAdmin(request, repoName(params))
-    const account = await store.findAccount(params[2]!)
-    if (!account || account.kind !== 'user') throw new HttpError(404, 'user not found')
+    const principal = await principalOf(request)
+    const repo = repoName(params)
+    await adminOf(principal, repo)
     const role = (await readBody(request)).role
-    if (!isRole(role)) throw new HttpError(400, 'role must be read, triage, write, maintain or admin')
-    await store.setCollaborator(repository.id, account.id, role, { kind: 'user', id: principal.id })
-    return json(200, { login: account.login, role })
+    return json(200, await settings.setCollaborator(principal, repo, params[2]!, typeof role === 'string' ? role : ''))
   }
 
   const grantInstance = async (request: Request, params: string[]): Promise<Response> => {
-    const { principal, repository } = await requireRepositoryAdmin(request, repoName(params))
-    const issuer = normalizeIssuer(requiredString(await readBody(request), 'issuer'))
-    if (!(await store.lookupTrustedIssuer(issuer))) throw new HttpError(422, `${issuer} is not a trusted instance; an instance admin must trust it first`)
-    await store.grantInstanceRepository(issuer, repository.id, { kind: 'user', id: principal.id })
-    return json(200, { issuer, role: 'read' })
+    const principal = await principalOf(request)
+    const repo = repoName(params)
+    await adminOf(principal, repo)
+    return json(200, await settings.grantInstance(principal, repo, requiredString(await readBody(request), 'issuer')))
   }
 
-  const listMirrorsRoute = async (request: Request, params: string[]): Promise<Response> => {
-    const repo = repoName(params)
-    await requireRepositoryAdmin(request, repo)
-    const mirrors = await listMirrors(storage, repo)
-    return json(200, await Promise.all(mirrors.map(async (config) => ({ config, status: await readMirrorStatus(storage, repo, config.remote) }))))
-  }
+  const listMirrorsRoute = async (request: Request, params: string[]): Promise<Response> =>
+    json(200, (await settings.read(await principalOf(request), repoName(params))).mirrors)
 
   const addMirror = async (request: Request, params: string[]): Promise<Response> => {
+    const principal = await principalOf(request)
     const repo = repoName(params)
-    const { repository } = await requireRepositoryAdmin(request, repo)
+    await adminOf(principal, repo)
     const body = await readBody(request)
     const mode = optionalString(body, 'mode')
     const auth = optionalString(body, 'auth')
@@ -687,55 +824,28 @@ export const createForge = (options: ForgeOptions): Forge => {
     const remote = optionalString(body, 'remote')
     const namespace = optionalString(body, 'namespace')
     const lfsUrl = optionalString(body, 'lfsUrl')
-    try {
-      const config = await configureMirror(storage, { owner: repository.owner, name: repository.name }, {
-        url: requiredString(body, 'url'),
-        ...(remote !== undefined ? { remote } : {}),
-        ...(mode !== undefined ? { mode } : {}),
-        ...(namespace !== undefined ? { namespace } : {}),
-        ...(body.lfs !== undefined ? { lfs: body.lfs as boolean } : {}),
-        ...(lfsUrl !== undefined ? { lfsUrl } : {}),
-        ...(auth !== undefined ? { auth } : {}),
-      })
-      if (federation) await enqueueMirrorSetup(federation, { owner: repository.owner, name: repository.name }, config)
-      return json(201, config)
-    } catch (error) {
-      if (error instanceof MirrorExistsError) throw new HttpError(409, error.message)
-      if (error instanceof HttpError) throw error
-      throw new HttpError(400, (error as Error).message)
-    }
+    const config = await settings.addMirror(principal, repo, {
+      url: requiredString(body, 'url'),
+      ...(remote !== undefined ? { remote } : {}),
+      ...(mode !== undefined ? { mode } : {}),
+      ...(namespace !== undefined ? { namespace } : {}),
+      ...(body.lfs !== undefined ? { lfs: body.lfs as boolean } : {}),
+      ...(lfsUrl !== undefined ? { lfsUrl } : {}),
+      ...(auth !== undefined ? { auth } : {}),
+    })
+    return json(201, config)
   }
 
   const syncMirrorRoute = async (request: Request, params: string[]): Promise<Response> => {
-    const { repository } = await requireRepositoryAdmin(request, repoName(params))
-    const repo = { owner: repository.owner, name: repository.name }
-    const config = await readMirrorConfig(storage, repo, params[2]!)
-    if (!config) throw new HttpError(404, 'mirror not configured')
-    try {
-      const result = federation ? await syncAndNotify(federation, repo, config) : await runMirrorSync(mirrorContext(issuerFor(request)), repo, config)
-      return json(result.status === 'failed' ? 502 : 200, result)
-    } catch (error) {
-      if (error instanceof MirrorAuthError) throw new HttpError(409, error.message)
-      throw error
-    }
+    const result = await settings.syncMirror(await principalOf(request), repoName(params), params[2]!, issuerFor(request))
+    return json(result.status === 'failed' ? 502 : 200, result)
   }
 
-  const verifyMirrorRoute = async (request: Request, params: string[]): Promise<Response> => {
-    const { repository } = await requireRepositoryAdmin(request, repoName(params))
-    const repo = { owner: repository.owner, name: repository.name }
-    if (!(await readMirrorConfig(storage, repo, params[2]!))) throw new HttpError(404, 'mirror not configured')
-    return json(200, await deepCheckMirror(storage, repo, params[2]!, now()))
-  }
+  const verifyMirrorRoute = async (request: Request, params: string[]): Promise<Response> =>
+    json(200, await settings.verifyMirror(await principalOf(request), repoName(params), params[2]!))
 
-  const detachMirrorRoute = async (request: Request, params: string[]): Promise<Response> => {
-    const { repository } = await requireRepositoryAdmin(request, repoName(params))
-    try {
-      return json(200, await detachMirror(storage, { owner: repository.owner, name: repository.name }, params[2]!, now()))
-    } catch (error) {
-      if (error instanceof MirrorNotFoundError) throw new HttpError(404, 'mirror not configured')
-      throw error
-    }
-  }
+  const detachMirrorRoute = async (request: Request, params: string[]): Promise<Response> =>
+    json(200, await settings.detachMirror(await principalOf(request), repoName(params), params[2]!))
 
   const checkRunInput = (check: CheckRunReport): CheckRunInput => ({
     name: check.name,
@@ -1131,6 +1241,7 @@ export const createForge = (options: ForgeOptions): Forge => {
           throw error
         }
       },
+      settings,
       actions: {
         runs: (repository, limit) => listRuns(db, repository.owner, repository.name, limit),
         run: async (repository, id) => {

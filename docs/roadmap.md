@@ -115,8 +115,8 @@ Design: [design.md §18](design.md#18-web-ui).
 - [x] Notifications inbox (unread/all, mark read, done, all read) and repository releases (list, tag page, notes, asset downloads)
 - [ ] List and unlink linked OIDC identities, list and end sessions
 - [ ] Organizations and teams
-- [ ] Repository settings (visibility, collaborators, branch protection, federation trust)
-- [ ] Mirror settings, status and alarms
+- [x] Repository settings (visibility, collaborators, branch protection, federation trust)
+- [x] Mirror settings, status and alarms (add, sync, deep check, detach)
 - [ ] Blame, syntax highlighting in diffs and Markdown code blocks
 - [ ] Explore and profile listings without one access check per repository
 - [ ] Issue/PR UI: labels, assignees, milestones, reviewer requests, suggested changes, `#N` autolinks in rendered Markdown

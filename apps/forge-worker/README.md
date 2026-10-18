@@ -469,6 +469,9 @@ argument.
 - `test/pages/collaboration.test.ts`: issue, pull request and discussion pages
   against the real collaboration backend (create, comment, close, permission
   refusals, review, line comment, merge, answers).
+- `test/pages/settings.test.ts`: repository settings as admin and non-admin
+  (visibility, collaborators, branch protection read back through the API,
+  mirrors, federation grants).
 - `test/pages/actions.test.ts`: workflow runs and jobs from a real push, the
   live job log (escape codes removed, polling URL), runs of other
   repositories hidden.

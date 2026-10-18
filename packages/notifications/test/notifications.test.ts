@@ -92,20 +92,23 @@ describe('recipient rules', () => {
 })
 
 describe('push commits', () => {
-  it('lists the new commits of a ref oldest first', () => {
-    const commit = (id: string, parent: string | null, message: string) => ({
-      id,
+  it('lists the new commits of a ref oldest first', async () => {
+    const commit = (parent: string | null, message: string) => ({
       type: 'commit' as const,
-      offset: 0,
-      crc32: 0,
       data: new TextEncoder().encode(`tree ${'t'.repeat(40)}\n${parent ? `parent ${parent}\n` : ''}author A <a@x.org> 1760781600 +0200\ncommitter A <a@x.org> 1760781600 +0200\n\n${message}\n`),
     })
     const old = 'a'.repeat(40)
-    const objects = [commit('c'.repeat(40), 'b'.repeat(40), 'second'), commit('b'.repeat(40), old, 'first')]
-    const commits = pushedCommits(objects, { oldId: old, newId: 'c'.repeat(40) })
+    const objects = new Map([
+      ['c'.repeat(40), commit('b'.repeat(40), 'second')],
+      ['b'.repeat(40), commit(old, 'first')],
+      [old, commit(null, 'base')],
+    ])
+    const read = async (id: string) => objects.get(id) ?? null
+    const commits = await pushedCommits(read, { oldId: old, newId: 'c'.repeat(40) })
     expect(commits.map((entry) => entry.message)).toEqual(['first', 'second'])
     expect(commits[0]!.timestamp).toBe('2025-10-18T12:00:00+02:00')
     expect(commits[0]!.author).toEqual({ name: 'A', email: 'a@x.org' })
+    expect((await pushedCommits(read, { oldId: '0'.repeat(40), newId: 'c'.repeat(40) }, new Set(['b'.repeat(40)]))).map((entry) => entry.message)).toEqual(['second'])
   })
 })
 

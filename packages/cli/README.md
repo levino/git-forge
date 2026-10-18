@@ -35,7 +35,7 @@ sh packages/cli/build-executables.sh out/  # all platforms plus CLI-SHA256SUMS
 
 | Option | Meaning |
 |---|---|
-| `--max-bytes <size>` | Largest request per push. Default `80MB` (80 000 000 bytes). Also `git config forge.maxPushBytes` or `GIT_FORGE_MAX_PUSH_BYTES`. Units: `k`/`M`/`G` (decimal), `Ki`/`Mi`/`Gi` (binary). Set it below the server's own limit, e.g. `16MiB` for the Worker's default `MAX_PUSH_BYTES`. |
+| `--max-bytes <size>` | Largest request per push. Default `80MB` (80 000 000 bytes). Also `git config forge.maxPushBytes` or `GIT_FORGE_MAX_PUSH_BYTES`. Units: `k`/`M`/`G` (decimal), `Ki`/`Mi`/`Gi` (binary). Set it below the server's limit: Cloudflare's request body limit (100 MB on Free and Pro), or `MAX_PUSH_BYTES` if the Worker sets one. |
 | `-f`, `--force` | Allow non-fast-forward updates, like `+<refspec>`. |
 | `-n`, `--dry-run` | Plan and print the chunks without pushing. |
 
@@ -116,4 +116,4 @@ with a small request limit: a split push lands the same refs and objects as a
 normal push, an interrupted chunk resumes without resending, merged side
 branches go through temporary refs, rewrites archive once, an oversized commit
 is refused. The Worker's end-to-end suite pushes 24 MiB through `wrangler dev`
-with its 16 MiB limit.
+with `MAX_PUSH_BYTES` set to 16 MiB.

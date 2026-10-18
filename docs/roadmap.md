@@ -9,12 +9,12 @@ discussions.
 - [x] Pack parsing and writing, including thin packs
 - [x] Pack index v2, byte-identical to `git index-pack`
 - [x] Refs via compare-and-swap
-- [x] `receive-pack` (smart HTTP), push size limit (default 64 MB)
-- [x] `upload-pack` protocol v2
+- [x] `receive-pack` (smart HTTP), streamed; size bounded by the platform's request body limit
+- [x] `upload-pack` protocol v2, streaming stored packs; `packfile-uris`
 - [x] Dumb HTTP
 - [x] Archive under `refs/archive/{timestamp}/...` on force push and deletion
-- [ ] Streaming pack indexing (packs are processed in memory in v1)
-- [ ] Pack compaction
+- [x] Streaming pack indexing with bounded memory (staging chunks, LRU cache, range reads)
+- [x] Geometric pack compaction (append-only, swaps the current pack set)
 
 ## M2 — Git LFS
 
@@ -65,10 +65,10 @@ discussions.
 
 ## M5a — Large pushes
 
-- [ ] Streaming receive-pack and upload-pack with bounded memory, `packfile-uris` (in progress)
+- [x] Streaming receive-pack and upload-pack with bounded memory, `packfile-uris`, geometric compaction
 - [x] Server-side import: create or update a repository by pulling from a URL (no request body limit), in resumable steps driven by a queue
 - [x] Chunked push helper: `git forge push` splits history into pushes below the platform body limit, using the unmodified git client; single executables per platform from the release workflow
-- [ ] Import: stream fetched packs into storage and index them with the streaming indexing job (via `ingestPack`)
+- [x] Import and mirror sync: stream fetched packs into the streaming indexer (via `ingestPack`)
 - [ ] Remote helper `git-remote-forge`: resumable multipart pack upload directly to object storage via presigned URLs, then a finalize call that indexes the pack and updates refs
 
 ## M5b — CI and distribution

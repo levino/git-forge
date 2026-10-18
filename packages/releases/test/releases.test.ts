@@ -18,7 +18,7 @@ import {
 } from '@git-forge/core'
 import type { ForgeEvent } from '@git-forge/notifications'
 import { beforeEach, describe, expect, it } from 'vitest'
-import { isValidTagName, stagingKey } from '../src/git.ts'
+import { isValidTagName } from '../src/git.ts'
 import { handleReleasesRequest, normalizeAssetName } from '../src/http.ts'
 
 const BASE = 'https://forge.example.org'
@@ -36,7 +36,7 @@ const commitTo = async (storage: MemoryStorage, branch: string, message: string)
     { type: 'tree', data: tree },
     { type: 'commit', data: commit },
   ])
-  await new ObjectDatabase(storage, repo).addPack(pack.bytes, pack.objects, pack.checksum)
+  await new ObjectDatabase(storage, repo).ingest(new Blob([new Uint8Array(pack.bytes)]).stream())
   const refs = (await readRefs(storage, repo))!
   await writeRefs(storage, repo, { ...refs.state, refs: { ...refs.state.refs, [`refs/heads/${branch}`]: commitId } }, refs.etag)
   return commitId
@@ -238,7 +238,7 @@ describe('releases API', () => {
     })
     expect(right.status).toBe(201)
     const staged: string[] = []
-    for await (const info of fixture.storage.list(stagingKey(repo, ''))) staged.push(info.key)
+    for await (const info of fixture.storage.list('tmp/')) staged.push(info.key)
     expect(staged).toEqual([])
     expect((await fixture.call('POST', `/api/v3/repos/alice/engine/releases/${release.id}/assets?name=b.txt`, fixture.tokens.alice, bytes, {})).status).toBe(411)
     expect((await fixture.call('POST', `/api/v3/repos/alice/engine/releases/${release.id}/assets?name=c.txt`, fixture.tokens.alice, bytes, { 'Content-Length': String(2 * 1024 * 1024) })).status).toBe(413)

@@ -8,7 +8,7 @@ import {
   type PushOutcome,
   readRefs,
   type RepositoryName,
-  repositoryPrefix,
+  stagingPrefix,
   type Storage,
   storeLfsObject,
   toHex,
@@ -63,13 +63,13 @@ export const createTag = async (storage: Storage, repo: RepositoryName, tag: str
     const state = { ...current.state, refs: { ...current.state.refs, [tagRef(tag)]: id } }
     if (await writeRefs(storage, repo, state, current.etag)) {
       await writeServerInfo(storage, repo, state, odb)
-      return { unpack: 'ok', results: [{ name: tagRef(tag), oldId: ZERO, newId: id, ok: true }], objects: [], archived: [] }
+      return { unpack: 'ok', results: [{ name: tagRef(tag), oldId: ZERO, newId: id, ok: true }], pack: null, objectCount: 0, archived: [] }
     }
   }
   throw new Error('refs changed concurrently, try again')
 }
 
-export const stagingKey = (repo: RepositoryName, id: string): string => `${repositoryPrefix(repo)}releases/uploads/${id}`
+export const assetStagingKey = (repo: RepositoryName): string => `${stagingPrefix(repo)}asset`
 
 export class AssetUploadError extends Error {
   constructor(
@@ -107,7 +107,7 @@ export const storeAsset = async (
     return { oid: options.sha256, size, staged: false }
   }
   const result: { oid?: string; size: number } = { size: 0 }
-  const key = stagingKey(repo, crypto.randomUUID())
+  const key = assetStagingKey(repo)
   const staged = await storage.put(key, body.pipeThrough(hashingStream(options.digests ?? javascriptDigests, result)), size, { ifNoneMatch: '*', contentType: 'application/octet-stream' })
   if (!staged.ok || !result.oid || result.size !== size) throw new AssetUploadError(400, 'upload did not match Content-Length')
   const oid = result.oid

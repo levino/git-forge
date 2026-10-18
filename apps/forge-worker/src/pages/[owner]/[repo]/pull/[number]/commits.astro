@@ -1,0 +1,50 @@
+---
+import { getPullSummary, pullCommits } from '@git-forge/collaboration'
+import NotFound from '../../../../../components/NotFound.astro'
+import PullHeader from '../../../../../components/PullHeader.astro'
+import RepoHeader from '../../../../../components/RepoHeader.astro'
+import Layout from '../../../../../layouts/Layout.astro'
+import { parseNumber, scopeFor, unlessMissing } from '../../../../../ui/collaboration.ts'
+import { isoTime, relativeTime, shortId } from '../../../../../ui/format.ts'
+import { commitUrl, openRepository } from '../../../../../ui/repository.ts'
+
+const { forge, principal } = Astro.locals
+const repo = await openRepository(forge, principal, Astro.params.owner!, Astro.params.repo!)
+const number = parseNumber(Astro.params.number)
+const scope = repo.kind === 'ok' ? await scopeFor(forge, Astro.request, principal, repo) : null
+const pull = scope && number !== null ? await unlessMissing(getPullSummary(scope, number)) : null
+const commits = scope && pull ? await pullCommits(scope, pull.number) : []
+const now = Math.floor(Date.now() / 1000)
+---
+
+{
+  repo.kind !== 'ok' || !pull ? (
+    <NotFound />
+  ) : (
+    <Layout title={`Commits · Pull request #${pull.number} · ${repo.name.owner}/${repo.name.name}`}>
+      <RepoHeader repo={repo} tab="pulls" />
+      <PullHeader repo={repo} pull={pull} tab="commits" />
+      {commits.length === 0 ? (
+        <p>No commits.</p>
+      ) : (
+        <ul class="border border-base-300 rounded-box divide-y divide-base-300" aria-label="Commits">
+          {commits.map((commit) => (
+            <li class="flex flex-wrap items-center gap-x-4 gap-y-1 px-4 py-3">
+              <div class="min-w-0 flex-1">
+                <a href={commitUrl(repo.name, commit.sha)} class="font-semibold link link-hover break-words">
+                  {commit.message.split('\n', 1)[0]}
+                </a>
+                <p class="text-sm text-base-content/70">
+                  {commit.author.name} committed <time datetime={isoTime(commit.committer.timestamp)}>{relativeTime(commit.committer.timestamp, now)}</time>
+                </p>
+              </div>
+              <a href={commitUrl(repo.name, commit.sha)} class="btn btn-sm font-mono">
+                {shortId(commit.sha)}
+              </a>
+            </li>
+          ))}
+        </ul>
+      )}
+    </Layout>
+  )
+}

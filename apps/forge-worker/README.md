@@ -473,6 +473,11 @@ argument.
   repositories, light and dark colour schemes and the cached stylesheet. CI
   installs Chromium with `playwright install`; elsewhere the version of
   `@playwright/test` must match the installed browsers.
+- `test/pages/collaboration.test.ts`: issue, pull request and discussion pages
+  against the real collaboration backend (create, comment, close, permission
+  refusals, review, line comment, merge, answers).
+- `test/browser/collaboration.spec.ts`: a passkey user comments on a diff line
+  through the inline form and opens an issue.
 - `test/browser/login.spec.ts`: an invited user signs up with a passkey
   (Chromium's virtual authenticator), creates and revokes a token at
   `/settings`, signs out and signs in with the passkey again; a cross-site

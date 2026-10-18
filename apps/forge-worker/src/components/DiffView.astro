@@ -1,18 +1,23 @@
 ---
 import type { FileDiff } from '@git-forge/core'
 
-type Props = { file: FileDiff; index: number; href: string | null }
+export type LineComment = { readonly id: number; readonly author: string; readonly html: string; readonly line: number; readonly side: 'LEFT' | 'RIGHT' }
 
-const { file, index, href } = Astro.props
+type Props = { file: FileDiff; index: number; href: string | null; comments?: readonly LineComment[]; commentable?: boolean }
+
+const { file, index, href, comments = [], commentable = false } = Astro.props
 const label = { added: 'Added', removed: 'Deleted', modified: 'Modified', renamed: 'Renamed' }[file.status]
 const badge = { added: 'badge-success', removed: 'badge-error', modified: 'badge-warning', renamed: 'badge-info' }[file.status]
 const rowClass = { ' ': '', '+': 'bg-success/15', '-': 'bg-error/15' }
 const spoken = { ' ': '', '+': 'added: ', '-': 'deleted: ' }
 const range = (start: number, count: number) => (count === 1 ? `${start}` : `${start},${count}`)
 const text = file.kind === 'text' || file.kind === 'lfs'
+const anchorOf = (line: { kind: ' ' | '-' | '+'; oldLine: number | null; newLine: number | null }) =>
+  line.kind === '-' ? { side: 'LEFT' as const, line: line.oldLine! } : { side: 'RIGHT' as const, line: line.newLine! }
+const commentsAt = (side: 'LEFT' | 'RIGHT', line: number) => comments.filter((comment) => comment.side === side && comment.line === line)
 ---
 
-<section id={`diff-${index}`} class="border border-base-300 rounded-box overflow-hidden" aria-label={`${label} ${file.path}`}>
+<section id={`diff-${index}`} class="border border-base-300 rounded-box overflow-hidden" aria-label={`${label} ${file.path}`} data-path={file.path}>
   <header class="flex flex-wrap items-center gap-2 px-4 py-2 bg-base-200 text-sm">
     <span class:list={['badge badge-sm', badge]}>{label}</span>
     {file.previousPath && <span class="font-mono break-all text-base-content/70">{file.previousPath} →</span>}
@@ -38,7 +43,7 @@ const text = file.kind === 'text' || file.kind === 'lfs'
     )
   }
   {
-    text && file.kind === 'text' && file.hunks.length === 0 && (
+    file.kind === 'text' && file.hunks.length === 0 && (
       <p class="px-4 py-3 text-sm text-base-content/70">{file.status === 'renamed' ? 'File renamed without changes.' : file.status === 'modified' ? 'File mode changed.' : 'Empty file.'}</p>
     )
   }
@@ -53,19 +58,44 @@ const text = file.kind === 'text' || file.kind === 'lfs'
                   {`@@ -${range(hunk.oldStart, hunk.oldLines)} +${range(hunk.newStart, hunk.newLines)} @@${hunk.section ? ` ${hunk.section}` : ''}`}
                 </td>
               </tr>
-              {hunk.lines.map((line) => (
-                <tr class={rowClass[line.kind]}>
-                  <td class="select-none text-right px-2 w-px text-base-content/50">{line.oldLine ?? ''}</td>
-                  <td class="select-none text-right px-2 w-px text-base-content/50">{line.newLine ?? ''}</td>
-                  <td class="whitespace-pre pr-4">
-                    <span class="select-none" aria-hidden="true">
-                      {line.kind}
-                    </span>
-                    <span class="sr-only">{spoken[line.kind]}</span>
-                    {line.text}
-                  </td>
-                </tr>
-              ))}
+              {hunk.lines.map((line) => {
+                const anchor = anchorOf(line)
+                const here = commentsAt(anchor.side, anchor.line)
+                return (
+                  <>
+                    <tr class={rowClass[line.kind]} data-side={anchor.side} data-line={anchor.line}>
+                      <td class="select-none text-right px-2 w-px text-base-content/50 whitespace-nowrap">
+                        {commentable && (
+                          <button type="button" class="btn btn-xs btn-ghost px-1 min-h-0 h-4 opacity-60 hover:opacity-100" data-comment-line aria-label={`Comment on line ${anchor.line} of ${file.path}`}>
+                            +
+                          </button>
+                        )}
+                        {line.oldLine ?? ''}
+                      </td>
+                      <td class="select-none text-right px-2 w-px text-base-content/50">{line.newLine ?? ''}</td>
+                      <td class="whitespace-pre pr-4">
+                        <span class="select-none" aria-hidden="true">
+                          {line.kind}
+                        </span>
+                        <span class="sr-only">{spoken[line.kind]}</span>
+                        {line.text}
+                      </td>
+                    </tr>
+                    {here.length > 0 && (
+                      <tr>
+                        <td colspan="3" class="p-2 bg-base-200 font-sans text-sm">
+                          {here.map((comment) => (
+                            <div id={`discussion-${comment.id}`} class="border border-base-300 rounded-box bg-base-100 mb-2 last:mb-0">
+                              <p class="px-3 py-1 border-b border-base-300 font-semibold">{comment.author}</p>
+                              <div class="markdown-body px-3 py-2" set:html={comment.html} />
+                            </div>
+                          ))}
+                        </td>
+                      </tr>
+                    )}
+                  </>
+                )
+              })}
             </tbody>
           ))}
         </table>

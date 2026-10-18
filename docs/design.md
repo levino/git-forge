@@ -846,7 +846,28 @@ through the binding before it counts as present, with the platform's
 streaming digest (`DigestFactory`; `crypto.DigestStream` on Workers, about 2 s
 CPU time for 600 MB against a `cpu_ms` budget of 60 s, the JavaScript
 fallback about 7 s). Without the credentials, LFS objects are proxied through
-the Worker as before.
+the Worker as before, and an object above `MAX_LFS_OBJECT_BYTES` is refused
+with a message that tells the admin how to enable presigning (with
+presigning: how to raise the limit). The core takes that text as
+`oversizeHint`, so it stays free of provider details.
+
+**The R2 key.** One bucket-scoped key per instance, created scriptably with
+the Cloudflare API (`templates/instance/README.md`, "Large LFS objects"):
+`POST /accounts/{account_id}/tokens` with an account-owned token whose policy
+allows the permission groups "Workers R2 Storage Bucket Item Read"
+(`6a018a9f2fc74eb6b293b0c548f38b39`) and "Workers R2 Storage Bucket Item
+Write" (`2efd5506f9c8494dacb1fa10a3e7d5b6`) on the single resource
+`com.cloudflare.edge.r2.bucket.<account_id>_default_<bucket>` (`default` is
+the jurisdiction). R2 derives the S3 credentials from it: the access key id is
+the token id, the secret access key is the hex SHA-256 of the token value.
+Both go into Worker secrets (`wrangler secret put R2_ACCESS_KEY_ID`,
+`R2_SECRET_ACCESS_KEY`); the dashboard alternative is an R2 "Account API
+token" with "Object Read & Write" on that bucket. The key can read and write
+objects of this bucket only, which is what the Worker's binding can do anyway,
+and it never leaves the Worker; clients only get URLs signed for one key, one
+length and one SHA-256, valid for an hour. A keyless mode (the CLI as a
+git-lfs custom transfer agent uploading parts through the Worker into an R2
+multipart upload via the binding) is planned as a follow-up (roadmap M2).
 
 **Local S3 test environment:** MinIO is discontinued. versitygw (posix
 backend) is used; it passed the full suite, as did RustFS. SeaweedFS lists in

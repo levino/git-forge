@@ -4,7 +4,7 @@ import { S3Storage } from '@git-forge/s3'
 import { commitAll, initRepo, sampleHistory, tempDir, writeFile } from '@git-forge/core/test/git-helpers.ts'
 import { type RunningServer, startServer } from '@git-forge/core/test/http-server.ts'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { basicAuthorization, secretMatches } from '../../src/app.ts'
+import { basicAuthorization, PRESIGN_HINT, RAISE_LIMIT_HINT, secretMatches } from '../../src/app.ts'
 import { git, gitFails } from '../e2e/history.ts'
 import { DEFAULT_COMPACT_MAX_BYTES, DEFAULT_MAX_LFS_OBJECT_BYTES, loadSecretsKey, parseActionsSettings, parseR2PresignSettings, parseSettings } from '../../src/config.ts'
 import { upstreamRepository } from '../../src/mirrors.ts'
@@ -151,6 +151,18 @@ describe('presigned LFS URLs on R2', () => {
     const { batch } = await setup(false)
     expect((await batch('upload', [big]))?.upload?.href).toBe(`${BASE}/admin/assets.git/info/lfs/objects/${big.oid}`)
   })
+
+  it('tells the client how the admin can allow an object above the limit', async () => {
+    const tooBig = { oid: 'd'.repeat(64), size: 2 * 1024 * 1024 * 1024 }
+    for (const [presign, hint] of [
+      [false, PRESIGN_HINT],
+      [true, RAISE_LIMIT_HINT],
+    ] as const) {
+      const { lfs } = await setup(presign)
+      const body = await json<{ objects: { error?: { code: number; message: string } }[] }>(await lfs('batch', { operation: 'upload', objects: [tooBig] }))
+      expect(body.objects[0]?.error).toEqual({ code: 422, message: `object exceeds ${1024 * 1024 * 1024} bytes; ${hint}` })
+    }
+  })
 })
 
 describe('bootstrap and admin API', () => {
@@ -261,6 +273,7 @@ describe('repositories with accounts', () => {
       }),
     )
     expect(put.status).toBe(413)
+    expect(((await put.json()) as { message: string }).message).toBe(`object exceeds 10 bytes; ${PRESIGN_HINT}`)
   })
 
   it('lets a read-only token read but not push, for example for a CDN pull zone', async () => {

@@ -104,7 +104,11 @@ export const hasLfsObject = async (storage: Storage, repo: RepositoryName, objec
 
 export type LfsLimits = {
   readonly maxObjectBytes?: number
+  readonly oversizeHint?: string
 }
+
+export const oversizeMessage = (maxObjectBytes: number, hint?: string): string =>
+  hint ? `object exceeds ${maxObjectBytes} bytes; ${hint}` : `object exceeds ${maxObjectBytes} bytes`
 
 const describeObject = async (
   storage: Storage,
@@ -125,7 +129,7 @@ const describeObject = async (
   if (stored === object.size) return { ...object, authenticated: true }
   if (stored !== null) return { ...object, error: { code: 422, message: `object size is ${stored}, not ${object.size}` } }
   if (limits.maxObjectBytes !== undefined && object.size > limits.maxObjectBytes) {
-    return { ...object, error: { code: 422, message: `object exceeds ${limits.maxObjectBytes} bytes` } }
+    return { ...object, error: { code: 422, message: oversizeMessage(limits.maxObjectBytes, limits.oversizeHint) } }
   }
   return { ...object, authenticated: true, actions: { upload: await links.upload(object), verify: await links.verify(object) } }
 }

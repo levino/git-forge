@@ -179,6 +179,11 @@ export type WaitUntil = (promise: Promise<unknown>) => void
 
 export const ACTIONS_SERVICE_PATH = '/_services/actions'
 
+export const PRESIGN_HINT =
+  'the instance admin can let larger objects go straight to R2 by setting R2_ACCOUNT_ID, R2_BUCKET, R2_ACCESS_KEY_ID and R2_SECRET_ACCESS_KEY and raising MAX_LFS_OBJECT_BYTES (see "Large LFS objects" in the instance README)'
+
+export const RAISE_LIMIT_HINT = 'the instance admin can raise MAX_LFS_OBJECT_BYTES up to about 5 GiB'
+
 export type ForgeServices = {
   readonly storage: Storage
   readonly store: AccountsStore
@@ -1150,7 +1155,7 @@ export const createForge = (options: ForgeOptions): Forge => {
       authorize,
       pushPolicy: access.pushPolicy,
       ...(options.maxPushBytes !== undefined ? { maxPushBytes: options.maxPushBytes } : {}),
-      lfs: { maxObjectBytes: options.maxLfsObjectBytes, ...(options.digests ? { digests: options.digests } : {}) },
+      lfs: { maxObjectBytes: options.maxLfsObjectBytes, oversizeHint: options.lfsPresigner ? RAISE_LIMIT_HINT : PRESIGN_HINT, ...(options.digests ? { digests: options.digests } : {}) },
       packfileUris: (incoming, repo) => packfileUris(incoming, repo, authorize),
       onPush: async (repo, outcome) => {
         await compactAfterPush(waitUntil)(repo, outcome)

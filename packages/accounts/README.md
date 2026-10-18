@@ -301,7 +301,7 @@ package).
 
 Forks: `createFork`, `forkInfo`, `listForks`, `forkNetwork` and
 `findRepositoryById` keep the fork tree in `repository_forks` (parent and
-root per fork, migration `0010_forks`); `organizationRole` answers whether a
+root per fork, migration `0011_forks`); `organizationRole` answers whether a
 user owns an organization.
 
 ### API

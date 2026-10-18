@@ -1613,7 +1613,7 @@ Issues, pull requests, reviews, commit statuses, check runs and discussions
   package.
 - **Forks.** `POST /repos/{o}/{r}/forks` creates a fork on the same
   instance (bucket: alternates, §6; database: `repository_forks` with parent
-  and root, migration `0010_forks`). Anyone with read access may fork into
+  and root, migration `0011_forks`). Anyone with read access may fork into
   their own account or an organization they own; the fork has the
   upstream's visibility and is an independent repository (its own
   collaborators; upstream collaborators get no access to a private fork).

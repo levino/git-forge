@@ -1,0 +1,115 @@
+# @git-forge/cli
+
+`git-forge`, a command-line helper for git-forge instances. Its first command,
+`git forge push`, pushes history that does not fit into one HTTP request
+(Cloudflare caps request bodies at 100 MB on the Free and Pro plans) as a
+series of smaller pushes made with the unmodified `git` client.
+
+```sh
+git forge push origin main
+git forge push --max-bytes 16MiB https://forge.example/acme/site.git main v1.0
+git forge push -n origin main          # print the chunks, push nothing
+git forge push origin +main            # rewritten history, archived as usual
+```
+
+Because the executable is called `git-forge`, `git forge …` works as soon as it
+is on `PATH`. It needs `git` 2.38 or newer.
+
+## Installation
+
+Download the single executable for your platform from the GitHub release
+(`cli-v*` tags: `git-forge-linux-x64`, `-linux-arm64`, `-darwin-x64`,
+`-darwin-arm64`, `-windows-x64.exe`, plus `SHA256SUMS`), rename it to
+`git-forge` and put it on `PATH`. No Node.js, npm or Bun is needed.
+
+During development run it from the repository:
+
+```sh
+pnpm --filter @git-forge/cli start push origin main
+pnpm --filter @git-forge/cli build        # dist/git-forge for this machine, needs Bun
+```
+
+## Options
+
+| Option | Meaning |
+|---|---|
+| `--max-bytes <size>` | Largest request per push. Default `80MB` (80 000 000 bytes). Also `git config forge.maxPushBytes` or `GIT_FORGE_MAX_PUSH_BYTES`. Units: `k`/`M`/`G` (decimal), `Ki`/`Mi`/`Gi` (binary). Set it below the server's own limit, e.g. `16MiB` for the Worker's default `MAX_PUSH_BYTES`. |
+| `-f`, `--force` | Allow non-fast-forward updates, like `+<refspec>`. |
+| `-n`, `--dry-run` | Plan and print the chunks without pushing. |
+
+Exit codes: `0` success, `1` error, `2` a single commit is larger than the
+budget.
+
+## How it works
+
+For each refspec:
+
+1. `git ls-remote` lists the remote refs. Those whose objects exist locally are
+   the negatives, exactly as `git push` computes them.
+2. If `git pack-objects --revs --thin --stdout` for the whole push stays below
+   the budget (minus 4 KiB for the ref commands), it is one normal `git push`.
+3. Otherwise the first-parent line of the source commit that is not yet on
+   the remote is split. For the next chunk the helper searches for the
+   furthest commit whose pack still fits: `git rev-list --objects
+   --disk-usage` gives a cheap estimate for a binary search, then a real
+   `pack-objects` dry run (aborted as soon as it passes the budget) checks the
+   candidate, and the estimate is rescaled when it was off. Each chunk is a
+   plain `git push <remote> <commit>:<ref>`; the pushed commit becomes a
+   negative for the next chunk.
+4. A first-parent step that alone is too large is a merge of a large side
+   branch: that branch is chunked the same way onto a temporary ref, then the
+   merge is retried. A non-merge commit that alone is too large aborts with
+   exit code 2 and the advice to move large files to Git LFS.
+5. The final `git push` sets the destination ref to the source and, in the
+   same `--atomic` push, deletes the temporary refs.
+
+### Where chunks go
+
+Chunks of a branch go **directly to the destination branch**:
+
+- Every chunk is an ancestor of the final commit, so after the first chunk
+  every update is a fast-forward. Branch protection that forbids force pushes
+  keeps working; a rewrite needs `+`/`--force` exactly as with `git push`,
+  and git-forge archives the old tip once, on the first chunk.
+- Nothing is left behind on the server: no extra refs, and no
+  `refs/archive/…` entries, because nothing is deleted.
+- Watchers see the branch move through intermediate commits, all of which
+  are real history of the branch.
+
+**Temporary refs** `refs/forge-chunk/<destination>/<n>` are only used where
+direct chunks are impossible: chunks of a merged side branch (they do not
+descend from the branch's current tip, so pushing them to the branch would be
+a force push) and chunks of a tag's history. The final atomic push removes
+them. git-forge never deletes anything, so their last values remain under
+`refs/archive/` — a few refs pointing at commits that are part of the pushed
+history anyway.
+
+### Resuming
+
+There is no local state. A rerun lists the remote refs again: chunks that
+landed are on the destination branch or on a temporary ref and therefore
+negatives, so the plan continues with the first missing chunk. An interrupted
+chunk is simply pushed again.
+
+## Why Bun for the single executable
+
+`bun build --compile` turns the TypeScript sources into one self-contained
+executable and cross-compiles for Linux, macOS and Windows (x64 and arm64)
+from a single CI runner, without a separate bundling step. The CLI only uses
+`node:child_process`, which Bun implements, so the same sources also run
+unchanged on Node.js for development and tests. `deno compile` would have
+worked as well, but needs `node:`-specifier and permission flags handling and
+produces larger binaries; `node --experimental-sea-config` cannot
+cross-compile and needs a separate bundler. The release workflow
+(`.github/workflows/release-cli.yml`) builds all targets on a `cli-v*` tag
+and publishes them with `SHA256SUMS`.
+
+## Tests
+
+`pnpm --filter @git-forge/cli test` drives the real `git` client through
+`git forge push` (a `git-forge` shim on `PATH`) against an in-process forge
+with a small request limit: a split push lands the same refs and objects as a
+normal push, an interrupted chunk resumes without resending, merged side
+branches go through temporary refs, rewrites archive once, an oversized commit
+is refused. The Worker's end-to-end suite pushes 24 MiB through `wrangler dev`
+with its 16 MiB limit.

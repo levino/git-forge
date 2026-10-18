@@ -55,8 +55,8 @@ discussions.
 ## M5a — Large pushes
 
 - [ ] Streaming receive-pack and upload-pack with bounded memory, `packfile-uris` (in progress)
-- [ ] Server-side import: create a repository by pulling from a URL (no request body limit)
-- [ ] Chunked push helper: `git forge push` splits history into pushes below the platform body limit, using the unmodified git client
+- [x] Server-side import: create or update a repository by pulling from a URL (no request body limit), in resumable steps driven by a queue
+- [x] Chunked push helper: `git forge push` splits history into pushes below the platform body limit, using the unmodified git client; single executables per platform from the release workflow
 - [ ] Remote helper `git-remote-forge`: resumable multipart pack upload directly to object storage via presigned URLs, then a finalize call that indexes the pack and updates refs
 
 ## M5b — CI and distribution

@@ -11,8 +11,9 @@ Serverless Git forge with built-in Git LFS and federated mirrors.
   and users. Every copy stays readable with a plain `git clone`, even without
   this software.
 
-Status: Git core implemented; LFS, accounts, mirrors and deployment in
-progress. See [docs/design.md](docs/design.md) and
+Status: Git core implemented, including server-side import and the
+`git forge push` helper for large pushes; LFS, accounts, mirrors and
+deployment in progress. See [docs/design.md](docs/design.md) and
 [docs/roadmap.md](docs/roadmap.md).
 
 License: MIT.

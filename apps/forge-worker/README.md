@@ -12,6 +12,7 @@ protocol v0 clients) straight from an R2 bucket, using `handleGitRequest` from
 | `BUCKET` (R2) | All repository data, in the bucket layout described in `docs/design.md` (`repos/<owner>/<name>/…`). |
 | `DB` (D1) | Placeholder for the accounts package. Not used yet. |
 | Cron Trigger `*/30 * * * *` | Stub for mirror sync; currently only logs. |
+| `IMPORTS` (Queue `git-forge-imports`) | Drives server-side imports: each message is one import step in its own invocation (producer and consumer are this Worker). |
 | `ADMIN_TOKEN` (secret) | Protects `POST /api/admin/repos` and, until accounts exist, every push. |
 | `PUBLIC_READ` (var) | `true` (default): anyone may clone. `false`: clones need the admin token too. |
 | `MAX_PUSH_BYTES` (var) | Largest accepted push request, default 16 MiB. Larger files belong in Git LFS. |
@@ -22,6 +23,22 @@ protocol v0 clients) straight from an R2 bucket, using `handleGitRequest` from
   body `{"owner": "acme", "name": "site", "defaultBranch": "main"}` creates a
   repository. Answers `201` with the clone URL, `409` if it exists, `400` for
   invalid names, `401` for a wrong token and `503` if no token is configured.
+- `POST /api/admin/repos/<owner>/<name>/import` with the admin token and a
+  JSON body `{"url": "https://github.com/acme/site.git", "token": "…"}`
+  creates the repository if needed and imports it from the URL (smart HTTP v2
+  or dumb HTTP). Optional fields: `username` (default `git`, sent with
+  `token` as HTTP Basic), `lfs` (default `true`), `lfsUrl`, `commitsPerStep`
+  (default 500), `defaultBranch` for a new repository. Answers `202` with the
+  import state and a `Location` to poll, `409` while an import of that
+  repository runs, `400` for invalid input (also for credentials inside the
+  URL) and `503` without the `IMPORTS` queue. The token is never stored in the
+  bucket; it travels with the queue messages. A repository that already has
+  content is updated: refs move to the upstream values (rewrites are archived
+  under `refs/archive/`), local refs that upstream lacks are kept.
+- `GET /api/admin/repos/<owner>/<name>/import` returns the import state
+  (`phase`: `discover`, `graph`, `fetch`, `lfs`, `refs`, `done` or `failed`,
+  plus progress, ref updates, missing LFS objects and the last error).
+  Starting a failed import again with the same URL resumes it.
 - `GET /api/health` answers `{"ok": true}`.
 - `/<owner>/<name>.git/…` is Git. Push with the admin token as the HTTP Basic
   password (any user name), e.g. `https://git:<token>@forge.example/acme/site.git`
@@ -39,6 +56,7 @@ cd apps/forge-worker
 npx wrangler login
 npx wrangler r2 bucket create git-forge
 npx wrangler d1 create git-forge
+npx wrangler queues create git-forge-imports
 ```
 
 Put the `database_id` printed by `d1 create` into `wrangler.jsonc` (the
@@ -59,6 +77,29 @@ curl -X POST https://git-forge.<account>.workers.dev/api/admin/repos \
 git push https://git:$ADMIN_TOKEN@git-forge.<account>.workers.dev/acme/site.git main
 git clone https://git-forge.<account>.workers.dev/acme/site.git
 ```
+
+### Large pushes
+
+The Worker rejects pushes above `MAX_PUSH_BYTES` (and Cloudflare rejects
+request bodies above 100 MB on Free/Pro, 200 MB on Business). Two ways
+around it:
+
+- `git forge push` from `packages/cli` splits the push into several pushes
+  below a budget: `git forge push --max-bytes 16MiB <url> main`.
+- Import the repository from where it already lives:
+
+  ```sh
+  curl -X POST https://git-forge.<account>.workers.dev/api/admin/repos/acme/site/import \
+    -H "Authorization: Bearer $ADMIN_TOKEN" \
+    -d '{"url":"https://github.com/acme/site.git","token":"'"$GITHUB_TOKEN"'"}'
+  curl -H "Authorization: Bearer $ADMIN_TOKEN" \
+    https://git-forge.<account>.workers.dev/api/admin/repos/acme/site/import
+  ```
+
+  Each import step runs as one queue message with its own CPU budget
+  (`limits.cpu_ms`); steps fetch about `commitsPerStep` commits and at most
+  32 MiB of pack. The step design is described in `docs/design.md` (§7,
+  Import).
 
 To use your own domain, add a `routes` entry with `custom_domain: true` to
 `wrangler.jsonc` or attach the domain in the dashboard.
@@ -82,9 +123,12 @@ database (Miniflare), persisted under `.wrangler/`. `.dev.vars` is gitignored.
   repository through the admin endpoint, pushes a generated history of 120
   commits with the real `git` client, clones it with protocol v2 and with
   `git -c protocol.version=0` (dumb HTTP), pushes incrementally, force-pushes
-  and checks that the previous tip is kept under `refs/archive/`, and fires the
-  Cron Trigger through `/__scheduled`. It takes about 8 seconds and is part of
-  the root `pnpm test`.
+  and checks that the previous tip is kept under `refs/archive/`, imports the
+  generated repository from a local `git http-backend` server (with a token,
+  stepped through the local queue), pushes 24 MiB with `git forge push`
+  against the 16 MiB limit, and fires the Cron Trigger through
+  `/__scheduled`. It takes about 30 seconds and is part of the root
+  `pnpm test`.
 - `pnpm --filter forge-worker bench` measures CPU time and memory per
   operation (below).
 

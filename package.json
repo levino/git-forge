@@ -1,7 +1,7 @@
 {
   "name": "git-forge",
   "private": true,
-  "description": "Serverlose Git-Forge mit eingebautem LFS und föderierten Sicherungskopien",
+  "description": "Serverless Git forge with built-in Git LFS and federated mirrors",
   "license": "MIT",
   "type": "module",
   "packageManager": "pnpm@12.5.1",

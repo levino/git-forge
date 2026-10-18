@@ -9,7 +9,7 @@ import { S3Storage } from '@git-forge/s3'
 import { createSesEmailSender } from '@git-forge/ses'
 import { createSmtpEmailSender } from '@git-forge/smtp'
 import { type AppJob, createForge, type Forge } from 'forge-worker/app'
-import { ConfigurationError, loadSecretsKey, parseActionsSettings, parseSettings } from 'forge-worker/config'
+import { ConfigurationError, loadIdTokenKeys, loadSecretsKey, parseActionsSettings, parseSettings } from 'forge-worker/config'
 import { type NodeConfig, type NodeEmailSettings, type NodeVars, parseNodeConfig, type StorageConfig } from './config.ts'
 import { createSqliteJobQueue, type SqliteJobQueue } from './jobs.ts'
 
@@ -84,6 +84,7 @@ export const createInstance = async (vars: NodeVars, overrides: InstanceOverride
   const settings = await parseSettings(vars)
   const actions = parseActionsSettings(vars)
   const secretsKey = await loadSecretsKey(actions, vars)
+  const idTokenKeys = await loadIdTokenKeys(actions, settings.instanceKey)
   const { db, handle } = await openDatabase(config.databasePath)
   try {
     const pending = await pendingMigrations(db, MIGRATIONS)
@@ -140,6 +141,9 @@ export const createInstance = async (vars: NodeVars, overrides: InstanceOverride
             ...(secretsKey ? { secretsKey } : {}),
             repositories: actions.repositories,
             githubFallback: actions.githubFallback,
+                idTokenKeys,
+                artifactRetentionDays: actions.artifactRetentionDays,
+                cacheLimits: actions.cacheLimits,
           },
         }
       : {}),

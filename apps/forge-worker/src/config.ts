@@ -1,4 +1,4 @@
-import { importSecretsKey, type SecretsKey } from '@git-forge/actions'
+import { type CacheLimits, DEFAULT_ARTIFACT_RETENTION_DAYS, DEFAULT_CACHE_LIMITS, type Es256PrivateJwk, type IdTokenKey, idTokenKeyFromInstanceKey, importEs256Key, importSecretsKey, type SecretsKey } from '@git-forge/actions'
 import {
   BreakGlassError,
   DEFAULT_OIDC_SCOPES,
@@ -13,6 +13,8 @@ import {
   type SigningKey,
 } from '@git-forge/accounts'
 import { PagesConfigError, type PagesHosts, parsePagesHosts } from '@git-forge/pages'
+
+export { generateEs256Key, importEs256Key } from '@git-forge/actions'
 
 export type ForgeVars = {
   readonly PUBLIC_URL?: string
@@ -30,6 +32,12 @@ export type ForgeVars = {
   readonly ACTIONS_SECRETS_KEY?: string
   readonly ACTIONS_REPOSITORIES?: string
   readonly ACTIONS_GITHUB_FALLBACK?: string
+  readonly ACTIONS_OIDC_KEY?: string
+  readonly ACTIONS_ID_TOKENS?: string
+  readonly ACTIONS_ARTIFACT_RETENTION_DAYS?: string
+  readonly ACTIONS_CACHE_LIMIT_BYTES?: string
+  readonly ACTIONS_CACHE_UNUSED_DAYS?: string
+  readonly ACTIONS_CACHE_MAX_DAYS?: string
   readonly MIRROR_DEEP_CHECK_DAYS?: string
   readonly MIRROR_UNIT_BYTES?: string
   readonly UI?: string
@@ -113,6 +121,10 @@ export type ActionsSettings = {
   readonly secretsKey: string | undefined
   readonly repositories: Readonly<Record<string, string>>
   readonly githubFallback: string | null
+  readonly oidcKey: string | undefined
+  readonly idTokens: boolean
+  readonly artifactRetentionDays: number
+  readonly cacheLimits: CacheLimits
 }
 
 export const ACTIONS_CRON = '*/5 * * * *'
@@ -300,6 +312,32 @@ export const parseActionsSettings = (vars: ForgeVars): ActionsSettings | undefin
     secretsKey: present(vars.ACTIONS_SECRETS_KEY),
     repositories: parseActionRepositories(vars.ACTIONS_REPOSITORIES),
     githubFallback: parseGithubFallback(vars.ACTIONS_GITHUB_FALLBACK),
+    oidcKey: present(vars.ACTIONS_OIDC_KEY),
+    idTokens: vars.ACTIONS_ID_TOKENS !== 'false',
+    artifactRetentionDays: positiveInteger(vars.ACTIONS_ARTIFACT_RETENTION_DAYS, DEFAULT_ARTIFACT_RETENTION_DAYS),
+    cacheLimits: {
+      ...DEFAULT_CACHE_LIMITS,
+      repositoryBytes: positiveInteger(vars.ACTIONS_CACHE_LIMIT_BYTES, DEFAULT_CACHE_LIMITS.repositoryBytes),
+      entryBytes: Math.min(DEFAULT_CACHE_LIMITS.entryBytes, positiveInteger(vars.ACTIONS_CACHE_LIMIT_BYTES, DEFAULT_CACHE_LIMITS.repositoryBytes)),
+      unusedDays: positiveInteger(vars.ACTIONS_CACHE_UNUSED_DAYS, DEFAULT_CACHE_LIMITS.unusedDays),
+      maxDays: positiveInteger(vars.ACTIONS_CACHE_MAX_DAYS, DEFAULT_CACHE_LIMITS.maxDays),
+    },
+  }
+}
+
+export const loadIdTokenKeys = async (settings: ActionsSettings | undefined, instanceKey: SigningKey | undefined): Promise<IdTokenKey[]> => {
+  if (!settings?.idTokens) return []
+  if (!settings.oidcKey) return instanceKey ? [idTokenKeyFromInstanceKey(instanceKey)] : []
+  let jwk: Es256PrivateJwk
+  try {
+    jwk = JSON.parse(settings.oidcKey) as Es256PrivateJwk
+  } catch {
+    throw new ConfigurationError('ACTIONS_OIDC_KEY must be a P-256 private JWK in JSON')
+  }
+  try {
+    return [await importEs256Key(jwk), ...(instanceKey ? [idTokenKeyFromInstanceKey(instanceKey)] : [])]
+  } catch (error) {
+    throw new ConfigurationError(`ACTIONS_OIDC_KEY is not a usable P-256 private JWK: ${(error as Error).message}`)
   }
 }
 

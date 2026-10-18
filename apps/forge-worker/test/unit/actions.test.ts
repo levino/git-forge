@@ -1,7 +1,9 @@
 import { commitAll, initRepo, writeFile } from '@git-forge/core/test/git-helpers.ts'
 import { type RunningServer, startServer } from '@git-forge/core/test/http-server.ts'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { generateEs256Key, importEs256Key } from '@git-forge/actions'
 import { git } from '../e2e/history.ts'
+import { isForgePath } from '../../src/routing.ts'
 import { bootstrap, call, type NodeForge, nodeForge } from '../support/node-forge.ts'
 
 const json = async <T>(response: Response): Promise<T> => (await response.json()) as T
@@ -14,7 +16,7 @@ describe('CI with collaboration', () => {
   beforeAll(async () => {
     let handler = (_request: Request) => Promise.resolve(new Response('starting', { status: 503 }))
     server = await startServer((request) => handler(request))
-    forge = await nodeForge({ publicUrl: server.url, actions: { instanceId: '00000000-0000-0000-0000-000000000000' } })
+    forge = await nodeForge({ publicUrl: server.url, actions: { instanceId: '00000000-0000-0000-0000-000000000000', idTokenKeys: [await importEs256Key(await generateEs256Key())] } })
     handler = forge.fetch
     admin = await bootstrap(forge, server.url, 'admin')
     expect((await call(forge, server.url, 'POST', '/api/repos', admin, { owner: 'admin', name: 'ci' })).status).toBe(201)
@@ -40,5 +42,18 @@ describe('CI with collaboration', () => {
     expect(runs.workflow_runs).toEqual([expect.objectContaining({ event: 'pull_request', head_sha: head, head_branch: 'refs/pull/1/head' })])
     const checks = await json<{ check_runs: { name: string; status: string; head_sha: string }[] }>(await call(forge, server.url, 'GET', `/api/v3/repos/admin/ci/commits/${head}/check-runs`, admin))
     expect(checks.check_runs.map((check) => [check.name, check.status, check.head_sha])).toEqual([['test', 'queued', head]])
+  })
+
+  it('mounts the results service: twirp, cache, blob URLs and the ID token issuer', async () => {
+    expect(['/twirp/github.actions.results.api.v1.CacheService/CreateCacheEntry', '/_services/cache/_apis/artifactcache/cache', '/_services/token/idtoken'].every(isForgePath)).toBe(true)
+    const twirp = await forge.fetch(
+      new Request(`${server.url}/twirp/github.actions.results.api.v1.CacheService/CreateCacheEntry`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }),
+    )
+    expect(twirp.status).toBe(401)
+    expect(await twirp.json()).toMatchObject({ code: 'unauthenticated' })
+    expect((await forge.fetch(new Request(`${server.url}/_services/cache/_apis/artifactcache/cache?keys=a&version=b`))).status).toBe(401)
+    expect((await forge.fetch(new Request(`${server.url}/_services/results/blobs/nope`))).status).toBe(403)
+    const discovery = await json<{ issuer: string; id_token_signing_alg_values_supported: string[] }>(await forge.fetch(new Request(`${server.url}/_services/token/.well-known/openid-configuration`)))
+    expect(discovery).toMatchObject({ issuer: `${server.url}/_services/token`, id_token_signing_alg_values_supported: ['ES256'] })
   })
 })

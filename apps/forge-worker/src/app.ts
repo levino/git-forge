@@ -8,6 +8,10 @@ import {
   queueRunsForPullRequest,
   type DispatchOptions,
   handleActionsService,
+  handleResultsService,
+  type CacheLimits,
+  type IdTokenKey,
+  isResultsServicePath,
   type SealedSecret,
   type SecretsKey,
   handleGhesApi,
@@ -22,6 +26,7 @@ import {
   listRunJobs,
   listRuns,
   listRunWorkflows,
+  openArtifactFile,
   readJobLog,
   RerunError,
   rerunRun,
@@ -198,6 +203,9 @@ export type ActionsOptions = {
   readonly secretsKey?: SecretsKey
   readonly repositories?: Readonly<Record<string, string>>
   readonly githubFallback?: string | null
+  readonly idTokenKeys?: readonly IdTokenKey[]
+  readonly artifactRetentionDays?: number
+  readonly cacheLimits?: CacheLimits
 }
 
 export type ForgeOptions = ForgeSettings & {
@@ -612,7 +620,7 @@ export const createForge = (options: ForgeOptions): Forge => {
     },
     isInstanceAdmin: store.isInstanceAdmin,
     jobTokenRepository,
-    ...(options.artifacts ? { artifacts: options.artifacts } : {}),
+    artifacts: options.artifacts ?? (async (repository, artifact) => (artifact.id && /^\d+$/.test(artifact.id) ? openArtifactFile(db, storage, repository.owner, repository.name, Number(artifact.id), now().getTime()) : null)),
     ...(options.jobs ? { schedule: (job: PagesJob) => options.jobs!.enqueue(job) } : {}),
     ...(options.digests ? { digests: options.digests } : {}),
     ...(options.pages?.maxAgeSeconds !== undefined ? { maxAgeSeconds: options.pages.maxAgeSeconds } : {}),
@@ -1359,9 +1367,15 @@ export const createForge = (options: ForgeOptions): Forge => {
       urls: { serverUrl, serviceUrl: `${serverUrl}${ACTIONS_SERVICE_PATH}` },
       checks: checkRuns,
       ...(options.actions?.launcher ? { launcher: options.actions.launcher } : {}),
+      ...(options.actions?.cacheLimits ? { cacheLimits: options.actions.cacheLimits } : {}),
       now: () => now().getTime(),
       log: (event) => console.log(JSON.stringify(event)),
     }
+  }
+
+  const repositoryFacts = async (owner: string, name: string) => {
+    const repository = await store.findRepository(owner, name)
+    return repository ? { id: repository.id, ownerId: repository.ownerId, visibility: repository.visibility } : null
   }
 
   const isRepositoryAdmin = async (request: Request, owner: string, name: string): Promise<boolean> => {
@@ -1445,9 +1459,19 @@ export const createForge = (options: ForgeOptions): Forge => {
   const actionsRoute = async (request: Request): Promise<Response | null> => {
     const { actions } = options
     const { pathname } = new URL(request.url)
-    if (!actions || !(pathname.startsWith(`${ACTIONS_SERVICE_PATH}/`) || pathname === '/api/v3' || pathname.startsWith('/api/v3/'))) return null
+    if (!actions || !(pathname.startsWith(`${ACTIONS_SERVICE_PATH}/`) || pathname === '/api/v3' || pathname.startsWith('/api/v3/') || isResultsServicePath(pathname))) return null
     const dispatch = dispatchOptions(request)
     return (
+      (await handleResultsService(request, {
+        db,
+        storage,
+        serverUrl: dispatch.urls.serverUrl,
+        ...(actions.idTokenKeys ? { idTokenKeys: actions.idTokenKeys } : {}),
+        repositoryFacts,
+        ...(actions.cacheLimits ? { cacheLimits: actions.cacheLimits } : {}),
+        ...(actions.artifactRetentionDays ? { artifactRetentionDays: actions.artifactRetentionDays } : {}),
+        now: () => now().getTime(),
+      })) ??
       (await handleActionsService(request, {
         db,
         storage,
@@ -1467,6 +1491,7 @@ export const createForge = (options: ForgeOptions): Forge => {
           await advanceRun(dispatch, job)
           await emitRunEvents(dispatch.urls.serverUrl, job)
         },
+        results: { idTokens: (actions.idTokenKeys?.length ?? 0) > 0, ...(actions.artifactRetentionDays ? { artifactRetentionDays: actions.artifactRetentionDays } : {}) },
       })) ??
       (await handleGhesApi(request, {
         db,

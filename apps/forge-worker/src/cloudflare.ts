@@ -4,7 +4,7 @@ import { continueImport, createConsoleEmailSender, type EmailSender, type Import
 import { S3Storage } from '@git-forge/s3'
 import { createSesEmailSender } from '@git-forge/ses'
 import { type AppJob, createForge, type Forge } from './app.ts'
-import { ACTIONS_CRON, type EmailSettings, type ForgeVars, loadSecretsKey, parseActionsSettings, parseEmailSettings, parseR2Signing, parseSettings, uiEnabled } from './config.ts'
+import { ACTIONS_CRON, type EmailSettings, type ForgeVars, loadIdTokenKeys, loadSecretsKey, parseActionsSettings, parseEmailSettings, parseR2Signing, parseSettings, uiEnabled } from './config.ts'
 import { containerLauncher } from './runner-launcher.ts'
 import { captureLoginPage } from './ui/login-pages.ts'
 
@@ -37,6 +37,7 @@ export const forgeFor = (env: Env): Promise<Forge> => {
       await migrateOnStart(d1Database(env.DB), MIGRATIONS)
       const actions = parseActionsSettings(env)
       const secretsKey = await loadSecretsKey(actions, env)
+      const idTokenKeys = await loadIdTokenKeys(actions, settings.instanceKey)
       const email = emailSender(parseEmailSettings(env))
       const signing = parseR2Signing(env)
       return createForge({
@@ -60,6 +61,9 @@ export const forgeFor = (env: Env): Promise<Forge> => {
                 ...(secretsKey ? { secretsKey } : {}),
                 repositories: actions.repositories,
                 githubFallback: actions.githubFallback,
+                idTokenKeys,
+                artifactRetentionDays: actions.artifactRetentionDays,
+                cacheLimits: actions.cacheLimits,
                 ...(env.RUNNER ? { launcher: containerLauncher(env.RUNNER) } : {}),
               },
             }

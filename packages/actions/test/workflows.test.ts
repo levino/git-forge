@@ -303,6 +303,73 @@ jobs:
     expect(await getRun(h.forge.db, one!.runId)).toMatchObject({ conclusion: 'cancelled' })
     expect(await jobs(h, two!.runId)).toEqual([['deploy', 'queued', null]])
   })
+
+  it('runs one job per job-level concurrency group and replaces the waiting one', async () => {
+    const h = await harness()
+    const workflow = `on: push
+jobs:
+  deploy:
+    runs-on: self-hosted
+    concurrency: deploy-\${{ github.ref }}
+    steps: [{ run: echo deploy }]
+`
+    await h.push({ '.github/workflows/deploy.yml': workflow })
+    await h.push({ 'a.txt': 'a\n' })
+    await h.push({ 'b.txt': 'b\n' })
+    const [one, two, three] = h.forge.runs
+    expect(await jobs(h, one!.runId)).toEqual([['deploy', 'queued', null]])
+    expect(await jobs(h, two!.runId)).toEqual([['deploy', 'completed', 'cancelled']])
+    expect(await jobs(h, three!.runId)).toEqual([['deploy', 'pending', null]])
+    const runner = await h.runner(0)
+    await runner.run()
+    expect(await jobs(h, three!.runId)).toEqual([['deploy', 'queued', null]])
+  })
+})
+
+describe('paths filters and variables', () => {
+  it('skips pushes whose changed files are all ignored', async () => {
+    const h = await harness()
+    await h.push({ '.github/workflows/ci.yml': "on:\n  push:\n    paths-ignore: ['docs/**', '**.md']\njobs:\n  a:\n    runs-on: self-hosted\n    steps: [{ run: x }]\n" })
+    await h.push({ 'docs/a.txt': 'a\n', 'README.md': 'r\n' })
+    expect(h.forge.runs).toHaveLength(1)
+    await h.push({ 'src/a.ts': 'a\n' })
+    expect(h.forge.runs).toHaveLength(2)
+  })
+
+  it('serves repository and environment variables to trusted jobs', async () => {
+    const h = await harness()
+    expect((await h.api('/repos/acme/site/actions/variables', { method: 'POST', body: JSON.stringify({ name: 'stage', value: 'repo' }) })).status).toBe(201)
+    expect((await h.api('/repos/acme/site/actions/variables', { method: 'POST', body: JSON.stringify({ name: 'STAGE', value: 'x' }) })).status).toBe(409)
+    expect((await h.api('/repos/acme/site/actions/variables', { method: 'POST', body: JSON.stringify({ name: 'ENABLED', value: 'no' }) })).status).toBe(201)
+    expect((await h.api('/repos/acme/site/actions/variables/enabled', { method: 'PATCH', body: JSON.stringify({ value: 'yes' }) })).status).toBe(204)
+    expect(await (await h.api('/repos/acme/site/actions/variables/ENABLED')).json()).toMatchObject({ name: 'ENABLED', value: 'yes' })
+    expect((await h.api('/repos/acme/site/actions/variables', { method: 'POST', token: REVIEWER_TOKEN, body: JSON.stringify({ name: 'X', value: 'x' }) })).status).toBe(404)
+    await h.api('/repos/acme/site/environments/production', { method: 'PUT', body: JSON.stringify({}) })
+    expect((await h.api('/repos/acme/site/environments/production/variables', { method: 'POST', body: JSON.stringify({ name: 'STAGE', value: 'production' }) })).status).toBe(201)
+    await h.push({
+      '.github/workflows/ci.yml': `on: push
+jobs:
+  deploy:
+    if: vars.ENABLED == 'yes'
+    runs-on: self-hosted
+    environment: production
+    steps: [{ run: echo }]
+  off:
+    if: vars.ENABLED != 'yes'
+    runs-on: self-hosted
+    steps: [{ run: echo }]
+`,
+    })
+    expect(await jobs(h, h.forge.runs[0]!.runId)).toEqual([
+      ['deploy', 'queued', null],
+      ['off', 'completed', 'skipped'],
+    ])
+    const job = await (await h.runner(0)).take()
+    expect(contextValue(job.message.contextData.vars, 'STAGE')).toBe('production')
+    expect(contextValue(job.message.contextData.vars, 'ENABLED')).toBe('yes')
+    expect((await h.api('/repos/acme/site/actions/variables/STAGE', { method: 'DELETE' })).status).toBe(204)
+    expect(((await (await h.api('/repos/acme/site/actions/variables')).json()) as { total_count: number }).total_count).toBe(1)
+  })
 })
 
 describe('secrets and environments', () => {

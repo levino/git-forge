@@ -17,6 +17,7 @@ jobs:
       - uses: actions/checkout@v4
       - run: sudo apt-get update && sudo apt-get install -y git-lfs
       - run: git lfs install --skip-repo
+      - run: echo "127.0.0.1 forge.localhost" | sudo tee -a /etc/hosts
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:

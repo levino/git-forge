@@ -52,6 +52,10 @@ export type Concurrency = {
   readonly cancelInProgress: YamlValue
 }
 
+export type PermissionLevel = 'read' | 'write' | 'none'
+
+export type Permissions = 'read-all' | 'write-all' | Readonly<Record<string, PermissionLevel>>
+
 export type WorkflowJob = {
   readonly id: string
   readonly name: string
@@ -66,6 +70,7 @@ export type WorkflowJob = {
   readonly environment?: JobEnvironment
   readonly continueOnError: boolean | string
   readonly timeoutMinutes: number
+  readonly permissions?: Permissions
   readonly steps: readonly WorkflowStep[]
 }
 
@@ -99,6 +104,7 @@ export type Workflow = {
   readonly env: WorkflowEnv
   readonly defaults: RunDefaults
   readonly concurrency?: Concurrency
+  readonly permissions?: Permissions
   readonly jobs: readonly WorkflowJob[]
 }
 
@@ -132,6 +138,24 @@ const TRIGGER_FILTER_KEYS: Readonly<Record<string, ReadonlySet<string>>> = {
   pull_request: new Set(['branches', 'branches-ignore', 'types']),
   workflow_dispatch: new Set(['inputs']),
 }
+
+const PERMISSION_SCOPES: ReadonlySet<string> = new Set([
+  'actions',
+  'attestations',
+  'checks',
+  'contents',
+  'deployments',
+  'discussions',
+  'id-token',
+  'issues',
+  'models',
+  'packages',
+  'pages',
+  'pull-requests',
+  'repository-projects',
+  'security-events',
+  'statuses',
+])
 
 const STEP_KEYS = new Set(['id', 'name', 'if', 'env', 'continue-on-error', 'timeout-minutes', 'run', 'shell', 'working-directory', 'uses', 'with'])
 
@@ -367,6 +391,7 @@ const parseJob = (id: string, value: YamlValue, c: Collector): WorkflowJob | nul
     ...optional('environment', parseEnvironment(value['environment'], `${path}.environment`, c)),
     continueOnError: c.booleanish(value['continue-on-error'], `${path}.continue-on-error`),
     timeoutMinutes: c.positiveNumber(value['timeout-minutes'], `${path}.timeout-minutes`) ?? DEFAULT_TIMEOUT_MINUTES,
+    ...optional('permissions', parsePermissions(value['permissions'], `${path}.permissions`, c)),
     steps: steps.flatMap((step, index) => parseStep(step, `${path}.steps[${index}]`, c) ?? []),
   }
 }
@@ -406,6 +431,34 @@ const parseEnvironment = (value: YamlValue | undefined, path: string, c: Collect
   }
   const name = c.scalarString(value, path)
   return name === undefined ? undefined : { name }
+}
+
+const parsePermissions = (value: YamlValue | undefined, path: string, c: Collector): Permissions | undefined => {
+  if (value === undefined || value === null) return undefined
+  if (value === 'read-all' || value === 'write-all') return value
+  if (!isMapping(value)) {
+    c.fail(path, 'expected read-all, write-all or a mapping of scopes')
+    return undefined
+  }
+  const permissions: Record<string, PermissionLevel> = {}
+  for (const [scope, level] of Object.entries(value)) {
+    if (!PERMISSION_SCOPES.has(scope)) c.fail(`${path}.${scope}`, 'is not a known permission scope')
+    else if (level !== 'read' && level !== 'write' && level !== 'none') c.fail(`${path}.${scope}`, 'expected read, write or none')
+    else if (scope === 'id-token' && level === 'read') c.fail(`${path}.${scope}`, 'expected write or none')
+    else permissions[scope] = level
+  }
+  return permissions
+}
+
+export const effectivePermissions = (workflow: Pick<Workflow, 'permissions'> | null | undefined, job: Pick<WorkflowJob, 'permissions'>): Permissions | undefined =>
+  job.permissions ?? workflow?.permissions
+
+export const grantsPermission = (permissions: Permissions | undefined, scope: string, level: 'read' | 'write'): boolean => {
+  if (permissions === undefined) return false
+  if (permissions === 'write-all') return true
+  if (permissions === 'read-all') return level === 'read' && scope !== 'id-token'
+  const granted = permissions[scope]
+  return granted === 'write' || (granted === 'read' && level === 'read')
 }
 
 const parseConcurrency = (value: YamlValue | undefined, path: string, c: Collector): Concurrency | undefined => {
@@ -456,6 +509,7 @@ export const parseWorkflow = (source: string): Workflow => {
     env: c.env(document['env'], 'env'),
     defaults: c.defaults(document['defaults'], 'defaults'),
     ...optional('concurrency', parseConcurrency(document['concurrency'], 'concurrency', c)),
+    ...optional('permissions', parsePermissions(document['permissions'], 'permissions', c)),
     jobs,
   }
   if (c.problems.length > 0) throw new WorkflowError(c.problems)

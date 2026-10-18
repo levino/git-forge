@@ -1,6 +1,6 @@
 import { generateSigningKey } from '@git-forge/accounts'
 import { serve } from '@git-forge/node'
-import { ACTIONS_CRON, ConfigurationError } from 'forge-worker/config'
+import { ACTIONS_CRON, ConfigurationError, generateEs256Key, importEs256Key } from 'forge-worker/config'
 import { parseCron } from './cron.ts'
 import { createInstance, jsonLog, type Log, migrate } from './instance.ts'
 import { startScheduler } from './scheduler.ts'
@@ -15,6 +15,7 @@ commands:
   serve          run the forge: HTTP server, job runner and mirror schedule (default)
   migrate        apply pending database migrations and exit
   instance-key   print a new Ed25519 instance key (private JWK) for INSTANCE_KEY
+  oidc-key       print a new P-256 key (private JWK) for ACTIONS_OIDC_KEY
   version        print the version
 
 Configuration comes from environment variables; see the README.`
@@ -91,6 +92,12 @@ export const main = async (args: readonly string[], env: Env = process.env, log:
       case 'instance-key': {
         const { key, privateJwk } = await generateSigningKey()
         process.stderr.write(`key id (JWK thumbprint, usable as pinnedThumbprint): ${key.kid}\n`)
+        process.stdout.write(`${JSON.stringify(privateJwk)}\n`)
+        return 0
+      }
+      case 'oidc-key': {
+        const privateJwk = await generateEs256Key()
+        process.stderr.write(`key id (JWK thumbprint): ${(await importEs256Key(privateJwk)).kid}\n`)
         process.stdout.write(`${JSON.stringify(privateJwk)}\n`)
         return 0
       }

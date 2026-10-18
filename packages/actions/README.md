@@ -14,7 +14,7 @@ Streams) and SQLite SQL through the `Database` adapter of
 ## Use
 
 ```ts
-import { actionsTick, advanceRun, handleActionsService, handleGhesApi, importSecretsKey, queueRunsForPush } from '@git-forge/actions'
+import { actionsTick, advanceRun, handleActionsService, handleGhesApi, handleResultsService, importEs256Key, importSecretsKey, queueRunsForPush } from '@git-forge/actions'
 
 const urls = { serverUrl: 'https://forge.example', serviceUrl: 'https://forge.example/_services/actions' }
 const dispatch = { db, storage, urls, launcher }
@@ -25,8 +25,10 @@ handleActionsService(request, {
   secrets, secretsKey,
   actionSources: { repositories: { 'actions/*': 'mirrors/*' }, githubFallback: null, canUse },
   onJobCompleted: (job) => advanceRun(dispatch, job),
+  results: { idTokens: true },
 })
 handleGhesApi(request, { db, storage, urls, launcher, secretsKey, authorize: isRepoAdmin, authorizeRead, authorizeWrite, actor })
+handleResultsService(request, { db, storage, serverUrl: urls.serverUrl, idTokenKeys: [await importEs256Key(oidcJwk)], repositoryFacts })
 handleGitRequest(request, { storage, onPush: (repo, outcome) => queueRunsForPush(dispatch, { repo, outcome, actor }) })
 actionsTick(dispatch)
 ```
@@ -34,7 +36,7 @@ actionsTick(dispatch)
 Both handlers return `null` for paths they do not own. `actionsTick` runs due
 scheduled workflows and the reaper; call it from a cron every few minutes.
 The tables are part of the D1 schema in `packages/accounts/migrations`
-(`0005_actions.sql`, `0009_actions_workflows.sql`), applied by
+(`0005_actions.sql`, `0009_actions_workflows.sql`, `0011_actions_results.sql`), applied by
 `wrangler d1 migrations apply` (tests: `applyMigrations(db, MIGRATIONS)`).
 
 ## What runs
@@ -59,6 +61,12 @@ The tables are part of the D1 schema in `packages/accounts/migrations`
   runner; none for untrusted runs (pull requests from other repositories).
 - Check runs per job through the `CheckRunSink` adapter (the Worker writes
   them with the collaboration package's check-run store).
+- Results service (`handleResultsService`): `actions/cache` (v1 REST on GHES
+  hosts, v2 twirp otherwise) with GitHub's ref scoping and eviction by
+  record, artifacts v4 with retention (the official v4 artifact actions
+  refuse non-github.com hosts on the client unless the host ends in
+  `.localhost`; see design §15), OIDC ID tokens for jobs with
+  `id-token: write`, signed ES256 or EdDSA, issuer `/_services/token`.
 
 ## REST (`/api/v3`, GitHub paths)
 
@@ -71,6 +79,8 @@ The tables are part of the D1 schema in `packages/accounts/migrations`
 | `GET/PUT/DELETE …/actions/secrets[/{name}]` (`{ value }`, no sealed boxes) | admin |
 | `GET/PUT/DELETE …/environments[/{name}]` (`{ reviewers: [{ type: "User", login }] }`), `…/environments/{name}/secrets[/{secret}]` | admin |
 | `GET …/tarball/{ref}` | read (or the action token handed to the runner) |
+| `GET …/actions/artifacts[/{id}[/zip]]`, `GET …/actions/runs/{id}/artifacts`, `GET …/actions/caches`, `GET …/actions/cache/usage` | read |
+| `DELETE …/actions/artifacts/{id}`, `DELETE …/actions/caches?key=&ref=`, `DELETE …/actions/caches/{id}` | write |
 | runners, `generate-jitconfig`, `registration-token` | admin |
 
 ## Running a runner by hand
@@ -99,11 +109,19 @@ The runner then picks up queued jobs whose `runs-on` labels it has.
   concurrency, encrypted secrets, environments with reviewers, untrusted
   pull requests, `workflow_dispatch`, schedules, check runs, action
   download info and tarballs.
+- `test/results.test.ts` covers cache v1 (chunks out of order, restore
+  keys, ranges), cache v2 with Azure block blobs and ref scopes, eviction,
+  artifacts (blocks, block list, list, signed URL, REST zip), ID tokens
+  (claims, JWKS signature, permission check) and the pure functions.
 - `test/runner.integration.test.ts` downloads the latest official runner
-  (or uses `ACTIONS_RUNNER_DIR`), mirrors `github.com/actions/checkout` into
+  (or uses `ACTIONS_RUNNER_DIR`), mirrors `github.com/actions/checkout`, `cache`, `upload-artifact` and `download-artifact` into
   the forge and runs real workflows: `actions/checkout@v4` from the mirror
   plus `wrangler deploy --dry-run` (or a real deploy if
   `CLOUDFLARE_API_TOKEN` is set), a matrix with job outputs and a masked
-  secret, and the cancellation of a running job. It skips with the reason
+  secret, the cancellation of a running job, `actions/cache@v4` (miss,
+  save, exact and restore-key hit) with an ES256 ID token checked against
+  the JWKS, and `upload-artifact@v4` / `download-artifact@v4` plus cache v2
+  against `forge.localhost` (skipped if that name does not resolve to
+  127.0.0.1; CI adds it to `/etc/hosts`). It skips with the reason
   in its name when the runner cannot be downloaded or the platform is not
   Linux x64/arm64.

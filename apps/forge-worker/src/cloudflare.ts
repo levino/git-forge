@@ -3,7 +3,7 @@ import { consumeJobs, digestStreams, QueueJobs, R2Storage } from '@git-forge/clo
 import { continueImport, createConsoleEmailSender, type EmailSender, type ImportJob, type ImportScheduler } from '@git-forge/core'
 import { createSesEmailSender } from '@git-forge/ses'
 import { type AppJob, createForge, type Forge } from './app.ts'
-import { ACTIONS_CRON, type EmailSettings, type ForgeVars, loadSecretsKey, parseActionsSettings, parseEmailSettings, parseSettings, uiEnabled } from './config.ts'
+import { ACTIONS_CRON, type EmailSettings, type ForgeVars, loadIdTokenKeys, loadSecretsKey, parseActionsSettings, parseEmailSettings, parseSettings, uiEnabled } from './config.ts'
 import { containerLauncher } from './runner-launcher.ts'
 import { captureLoginPage } from './ui/login-pages.ts'
 
@@ -34,6 +34,7 @@ export const forgeFor = (env: Env): Promise<Forge> => {
     .then(async (settings) => {
       const actions = parseActionsSettings(env)
       const secretsKey = await loadSecretsKey(actions)
+      const idTokenKeys = await loadIdTokenKeys(actions, settings.instanceKey)
       const email = emailSender(parseEmailSettings(env))
       return createForge({
         ...settings,
@@ -52,6 +53,9 @@ export const forgeFor = (env: Env): Promise<Forge> => {
                 ...(secretsKey ? { secretsKey } : {}),
                 repositories: actions.repositories,
                 githubFallback: actions.githubFallback,
+                idTokenKeys,
+                artifactRetentionDays: actions.artifactRetentionDays,
+                cacheLimits: actions.cacheLimits,
                 ...(env.RUNNER ? { launcher: containerLauncher(env.RUNNER) } : {}),
               },
             }

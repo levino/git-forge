@@ -1,4 +1,5 @@
 import { type Database, sql } from '@git-forge/accounts'
+import { type CacheLimits, evictCaches } from './cache.ts'
 import {
   advertisedRefs,
   cronMatches,
@@ -166,6 +167,7 @@ export type DispatchOptions = {
   readonly checks?: CheckRunSink
   readonly now?: () => number
   readonly log?: (event: Record<string, unknown>) => void
+  readonly cacheLimits?: CacheLimits
 }
 
 export const MAX_LAUNCHES = 3
@@ -936,6 +938,7 @@ export type ReapReport = {
   readonly forceCancelled: number
   readonly sessionsClosed: number
   readonly tokensDeleted: number
+  readonly cachesEvicted: number
 }
 
 const abandon = async (options: DispatchOptions, job: JobRow, conclusion: string, reason: string): Promise<boolean> => {
@@ -1007,7 +1010,8 @@ export const reapActions = async (options: DispatchOptions): Promise<ReapReport>
     if (runner?.ephemeral && runner.jobId === job.id && runner.status !== 'online' && runner.createdAt < now - REAPER.launchTimeoutMs && (await relaunch(options, job))) requeued++
   }
   const tokensDeleted = await deleteExpiredTokens(db, now - REAPER.tokenRetentionMs)
-  return { abandoned, requeued, timedOut, forceCancelled, sessionsClosed, tokensDeleted }
+  const cachesEvicted = await evictCaches(db, now, options.cacheLimits)
+  return { abandoned, requeued, timedOut, forceCancelled, sessionsClosed, tokensDeleted, cachesEvicted }
 }
 
 export type ActionsTick = {

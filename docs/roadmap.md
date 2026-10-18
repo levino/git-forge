@@ -92,7 +92,12 @@ Design: [design.md §15](design.md#ci).
 - [x] `workflow_dispatch` (typed inputs), `schedule` (cron table + Worker cron), `pull_request` trigger function (`queueRunsForPullRequest`, wired to collaboration's events); check runs per job through a `CheckRunSink`
 - [x] `pull_request` runs from the collaboration package's pull request events; check runs written with its store
 - [ ] `paths` filters; job-level `concurrency`; configuration variables (`vars`)
-- [ ] Broker and run service (v2 flow), results service, message encryption; then cache, artifacts, OIDC id tokens
+- [x] Results service without a broker (legacy flow, endpoint data): `actions/cache@v4` over the v1 protocol (GHES hosts) and v2 twirp, scoped per repository and ref like GitHub, eviction by record (unused, max age, LRU quota) on append-only storage
+- [x] Artifacts v4 (twirp `ArtifactService`, Azure block blob uploads, signed downloads), retention, REST (`artifacts`, `runs/{id}/artifacts`, `caches`, `cache/usage`)
+- [x] OIDC ID tokens for jobs with `id-token: write` (`permissions` parsed), GitHub-shaped claims, ES256 (`ACTIONS_OIDC_KEY`) or EdDSA, issuer `/_services/token` with discovery and JWKS
+- [ ] Official `upload-artifact@v4`/`download-artifact@v4` on non-`*.localhost` hosts (blocked by a client-side GHES check in `@actions/artifact`; forks work), artifacts v3
+- [ ] Broker and run service (v2 flow), message encryption (not needed for the features above)
+- [ ] Verify ID token trust against real AWS / Google Cloud accounts
 - [ ] External providers: signed `workflow_job` webhook delivery, GitHub App auth (JWT → installation token, manifest flow) and PATs on `/api/v3`, org-level runners; try WarpBuild Enterprise, AWS CodeBuild, RunsOn
 - [ ] `container:` and `services:` (Docker-in-Docker in the runner container)
 - [ ] Web UI for runs and live logs

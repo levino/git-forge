@@ -276,5 +276,10 @@ repository and environment secrets set the `ACTIONS_SECRETS_KEY` secret to
 it in D1. `uses:` actions are served from repositories on the instance, for
 example a mirror of `github.com/actions/checkout` named `actions/checkout`
 (`ACTIONS_REPOSITORIES` maps other names, `ACTIONS_GITHUB_FALLBACK=true`
-downloads unmirrored actions from GitHub).
+downloads unmirrored actions from GitHub). `actions/cache`,
+`actions/upload-artifact` and `actions/download-artifact` store their data in
+the R2 bucket. For OIDC ID tokens (`permissions: id-token: write`, e.g. for
+cloud logins without stored keys) set the `ACTIONS_OIDC_KEY` secret to a P-256
+private JWK (`git-forge-node oidc-key`); the issuer is
+`https://<your domain>/_services/token`.
 

@@ -5,6 +5,8 @@ import { jobDefinitionOf, runContextOf, runDefinitionOf } from './definitions.ts
 import { type CheckRunSink, recordCheck } from './dispatch.ts'
 import { buildJobMessage, JOB_REQUEST_MESSAGE_TYPE } from './job-message.ts'
 import { verifyClientAssertion } from './keys.ts'
+import { idTokenAllowed, idTokenRequestUrl } from './oidc.ts'
+import { resultsEndpointData } from './results.ts'
 import { readSecrets, type SecretsKey } from './secrets.ts'
 import { authorizationUrl, POOL_ID, POOL_NAME } from './service-constants.ts'
 import {
@@ -31,6 +33,7 @@ import {
   recordLogChunk,
   removeRunner,
   renewJob,
+  resultsScope,
   revokeJobTokens,
   type Runner,
   RunnerExistsError,
@@ -59,6 +62,12 @@ export type ActionsServiceOptions = {
   readonly messageWaitMs?: number
   readonly pollIntervalMs?: number
   readonly onJobCompleted?: (job: JobRow) => Promise<void>
+  readonly results?: ResultsAdvertisement
+}
+
+export type ResultsAdvertisement = {
+  readonly idTokens: boolean
+  readonly artifactRetentionDays?: number
 }
 
 export const RUNNER_TOKEN_TTL_MS = 60 * 60 * 1000
@@ -307,9 +316,12 @@ const deliver = async (context: Context, job: JobRow, runner: Runner): Promise<R
   const run = await getRun(db, job.run_id)
   if (!run) throw new Error(`job ${job.id} has no run ${job.run_id}`)
   const definition = jobDefinitionOf(job)
+  const runDefinition = runDefinitionOf(run)
   const ttlMs = jobTtlMs(job)
+  const results = context.options.results
+  const idTokenUrl = results?.idTokens && idTokenAllowed(run, runDefinition, definition) ? idTokenRequestUrl(context.serverUrl) : null
   const [runtimeToken, githubToken, secrets] = await Promise.all([
-    issueToken(db, { kind: 'runtime', jobId: job.id, runnerId: runner.id, owner: run.owner, repo: run.repo, ttlMs }, context.now),
+    issueToken(db, { kind: 'runtime', jobId: job.id, runnerId: runner.id, owner: run.owner, repo: run.repo, scope: resultsScope(run.id, job.id), ttlMs }, context.now),
     issueToken(db, { kind: 'github', jobId: job.id, owner: run.owner, repo: run.repo, ttlMs }, context.now),
     jobSecrets(context.options, run, job),
   ])
@@ -321,7 +333,7 @@ const deliver = async (context: Context, job: JobRow, runner: Runner): Promise<R
     stepIds: definition.job.steps.map(() => crypto.randomUUID()),
     job: definition.job,
     displayName: job.display_name,
-    run: runContextOf(run, runDefinitionOf(run), definition),
+    run: runContextOf(run, runDefinition, definition),
     matrix: definition.matrix ?? null,
     strategy: definition.strategy ?? null,
     needs: definition.needs ?? {},
@@ -330,6 +342,13 @@ const deliver = async (context: Context, job: JobRow, runner: Runner): Promise<R
     runtimeToken,
     githubToken,
     secrets,
+    ...(results
+      ? {
+          endpointData: resultsEndpointData(context.serverUrl, idTokenUrl),
+          variables: { actions_uses_cache_service_v2: 'true' },
+          ...(results.artifactRetentionDays ? { retentionDays: results.artifactRetentionDays } : {}),
+        }
+      : {}),
   })
   return json(200, { messageId: job.request_id, messageType: JOB_REQUEST_MESSAGE_TYPE, body: JSON.stringify(message) })
 }

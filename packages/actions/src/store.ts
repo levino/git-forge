@@ -195,6 +195,7 @@ export type TokenGrant = {
   readonly jobId?: string
   readonly owner?: string
   readonly repo?: string
+  readonly scope?: string
   readonly ttlMs: number
 }
 
@@ -218,6 +219,7 @@ const mintToken = (grant: TokenGrant, now: number): string => {
     iat: seconds,
     exp: Math.floor((now + grant.ttlMs) / 1000),
     ...(grant.jobId ? { orchid: grant.jobId } : {}),
+    ...(grant.scope ? { scp: grant.scope } : {}),
   }
   return `${base64UrlJson({ typ: 'JWT', alg: 'HS256' })}.${base64UrlJson(payload)}.${base64UrlEncode(randomBytes(32))}`
 }
@@ -246,8 +248,13 @@ export const verifyToken = async (db: Database, token: string, kind: TokenKind, 
 }
 
 export const revokeJobTokens = async (db: Database, jobId: string, now: number): Promise<void> => {
-  await db.run(sql('UPDATE actions_tokens SET expires_at = ? WHERE job_id = ? AND expires_at > ?', now, jobId, now))
+  await db.batch([
+    sql('UPDATE actions_tokens SET expires_at = ? WHERE job_id = ? AND expires_at > ?', now, jobId, now),
+    sql('UPDATE actions_blob_grants SET expires_at = ? WHERE job_id = ? AND expires_at > ?', now, jobId, now),
+  ])
 }
+
+export const resultsScope = (runId: number, jobId: string): string => `Actions.Results:${runId}:${jobId}`
 
 export const createSession = async (db: Database, runnerId: number, ownerName: string, now: number): Promise<string> => {
   const id = crypto.randomUUID()
@@ -481,7 +488,10 @@ export const listJobsByStatus = async (db: Database, statuses: readonly JobStatu
 export const listStaleSessions = async (db: Database, before: number): Promise<SessionRow[]> =>
   db.all<SessionRow>(sql('SELECT * FROM actions_sessions WHERE closed_at IS NULL AND last_seen_at < ? LIMIT 200', before))
 
-export const deleteExpiredTokens = async (db: Database, before: number): Promise<number> => (await db.run(sql('DELETE FROM actions_tokens WHERE expires_at < ?', before))).changes
+export const deleteExpiredTokens = async (db: Database, before: number): Promise<number> => {
+  const [tokens, grants] = await db.batch([sql('DELETE FROM actions_tokens WHERE expires_at < ?', before), sql('DELETE FROM actions_blob_grants WHERE expires_at < ?', before)])
+  return tokens!.changes + grants!.changes
+}
 
 export const getJob = async (db: Database, requestId: number): Promise<JobRow | null> => first<JobRow>(db, sql('SELECT * FROM actions_jobs WHERE request_id = ?', requestId))
 

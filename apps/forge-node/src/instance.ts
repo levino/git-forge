@@ -7,7 +7,7 @@ import { continueImport, createMemoryJobQueue, type FetchFunction, type ImportJo
 import { FsStorage, nodeDigests } from '@git-forge/node'
 import { S3Storage } from '@git-forge/s3'
 import { type AppJob, createForge, type Forge } from 'forge-worker/app'
-import { ConfigurationError, loadSecretsKey, parseActionsSettings, parseSettings } from 'forge-worker/config'
+import { ConfigurationError, loadIdTokenKeys, loadSecretsKey, parseActionsSettings, parseSettings } from 'forge-worker/config'
 import { type NodeConfig, type NodeVars, parseNodeConfig, type StorageConfig } from './config.ts'
 
 export type Log = (event: Record<string, unknown>) => void
@@ -70,6 +70,7 @@ export const createInstance = async (vars: NodeVars, overrides: InstanceOverride
   const settings = await parseSettings(vars)
   const actions = parseActionsSettings(vars)
   const secretsKey = await loadSecretsKey(actions)
+  const idTokenKeys = await loadIdTokenKeys(actions, settings.instanceKey)
   const { db, handle } = await openDatabase(config.databasePath)
   try {
     const pending = await pendingMigrations(db, MIGRATIONS)
@@ -114,6 +115,9 @@ export const createInstance = async (vars: NodeVars, overrides: InstanceOverride
             ...(secretsKey ? { secretsKey } : {}),
             repositories: actions.repositories,
             githubFallback: actions.githubFallback,
+                idTokenKeys,
+                artifactRetentionDays: actions.artifactRetentionDays,
+                cacheLimits: actions.cacheLimits,
           },
         }
       : {}),

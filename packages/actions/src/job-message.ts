@@ -47,6 +47,9 @@ export type JobMessageInput = {
   readonly runtimeToken: string
   readonly githubToken: string
   readonly secrets: Readonly<Record<string, string>>
+  readonly endpointData?: Readonly<Record<string, string>>
+  readonly variables?: Readonly<Record<string, string>>
+  readonly retentionDays?: number
 }
 
 export const PLAN_TYPE = 'actions'
@@ -115,7 +118,7 @@ const repositoryPayload = (run: RunContext, serverUrl: string): Record<string, E
   clone_url: `${serverUrl}/${run.owner}/${run.repo}.git`,
 })
 
-export const githubContextValue = (run: RunContext, serverUrl: string, jobKey: string): Record<string, ExpressionValue> => {
+export const githubContextValue = (run: RunContext, serverUrl: string, jobKey: string, retentionDays = 90): Record<string, ExpressionValue> => {
   const repository = `${run.owner}/${run.repo}`
   const refName = run.ref.replace(/^refs\/(heads|tags)\//, '')
   const payload = run.payload ?? { ref: run.ref, after: run.sha }
@@ -143,7 +146,7 @@ export const githubContextValue = (run: RunContext, serverUrl: string, jobKey: s
     triggering_actor: run.actor,
     event_name: run.event,
     job: jobKey,
-    retention_days: '90',
+    retention_days: String(retentionDays),
     event: { repository: repositoryPayload(run, serverUrl), ...payload } as Record<string, ExpressionValue>,
   }
 }
@@ -199,14 +202,14 @@ export const buildJobMessage = (input: JobMessageInput) => {
           name: 'SystemVssConnection',
           url: input.serviceUrl,
           authorization: { scheme: 'OAuth', parameters: { AccessToken: input.runtimeToken } },
-          data: {},
+          data: { ...input.endpointData },
           isShared: false,
           isReady: true,
         },
       ],
     },
     contextData: {
-      github: toContextData(githubContextValue(input.run, input.serverUrl, input.job.id)),
+      github: toContextData(githubContextValue(input.run, input.serverUrl, input.job.id, input.retentionDays)),
       inputs: toContextData(input.run.inputs ?? {}),
       vars: contextDictionary({}),
       needs: toContextData(needsContextValue(input.needs ?? {})),
@@ -223,6 +226,7 @@ export const buildJobMessage = (input: JobMessageInput) => {
       github_token: secret(input.githubToken),
       'system.github.job': { value: input.job.id },
       'system.runner.lowdiskspacethreshold': { value: '100' },
+      ...Object.fromEntries(Object.entries(input.variables ?? {}).map(([name, value]) => [name, { value }])),
       ...Object.fromEntries(Object.entries(input.secrets).map(([name, value]) => [name, secret(value)])),
     },
     steps,

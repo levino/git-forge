@@ -26,7 +26,7 @@ const tables = (db: Database) => db.all<{ name: string }>(sql("SELECT name FROM 
 describe('migrations on node:sqlite', () => {
   it('creates the schema once and is idempotent', async () => {
     const { db } = openSqliteDatabase()
-    expect(await applyMigrations(db, MIGRATIONS)).toEqual(['0001_initial'])
+    expect(await applyMigrations(db, MIGRATIONS)).toEqual(['0001_initial', '0002_branch_protection'])
     expect(await applyMigrations(db, MIGRATIONS)).toEqual([])
     expect((await tables(db)).map((row) => row.name)).toEqual(
       expect.arrayContaining([
@@ -44,6 +44,9 @@ describe('migrations on node:sqlite', () => {
         'trusted_instances',
         'instance_repositories',
         'audit_log',
+        'branch_protection_rules',
+        'branch_protection_push_allowances',
+        'branch_protection_status_checks',
         'schema_migrations',
       ]),
     )
@@ -260,7 +263,7 @@ describe('D1 adapter', () => {
     const handle = new DatabaseSync(':memory:')
     handle.exec('PRAGMA foreign_keys = ON')
     const db = d1Database(fakeD1(handle))
-    expect(await applyMigrations(db, MIGRATIONS)).toEqual(['0001_initial'])
+    expect(await applyMigrations(db, MIGRATIONS)).toEqual(['0001_initial', '0002_branch_protection'])
     const store = createAccountsStore(db)
     const { alice } = await seed(store)
     const { token } = await store.createPersonalAccessToken(alice.id, { name: 'd1', scopes: ['repo:admin'], expiresAt: null })

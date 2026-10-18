@@ -21,7 +21,7 @@ discussions.
 - [ ] Batch API with presigned URLs (in progress)
 - [ ] Verify step (size, SHA-256) before an object counts as present
 - [ ] Reject pushes referencing missing LFS objects
-- [ ] Media URLs `/{owner}/{repo}/media/{oid}` and raw endpoint resolving LFS pointers
+- [x] Media URLs `/{owner}/{repo}/media/{oid}` and raw endpoint `/{owner}/{repo}/raw/{ref}/{path}` resolving LFS pointers (CDN pull-zone friendly: immutable caching, ETag, Range, HEAD)
 - [ ] Optional: publish public LFS objects to a CDN bucket on push
 
 ## M3 — Accounts and federation
@@ -34,6 +34,8 @@ discussions.
 - [ ] Device flow (`gh auth login`-style)
 - [ ] Break-glass key
 - [ ] SAML, SCIM
+- [x] Branch protection rules (patterns, force push, deletion, push restrictions, admin bypass) enforced in `receive-pack`, API under `/api/repos/{owner}/{repo}/branches/{branch}/protection`
+- [ ] Branch protection API and push policy wired into the Worker app (needs accounts on D1 there)
 
 ## M4 — Mirrors
 
@@ -66,7 +68,9 @@ discussions.
 - [ ] Workflow parsing and job scheduling, secrets
 - [ ] GHES-style `/api/v3` runner API and `workflow_job` webhooks for external providers (WarpBuild, CodeBuild, RunsOn)
 - [ ] "Deploy to Cloudflare" button and three test instances (alpha, beta, gamma)
-- [ ] Release artifact (bundled worker + migrations + checksums) and instance template with pinned version
+- [x] Release artifact (bundled worker + migrations + checksums) and instance template with pinned version
+- [ ] Create `levino/git-forge-instance`, add the deploy key secret `INSTANCE_TEMPLATE_DEPLOY_KEY`, cut the first release
+- [ ] Verify the Deploy button, Workers Builds settings and automatic provisioning of D1/R2 of the template against a real Cloudflare account
 
 ## M6 — Web UI (Astro SSR)
 
@@ -80,6 +84,7 @@ discussions.
 - [ ] Branch protection (in progress, v1)
 - [ ] Issues
 - [ ] Pull requests, reviews, conflict-free merge
+- [ ] Enforce required reviews and status checks on merge via `evaluateBranchUpdate(..., { via: 'pull-request' })`
 - [ ] Discussions
 - [ ] Submit via form
 

@@ -93,6 +93,31 @@ describe('git routes', () => {
     expect((await advertise(forge, 'git-upload-pack', basic('secret'))).status).toBe(200)
   })
 
+  it('lets the read token read but not push', async () => {
+    const forge = config({ publicRead: false, readToken: 'reader' })
+    await createRepo(forge, { owner: 'acme', name: 'site' })
+    expect((await advertise(forge, 'git-upload-pack', basic('reader'))).status).toBe(200)
+    expect((await advertise(forge, 'git-receive-pack', basic('reader'))).status).toBe(401)
+    expect((await advertise(forge, 'git-upload-pack', basic('wrong'))).status).toBe(401)
+  })
+
+  it('routes media and raw URLs through the same authorization', async () => {
+    const forge = config({ publicRead: false, readToken: 'reader' })
+    await createRepo(forge, { owner: 'acme', name: 'site' })
+    const media = (authorization?: string) =>
+      handleRequest(
+        new Request(`https://forge.example/acme/site/media/${'0'.repeat(64)}`, authorization ? { headers: { Authorization: authorization } } : {}),
+        forge,
+      )
+    expect((await media()).status).toBe(401)
+    const missing = await media('Bearer reader')
+    expect(missing.status).toBe(404)
+    expect(await missing.text()).toBe('object does not exist\n')
+    const raw = await handleRequest(new Request('https://forge.example/acme/site/raw/main/README.md', { headers: { Authorization: 'Bearer reader' } }), forge)
+    expect(raw.status).toBe(404)
+    expect(await raw.text()).toBe('unknown ref\n')
+  })
+
   it('answers health checks and unknown paths', async () => {
     const forge = config()
     expect((await handleRequest(new Request('https://forge.example/api/health'), forge)).status).toBe(200)

@@ -1,6 +1,7 @@
 import {
   type Authorize,
   createRepository,
+  handleContentRequest,
   handleGitRequest,
   type ImportScheduler,
   ImportRunningError,
@@ -14,6 +15,7 @@ import {
 export type ForgeConfig = {
   readonly storage: Storage
   readonly adminToken: string | undefined
+  readonly readToken?: string | undefined
   readonly publicRead: boolean
   readonly maxPushBytes: number
   readonly scheduleImport?: ImportScheduler
@@ -59,10 +61,17 @@ const isAdmin = async (request: Request, config: ForgeConfig): Promise<boolean> 
   return token !== null && (await tokenMatches(token, config.adminToken))
 }
 
+const isReader = async (request: Request, config: ForgeConfig): Promise<boolean> => {
+  const token = presentedToken(request)
+  return token !== null && (await tokenMatches(token, config.readToken))
+}
+
 const authorizer =
   (config: ForgeConfig): Authorize =>
-  async (request, _repo, access) =>
-    (access === 'read' && config.publicRead) || (await isAdmin(request, config)) ? null : unauthorized()
+  async (request, _repo, access) => {
+    if (access === 'read' && (config.publicRead || (await isReader(request, config)))) return null
+    return (await isAdmin(request, config)) ? null : unauthorized()
+  }
 
 type CreateRepositoryBody = { owner?: unknown; name?: unknown; defaultBranch?: unknown }
 
@@ -178,10 +187,9 @@ export const handleRequest = async (request: Request, config: ForgeConfig): Prom
     return importRoute(request, config, owner, name)
   }
   if (url.pathname === '/' || url.pathname === '/api/health') return json(200, { ok: true, service: 'git-forge' })
-  const git = await handleGitRequest(request, {
-    storage: config.storage,
-    authorize: authorizer(config),
-    maxRequestBytes: config.maxPushBytes,
-  })
+  const authorize = authorizer(config)
+  const content = await handleContentRequest(request, { storage: config.storage, authorize })
+  if (content) return content
+  const git = await handleGitRequest(request, { storage: config.storage, authorize, maxRequestBytes: config.maxPushBytes })
   return git ?? json(404, { error: 'not found' })
 }

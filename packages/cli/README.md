@@ -17,16 +17,18 @@ is on `PATH`. It needs `git` 2.38 or newer.
 
 ## Installation
 
-Download the single executable for your platform from the GitHub release
-(`cli-v*` tags: `git-forge-linux-x64`, `-linux-arm64`, `-darwin-x64`,
-`-darwin-arm64`, `-windows-x64.exe`, plus `SHA256SUMS`), rename it to
-`git-forge` and put it on `PATH`. No Node.js, npm or Bun is needed.
+Download the single executable for your platform from a git-forge release
+(`git-forge-linux-x64`, `-linux-arm64`, `-darwin-x64`, `-darwin-arm64`,
+`-windows-x64.exe`; checksums in `CLI-SHA256SUMS`), rename it to `git-forge`
+(`git-forge.exe` on Windows) and put it on `PATH`. No Node.js, npm or Bun is
+needed.
 
 During development run it from the repository:
 
 ```sh
 pnpm --filter @git-forge/cli start push origin main
 pnpm --filter @git-forge/cli build        # dist/git-forge for this machine, needs Bun
+sh packages/cli/build-executables.sh out/  # all platforms plus CLI-SHA256SUMS
 ```
 
 ## Options
@@ -101,8 +103,10 @@ unchanged on Node.js for development and tests. `deno compile` would have
 worked as well, but needs `node:`-specifier and permission flags handling and
 produces larger binaries; `node --experimental-sea-config` cannot
 cross-compile and needs a separate bundler. The release workflow
-(`.github/workflows/release-cli.yml`) builds all targets on a `cli-v*` tag
-and publishes them with `SHA256SUMS`.
+(`.github/workflows/release.yml`) runs `build-executables.sh` and attaches the
+executables and `CLI-SHA256SUMS` to every git-forge release, next to the
+Worker bundle. `CLI-SHA256SUMS` is separate from `SHA256SUMS`, so the pin of
+instances is unaffected.
 
 ## Tests
 

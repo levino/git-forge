@@ -85,6 +85,9 @@ triggers with `RAISE`), all of which D1, Durable Objects and libSQL support.
 | `tokens` | personal and app tokens: SHA-256 hash only, display prefix, scopes, optional repository restriction, expiry, last use, revocation |
 | `trusted_instances`, `instance_repositories` | federation trust: issuer (+ optional pinned key thumbprint) may read specific repositories |
 | `audit_log` | append-only; `UPDATE` and `DELETE` are rejected by triggers |
+| `branch_protection_rules` | one rule per `(repository, pattern)`: force push, deletion, admin enforcement, push restriction, pull request reviews, status checks (migration `0002`) |
+| `branch_protection_push_allowances` | who may push when a rule restricts pushes: `user`, `team`, `app` (by ID) or `role` (minimum role) |
+| `branch_protection_status_checks` | required status check names per rule |
 
 Timestamps are Unix milliseconds. IDs are random UUIDs. Logins and repository
 names are case-insensitive (`COLLATE NOCASE`).
@@ -146,6 +149,109 @@ instance verifier, anything else is looked up as a token. Invalid credentials
 always yield `401`. `checkRepositoryAccess(directory, principal, repo, role,
 surface)` is the same check for other HTTP surfaces such as the LFS batch API
 (`surface: 'lfs'` requires the instance token scope `lfs:read`).
+
+## Branch protection
+
+Modelled on GitHub's classic branch protection rules. A repository has any
+number of rules, each with a branch name pattern; exactly one rule applies to
+a branch.
+
+### Patterns and rule selection
+
+Patterns are `fnmatch` with `FNM_PATHNAME`, as on GitHub: `*` and `?` never
+match `/`, `**/` matches any number of directories (`release/**/*`),
+`[a-z]`, `[!x]`/`[^x]` and `\` escapes work. A rule whose pattern names the
+branch exactly (no `*`, `?`, `[`, `]`, `\`) wins; otherwise the oldest
+matching wildcard rule applies. Rules never combine. Patterns match the branch
+name without `refs/heads/`; tags and all other refs are not protected.
+
+### Settings
+
+| Setting | Default | Effect on a direct push |
+|---|---|---|
+| `allowForcePushes` | `false` | non-fast-forward updates are rejected |
+| `allowDeletions` | `false` | deleting the branch is rejected |
+| `enforceAdmins` | `false` | when `false`, actors with `admin` access bypass every rule |
+| `restrictions` | `null` | when set, only the listed users, teams (of the repository's organization), apps, or actors with at least one of the listed roles may push, create or delete matching branches |
+| `requiredPullRequestReviews` | `null` | when set, direct pushes are rejected; the PR feature checks `requiredApprovingReviewCount` (0–6), `dismissStaleReviews`, `requireCodeOwnerReviews`, `requireLastPushApproval` |
+| `requiredStatusChecks` | `null` | when set, the new commit needs every listed context in a passing state (`success`, `neutral`, `skipped`); `strict` additionally requires the PR branch to be up to date |
+
+Creating a branch that matches a rule is a fast-forward and allowed unless
+push restrictions, required reviews or required status checks forbid it.
+
+### Checking an update
+
+`evaluateBranchUpdate(rule, actor, update, evidence)` is a pure function and
+the only place the rules are interpreted. It returns every unmet requirement
+as a list of strings (empty = allowed):
+
+```ts
+evaluateBranchUpdate(rule, actor, { ref, oldId, newId, fastForward }, { via: 'push' })
+evaluateBranchUpdate(rule, actor, update, {
+  via: 'pull-request',
+  approvals, changesRequested, codeOwnerApproved, lastPushApproved, upToDate,
+  statuses: { ci: 'success' },
+})
+```
+
+`actor` (`ProtectionActor`) carries the principal's kind and ID, its resolved
+repository `access` and its team IDs, all derived from the verified token by
+`protectionActor(store, principal, repository, access)`. Pull request merges
+(once they exist) call the same function with `via: 'pull-request'`;
+push restrictions and admin bypass apply to merges exactly as to pushes.
+`selectProtectionRule(rules, branch)` picks the applicable rule.
+
+### Enforcement in receive-pack
+
+```ts
+const access = createGitAccess({ directory: store, verifyInstance })
+await handleGitRequest(request, { storage, authorize: access.authorize, pushPolicy: access.pushPolicy })
+```
+
+`createGitAccess` authenticates each request once (shared between
+`authorize` and `pushPolicy`), loads the repository's rules and the actor
+before the refs are updated, and returns a synchronous `RefPolicy` for
+`receivePack`. A violation rejects only that ref with
+`ng <ref> protected branch: <reason>`, which `git push` prints as
+`! [remote rejected] main -> main (protected branch: force push is not allowed)`;
+with `--atomic` the whole push fails. Rejected force pushes archive nothing.
+`refs/upstream/*` and `refs/archive/*` are refused before the policy runs
+(`invalid ref name`) and stay governed by the mirror rules; mirror sync
+writes `refs/upstream/*` directly and is not subject to branch protection.
+
+### API
+
+`handleBranchProtectionRequest(request, { store, verifyInstance?, prefix = '/api' })`
+serves GitHub's REST shape under the prefix. All routes need `admin` access
+(`401` anonymous, `404` not visible, `403` otherwise).
+
+| Method and path | Meaning |
+|---|---|
+| `GET /api/repos/{owner}/{repo}/branches/{pattern}/protection` | the rule with exactly this pattern, `404 Branch not protected` otherwise |
+| `PUT /api/repos/{owner}/{repo}/branches/{pattern}/protection` | create or replace the rule |
+| `DELETE /api/repos/{owner}/{repo}/branches/{pattern}/protection` | remove the rule (`204`) |
+| `GET /api/repos/{owner}/{repo}/branch-protection` | all rules in creation order (not in GitHub's REST API) |
+
+`{pattern}` may contain `/` and wildcards, URL-encoded or not
+(`release%2F*`). The `PUT` body is GitHub's:
+
+```json
+{
+  "required_status_checks": { "strict": true, "contexts": ["ci"] },
+  "enforce_admins": true,
+  "required_pull_request_reviews": { "required_approving_review_count": 2, "dismiss_stale_reviews": true },
+  "restrictions": { "users": ["rita"], "teams": ["releasers"], "apps": [], "roles": ["maintain"] },
+  "allow_force_pushes": false,
+  "allow_deletions": false
+}
+```
+
+Missing or `null` sections are disabled; `restrictions.roles` is an
+extension. Users, teams and apps are given by login/slug and stored by ID.
+Responses follow GitHub (`enforce_admins.enabled`, `allow_force_pushes.enabled`,
+disabled sections omitted) plus `pattern`. Invalid bodies yield `422`. Every
+change is written with an audit entry (`branch_protection.create`,
+`.update`, `.delete`).
 
 ## Instance federation
 

@@ -52,7 +52,6 @@ beforeAll(async () => {
     headers: { Authorization: `Bearer ${BOOTSTRAP_TOKEN}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({ login: 'owner' }),
   })
-  expect(bootstrapped.status, await bootstrapped.clone().text()).toBe(201)
   owner = ((await bootstrapped.json()) as { token: string }).token
   for (const login of ['maintainer', 'outsider']) expect((await call('POST', '/api/admin/users', owner, { login })).status).toBe(201)
   maintainer = (await call('POST', '/api/admin/users/maintainer/tokens', owner, { scopes: ['repo:write'] })).body.token

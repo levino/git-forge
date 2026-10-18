@@ -155,15 +155,15 @@ Design: [design.md §17](design.md#17-collaboration).
 - [x] Discussions: categories, threads, answers
 - [x] REST API under `/api/v3` with GitHub-compatible shapes, wired into the Worker
 - [x] Web UI: issues (list, new, timeline, comment, close/reopen), pull requests (list, new, conversation with reviews, checks and merge box, commits, files with inline line comments), discussions (categories, threads, replies, answers)
-- [x] Forks on the same instance (object sharing through alternates, fork network listing) and pull requests from forks (head objects copied into the base, maintainers can modify, untrusted CI)
+- [x] Forks on the same instance (object sharing through alternates, fork network listing) and pull requests from forks (head objects and their LFS objects copied into the base, maintainers can modify, untrusted CI)
+- [x] Web UI for forks: Fork button, fork list, *forked from*, pull requests from forks
 - [ ] Forks across instances (fork a mirror, pull requests between instances)
 - [x] CODEOWNERS parsing for `require_code_owner_reviews` (owners of every changed file must approve, user owners are requested as reviewers)
 - [x] Rename detection in merges (port of git's `diffcore-rename` scoring and pairing; edits follow renamed files, rename/rename and rename/delete conflicts)
-- [ ] Directory rename detection in merges (a directory removed on one side while the other adds to it is still reported as a conflict)
+- [x] Directory renames in merges: adds into a renamed directory conflict like git's default, adds into a deleted directory merge
 - [ ] In-browser conflict resolution
 - [x] Search (FTS5): repositories, issues, pull requests, discussions with comments, users; access-filtered; `/api/search`, `/api/v3/search/*`
 - [ ] Reactions, notifications
-- [ ] Web UI for issues, pull requests and discussions (separate work package)
 - [ ] Submit via form
 
 ## Later

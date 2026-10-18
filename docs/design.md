@@ -1944,11 +1944,12 @@ Issues, pull requests, reviews, commit statuses, check runs and discussions
   traversal order (several identical files competing for one rename, tied
   scores or tied directory hints) or the comparison budget (250 000 pairs) is
   exceeded, the relevant sources are reported as conflicts instead.
-  Directory rename detection is not ported: a directory removed on one side
-  while the other side adds to it is a conflict (git reports these as
-  conflicts too when it finds a directory rename, and merges them when it
-  does not). The merge is therefore never clean where git conflicts, and
-  identical where both are clean.
+  Directory renames: a path the other side adds below a directory that one
+  side removed is a `directory-rename` conflict when a file of that
+  directory was renamed (git's default `merge.directoryRenames=conflict`),
+  and merges cleanly when it was only deleted. Sources in such directories
+  are always considered for renames. The merge is therefore never clean
+  where git conflicts, and identical where both are clean.
 - **Branch protection on merge.** The merge calls the same
   `evaluateBranchUpdate(rule, actor, update, { via: 'pull-request', … })` as
   receive-pack, with approvals from reviewers with write access (the
@@ -1985,8 +1986,9 @@ Issues, pull requests, reviews, commit statuses, check runs and discussions
   request is opened and whenever the head moves (a pack streamed from the
   head repository, like GitHub's `refs/pull/N/head` but without a ref), so
   diffs, reviews, merges and CI read only the base repository and the base
-  never depends on the fork. Pushes to a fork refresh the pull requests it
-  heads. With `maintainer_can_modify` (set by the author) users with write
+  never depends on the fork. LFS objects of pointers in the copied pack are
+  copied with it (content-addressed, written once, hash verified). Pushes to
+  a fork refresh the pull requests it heads. With `maintainer_can_modify` (set by the author) users with write
   access to the base may push to that one head branch of the fork, and
   read the fork, through a `delegatedBranches` hook of the git access check;
   every other ref stays denied. CI for pull requests from forks runs
@@ -2149,6 +2151,13 @@ goes through the service function, which checks the permission again, after
 `verifySessionWrite`. Collaboration errors are shown on the page with their
 status. Links that come from the API (check run `details_url`, status
 `target_url`) are rendered only for `http(s)` URLs.
+
+Forks: the repository header has a *Fork* button (`…/fork`: owner and
+name, `createFork`), the fork count (`…/forks`, with a *Compare* link per
+fork) and, on a fork, *forked from* with a *Contribute* link. *New pull
+request* takes `head_repo` (any readable repository of the fork network)
+and offers that repository's branches; *Allow edits by maintainers* sets
+`maintainer_can_modify`.
 
 Inline review comments on the *Files changed* tab use the only client script
 of these pages: a click on a line's `+` clones a `<template>` form below the

@@ -109,8 +109,8 @@ branch do the same.
   repository in the same fork network (`head_repo` picks one when an owner
   has several). The caller needs read access to the head repository. The
   head's objects are copied into the base repository when the pull request
-  is opened and whenever its head moves, so everything else reads only the
-  base. `maintainer_can_modify` (author only, forks only) lets users with
+  is opened and whenever its head moves, together with the LFS objects their
+  pointers name, so everything else reads only the base. `maintainer_can_modify` (author only, forks only) lets users with
   write access to the base push to the head branch of the fork
   (`maintainerPushBranches`, wired into the git access check by the host).
 - The head and base shas are refreshed from `refs.json` on every read and on

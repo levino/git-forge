@@ -1,4 +1,4 @@
-import { isTokenScope, type TokenScope } from '@git-forge/accounts'
+import { isTokenScope } from '@git-forge/accounts'
 import type { ForgeServices, UiSession } from '../app.ts'
 
 export type AccountAction =
@@ -22,12 +22,12 @@ export const accountAction = async (forge: ForgeServices, session: UiSession, fo
   const action = form.get('action')
   if (action === 'create-token') {
     const name = String(form.get('name') ?? '').trim()
-    const scopes = form.getAll('scopes').map(String)
+    const scope = form.get('scope')
     const expiresAt = parseExpiry(String(form.get('expires') ?? ''), now)
     if (name === '' || name.length > 100) return { kind: 'error', message: 'Give the token a name of at most 100 characters.' }
-    if (scopes.length === 0 || !scopes.every(isTokenScope)) return { kind: 'error', message: 'Choose at least one scope.' }
+    if (!isTokenScope(scope)) return { kind: 'error', message: 'Choose the access: read, write or admin.' }
     if (expiresAt === undefined) return { kind: 'error', message: 'Choose an expiry.' }
-    const created = await forge.account.createToken(user, { name, scopes: scopes as TokenScope[], expiresAt })
+    const created = await forge.account.createToken(user, { name, scopes: [scope], expiresAt })
     return { kind: 'token-created', name, token: created.token }
   }
   if (action === 'revoke-token') {

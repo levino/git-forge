@@ -1,3 +1,27 @@
+import { accessChoices, ACCESS_CHOICES, type TokenScope } from './tokens.ts'
+
+export type ConsentUser = { readonly login: string; readonly csrf: string }
+
+export type DeviceDetails = {
+  readonly userCode: string
+  readonly clientName: string
+  readonly clientHost: string | null
+  readonly requestIp: string | null
+  readonly requestedAt: number
+  readonly scope: TokenScope
+}
+
+export type CliConsent = {
+  readonly id: string
+  readonly clientName: string
+  readonly clientHost: string | null
+  readonly requestIp: string | null
+  readonly requestedAt: number
+  readonly redirect: 'loopback' | 'oob'
+  readonly redirectUri: string
+  readonly scope: TokenScope
+}
+
 export type LoginPage =
   | {
       readonly kind: 'login'
@@ -18,11 +42,15 @@ export type LoginPage =
   | {
       readonly kind: 'device'
       readonly userCode: string | null
-      readonly device: { readonly userCode: string; readonly clientName: string; readonly scopes: string } | null
-      readonly user: { readonly login: string; readonly csrf: string }
+      readonly device: DeviceDetails | null
+      readonly user: ConsentUser
+      readonly instance: string
+      readonly viewerIp: string | null
       readonly message?: string
     }
   | { readonly kind: 'device-result'; readonly approved: boolean }
+  | { readonly kind: 'cli'; readonly request: CliConsent; readonly user: ConsentUser; readonly instance: string }
+  | { readonly kind: 'cli-code'; readonly code: string; readonly expiresAt: number }
   | { readonly kind: 'break-glass'; readonly message?: string }
   | { readonly kind: 'error'; readonly status: number; readonly message: string }
 
@@ -30,6 +58,33 @@ export type LoginPageRenderer = (page: LoginPage, request: Request) => Response 
 
 export const escapeHtml = (value: string): string =>
   value.replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]!)
+
+export const CONSENT_WARNING =
+  'Only approve a request you started yourself just now. Whoever sent you a link to this page gets this access to your account if you approve it.'
+
+export const accessLabel = (scope: TokenScope): string => ACCESS_CHOICES.find((choice) => choice.scope === scope)?.label ?? scope
+
+export const LOOPBACK_FORM_ACTION = 'http://127.0.0.1:* http://localhost:*'
+
+export const loginFormAction = (page: LoginPage): string => (page.kind === 'cli' && page.request.redirect === 'loopback' ? `'self' ${LOOPBACK_FORM_ACTION}` : "'self'")
+
+export const formatRequestTime = (ms: number): string => `${new Date(ms).toISOString().slice(0, 19).replace('T', ' ')} UTC`
+
+const accessRadios = (max: TokenScope): string =>
+  `<fieldset><legend>Access</legend>${accessChoices(max)
+    .map((choice) => `<label><input type="radio" name="scope" value="${choice.scope}"${choice.scope === max ? ' checked' : ''}> ${escapeHtml(choice.label)}</label>`)
+    .join('<br>')}</fieldset>`
+
+export const COPY_SCRIPT = `
+for (const button of document.querySelectorAll('[data-copy]')) {
+  button.addEventListener('click', async () => {
+    const field = document.getElementById(button.dataset.copy);
+    field.select();
+    try { await navigator.clipboard.writeText(field.value); } catch { document.execCommand('copy'); }
+    button.textContent = 'Copied';
+  });
+}
+`
 
 const scriptJson = (value: unknown): string => JSON.stringify(value).replace(/</g, '\\u003c')
 
@@ -139,12 +194,15 @@ const renderBody = (page: LoginPage): { title: string; body: string; config: Rec
           config: null,
         }
       }
+      const device = page.device
       return {
         title: 'Connect a device',
-        body: `${message}<p><strong>${escapeHtml(page.device.clientName)}</strong> asks for a token for Git and Git LFS (<code>${escapeHtml(page.device.scopes)}</code>) on behalf of <strong>${escapeHtml(page.user.login)}</strong>.</p>
-<p>Code: <code>${escapeHtml(page.device.userCode)}</code> — only continue if your device shows the same code.</p>
-<form method="post" action="/login/device">${csrfField(page.user.csrf)}<input type="hidden" name="user_code" value="${escapeHtml(page.device.userCode)}">
-<button name="decision" value="approve">Authorize</button> <button name="decision" value="deny">Deny</button></form>`,
+        body: `${message}<p><strong>${escapeHtml(device.clientName)}</strong> asks for a token for Git, Git LFS and the API on <strong>${escapeHtml(page.instance)}</strong> on behalf of <strong>${escapeHtml(page.user.login)}</strong>, with ${escapeHtml(accessLabel(device.scope))} access.</p>
+<ul><li>Device: ${escapeHtml(device.clientHost ?? 'not reported')} (reported by the device)</li><li>Requested from: ${escapeHtml(device.requestIp ?? 'unknown')}${page.viewerIp ? ` (this browser: ${escapeHtml(page.viewerIp)})` : ''}</li><li>Requested at: ${escapeHtml(formatRequestTime(device.requestedAt))}</li><li>Code: <code>${escapeHtml(device.userCode)}</code></li></ul>
+<p><strong>${escapeHtml(CONSENT_WARNING)}</strong></p>
+<form method="post" action="/login/device">${csrfField(page.user.csrf)}<input type="hidden" name="user_code" value="${escapeHtml(device.userCode)}">
+${accessRadios(device.scope)}
+<button name="decision" value="approve">Approve</button> <button name="decision" value="deny">Deny</button></form>`,
         config: null,
       }
     }
@@ -152,6 +210,28 @@ const renderBody = (page: LoginPage): { title: string; body: string; config: Rec
       return {
         title: page.approved ? 'Device connected' : 'Request denied',
         body: page.approved ? '<p>You can close this window and return to your terminal.</p>' : '<p>The device received no token.</p>',
+        config: null,
+      }
+    case 'cli': {
+      const request = page.request
+      return {
+        title: 'Authorize the command line',
+        body: `<p>Authorize <strong>${escapeHtml(request.clientName)}</strong>${request.clientHost ? ` on <strong>${escapeHtml(request.clientHost)}</strong>` : ''} to act as <strong>${escapeHtml(page.user.login)}</strong> on <strong>${escapeHtml(page.instance)}</strong> with ${escapeHtml(accessLabel(request.scope))} access?</p>
+<ul><li>Requested from: ${escapeHtml(request.requestIp ?? 'unknown')}</li><li>Requested at: ${escapeHtml(formatRequestTime(request.requestedAt))}</li></ul>
+<p>${request.redirect === 'loopback' ? `The token goes to <code>${escapeHtml(request.redirectUri)}</code> on this computer.` : 'You will get a one-time code to paste into your terminal.'}</p>
+<p><strong>${escapeHtml(CONSENT_WARNING)}</strong></p>
+<form method="post" action="/login/cli/${escapeHtml(request.id)}">${csrfField(page.user.csrf)}
+${accessRadios(request.scope)}
+<button name="decision" value="approve">Approve</button> <button name="decision" value="deny">Deny</button></form>`,
+        config: null,
+      }
+    }
+    case 'cli-code':
+      return {
+        title: 'Paste this code',
+        body: `<p>Paste this one-time code into your terminal. It works once, only for the terminal that asked for it, and expires at ${escapeHtml(formatRequestTime(page.expiresAt))}.</p>
+<p><input id="cli-code" readonly value="${escapeHtml(page.code)}" aria-label="Authorization code" size="40"> <button type="button" data-copy="cli-code">Copy</button></p>
+<script>${COPY_SCRIPT}</script>`,
         config: null,
       }
     case 'break-glass':
@@ -175,7 +255,7 @@ export const renderLoginPage = (page: LoginPage): Response => {
       'Cache-Control': 'no-store',
       'X-Frame-Options': 'DENY',
       'Referrer-Policy': 'no-referrer',
-      'Content-Security-Policy': "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+      'Content-Security-Policy': `default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; form-action ${loginFormAction(page)}; frame-ancestors 'none'; base-uri 'none'`,
     },
   })
 }

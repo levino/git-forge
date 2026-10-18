@@ -1,3 +1,4 @@
+import { CLI_REQUEST_TTL_MS, generateCliCode, generateCliRequestId, isCliRequestId } from './cli-login.ts'
 import { type Database, first, sql } from './database.ts'
 import { base64UrlEncode, randomBytes, randomId, sha256Hex } from './encoding.ts'
 import {
@@ -11,6 +12,7 @@ import {
 } from './device.ts'
 import type { VerificationJwk } from './jose.ts'
 import { parseVerificationJwk } from './jose.ts'
+import { createRateLimiter, type RateDecision, type RateLimit } from './rate-limit.ts'
 import { generateSessionToken, hashSessionToken, isSessionToken, SESSION_TOUCH_RESOLUTION_MS, type SessionMethod } from './sessions.ts'
 import { type AuditActor, auditStatement, SYSTEM } from './store.ts'
 import type { CoseAlgorithm, CredentialPublicKey } from './webauthn.ts'
@@ -76,10 +78,63 @@ export type DeviceAuthorization = {
 export type PendingDevice = {
   readonly userCode: string
   readonly clientName: string
+  readonly clientHost: string | null
+  readonly requestIp: string | null
   readonly scopes: string
   readonly status: DeviceStatus
+  readonly createdAt: number
   readonly expiresAt: number
 }
+
+export type NewCliRequest = {
+  readonly clientName: string
+  readonly clientHost: string | null
+  readonly requestIp: string | null
+  readonly redirectUri: string
+  readonly state: string | null
+  readonly codeChallenge: string
+  readonly scopes: string
+}
+
+export type PendingCliRequest = {
+  readonly id: string
+  readonly clientName: string
+  readonly clientHost: string | null
+  readonly requestIp: string | null
+  readonly redirectUri: string
+  readonly state: string | null
+  readonly scopes: string
+  readonly createdAt: number
+  readonly expiresAt: number
+}
+
+type CliRow = {
+  client_name: string
+  client_host: string | null
+  request_ip: string | null
+  redirect_uri: string
+  state: string | null
+  scopes: string
+  created_at: number
+  expires_at: number
+}
+
+export type CliCodeGrant = {
+  readonly userId: string
+  readonly clientName: string
+  readonly redirectUri: string
+  readonly codeChallenge: string
+  readonly scopes: string
+}
+
+export type PurgeResult = {
+  readonly challenges: number
+  readonly devices: number
+  readonly cliCodes: number
+  readonly rateLimits: number
+}
+
+export const PURGE_GRACE_MS = 60 * 60 * 1000
 
 export type DevicePoll = {
   readonly outcome: DevicePollOutcome
@@ -115,6 +170,9 @@ type CredentialRow = {
 type DeviceRow = {
   user_code: string
   client_name: string
+  client_host: string | null
+  request_ip: string | null
+  created_at: number
   scopes: string
   status: DeviceStatus
   user_id: string | null
@@ -297,7 +355,7 @@ export const createLoginStore = (db: Database, options: { readonly now?: () => n
       return true
     },
 
-    createDevice: async (input: { readonly clientName: string; readonly scopes: string }): Promise<DeviceAuthorization> => {
+    createDevice: async (input: { readonly clientName: string; readonly scopes: string; readonly clientHost?: string | null; readonly requestIp?: string | null }): Promise<DeviceAuthorization> => {
       const deviceCode = generateDeviceCode()
       const at = now()
       const expiresAt = at + DEVICE_CODE_TTL_SECONDS * 1000
@@ -305,11 +363,13 @@ export const createLoginStore = (db: Database, options: { readonly now?: () => n
         const userCode = generateUserCode()
         const result = await db.run(
           sql(
-            `INSERT INTO device_authorizations (device_code_hash, user_code, client_name, scopes, status, interval_seconds, created_at, expires_at)
-             VALUES (?, ?, ?, ?, 'pending', ?, ?, ?) ON CONFLICT (user_code) DO NOTHING`,
+            `INSERT INTO device_authorizations (device_code_hash, user_code, client_name, client_host, request_ip, scopes, status, interval_seconds, created_at, expires_at)
+             VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?) ON CONFLICT (user_code) DO NOTHING`,
             await handleHash(deviceCode),
             userCode,
             input.clientName.slice(0, 100),
+            input.clientHost?.slice(0, 100) ?? null,
+            input.requestIp?.slice(0, 64) ?? null,
             input.scopes,
             DEVICE_POLL_INTERVAL_SECONDS,
             at,
@@ -322,32 +382,49 @@ export const createLoginStore = (db: Database, options: { readonly now?: () => n
     },
 
     findDevice: async (userCode: string): Promise<PendingDevice | null> => {
-      const row = await first<DeviceRow>(db, sql('SELECT user_code, client_name, scopes, status, user_id, interval_seconds, expires_at, last_polled_at FROM device_authorizations WHERE user_code = ?', userCode))
+      const row = await first<DeviceRow>(db, sql('SELECT user_code, client_name, client_host, request_ip, created_at, scopes, status, user_id, interval_seconds, expires_at, last_polled_at FROM device_authorizations WHERE user_code = ?', userCode))
       if (!row || row.expires_at <= now()) return null
-      return { userCode: row.user_code, clientName: row.client_name, scopes: row.scopes, status: row.status, expiresAt: row.expires_at }
+      return {
+        userCode: row.user_code,
+        clientName: row.client_name,
+        clientHost: row.client_host,
+        requestIp: row.request_ip,
+        scopes: row.scopes,
+        status: row.status,
+        createdAt: row.created_at,
+        expiresAt: row.expires_at,
+      }
     },
 
-    decideDevice: async (userCode: string, userId: string, approve: boolean): Promise<boolean> => {
+    decideDevice: async (userCode: string, userId: string, decision: { readonly approve: false } | { readonly approve: true; readonly scopes: string }): Promise<boolean> => {
       const at = now()
       const result = await db.run(
-        sql(
-          "UPDATE device_authorizations SET status = ?, user_id = ?, decided_at = ? WHERE user_code = ? AND status = 'pending' AND expires_at > ?",
-          approve ? 'approved' : 'denied',
-          userId,
-          at,
-          userCode,
+        decision.approve
+          ? sql(
+              "UPDATE device_authorizations SET status = 'approved', scopes = ?, user_id = ?, decided_at = ? WHERE user_code = ? AND status = 'pending' AND expires_at > ?",
+              decision.scopes,
+              userId,
+              at,
+              userCode,
+              at,
+            )
+          : sql("UPDATE device_authorizations SET status = 'denied', user_id = ?, decided_at = ? WHERE user_code = ? AND status = 'pending' AND expires_at > ?", userId, at, userCode, at),
+      )
+      if (result.changes !== 1) return false
+      await db.run(
+        auditStatement(
+          userActor(userId),
+          { action: decision.approve ? 'device.approve' : 'device.deny', subjectKind: 'device', subjectId: userCode, ...(decision.approve ? { data: { scopes: decision.scopes } } : {}) },
           at,
         ),
       )
-      if (result.changes !== 1) return false
-      await db.run(auditStatement(userActor(userId), { action: approve ? 'device.approve' : 'device.deny', subjectKind: 'device', subjectId: userCode }, at))
       return true
     },
 
     pollDevice: async (deviceCode: string): Promise<DevicePoll | null> => {
       if (typeof deviceCode !== 'string' || deviceCode.length > 128) return null
       const id = await handleHash(deviceCode)
-      const row = await first<DeviceRow>(db, sql('SELECT user_code, client_name, scopes, status, user_id, interval_seconds, expires_at, last_polled_at FROM device_authorizations WHERE device_code_hash = ?', id))
+      const row = await first<DeviceRow>(db, sql('SELECT user_code, client_name, client_host, request_ip, created_at, scopes, status, user_id, interval_seconds, expires_at, last_polled_at FROM device_authorizations WHERE device_code_hash = ?', id))
       if (!row) return null
       const at = now()
       const outcome = devicePollOutcome({ status: row.status, expiresAt: row.expires_at, intervalSeconds: row.interval_seconds, lastPolledAt: row.last_polled_at }, at)
@@ -364,6 +441,119 @@ export const createLoginStore = (db: Database, options: { readonly now?: () => n
 
     attachDeviceToken: async (deviceCode: string, tokenId: string): Promise<void> => {
       await db.run(sql('UPDATE device_authorizations SET token_id = ? WHERE device_code_hash = ?', tokenId, await handleHash(deviceCode)))
+    },
+
+    createCliRequest: async (input: NewCliRequest): Promise<{ readonly id: string; readonly expiresAt: number }> => {
+      const id = generateCliRequestId()
+      const at = now()
+      const expiresAt = at + CLI_REQUEST_TTL_MS
+      await db.run(
+        sql(
+          `INSERT INTO cli_authorizations (id_hash, status, client_name, client_host, request_ip, redirect_uri, state, code_challenge, scopes, created_at, expires_at)
+           VALUES (?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          await handleHash(id),
+          input.clientName.slice(0, 100),
+          input.clientHost?.slice(0, 100) ?? null,
+          input.requestIp?.slice(0, 64) ?? null,
+          input.redirectUri,
+          input.state,
+          input.codeChallenge,
+          input.scopes,
+          at,
+          expiresAt,
+        ),
+      )
+      return { id, expiresAt }
+    },
+
+    findCliRequest: async (id: string): Promise<PendingCliRequest | null> => {
+      if (!isCliRequestId(id)) return null
+      const row = await first<CliRow>(
+        db,
+        sql(
+          "SELECT client_name, client_host, request_ip, redirect_uri, state, scopes, created_at, expires_at FROM cli_authorizations WHERE id_hash = ? AND status = 'pending' AND expires_at > ?",
+          await handleHash(id),
+          now(),
+        ),
+      )
+      return row
+        ? {
+            id,
+            clientName: row.client_name,
+            clientHost: row.client_host,
+            requestIp: row.request_ip,
+            redirectUri: row.redirect_uri,
+            state: row.state,
+            scopes: row.scopes,
+            createdAt: row.created_at,
+            expiresAt: row.expires_at,
+          }
+        : null
+    },
+
+    decideCliRequest: async (
+      id: string,
+      userId: string,
+      decision: { readonly approve: false } | { readonly approve: true; readonly scopes: string },
+    ): Promise<{ readonly code: string | null; readonly expiresAt: number } | null> => {
+      if (!isCliRequestId(id)) return null
+      const hash = await handleHash(id)
+      const at = now()
+      const code = decision.approve ? generateCliCode() : null
+      const result = await db.run(
+        decision.approve
+          ? sql(
+              "UPDATE cli_authorizations SET status = 'approved', code_hash = ?, scopes = ?, user_id = ?, decided_at = ? WHERE id_hash = ? AND status = 'pending' AND expires_at > ?",
+              await handleHash(code!),
+              decision.scopes,
+              userId,
+              at,
+              hash,
+              at,
+            )
+          : sql("UPDATE cli_authorizations SET status = 'denied', user_id = ?, decided_at = ? WHERE id_hash = ? AND status = 'pending' AND expires_at > ?", userId, at, hash, at),
+      )
+      if (result.changes !== 1) return null
+      await db.run(
+        auditStatement(
+          userActor(userId),
+          { action: decision.approve ? 'cli.approve' : 'cli.deny', subjectKind: 'cli-authorization', subjectId: hash.slice(0, 16), ...(decision.approve ? { data: { scopes: decision.scopes } } : {}) },
+          at,
+        ),
+      )
+      const row = await first<{ expires_at: number }>(db, sql('SELECT expires_at FROM cli_authorizations WHERE id_hash = ?', hash))
+      return { code, expiresAt: row?.expires_at ?? at }
+    },
+
+    takeCliCode: async (code: string): Promise<CliCodeGrant | null> => {
+      if (typeof code !== 'string' || !code.startsWith('gfc_') || code.length > 64) return null
+      const hash = await handleHash(code)
+      const at = now()
+      const row = await first<{ user_id: string; client_name: string; redirect_uri: string; code_challenge: string; scopes: string }>(
+        db,
+        sql("SELECT user_id, client_name, redirect_uri, code_challenge, scopes FROM cli_authorizations WHERE code_hash = ? AND status = 'approved' AND expires_at > ?", hash, at),
+      )
+      if (!row) return null
+      const claimed = await db.run(sql("UPDATE cli_authorizations SET status = 'consumed', used_at = ? WHERE code_hash = ? AND status = 'approved'", at, hash))
+      if (claimed.changes !== 1) return null
+      return { userId: row.user_id, clientName: row.client_name, redirectUri: row.redirect_uri, codeChallenge: row.code_challenge, scopes: row.scopes }
+    },
+
+    attachCliToken: async (code: string, tokenId: string): Promise<void> => {
+      await db.run(sql('UPDATE cli_authorizations SET token_id = ? WHERE code_hash = ?', tokenId, await handleHash(code)))
+    },
+
+    hitRateLimit: (limit: RateLimit, key: string): Promise<RateDecision> => createRateLimiter(db, now).hit(limit, key),
+
+    purgeExpired: async (graceMs: number = PURGE_GRACE_MS): Promise<PurgeResult> => {
+      const before = now() - graceMs
+      const [challenges, devices, cliCodes] = await db.batch([
+        sql('DELETE FROM login_challenges WHERE expires_at <= ?', before),
+        sql('DELETE FROM device_authorizations WHERE expires_at <= ?', before),
+        sql('DELETE FROM cli_authorizations WHERE expires_at <= ?', before),
+      ])
+      const rateLimits = await createRateLimiter(db, now).purge()
+      return { challenges: challenges!.changes, devices: devices!.changes, cliCodes: cliCodes!.changes, rateLimits }
     },
 
     createInvite: async (

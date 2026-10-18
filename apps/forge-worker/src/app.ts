@@ -165,6 +165,7 @@ export type ForgeOptions = ForgeSettings & {
   readonly scheduleImport?: ImportScheduler
   readonly email?: EmailSender
   readonly renderLoginPage?: LoginPageRenderer
+  readonly clientAddress?: (request: Request) => string | null
 }
 
 export type AppJob = ForgeJob | NotificationJob
@@ -335,7 +336,12 @@ export const createForge = (options: ForgeOptions): Forge => {
       fetch: outbound,
       now: () => now().getTime(),
     }
-    return { context, secureCookies: origin.startsWith('https:'), ...(options.renderLoginPage ? { renderPage: options.renderLoginPage } : {}) }
+    return {
+      context,
+      secureCookies: origin.startsWith('https:'),
+      ...(options.renderLoginPage ? { renderPage: options.renderLoginPage } : {}),
+      ...(options.clientAddress ? { clientAddress: options.clientAddress } : {}),
+    }
   }
 
   const principalOf = async (request: Request): Promise<Principal> => {
@@ -1133,6 +1139,8 @@ export const createForge = (options: ForgeOptions): Forge => {
     scheduled: async (at = now()) => {
       const sweep = await notifications.sweep().catch((error: unknown) => ({ error: String(error) }))
       console.log(JSON.stringify({ event: 'notification-sweep', ...sweep }))
+      const purged = await logins.purgeExpired().catch((error: unknown) => ({ error: String(error) }))
+      console.log(JSON.stringify({ event: 'login-purge', ...purged }))
       return federation ? enqueueDueMirrors(federation, at, options.mirrorIntervalMinutes) : syncDueMirrors(mirrorContext(options.publicUrl), at, options.mirrorIntervalMinutes)
     },
     actionsTick: async () => {

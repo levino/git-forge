@@ -126,49 +126,102 @@ describe('interactive login on wrangler dev', () => {
     expect((await browser.json('/api/repos', body, (await browser.session()).csrfToken)).status).toBe(201)
   })
 
-  it('logs the CLI in with the device flow and lets plain git and git-lfs use the credential helper', async () => {
+  const cliEnv = () => {
     const home = tempDir()
     const globalConfig = join(home, 'gitconfig')
     writeFileSync(globalConfig, LFS_CONFIG)
-    const env = { ...process.env, ...gitEnv, HOME: home, GIT_CONFIG_GLOBAL: globalConfig, GIT_FORGE_CONFIG_DIR: join(home, 'git-forge') }
-    const cli: ChildProcess = spawn(process.execPath, ['--no-warnings', cliMain, 'auth', 'login', dev.url], { env, stdio: ['ignore', 'pipe', 'pipe'] })
-    let output = ''
-    cli.stderr!.on('data', (chunk: Buffer) => (output += chunk.toString()))
-    const exited = new Promise<number | null>((done) => cli.on('close', done))
-    const deadline = Date.now() + 20_000
-    while (!/code: ([A-Z]{4}-[A-Z]{4})/.test(output) && Date.now() < deadline) await new Promise((done) => setTimeout(done, 100))
-    const userCode = /code: ([A-Z]{4}-[A-Z]{4})/.exec(output)![1]!
-    const page = await browser.fetch(`/login/device?user_code=${userCode}`)
-    expect(await page.text()).toContain(userCode)
-    const approved = await browser.form('/login/device', { user_code: userCode, decision: 'approve', csrf: (await browser.session()).csrfToken })
-    expect(await approved.text()).toContain('Device connected')
-    expect(await exited).toBe(0)
-    expect(output).toContain('Logged in to')
+    return { ...process.env, ...gitEnv, HOME: home, GIT_CONFIG_GLOBAL: globalConfig, GIT_FORGE_CONFIG_DIR: join(home, 'git-forge'), BROWSER: 'none' }
+  }
 
-    const gitWith = (cwd: string, args: readonly string[]) =>
-      new Promise<string>((done, fail) =>
-        execFile('git', args, { cwd, env }, (error, stdout, stderr) => (error ? fail(new Error(`${error.message}\n${stderr}`)) : done(stdout))),
-      )
-    const remote = `${dev.url}/levin/archive.git`
+  const runCli = (args: readonly string[], env: NodeJS.ProcessEnv, cwd?: string) => {
+    const child: ChildProcess = spawn(process.execPath, ['--no-warnings', cliMain, ...args], { env, cwd, stdio: ['pipe', 'pipe', 'pipe'] })
+    let stderr = ''
+    let stdout = ''
+    child.stderr!.on('data', (chunk: Buffer) => (stderr += chunk.toString()))
+    child.stdout!.on('data', (chunk: Buffer) => (stdout += chunk.toString()))
+    const exited = new Promise<number | null>((done) => child.on('close', done))
+    const waitFor = async (pattern: RegExp): Promise<RegExpExecArray> => {
+      const deadline = Date.now() + 20_000
+      while (!pattern.test(stderr) && Date.now() < deadline) await new Promise((done) => setTimeout(done, 100))
+      const match = pattern.exec(stderr)
+      if (!match) throw new Error(`CLI did not print ${pattern}: ${stderr}`)
+      return match
+    }
+    return { child, exited, waitFor, output: () => ({ stderr, stdout }) }
+  }
+
+  const linkPattern = (path: string) => new RegExp(`(${dev.url.replace(/[.]/g, '\\.')}${path}\\S*)`)
+
+  const gitWith = (cwd: string, args: readonly string[], env: NodeJS.ProcessEnv) =>
+    new Promise<string>((done, fail) => execFile('git', args, { cwd, env }, (error, stdout, stderr) => (error ? fail(new Error(`${error.message}\n${stderr}`)) : done(stdout))))
+
+  it('logs the CLI in by pasting the code from the browser, creates a repository and pushes with plain git and git-lfs', async () => {
+    const env = cliEnv()
+    const login = runCli(['auth', 'login', dev.url, '--scopes', 'repo:admin'], env)
+    const link = new URL((await login.waitFor(linkPattern('/login/cli/')))[1]!)
+    expect(link.pathname).toMatch(/^\/login\/cli\/[A-Za-z0-9_-]{22}$/)
+    expect(link.search).toBe('')
+    const consent = await (await browser.fetch(link.pathname)).text()
+    expect(consent).toContain('admin (includes write)')
+    expect(consent).toContain('Only approve a request you started yourself')
+    const approved = await (await browser.form(link.pathname, { decision: 'approve', scope: 'repo:admin', csrf: (await browser.session()).csrfToken })).text()
+    const code = /value="(gfc_[A-Za-z0-9_-]+)"/.exec(approved)![1]!
+    login.child.stdin!.end(`${code}\n`)
+    expect(await login.exited).toBe(0)
+    expect(login.output().stderr).toContain('Logged in to')
+
     const source = tempDir()
-    await gitWith(source, ['init', '-q', '-b', 'main'])
-    await gitWith(source, ['lfs', 'track', '*.bin'])
-    writeFileSync(join(source, 'README.md'), '# Archive\n')
+    await gitWith(source, ['init', '-q', '-b', 'main'], env)
+    const create = runCli(['repo', 'create', 'levin/from-cli', '--private', '--remote', 'origin'], env, source)
+    expect(await create.exited).toBe(0)
+    const remote = `${dev.url}/levin/from-cli.git`
+    expect(create.output().stdout.trim()).toBe(remote)
+    expect((await gitWith(source, ['remote', 'get-url', 'origin'], env)).trim()).toBe(remote)
+
+    await gitWith(source, ['lfs', 'track', '*.bin'], env)
+    writeFileSync(join(source, 'README.md'), '# From the CLI\n')
     writeFileSync(join(source, 'scan.bin'), crypto.getRandomValues(new Uint8Array(4096)))
-    await gitWith(source, ['add', '.'])
-    await gitWith(source, ['commit', '-q', '-m', 'first'])
-    await gitWith(source, ['push', '-q', remote, 'main'])
+    await gitWith(source, ['add', '.'], env)
+    await gitWith(source, ['commit', '-q', '-m', 'first'], env)
+    await gitWith(source, ['push', '-q', 'origin', 'main'], env)
     const clone = join(tempDir(), 'clone')
-    await gitWith(tempDir(), ['clone', '-q', remote, clone])
-    expect(await gitWith(clone, ['log', '--format=%s'])).toBe('first\n')
-    expect((await gitWith(clone, ['lfs', 'ls-files'])).trim()).toMatch(/scan\.bin$/)
+    await gitWith(tempDir(), ['clone', '-q', remote, clone], env)
+    expect(await gitWith(clone, ['log', '--format=%s'], env)).toBe('first\n')
+    expect((await gitWith(clone, ['lfs', 'ls-files'], env)).trim()).toMatch(/scan\.bin$/)
     expect(await gitFails(tempDir(), ['clone', '-q', remote, 'anonymous'])).toMatch(/401|Authentication failed|could not read Username/i)
 
-    const status = spawn(process.execPath, ['--no-warnings', cliMain, 'auth', 'status'], { env, stdio: ['ignore', 'pipe', 'pipe'] })
-    let statusOutput = ''
-    status.stdout!.on('data', (chunk: Buffer) => (statusOutput += chunk.toString()))
-    expect(await new Promise((done) => status.on('close', done))).toBe(0)
-    expect(statusOutput).toContain(`${dev.url}: levin`)
+    const status = runCli(['auth', 'status'], env)
+    expect(await status.exited).toBe(0)
+    expect(status.output().stdout).toContain(`${dev.url}: levin`)
+  }, 60_000)
+
+  it('logs the CLI in through a loopback redirect', async () => {
+    const env = cliEnv()
+    const login = runCli(['auth', 'login', dev.url, '--browser-redirect', '--no-setup-git'], env)
+    const link = new URL((await login.waitFor(linkPattern('/login/cli/')))[1]!)
+    const approved = await browser.form(link.pathname, { decision: 'approve', csrf: (await browser.session()).csrfToken })
+    expect(approved.status).toBe(303)
+    const callback = new URL(approved.headers.get('Location')!)
+    expect(callback.hostname).toBe('127.0.0.1')
+    expect(await (await fetch(callback)).text()).toContain('Logged in')
+    expect(await login.exited).toBe(0)
+    expect(login.output().stderr).toContain('(repo:write)')
+    const repo = runCli(['repo', 'create', 'levin/needs-admin', '--host', dev.url], env)
+    expect(await repo.exited).toBe(1)
+    expect(repo.output().stderr).toContain('--scopes repo:admin')
+  }, 60_000)
+
+  it('logs the CLI in with the device flow through the complete verification link', async () => {
+    const env = cliEnv()
+    const login = runCli(['auth', 'login', dev.url, '--device', '--scopes', 'repo:read', '--no-setup-git'], env)
+    const link = new URL((await login.waitFor(linkPattern('/login/device\\?user_code=')))[1]!)
+    const page = await (await browser.fetch(`${link.pathname}${link.search}`)).text()
+    expect(page).toContain(link.searchParams.get('user_code')!)
+    expect(page).toContain('Requested from')
+    const approved = await browser.form('/login/device', { user_code: link.searchParams.get('user_code')!, decision: 'approve', scope: 'repo:admin', csrf: (await browser.session()).csrfToken })
+    expect(await approved.text()).toContain('Device connected')
+    expect(await login.exited).toBe(0)
+    expect(login.output().stderr).toContain('(repo:read)')
   }, 60_000)
 
   it('signs up with a passkey from an invite, without OIDC', async () => {

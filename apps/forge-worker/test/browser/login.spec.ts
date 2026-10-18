@@ -38,6 +38,6 @@ test('signs up with a passkey from an invite, manages tokens and signs out', asy
 })
 
 test('refuses a cross-site token form', async ({ request }) => {
-  const response = await request.post(`${base()}/settings`, { headers: { Origin: 'https://evil.example' }, form: { action: 'create-token', name: 'x', scopes: 'repo:admin', expires: 'never' } })
+  const response = await request.post(`${base()}/settings`, { headers: { Origin: 'https://evil.example' }, form: { action: 'create-token', name: 'x', scope: 'repo:admin', expires: 'never' } })
   expect(response.status()).toBe(403)
 })

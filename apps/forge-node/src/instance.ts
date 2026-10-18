@@ -4,7 +4,7 @@ import type { DatabaseSync } from 'node:sqlite'
 import { applyMigrations, type Database, MIGRATIONS, pendingMigrations } from '@git-forge/accounts'
 import { openSqliteDatabase } from '@git-forge/accounts-node'
 import { continueImport, createMemoryJobQueue, type FetchFunction, type ImportJob, type JobOutcome, type MemoryJobQueue, type Storage } from '@git-forge/core'
-import { FsStorage, nodeDigests } from '@git-forge/node'
+import { CLIENT_ADDRESS_HEADER, FsStorage, nodeDigests } from '@git-forge/node'
 import { S3Storage } from '@git-forge/s3'
 import { type AppJob, createForge, type Forge } from 'forge-worker/app'
 import { ConfigurationError, loadSecretsKey, parseActionsSettings, parseSettings } from 'forge-worker/config'
@@ -102,6 +102,7 @@ export const createInstance = async (vars: NodeVars, overrides: InstanceOverride
     storage,
     db,
     digests: nodeDigests,
+    clientAddress: (request) => request.headers.get(CLIENT_ADDRESS_HEADER),
     jobs,
     scheduleImport: (job, delaySeconds) => imports.enqueue(job, { delaySeconds }),
     ...(overrides.fetch ? { fetch: overrides.fetch } : {}),

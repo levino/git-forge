@@ -41,6 +41,7 @@ export const forgeFor = (env: Env): Promise<Forge> => {
         storage: new R2Storage(env.BUCKET),
         db: d1Database(env.DB),
         digests: digestStreams,
+        clientAddress: (request) => request.headers.get('CF-Connecting-IP'),
         ...(uiEnabled(env) ? { renderLoginPage: captureLoginPage } : {}),
         ...(env.IMPORTS ? { scheduleImport: importScheduler(env.IMPORTS) } : {}),
         ...(env.JOBS ? { jobs: new QueueJobs(env.JOBS) } : {}),

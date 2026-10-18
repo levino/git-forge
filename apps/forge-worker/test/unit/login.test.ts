@@ -1,5 +1,5 @@
 import { createAccountsStore } from '@git-forge/accounts'
-import { generateSigningKey, type PrivateJwk, signBreakGlassToken } from '@git-forge/accounts'
+import { base64UrlEncode, generateSigningKey, pkceChallenge, type PrivateJwk, signBreakGlassToken } from '@git-forge/accounts'
 import { createMockOidc, type MockOidc } from '@git-forge/accounts/test/support/mock-oidc.ts'
 import { createSoftAuthenticator } from '@git-forge/accounts/test/support/soft-authenticator.ts'
 import { beforeEach, describe, expect, it } from 'vitest'
@@ -44,12 +44,20 @@ class Browser {
 
 const json = async <T = Record<string, unknown>>(response: Response): Promise<T> => (await response.json()) as T
 
-const loginForge = async (login: Partial<LoginSettings>, mock?: MockOidc, clock?: { now: number }) =>
+const loginForge = async (login: Partial<LoginSettings>, mock?: MockOidc, clock?: { now: number }, clientAddress?: (request: Request) => string | null) =>
   nodeForge({
     login: { oidc: undefined, selfSignup: false, breakGlassKey: undefined, ...login },
     ...(mock ? { fetch: (request: Request) => mock.handle(request) } : {}),
     ...(clock ? { now: () => new Date(clock.now) } : {}),
+    ...(clientAddress ? { clientAddress } : {}),
   })
+
+const pkce = async () => {
+  const verifier = base64UrlEncode(crypto.getRandomValues(new Uint8Array(32)))
+  return { verifier, challenge: await pkceChallenge(verifier) }
+}
+
+const OOB = 'urn:ietf:wg:oauth:2.0:oob'
 
 const registerPasskey = async (browser: Browser, authenticator: Awaited<ReturnType<typeof createSoftAuthenticator>>, body: Record<string, unknown>, csrf?: string) => {
   const options = await browser.json('/login/passkey/register/options', body, csrf)
@@ -277,8 +285,11 @@ describe('device flow', () => {
     const anonymous = await new Browser(forge).fetch(new URL(started.verification_uri_complete).pathname + new URL(started.verification_uri_complete).search)
     expect(anonymous.status).toBe(303)
     expect(anonymous.headers.get('Location')).toContain('/login?return_to=')
-    const page = await browser.fetch(`/login/device?user_code=${started.user_code.toLowerCase()}`)
-    expect(await page.text()).toContain('git forge auth login on laptop')
+    const page = await (await browser.fetch(`/login/device?user_code=${started.user_code.toLowerCase()}`)).text()
+    expect(page).toContain('git forge auth login on laptop')
+    expect(page).toContain('Only approve a request you started yourself')
+    expect(page).toContain('value="repo:write" checked')
+    expect(page).not.toContain('value="repo:admin"')
     expect((await browser.form('/login/device', { user_code: started.user_code, decision: 'approve' })).status).toBe(403)
     const approved = await browser.form('/login/device', { user_code: started.user_code, decision: 'approve', csrf: await browser.csrf() })
     expect(await approved.text()).toContain('Device connected')
@@ -295,6 +306,31 @@ describe('device flow', () => {
     expect(await json(await call(forge, BASE, 'GET', '/api/user', issued.access_token))).toMatchObject({ login: 'hank', via: 'token', ceiling: 'write' })
   })
 
+  it('issues the requested scope at most, with host, address and time on the consent page', async () => {
+    const clock = { now: Date.UTC(2026, 9, 18, 12, 0, 0) }
+    const forge = await loginForge({ selfSignup: true }, undefined, clock, () => '203.0.113.7')
+    const browser = new Browser(forge)
+    await registerPasskey(browser, await createSoftAuthenticator({ origin: BASE }), { login: 'jo' })
+    const cli = new Browser(forge)
+    expect(await json(await cli.form('/login/device/code', { client_id: 'git-forge-cli', scope: 'repo:root' }))).toMatchObject({ error: 'invalid_scope' })
+    const admin = await json<{ device_code: string; user_code: string }>(await cli.form('/login/device/code', { client_id: 'git-forge-cli', client_host: 'build-box', scope: 'repo:admin' }))
+    const page = await (await browser.fetch(`/login/device?user_code=${admin.user_code}`)).text()
+    expect(page).toContain('build-box')
+    expect(page).toContain('203.0.113.7')
+    expect(page).toContain('2026-10-18 12:00:00 UTC')
+    expect(page).toContain('admin (includes write)')
+    await browser.form('/login/device', { user_code: admin.user_code, decision: 'approve', scope: 'repo:admin', csrf: await browser.csrf() })
+    const poll = (deviceCode: string) => cli.form('/login/device/token', { grant_type: 'urn:ietf:params:oauth:grant-type:device_code', device_code: deviceCode, client_id: 'git-forge-cli' })
+    const issued = await json<{ access_token: string; scope: string }>(await poll(admin.device_code))
+    expect(issued.scope).toBe('repo:admin')
+    expect((await call(forge, BASE, 'POST', '/api/repos', issued.access_token, { owner: 'jo', name: 'made-by-cli' })).status).toBe(201)
+    expect((await call(forge, BASE, 'POST', '/api/repos', issued.access_token, { owner: 'hank', name: 'not-mine' })).status).toBe(404)
+
+    const read = await json<{ device_code: string; user_code: string }>(await cli.form('/login/device/code', { client_id: 'git-forge-cli', scope: 'repo:read' }))
+    await browser.form('/login/device', { user_code: read.user_code, decision: 'approve', scope: 'repo:admin', csrf: await browser.csrf() })
+    expect(await json(await poll(read.device_code))).toMatchObject({ scope: 'repo:read' })
+  })
+
   it('tells the client when the user denies', async () => {
     const clock = { now: Date.now() }
     const forge = await loginForge({ selfSignup: true }, undefined, clock)
@@ -304,6 +340,119 @@ describe('device flow', () => {
     await browser.form('/login/device', { user_code: started.user_code, decision: 'deny', csrf: await browser.csrf() })
     const poll = await new Browser(forge).form('/login/device/token', { grant_type: 'urn:ietf:params:oauth:grant-type:device_code', device_code: started.device_code, client_id: 'git-forge-cli' })
     expect(await json(poll)).toEqual({ error: 'access_denied' })
+  })
+})
+
+describe('command line login', () => {
+  const signedIn = async (login: string, clock = { now: Date.now() }) => {
+    const forge = await loginForge({ selfSignup: true }, undefined, clock, () => '198.51.100.4')
+    const browser = new Browser(forge)
+    await registerPasskey(browser, await createSoftAuthenticator({ origin: BASE }), { login })
+    return { forge, browser, cli: new Browser(forge), clock }
+  }
+
+  const start = async (cli: Browser, fields: Record<string, string>) =>
+    cli.form('/login/cli/start', { client_id: 'git-forge-cli', client_name: 'git forge auth login', client_host: 'laptop', ...fields })
+
+  const exchange = (cli: Browser, fields: Record<string, string>) => cli.form('/login/cli/token', { grant_type: 'authorization_code', client_id: 'git-forge-cli', ...fields })
+
+  it('shows a one-time code bound to the PKCE verifier', async () => {
+    const { forge, browser, cli } = await signedIn('kim')
+    const { verifier, challenge } = await pkce()
+    const started = await json<{ authorization_url: string; request_id: string }>(await start(cli, { redirect_uri: OOB, code_challenge: challenge, scope: 'repo:admin' }))
+    expect(started.authorization_url).toBe(`${BASE}/login/cli/${started.request_id}`)
+    expect(started.request_id).toMatch(/^[A-Za-z0-9_-]{22}$/)
+    const path = new URL(started.authorization_url).pathname
+    const anonymous = await new Browser(forge).fetch(path)
+    expect(anonymous.status).toBe(303)
+    expect(anonymous.headers.get('Location')).toBe(`/login?return_to=${encodeURIComponent(path)}`)
+    const consent = await browser.fetch(path)
+    const html = await consent.text()
+    expect(html).toContain('laptop')
+    expect(html).toContain('198.51.100.4')
+    expect(html).toContain('admin (includes write)')
+    expect(html).toContain('Only approve a request you started yourself')
+    expect(consent.headers.get('Content-Security-Policy')).toContain("form-action 'self';")
+    expect((await browser.form(path, { decision: 'approve' })).status).toBe(403)
+    const approved = await (await browser.form(path, { decision: 'approve', scope: 'repo:write', csrf: await browser.csrf() })).text()
+    const code = /value="(gfc_[A-Za-z0-9_-]+)"/.exec(approved)?.[1]
+    expect(code).toBeDefined()
+    expect(approved).toContain('data-copy="cli-code"')
+    expect(await (await browser.form(path, { decision: 'approve', csrf: await browser.csrf() })).text()).toContain('unknown, expired or already answered')
+
+    expect(await json(await exchange(cli, { code: code!, code_verifier: (await pkce()).verifier, redirect_uri: OOB }))).toEqual({ error: 'invalid_grant' })
+    expect(await json(await exchange(cli, { code: code!, code_verifier: verifier, redirect_uri: OOB }))).toEqual({ error: 'invalid_grant' })
+
+    const second = await pkce()
+    const again = await json<{ authorization_url: string }>(await start(cli, { redirect_uri: OOB, code_challenge: second.challenge, scope: 'repo:admin' }))
+    const page = await (await browser.form(new URL(again.authorization_url).pathname, { decision: 'approve', scope: 'repo:admin', csrf: await browser.csrf() })).text()
+    const fresh = /value="(gfc_[A-Za-z0-9_-]+)"/.exec(page)![1]!
+    const token = await json<{ access_token: string; scope: string; login: string }>(await exchange(cli, { code: fresh, code_verifier: second.verifier, redirect_uri: OOB }))
+    expect(token).toMatchObject({ login: 'kim', scope: 'repo:admin', access_token: expect.stringMatching(/^gfp_/) })
+    expect(await json(await exchange(cli, { code: fresh, code_verifier: second.verifier, redirect_uri: OOB }))).toEqual({ error: 'invalid_grant' })
+    expect((await call(forge, BASE, 'POST', '/api/repos', token.access_token, { owner: 'kim', name: 'tool' })).status).toBe(201)
+  })
+
+  it('redirects to a loopback address with code and state, and only there', async () => {
+    const { browser, cli } = await signedIn('lee')
+    const { verifier, challenge } = await pkce()
+    for (const redirect of ['http://evil.example/callback', 'https://127.0.0.1:5000/callback', 'http://127.0.0.1.evil.example/cb', 'http://user@127.0.0.1:5/cb']) {
+      expect((await start(cli, { redirect_uri: redirect, code_challenge: challenge, state: 's' })).status).toBe(400)
+    }
+    expect((await start(cli, { redirect_uri: 'http://127.0.0.1:5000/callback', code_challenge: challenge })).status).toBe(400)
+    expect((await start(cli, { redirect_uri: OOB, code_challenge: 'short' })).status).toBe(400)
+    const redirectUri = 'http://127.0.0.1:5000/callback'
+    const started = await json<{ authorization_url: string }>(await start(cli, { redirect_uri: redirectUri, code_challenge: challenge, state: 'xyz' }))
+    const path = new URL(started.authorization_url).pathname
+    const consent = await browser.fetch(path)
+    expect(consent.headers.get('Content-Security-Policy')).toContain("form-action 'self' http://127.0.0.1:* http://localhost:*")
+    expect(await consent.text()).toContain(redirectUri)
+    const approved = await browser.form(path, { decision: 'approve', csrf: await browser.csrf() })
+    expect(approved.status).toBe(303)
+    const location = new URL(approved.headers.get('Location')!)
+    expect(`${location.origin}${location.pathname}`).toBe(redirectUri)
+    expect(location.searchParams.get('state')).toBe('xyz')
+    const code = location.searchParams.get('code')!
+    expect(await json(await exchange(cli, { code, code_verifier: verifier, redirect_uri: OOB }))).toEqual({ error: 'invalid_grant' })
+
+    const second = await pkce()
+    const next = await json<{ authorization_url: string }>(await start(cli, { redirect_uri: redirectUri, code_challenge: second.challenge, state: 'abc', scope: 'repo:read' }))
+    const nextApproved = await browser.form(new URL(next.authorization_url).pathname, { decision: 'approve', scope: 'repo:admin', csrf: await browser.csrf() })
+    const nextCode = new URL(nextApproved.headers.get('Location')!).searchParams.get('code')!
+    expect(await json(await exchange(cli, { code: nextCode, code_verifier: second.verifier, redirect_uri: redirectUri }))).toMatchObject({ login: 'lee', scope: 'repo:read' })
+
+    const denied = await json<{ authorization_url: string }>(await start(cli, { redirect_uri: redirectUri, code_challenge: challenge, state: 'no' }))
+    const refusal = await browser.form(new URL(denied.authorization_url).pathname, { decision: 'deny', csrf: await browser.csrf() })
+    expect(Object.fromEntries(new URL(refusal.headers.get('Location')!).searchParams)).toEqual({ error: 'access_denied', state: 'no' })
+  })
+
+  it('rate-limits device and login endpoints per client address', async () => {
+    const forge = await loginForge({}, undefined, undefined, (request) => request.headers.get('X-Test-Address'))
+    const from = (address: string) => forge.fetch(new Request(`${BASE}/login/device/code`, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'X-Test-Address': address }, body: 'client_id=git-forge-cli' }))
+    for (let i = 0; i < 30; i++) expect((await from('192.0.2.1')).status).toBe(200)
+    const limited = await from('192.0.2.1')
+    expect(limited.status).toBe(429)
+    expect(Number(limited.headers.get('Retry-After'))).toBeGreaterThan(0)
+    expect(await json(limited)).toMatchObject({ error: 'rate_limited' })
+    expect((await from('192.0.2.2')).status).toBe(200)
+  })
+
+  it('purges expired challenges, device codes, CLI requests and rate-limit windows on the schedule', async () => {
+    const { forge, cli, clock } = await signedIn('max')
+    await cli.form('/login/device/code', { client_id: 'git-forge-cli' })
+    await start(cli, { redirect_uri: OOB, code_challenge: (await pkce()).challenge })
+    await cli.json('/login/passkey/options', {})
+    const count = async (table: string) => Number((await forge.db.all<{ n: number }>({ sql: `SELECT COUNT(*) AS n FROM ${table}`, params: [] }))[0]!.n)
+    expect(await count('device_authorizations')).toBe(1)
+    expect(await count('cli_authorizations')).toBe(1)
+    expect(await count('rate_limits')).toBeGreaterThan(0)
+    const challenges = await count('login_challenges')
+    expect(challenges).toBeGreaterThan(0)
+    await forge.scheduled(new Date(clock.now))
+    expect(await count('device_authorizations')).toBe(1)
+    clock.now += 3 * 60 * 60 * 1000
+    await forge.scheduled(new Date(clock.now))
+    for (const table of ['device_authorizations', 'cli_authorizations', 'login_challenges', 'rate_limits']) expect(await count(table)).toBe(0)
   })
 })
 

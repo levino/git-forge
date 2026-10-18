@@ -28,7 +28,7 @@ read functions of `@git-forge/core` and check access with the same
 | Name | Kind | Purpose |
 |---|---|---|
 | `BUCKET` | R2 binding | Repository data in the bucket layout of `docs/design.md` (`repos/<owner>/<name>/…`). |
-| `DB` | D1 binding | Accounts, tokens, repository roles, branch protection, instance trust, audit log (`@git-forge/accounts`). Migrations come from `packages/accounts/migrations` (`migrations_dir`) and are applied with `wrangler d1 migrations apply`. |
+| `DB` | D1 binding | Accounts, tokens, repository roles, branch protection, instance trust, audit log (`@git-forge/accounts`). Migrations come from `packages/accounts/migrations`; the Worker applies pending ones on start (also adopting those applied with `wrangler d1 migrations apply` through `migrations_dir`). |
 | `JOBS` | Queue binding, optional | Queue `git-forge-jobs` (`git-forge-<env>-jobs` per environment) for background jobs: mirror syncs, mirror notification deliveries, subscription renewals, deep checks (`src/mirror-federation.ts`), event fan-out, webhook deliveries and email digests (`@git-forge/notifications`). Without it, fan-out and deliveries run inline in the request. One message per invocation (`max_batch_size: 1`), retried with exponential backoff. With `JOBS`, `INSTANCE_KEY` and `PUBLIC_URL` set, push notifications are on. |
 | `IMPORTS` | Queue binding, optional | Queue `git-forge-imports` (`git-forge-<env>-imports` per environment), produced and consumed by this Worker. Each message is one step of a server-side import in its own invocation. Without it the import endpoint answers `503`. |
 | Cron `17 3 * * *` | trigger | Daily safety net: with `JOBS`, enqueues a sync (and a subscription renewal) for every due auto mirror and the periodic deep checks; without `JOBS`, syncs due mirrors inline. It also re-dispatches stuck webhook deliveries and due email digests. |
@@ -236,14 +236,14 @@ Then `https://<zone>.b-cdn.net/acme/site/raw/main/photos/a.jpg` redirects to
 
 ## Deploying to Cloudflare
 
-[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/levino/git-forge-instance)
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/levino/git-forge/tree/main/templates/instance)
 
 New instances are deployed from the
-[instance template](../../templates/instance): the button copies it (as
-`levino/git-forge-instance`), connects Workers Builds, asks for
-`BOOTSTRAP_TOKEN` and creates the R2 bucket and the D1 database from its
-`wrangler.jsonc`. The template deploys a pinned, checksummed release bundle of
-this Worker and applies the D1 migrations before every upload
+[instance template](../../templates/instance): the button copies that
+self-contained subdirectory into a new repository, connects Workers Builds,
+asks for `BOOTSTRAP_TOKEN` and creates the R2 bucket, the D1 database and the
+queues from its `wrangler.toml`. The template deploys a pinned, checksummed
+release bundle of this Worker, which migrates its database on start
 (`docs/design.md` §15). A button pointing at this directory would not work:
 Cloudflare requires a subdirectory to be self-contained, and this Worker
 builds from the workspace packages.
@@ -274,9 +274,9 @@ npx wrangler r2 bucket lifecycle add git-forge expire-staging tmp/ --expire-days
 ```
 
 The first `wrangler deploy` creates the bucket, the database and the import
-queue from the binding names; no IDs need to be filled in. Later deployments apply new
-migrations first (`wrangler d1 migrations apply DB --remote`, then
-`wrangler deploy`). The Worker never migrates the database itself.
+queue from the binding names; no IDs need to be filled in. The Worker applies
+pending migrations itself when it starts; `wrangler d1 migrations apply DB
+--remote` before `wrangler deploy` still works and is adopted.
 
 ### First admin
 

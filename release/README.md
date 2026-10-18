@@ -15,8 +15,9 @@ writes into `out-dir` (default `release/dist`):
 | `migrations.tar.gz` | `migrations/*.sql` for D1, collected from the packages listed in `migration_dirs`. Built reproducibly (sorted, zero mtime, `gzip -n`). |
 | `SHA256SUMS` | `sha256sum` output for the two files above. |
 
-and prints the SHA-256 of `SHA256SUMS`, which is the `sha256` an instance pins
-in `git-forge.json`.
+and prints the SHA-256 of `SHA256SUMS`, which is the `S` an instance pins at
+the start of its `[build]` command (`V=<version> S=<sha256>` in
+`templates/instance/wrangler.toml`).
 
 The release workflow also attaches the single executables of the `git-forge`
 CLI (`packages/cli/build-executables.sh`, built with Bun) and their checksums
@@ -29,27 +30,22 @@ in a separate `CLI-SHA256SUMS`, and the single executables of
 `main` that changes `release/VERSION` (it then creates the tag `v<VERSION>` on
 that commit unless the release exists already) and on manual dispatch, and
 publishes the three files as release assets with `GITHUB_TOKEN`; the release
-notes contain the `git-forge.json` to pin. Tags with a `-` (`v0.2.0-rc.1`) are
-marked as pre-releases.
+notes contain the pin `V=<version> S=<sha256>` and the complete `[build]`
+command line taken from `templates/instance/wrangler.toml` with that pin.
+Tags with a `-` (`v0.2.0-rc.1`) are marked as pre-releases. For every other
+release the `pin-template` job then writes the new pin into
+`templates/instance/wrangler.toml` and pushes that commit to `main`, so the
+Deploy button (which deploys `templates/instance` from `main` as is) always
+gets a published release.
 
 ## Test
 
 `pnpm --filter @git-forge/release test` builds a release into a temporary
-directory, copies `templates/instance`, pins the release and runs the
-template's `build.sh` against it via `GIT_FORGE_RELEASE_URL=file://…`. It
-checks that a wrong pin and a tampered bundle are refused, applies the D1
-migrations locally, starts the instance with `wrangler dev`, pushes and
-clones a repository with the real `git` client and requests its page in the
-web UI.
-
-## Instance template repository
-
-The template is meant to live in its own repository `levino/git-forge-instance`.
-`.github/workflows/sync-instance-template.yml` copies `templates/instance`
-there, with `git-forge.json` pinned to the latest release, after every release
-and on every change of the template on `main`; it can also be started by hand
-for a given tag. It needs a deploy key with write access on
-`levino/git-forge-instance`, stored as the secret
-`INSTANCE_TEMPLATE_DEPLOY_KEY` in this repository, and skips itself while the
-secret is missing. Mark `levino/git-forge-instance` as a template repository
-in its settings so "Use this template" is offered.
+directory, copies `templates/instance`, checks its shape (one pin, resources
+by name only, `BOOTSTRAP_TOKEN` as the only secret), pins the release and runs
+the `[build]` command from its `wrangler.toml` against it via
+`GIT_FORGE_RELEASE_URL=file://…`. It checks that a wrong pin and a tampered
+bundle are refused, starts the instance with `wrangler dev` (which runs the
+build command too and lets the Worker migrate its local D1), inserts an admin
+claim, pushes and clones a repository with the real `git` client and requests
+its page in the web UI.

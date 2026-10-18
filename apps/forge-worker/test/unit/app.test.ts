@@ -1,5 +1,6 @@
 import { generateSigningKey, type SigningKey } from '@git-forge/accounts'
-import { type ImportJob, lfsObjectKey, readImportState, readRefs, sha256Hex, ZERO_ID } from '@git-forge/core'
+import { type ImportJob, lfsObjectKey, readImportState, readRefs, sha256Hex, startImport, ZERO_ID } from '@git-forge/core'
+import { basicAuth, chain, fakeLfs, lfsPointer, requireAuthorization } from '@git-forge/core/test/mirror-helpers.ts'
 import { S3Storage } from '@git-forge/s3'
 import { commitAll, gitBytes, initRepo, sampleHistory, tempDir, writeFile } from '@git-forge/core/test/git-helpers.ts'
 import { type RunningServer, startServer } from '@git-forge/core/test/http-server.ts'
@@ -529,6 +530,24 @@ describe('import endpoint', () => {
     const plain = await nodeForge()
     const token = await bootstrap(plain, BASE)
     expect((await call(plain, BASE, 'POST', '/api/repos/admin/x/import', token, { url: 'https://x/y.git' })).status).toBe(503)
+  })
+
+  it('runs an import LFS job without federation and sends the import token to the LFS endpoint', async () => {
+    const asset = new TextEncoder().encode('large asset\n')
+    const pointer = lfsPointer(asset)
+    const token = basicAuth('git', 'lfs-job-token')
+    const lfs = fakeLfs({ read: async (oid) => (oid === pointer.oid ? asset : null) })
+    const server = await startServer(chain(requireAuthorization(token), lfs.handler))
+    try {
+      const repo = { owner: 'alice', name: 'media' }
+      const url = `${server.url}/acme/media.git`
+      await startImport(forge.storage, repo, { url })
+      await forge.runJob({ kind: 'import-lfs', ...repo, oid: pointer.oid, size: pointer.size, endpoint: { url: `${url}/info/lfs`, source: 'default' }, authorization: token })
+      expect(lfs.batches).toEqual([{ authorization: token, oids: [pointer.oid] }])
+      expect(await forge.storage.head(lfsObjectKey(repo, pointer.oid))).toMatchObject({ size: pointer.size })
+    } finally {
+      await server.close()
+    }
   })
 
   it('encodes non-ASCII credentials as UTF-8', () => {

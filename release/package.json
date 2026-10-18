@@ -1,0 +1,18 @@
+{
+  "name": "@git-forge/release",
+  "version": "0.0.0",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "build": "sh build-release.sh",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.5",
+    "typescript": "6.0.3",
+    "vitest": "4.1.11",
+    "wrangler": "4.151.1"
+  }
+}

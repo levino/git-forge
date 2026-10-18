@@ -15,4 +15,8 @@ Status: Git core implemented; LFS, accounts, mirrors and deployment in
 progress. See [docs/design.md](docs/design.md) and
 [docs/roadmap.md](docs/roadmap.md).
 
+To run an instance, start from the instance template in
+[templates/instance](templates/instance) (later `levino/git-forge-instance`):
+it pins a checksummed release bundle; nothing is installed from npm.
+
 License: MIT.

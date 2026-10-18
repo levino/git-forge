@@ -50,14 +50,16 @@ discussions.
 - [ ] Local S3 test environment (in progress; MinIO discontinued — Garage, SeaweedFS, RustFS, versitygw evaluated)
 - [ ] Headless deployment on a Raspberry Pi (Bun/Node + SQLite file + filesystem or S3)
 
-## M5b — CI and self-update
+## M5b — CI and distribution
 
 - [ ] Spike: official `actions/runner` registers via JIT config, runs one job in a Cloudflare Container and deploys a hello-world Worker with `wrangler`
 - [ ] Actions service: sessions, jobs, timeline, logs; then cache, artifacts, OIDC
 - [ ] Workflow parsing and job scheduling, secrets
 - [ ] GHES-style `/api/v3` runner API and `workflow_job` webhooks for external providers (WarpBuild, CodeBuild, RunsOn)
 - [ ] "Deploy to Cloudflare" button and three test instances (alpha, beta, gamma)
-- [ ] Release artifact (bundled worker + migrations + checksums) and instance template with pinned version
+- [x] Release artifact (bundled worker + migrations + checksums) and instance template with pinned version
+- [ ] Create `levino/git-forge-instance`, add the deploy key secret `INSTANCE_TEMPLATE_DEPLOY_KEY`, cut the first release
+- [ ] Verify the Deploy button and Workers Builds settings of the template against a real Cloudflare account
 
 ## M6 — Web UI (Astro SSR)
 

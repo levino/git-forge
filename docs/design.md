@@ -379,3 +379,56 @@ as local S3 test environment.
 - git-lfs — Batch API specification and integration tests
 - Radicle — signed refs per participant
 - LOCKSS — many copies, verification, repair
+
+## 15. CI, deployment and updates
+
+### CI
+
+CI emulates the GitHub runner stack so the unmodified official
+`actions/runner` and existing per-minute providers work:
+
+- A GHES-style API under `/api/v3`: runner REST (`generate-jitconfig`,
+  registration tokens), GitHub App auth and PATs, signed `workflow_job`
+  webhooks for external providers.
+- The Actions service the runner talks to: connection data and token
+  exchange, sessions and message long-poll (or broker and run service), job
+  acquire/renew/complete, timeline, logs, later cache, artifacts and OIDC.
+- First compute backend: **Cloudflare Containers / Sandbox SDK**. Per job the
+  forge starts a container with the runner and a JIT config and discards it
+  afterwards (billed per 10 ms, scale to zero, up to 4 vCPU / 12 GiB, rootless
+  Docker-in-Docker).
+- External backends later via the same API: WarpBuild Enterprise, AWS
+  CodeBuild, RunsOn (research in issue #7).
+
+### Deployment
+
+Deployments run in our own CI: a job calls `wrangler deploy` with a Cloudflare
+API token stored as an instance secret. No Cloudflare Workers Builds and no
+GitHub mirror are needed.
+
+### Distribution, new instances and updates
+
+An instance is a stateless deployment; its operators choose the version. The
+deployable unit is a release artifact, not an npm package:
+
+- **Release artifact:** on every release tag, CI builds the worker as a single
+  bundled ES module file plus the D1 migrations and publishes them with
+  SHA-256 checksums as release assets.
+- **Instance template** (`templates/instance`, later its own repository
+  `git-forge-instance`): only `wrangler.jsonc` (own bindings, domain, vars) and
+  `git-forge.json` (`version`, `sha256`). No `package.json`, no lockfile.
+- **Build:** the Cloudflare build step downloads the pinned bundle, verifies the
+  checksum, applies D1 migrations and runs `wrangler deploy`.
+- **First install:** fork/use the template or click "Deploy to Cloudflare",
+  connect the repository to Cloudflare.
+- **Update:** bump `version` and `sha256` in `git-forge.json` and push.
+  Renovate can propose the bump via a regex manager on releases.
+- The same bundle may additionally be published to npm later; the template
+  never depends on it.
+
+### Test instances
+
+`apps/forge-worker` defines three wrangler environments `alpha`, `beta` and
+`gamma`, each with its own D1 and R2. An E2E test runs all three locally and
+checks mirroring and federation across them (beta mirrors alpha, gamma mirrors
+beta).

@@ -136,8 +136,9 @@ Design: [design.md §18](design.md#18-web-ui).
 - [ ] Mirror overview UI on top of the attestation API of design §10 (lag, ref checksum history, spot checks)
 - [x] Repository settings (visibility, collaborators, branch protection, federation trust)
 - [x] Mirror settings, status and alarms (add, sync, deep check, detach)
-- [ ] Blame, syntax highlighting in diffs and Markdown code blocks
-- [ ] Explore and profile listings without one access check per repository
+- [x] Blame, syntax highlighting in diffs and Markdown code blocks
+- [x] Explore and profile listings without one access check per repository (one SQL query, stored default branch and last commit time, sort and paging)
+- [x] Search box and results page (repositories, issues and pull requests, discussions, users)
 - [ ] Issue/PR UI: labels, assignees, milestones, reviewer requests, suggested changes, `#N` autolinks in rendered Markdown
 
 ## M7 — Collaboration
@@ -160,7 +161,8 @@ Design: [design.md §17](design.md#17-collaboration).
 - [x] Rename detection in merges (port of git's `diffcore-rename` scoring and pairing; edits follow renamed files, rename/rename and rename/delete conflicts)
 - [ ] Directory rename detection in merges (a directory removed on one side while the other adds to it is still reported as a conflict)
 - [ ] In-browser conflict resolution
-- [ ] Reactions, search (FTS5), notifications
+- [x] Search (FTS5): repositories, issues, pull requests, discussions with comments, users; access-filtered; `/api/search`, `/api/v3/search/*`
+- [ ] Reactions, notifications
 - [ ] Web UI for issues, pull requests and discussions (separate work package)
 - [ ] Submit via form
 

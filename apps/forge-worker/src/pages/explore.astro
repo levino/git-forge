@@ -1,14 +1,14 @@
 ---
 import RepoList from '../components/RepoList.astro'
 import Layout from '../layouts/Layout.astro'
-import { visibleRepositories } from '../ui/listing.ts'
+import { repositoryPage } from '../ui/listing.ts'
 
-const repositories = await visibleRepositories(Astro.locals.forge, Astro.locals.principal)
+const repositories = await repositoryPage(Astro.locals.forge, Astro.locals.principal, Astro.url)
 ---
 
 <Layout title="Explore">
   <div class="max-w-4xl mx-auto">
-    <h1 class="text-lg font-semibold mb-3">Explore <span class="badge badge-sm align-middle ml-1">{repositories.length}</span></h1>
-    <RepoList repositories={repositories} empty="There are no repositories you can see." />
+    <h1 class="text-lg font-semibold mb-3">Explore <span class="badge badge-sm align-middle ml-1">{repositories.total}</span></h1>
+    <RepoList listing={repositories} empty="There are no repositories you can see." />
   </div>
 </Layout>

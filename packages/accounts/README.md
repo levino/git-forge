@@ -83,7 +83,7 @@ triggers with `RAISE`), all of which D1, Durable Objects and libSQL support.
 | `external_identities` | `(issuer, subject)` → user, the OIDC link |
 | `organization_members` | role `member` or `owner` |
 | `teams`, `team_members` | teams belong to one organization; members must be org members |
-| `repositories` | owner is a user or an organization; `visibility` public/private |
+| `repositories` | owner is a user or an organization; `visibility` public/private; `default_branch`, `last_commit_at`, `stats_at` kept by the host after pushes, imports and mirror syncs (migration `0026`) |
 | `repository_collaborators` | per-user role: `read`, `triage`, `write`, `maintain`, `admin` |
 | `repository_teams` | per-team role on repositories of the team's organization |
 | `apps`, `app_repositories` | machine accounts with explicit per-repository roles |
@@ -104,6 +104,7 @@ triggers with `RAISE`), all of which D1, Durable Objects and libSQL support.
 | `invites` | hash of the invite code, fixed login or existing user, expiry, redemption |
 | `actions_*` | CI state of `@git-forge/actions`: runners, hashed CI tokens, sessions, runs, jobs, timeline records, log index (migration `0005`; the schema lives here so that all D1 migrations come from one directory) |
 | `collaboration_settings`, `repository_numbers`, `issues`, `issue_*`, `labels`, `milestones`, `pull_requests`, `pull_request_reviews`, `review_comments`, `review_requests`, `commit_statuses`, `check_runs`, `discussion*` | collaboration data of `@git-forge/collaboration` (migration `0008`); integer IDs for GitHub compatibility, never synced to mirrors |
+| `search_*` | FTS5 indexes of repositories, accounts, issues, issue comments, discussions and discussion comments, kept by triggers (migration `0026`) |
 
 Timestamps are Unix milliseconds. IDs are random UUIDs. Logins and repository
 names are case-insensitive (`COLLATE NOCASE`).
@@ -127,6 +128,10 @@ LFS and sync all call the same function.
 - Tokens narrow, never widen: scopes cap access (`repo:read` → read,
   `repo:write` → write, `repo:admin` → admin, none → public only) and an
   optional repository list restricts the token to those repositories.
+
+`readableRepositories(principal)` is the same rule set as SQL (plus
+instance admins) for lists and search: `listReadableRepositories` and
+`search` filter, sort and page in one query.
 
 `decide(principal, access, required)` turns this into GitHub's HTTP
 semantics: allowed; `401` with `WWW-Authenticate: Basic realm="git-forge"`

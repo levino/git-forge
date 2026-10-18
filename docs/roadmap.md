@@ -57,7 +57,7 @@ discussions.
 - [ ] Workflow parsing and job scheduling, secrets
 - [ ] GHES-style `/api/v3` runner API and `workflow_job` webhooks for external providers (WarpBuild, CodeBuild, RunsOn)
 - [ ] "Deploy to Cloudflare" button and three test instances (alpha, beta, gamma)
-- [ ] Self-update: instance mirrors upstream git-forge, release tags trigger a deploy job
+- [ ] Release artifact (bundled worker + migrations + checksums) and instance template with pinned version
 
 ## M6 — Web UI (Astro SSR)
 

@@ -360,23 +360,25 @@ Deployments run in our own CI: a job calls `wrangler deploy` with a Cloudflare
 API token stored as an instance secret. No Cloudflare Workers Builds and no
 GitHub mirror are needed.
 
-### New instances and updates
+### Distribution, new instances and updates
 
-- **First install:** a "Deploy to Cloudflare" button on `apps/forge-worker`.
-  Cloudflare copies the repository into the installer's GitHub/GitLab account,
-  provisions D1 and R2 from `wrangler.jsonc` and deploys. The copy has no link
-  to upstream.
-- **Updates after that:** every instance mirrors the upstream git-forge
-  repository like any other mirrored repo (archive on rewritten history,
-  alarm). New release tags show up as "update available"; an update, manual or
-  automatic, is a CI job on the instance that runs migrations and
-  `wrangler deploy`. The repository copy from the first install becomes
-  irrelevant.
-- To keep upstream merges conflict-free, instance-specific configuration
-  (domain, name, switches) lives in environment variables and D1, not in code;
-  `wrangler.jsonc` only carries binding IDs.
-- npm packages are not the distribution channel; the deployable unit is the
-  repository.
+An instance is a stateless deployment; its operators choose the version. The
+deployable unit is a release artifact, not an npm package:
+
+- **Release artifact:** on every release tag, CI builds the worker as a single
+  bundled ES module file plus the D1 migrations and publishes them with
+  SHA-256 checksums as release assets.
+- **Instance template** (`templates/instance`, later its own repository
+  `git-forge-instance`): only `wrangler.jsonc` (own bindings, domain, vars) and
+  `git-forge.json` (`version`, `sha256`). No `package.json`, no lockfile.
+- **Build:** the Cloudflare build step downloads the pinned bundle, verifies the
+  checksum, applies D1 migrations and runs `wrangler deploy`.
+- **First install:** fork/use the template or click "Deploy to Cloudflare",
+  connect the repository to Cloudflare.
+- **Update:** bump `version` and `sha256` in `git-forge.json` and push.
+  Renovate can propose the bump via a regex manager on releases.
+- The same bundle may additionally be published to npm later; the template
+  never depends on it.
 
 ### Test instances
 

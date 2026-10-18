@@ -1,0 +1,23 @@
+{
+  "name": "git-forge",
+  "image": "mcr.microsoft.com/devcontainers/typescript-node:1-22-bookworm",
+  "features": {
+    "ghcr.io/devcontainers/features/github-cli:1": {},
+    "ghcr.io/devcontainers/features/git-lfs:1": {},
+    "ghcr.io/devcontainers/features/docker-in-docker:2": {},
+    "ghcr.io/anthropics/devcontainer-features/claude-code:1": {}
+  },
+  "updateContentCommand": "pnpm install --frozen-lockfile && pnpm --filter forge-worker exec playwright install --with-deps chromium",
+  "postCreateCommand": "git lfs install --skip-repo",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "astro-build.astro-vscode",
+        "bradlc.vscode-tailwindcss",
+        "vitest.explorer",
+        "ms-playwright.playwright",
+        "anthropic.claude-code"
+      ]
+    }
+  }
+}

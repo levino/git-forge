@@ -1,12 +1,16 @@
 ---
+import Avatar from '../../components/Avatar.astro'
+import Icon from '../../components/Icon.astro'
 import NotFound from '../../components/NotFound.astro'
 import RepoList from '../../components/RepoList.astro'
 import Layout from '../../layouts/Layout.astro'
-import { visibleRepositories } from '../../ui/listing.ts'
+import { repositoryPage } from '../../ui/listing.ts'
 
 const { forge, principal } = Astro.locals
 const account = await forge.store.findAccount(Astro.params.owner!)
-const repositories = account ? await visibleRepositories(forge, principal, account.login) : []
+const repositories = account ? await repositoryPage(forge, principal, Astro.url, account.login) : null
+const membership = account?.kind === 'organization' ? (await forge.organizations.view(principal, account.login)).membership !== null || (await forge.isInstanceAdmin(principal)) : false
+const organization = account?.kind === 'organization'
 ---
 
 {
@@ -14,21 +18,29 @@ const repositories = account ? await visibleRepositories(forge, principal, accou
     <NotFound />
   ) : (
     <Layout title={account.login}>
-      <div class="flex flex-col md:flex-row gap-8">
-        <aside class="md:w-64 flex-none">
-          <div class="avatar avatar-placeholder mb-4">
-            <div class="bg-neutral text-neutral-content w-24 md:w-48 rounded-full">
-              <span class="text-4xl" aria-hidden="true">{account.login.slice(0, 1).toUpperCase()}</span>
-            </div>
+      <div class="max-w-4xl mx-auto">
+        <header class="flex flex-wrap items-center gap-4 pb-6 mb-6 border-b border-base-300">
+          <Avatar name={account.login} size={56} square={organization} />
+          <div class="min-w-0 flex-1">
+            <h1 class="text-xl font-semibold break-all leading-tight">{account.displayName || account.login}</h1>
+            <p class="flex items-center gap-1.5 text-base-content/60">
+              <Icon name={organization ? 'org' : 'user'} class="size-3.5" />
+              {account.displayName ? <span>{account.login}</span> : <span>{organization ? 'Organization' : 'User'}</span>}
+            </p>
           </div>
-          <h1 class="text-2xl font-semibold break-all">{account.login}</h1>
-          <p class="text-base-content/70">{account.kind === 'organization' ? 'Organization' : 'User'}</p>
-        </aside>
-        <section class="flex-1 min-w-0" aria-labelledby="repositories">
-          <h2 id="repositories" class="text-xl font-semibold mb-4">
-            Repositories <span class="badge">{repositories.length}</span>
+          {organization && membership && (
+            <a class="btn btn-sm" href={`/orgs/${account.login}`}>
+              <Icon name="users" />
+              People and teams
+            </a>
+          )}
+        </header>
+        <section aria-labelledby="repositories">
+          <h2 id="repositories" class="text-base font-semibold mb-3 flex items-center gap-2">
+            <Icon name="repo" class="size-4 text-base-content/60" />
+            Repositories <span class="badge badge-sm">{repositories?.total}</span>
           </h2>
-          <RepoList repositories={repositories} showOwner={false} />
+          {repositories && <RepoList listing={repositories} showOwner={false} />}
         </section>
       </div>
     </Layout>

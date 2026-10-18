@@ -1,0 +1,250 @@
+{
+  "/repos/acme/site/labels?per_page=100": {
+    "headers": { "etag": "W/\"labels-1\"", "x-ratelimit-remaining": "4990", "x-ratelimit-reset": "1792364306" },
+    "body": [
+      { "id": 10175840432, "node_id": "LA_kwDORM31cM8AAAACXocAsA", "url": "https://api.github.com/repos/acme/site/labels/bug", "name": "bug", "color": "d73a4a", "default": true, "description": "Something isn't working" },
+      { "id": 10175840436, "node_id": "LA_kwDORM31cM8AAAACXocAtA", "url": "https://api.github.com/repos/acme/site/labels/enhancement", "name": "enhancement", "color": "a2eeef", "default": true, "description": "New feature or request" }
+    ]
+  },
+  "/repos/acme/site/milestones?state=all&per_page=100": {
+    "headers": { "etag": "W/\"milestones-1\"" },
+    "body": [
+      {
+        "url": "https://api.github.com/repos/acme/site/milestones/1",
+        "html_url": "https://github.com/acme/site/milestone/1",
+        "id": 13961234,
+        "node_id": "MI_kwDORM31cM4A1Nqy",
+        "number": 1,
+        "title": "v1",
+        "description": "First release",
+        "creator": { "login": "octo", "id": 1150767, "type": "User" },
+        "open_issues": 1,
+        "closed_issues": 0,
+        "state": "open",
+        "created_at": "2026-02-01T10:00:00Z",
+        "updated_at": "2026-02-02T10:00:00Z",
+        "due_on": "2026-03-01T08:00:00Z",
+        "closed_at": null
+      }
+    ]
+  },
+  "/repos/acme/site/pulls?state=all&sort=created&direction=asc&per_page=100": {
+    "headers": { "etag": "W/\"pulls-1\"", "link": "<https://api.github.com/repositories/1424427959/pulls?state=all&sort=created&direction=asc&per_page=100&page=2>; rel=\"next\", <https://api.github.com/repositories/1424427959/pulls?state=all&sort=created&direction=asc&per_page=100&page=2>; rel=\"last\"" },
+    "body": [
+      {
+        "url": "https://api.github.com/repos/acme/site/pulls/2",
+        "id": 4714793580,
+        "node_id": "PR_kwDORM31cM8AAAABGQYKbA",
+        "html_url": "https://github.com/acme/site/pull/2",
+        "issue_url": "https://api.github.com/repos/acme/site/issues/2",
+        "number": 2,
+        "state": "closed",
+        "locked": false,
+        "title": "Rewrite line 15",
+        "user": { "login": "octo", "id": 1150767, "type": "User" },
+        "body": "Fixes #1",
+        "created_at": "2026-02-03T09:00:00Z",
+        "updated_at": "2026-02-04T09:21:16Z",
+        "closed_at": "2026-02-04T09:21:15Z",
+        "merged_at": "2026-02-04T09:21:15Z",
+        "merge_commit_sha": "{{main}}",
+        "assignee": null,
+        "assignees": [],
+        "requested_reviewers": [],
+        "labels": [{ "id": 10175840436, "name": "enhancement", "color": "a2eeef", "default": true, "description": "New feature or request" }],
+        "milestone": null,
+        "draft": false,
+        "head": { "label": "acme:feature", "ref": "feature", "sha": "{{feature}}", "user": { "login": "acme" }, "repo": { "id": 1424427959, "full_name": "acme/site" } },
+        "base": { "label": "acme:main", "ref": "main", "sha": "{{start}}", "user": { "login": "acme" }, "repo": { "id": 1424427959, "full_name": "acme/site" } },
+        "author_association": "OWNER",
+        "auto_merge": null,
+        "active_lock_reason": null
+      },
+      {
+        "url": "https://api.github.com/repos/acme/site/pulls/3",
+        "id": 4714793581,
+        "node_id": "PR_kwDORM31cM8AAAABGQYKbB",
+        "html_url": "https://github.com/acme/site/pull/3",
+        "issue_url": "https://api.github.com/repos/acme/site/issues/3",
+        "number": 3,
+        "state": "open",
+        "locked": false,
+        "title": "Typo from a fork",
+        "user": { "login": "stranger", "id": 99, "type": "User" },
+        "body": "Please merge",
+        "created_at": "2026-02-05T09:00:00Z",
+        "updated_at": "2026-02-05T09:00:00Z",
+        "closed_at": null,
+        "merged_at": null,
+        "merge_commit_sha": "1111111111111111111111111111111111111111",
+        "assignee": null,
+        "assignees": [],
+        "requested_reviewers": [],
+        "labels": [],
+        "milestone": null,
+        "draft": false,
+        "head": { "label": "stranger:typo", "ref": "typo", "sha": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", "user": { "login": "stranger" }, "repo": { "id": 7, "full_name": "stranger/site" } },
+        "base": { "label": "acme:main", "ref": "main", "sha": "{{main}}", "user": { "login": "acme" }, "repo": { "id": 1424427959, "full_name": "acme/site" } },
+        "author_association": "FIRST_TIME_CONTRIBUTOR",
+        "auto_merge": null,
+        "active_lock_reason": null
+      }
+    ]
+  },
+  "/repositories/1424427959/pulls?state=all&sort=created&direction=asc&per_page=100&page=2": {
+    "headers": { "etag": "W/\"pulls-2\"", "link": "<https://api.github.com/repositories/1424427959/pulls?state=all&sort=created&direction=asc&per_page=100&page=1>; rel=\"prev\", <https://api.github.com/repositories/1424427959/pulls?state=all&sort=created&direction=asc&per_page=100&page=1>; rel=\"first\"" },
+    "body": [
+      {
+        "url": "https://api.github.com/repos/acme/site/pulls/4",
+        "id": 4714793582,
+        "node_id": "PR_kwDORM31cM8AAAABGQYKbC",
+        "html_url": "https://github.com/acme/site/pull/4",
+        "issue_url": "https://api.github.com/repos/acme/site/issues/4",
+        "number": 4,
+        "state": "open",
+        "locked": false,
+        "title": "Change the source",
+        "user": { "login": "carlgh", "id": 77, "type": "User", "email": "carl@example.org" },
+        "body": null,
+        "created_at": "2026-02-06T09:00:00Z",
+        "updated_at": "2026-02-07T09:00:00Z",
+        "closed_at": null,
+        "merged_at": null,
+        "merge_commit_sha": "2222222222222222222222222222222222222222",
+        "assignee": { "login": "octo", "id": 1150767, "type": "User" },
+        "assignees": [{ "login": "octo", "id": 1150767, "type": "User" }],
+        "requested_reviewers": [],
+        "labels": [],
+        "milestone": { "number": 1, "title": "v1" },
+        "draft": true,
+        "head": { "label": "acme:topic", "ref": "topic", "sha": "{{topic}}", "user": { "login": "acme" }, "repo": { "id": 1424427959, "full_name": "acme/site" } },
+        "base": { "label": "acme:main", "ref": "main", "sha": "{{main}}", "user": { "login": "acme" }, "repo": { "id": 1424427959, "full_name": "acme/site" } },
+        "author_association": "MEMBER",
+        "auto_merge": null,
+        "active_lock_reason": null
+      }
+    ]
+  },
+  "/repos/acme/site/issues?state=all&sort=created&direction=asc&per_page=100": {
+    "headers": { "etag": "W/\"issues-1\"" },
+    "body": [
+      {
+        "url": "https://api.github.com/repos/acme/site/issues/1",
+        "html_url": "https://github.com/acme/site/issues/1",
+        "id": 3917016676,
+        "node_id": "I_kwDORM31cM7pejlk",
+        "number": 1,
+        "title": "Line 15 is wrong",
+        "user": { "login": "octo", "id": 1150767, "type": "User" },
+        "labels": [{ "id": 10175840432, "name": "bug", "color": "d73a4a", "default": true, "description": "Something isn't working" }],
+        "state": "open",
+        "locked": true,
+        "assignee": { "login": "octo", "id": 1150767, "type": "User" },
+        "assignees": [{ "login": "octo", "id": 1150767, "type": "User" }, { "login": "stranger", "id": 99, "type": "User" }],
+        "milestone": { "number": 1, "title": "v1" },
+        "comments": 1,
+        "created_at": "2026-02-02T08:00:00Z",
+        "updated_at": "2026-02-08T08:00:00Z",
+        "closed_at": null,
+        "author_association": "OWNER",
+        "active_lock_reason": "resolved",
+        "body": "See #2 and #4.",
+        "state_reason": null
+      },
+      { "number": 2, "html_url": "https://github.com/acme/site/pull/2", "title": "Rewrite line 15", "user": { "login": "octo" }, "labels": [], "state": "closed", "locked": false, "assignees": [], "milestone": null, "created_at": "2026-02-03T09:00:00Z", "updated_at": "2026-02-04T09:21:16Z", "closed_at": "2026-02-04T09:21:15Z", "body": "Fixes #1", "pull_request": { "url": "https://api.github.com/repos/acme/site/pulls/2", "merged_at": "2026-02-04T09:21:15Z" } },
+      { "number": 3, "html_url": "https://github.com/acme/site/pull/3", "title": "Typo from a fork", "user": { "login": "stranger" }, "labels": [], "state": "open", "locked": false, "assignees": [], "milestone": null, "created_at": "2026-02-05T09:00:00Z", "updated_at": "2026-02-05T09:00:00Z", "closed_at": null, "body": "Please merge", "pull_request": { "url": "https://api.github.com/repos/acme/site/pulls/3", "merged_at": null } },
+      { "number": 4, "html_url": "https://github.com/acme/site/pull/4", "title": "Change the source", "user": { "login": "carlgh" }, "labels": [], "state": "open", "locked": false, "assignees": [], "milestone": null, "created_at": "2026-02-06T09:00:00Z", "updated_at": "2026-02-07T09:00:00Z", "closed_at": null, "body": null, "pull_request": { "url": "https://api.github.com/repos/acme/site/pulls/4", "merged_at": null } },
+      {
+        "url": "https://api.github.com/repos/acme/site/issues/5",
+        "html_url": "https://github.com/acme/site/issues/5",
+        "id": 3917016680,
+        "node_id": "I_kwDORM31cM7pejlo",
+        "number": 5,
+        "title": "Rewrite everything in Rust",
+        "user": { "login": "carlgh", "id": 77, "type": "User", "email": "carl@example.org" },
+        "labels": [],
+        "state": "closed",
+        "locked": false,
+        "assignee": null,
+        "assignees": [],
+        "milestone": null,
+        "comments": 0,
+        "created_at": "2026-02-09T08:00:00Z",
+        "updated_at": "2026-02-10T08:00:00Z",
+        "closed_at": "2026-02-10T08:00:00Z",
+        "author_association": "MEMBER",
+        "active_lock_reason": null,
+        "body": "",
+        "state_reason": "not_planned"
+      }
+    ]
+  },
+  "/repos/acme/site/issues/comments?sort=created&direction=asc&per_page=100": {
+    "headers": { "etag": "W/\"comments-1\"" },
+    "body": [
+      { "url": "https://api.github.com/repos/acme/site/issues/comments/101", "html_url": "https://github.com/acme/site/issues/1#issuecomment-101", "issue_url": "https://api.github.com/repos/acme/site/issues/1", "id": 101, "user": { "login": "stranger", "id": 99, "type": "User" }, "created_at": "2026-02-02T09:00:00Z", "updated_at": "2026-02-02T09:30:00Z", "author_association": "NONE", "body": "Same here." },
+      { "url": "https://api.github.com/repos/acme/site/issues/comments/102", "html_url": "https://github.com/acme/site/pull/2#issuecomment-102", "issue_url": "https://api.github.com/repos/acme/site/issues/2", "id": 102, "user": { "login": "octo", "id": 1150767, "type": "User" }, "created_at": "2026-02-04T09:00:00Z", "updated_at": "2026-02-04T09:00:00Z", "author_association": "OWNER", "body": "Merging." }
+    ]
+  },
+  "/repos/acme/site/pulls/2/reviews?per_page=100": {
+    "headers": { "etag": "W/\"reviews-2\"" },
+    "body": [
+      { "id": 201, "node_id": "PRR_kwDORM31cM7pejl1", "user": { "login": "octo", "id": 1150767, "type": "User" }, "body": "Looks good", "state": "APPROVED", "html_url": "https://github.com/acme/site/pull/2#pullrequestreview-201", "pull_request_url": "https://api.github.com/repos/acme/site/pulls/2", "author_association": "OWNER", "submitted_at": "2026-02-04T08:00:00Z", "commit_id": "{{feature}}" },
+      { "id": 202, "node_id": "PRR_kwDORM31cM7pejl2", "user": { "login": "octo", "id": 1150767, "type": "User" }, "body": "", "state": "PENDING", "html_url": "https://github.com/acme/site/pull/2#pullrequestreview-202", "pull_request_url": "https://api.github.com/repos/acme/site/pulls/2", "author_association": "OWNER", "commit_id": "{{feature}}" }
+    ]
+  },
+  "/repos/acme/site/pulls/4/reviews?per_page=100": {
+    "headers": { "etag": "W/\"reviews-4\"" },
+    "body": [
+      { "id": 203, "node_id": "PRR_kwDORM31cM7pejl3", "user": { "login": "stranger", "id": 99, "type": "User" }, "body": "", "state": "COMMENTED", "html_url": "https://github.com/acme/site/pull/4#pullrequestreview-203", "pull_request_url": "https://api.github.com/repos/acme/site/pulls/4", "author_association": "NONE", "submitted_at": "2026-02-06T10:00:00Z", "commit_id": "{{topic}}" }
+    ]
+  },
+  "/repos/acme/site/pulls/comments?sort=created&direction=asc&per_page=100": {
+    "headers": { "etag": "W/\"review-comments-1\"" },
+    "body": [
+      { "url": "https://api.github.com/repos/acme/site/pulls/comments/301", "pull_request_review_id": 203, "id": 301, "node_id": "PRRC_1", "diff_hunk": "@@ -1,5 +1,5 @@", "path": "src.txt", "commit_id": "{{topic}}", "original_commit_id": "{{topic}}", "user": { "login": "stranger", "id": 99, "type": "User" }, "body": "Why?", "created_at": "2026-02-06T10:00:00Z", "updated_at": "2026-02-06T10:00:00Z", "html_url": "https://github.com/acme/site/pull/4#discussion_r301", "pull_request_url": "https://api.github.com/repos/acme/site/pulls/4", "author_association": "NONE", "start_line": null, "original_start_line": null, "start_side": null, "line": 3, "original_line": 3, "side": "RIGHT", "subject_type": "line" },
+      { "url": "https://api.github.com/repos/acme/site/pulls/comments/302", "pull_request_review_id": 203, "id": 302, "node_id": "PRRC_2", "diff_hunk": "@@ -1,5 +1,5 @@", "path": "src.txt", "commit_id": "{{topic}}", "original_commit_id": "{{topic}}", "user": { "login": "carlgh", "id": 77, "type": "User" }, "body": "Because.", "created_at": "2026-02-06T11:00:00Z", "updated_at": "2026-02-06T11:00:00Z", "html_url": "https://github.com/acme/site/pull/4#discussion_r302", "pull_request_url": "https://api.github.com/repos/acme/site/pulls/4", "author_association": "MEMBER", "in_reply_to_id": 301, "start_line": null, "original_start_line": null, "start_side": null, "line": 3, "original_line": 3, "side": "RIGHT", "subject_type": "line" },
+      { "url": "https://api.github.com/repos/acme/site/pulls/comments/303", "pull_request_review_id": 203, "id": 303, "node_id": "PRRC_3", "diff_hunk": "@@ -1 +1 @@", "path": "README.md", "commit_id": "{{topic}}", "original_commit_id": "{{topic}}", "user": { "login": "stranger", "id": 99, "type": "User" }, "body": "Unrelated line", "created_at": "2026-02-06T12:00:00Z", "updated_at": "2026-02-06T12:00:00Z", "html_url": "https://github.com/acme/site/pull/4#discussion_r303", "pull_request_url": "https://api.github.com/repos/acme/site/pulls/4", "author_association": "NONE", "start_line": null, "original_start_line": null, "start_side": null, "line": null, "original_line": 1, "side": "RIGHT", "subject_type": "line" }
+    ]
+  },
+  "/repos/acme/site/releases?per_page=100": {
+    "headers": { "etag": "W/\"releases-1\"" },
+    "body": [
+      {
+        "url": "https://api.github.com/repos/acme/site/releases/284113300",
+        "html_url": "https://github.com/acme/site/releases/tag/v1",
+        "id": 284113300,
+        "author": { "login": "octo", "id": 1150767, "type": "User" },
+        "node_id": "RE_kwDORM31cM4Q7yGU",
+        "tag_name": "v1",
+        "target_commitish": "main",
+        "name": "Version 1",
+        "draft": false,
+        "immutable": false,
+        "prerelease": false,
+        "created_at": "2026-02-10T16:49:20Z",
+        "updated_at": "2026-02-10T16:52:13Z",
+        "published_at": "2026-02-10T16:52:13Z",
+        "assets": [
+          {
+            "url": "https://api.github.com/repos/acme/site/releases/assets/501",
+            "id": 501,
+            "node_id": "RA_kwDORM31cM4A1",
+            "name": "tool.bin",
+            "label": "Tool",
+            "uploader": { "login": "stranger", "id": 99, "type": "User" },
+            "content_type": "application/octet-stream",
+            "state": "uploaded",
+            "size": "{{assetSize}}",
+            "digest": "sha256:{{assetSha}}",
+            "download_count": 3,
+            "created_at": "2026-02-10T16:50:00Z",
+            "updated_at": "2026-02-10T16:50:00Z",
+            "browser_download_url": "https://github.com/acme/site/releases/download/v1/tool.bin"
+          }
+        ],
+        "body": "First release, see #1."
+      }
+    ]
+  }
+}

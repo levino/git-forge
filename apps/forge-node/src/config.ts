@@ -1,5 +1,6 @@
 import type { S3StorageConfig } from '@git-forge/s3'
-import { ConfigurationError, type ForgeVars } from 'forge-worker/config'
+import type { SmtpSecurity } from '@git-forge/smtp'
+import { ConfigurationError, type EmailSettings, type ForgeVars, parseEmailSettings } from 'forge-worker/config'
 import { type CronSchedule, CronError, parseCron } from './cron.ts'
 
 export type NodeVars = ForgeVars & {
@@ -19,7 +20,36 @@ export type NodeVars = ForgeVars & {
   readonly S3_FORCE_PATH_STYLE?: string
   readonly SCHEDULE?: string
   readonly JOB_CONCURRENCY?: string
+  readonly SMTP_HOST?: string
+  readonly SMTP_PORT?: string
+  readonly SMTP_SECURITY?: string
+  readonly SMTP_USERNAME?: string
+  readonly SMTP_PASSWORD?: string
+  readonly SMTP_HELO?: string
+  readonly LFS_PUBLISH_DIR?: string
+  readonly BACKUP_STORAGE?: string
+  readonly BACKUP_STORAGE_DIR?: string
+  readonly BACKUP_S3_ENDPOINT?: string
+  readonly BACKUP_S3_REGION?: string
+  readonly BACKUP_S3_BUCKET?: string
+  readonly BACKUP_S3_ACCESS_KEY_ID?: string
+  readonly BACKUP_S3_SECRET_ACCESS_KEY?: string
+  readonly BACKUP_S3_PREFIX?: string
+  readonly BACKUP_S3_FORCE_PATH_STYLE?: string
 }
+
+export type SmtpSettings = {
+  readonly provider: 'smtp'
+  readonly from: string
+  readonly host: string
+  readonly port?: number
+  readonly security: SmtpSecurity
+  readonly username?: string
+  readonly password?: string
+  readonly helo?: string
+}
+
+export type NodeEmailSettings = EmailSettings | SmtpSettings
 
 export type StorageConfig = { readonly kind: 'fs'; readonly dir: string } | { readonly kind: 's3'; readonly config: S3StorageConfig }
 
@@ -31,6 +61,9 @@ export type NodeConfig = {
   readonly storage: StorageConfig
   readonly schedule: CronSchedule
   readonly jobConcurrency: number
+  readonly email: NodeEmailSettings | undefined
+  readonly lfsPublishDir: string | null
+  readonly backup: StorageConfig | null
 }
 
 export const DEFAULT_PORT = 8080
@@ -62,32 +95,37 @@ const flag = (name: string, value: string | undefined): boolean => {
   throw new ConfigurationError(`${name} must be true or false`)
 }
 
-const required = (vars: NodeVars, name: keyof NodeVars): string => {
-  const value = present(vars[name])
-  if (value === undefined) throw new ConfigurationError(`${name} is required with STORAGE=s3`)
-  return value
-}
-
-const storageConfig = (vars: NodeVars, dataDir: string): StorageConfig => {
-  const kind = present(vars.STORAGE) ?? 'fs'
-  if (kind === 'fs') return { kind, dir: present(vars.STORAGE_DIR) ?? joinPath(dataDir, 'objects') }
-  if (kind !== 's3') throw new ConfigurationError('STORAGE must be fs or s3')
-  const endpoint = required(vars, 'S3_ENDPOINT')
+const storageConfig = (vars: NodeVars, scope: '' | 'BACKUP_', defaultDir: string | null): StorageConfig | null => {
+  const value = (name: string) => present((vars as Record<string, string | undefined>)[`${scope}${name}`])
+  const required = (name: string): string => {
+    const found = value(name)
+    if (found === undefined) throw new ConfigurationError(`${scope}${name} is required with ${scope}STORAGE=s3`)
+    return found
+  }
+  const kind = value('STORAGE') ?? (defaultDir === null ? undefined : 'fs')
+  if (kind === undefined) return null
+  if (kind === 'fs') {
+    const dir = value('STORAGE_DIR') ?? defaultDir
+    if (dir === null) throw new ConfigurationError(`${scope}STORAGE_DIR is required with ${scope}STORAGE=fs`)
+    return { kind, dir }
+  }
+  if (kind !== 's3') throw new ConfigurationError(`${scope}STORAGE must be fs or s3`)
+  const endpoint = required('S3_ENDPOINT')
   try {
     new URL(endpoint)
   } catch {
-    throw new ConfigurationError('S3_ENDPOINT must be a URL')
+    throw new ConfigurationError(`${scope}S3_ENDPOINT must be a URL`)
   }
-  const prefix = present(vars.S3_PREFIX)
+  const prefix = value('S3_PREFIX')
   return {
     kind,
     config: {
       endpoint,
-      region: present(vars.S3_REGION) ?? 'us-east-1',
-      bucket: required(vars, 'S3_BUCKET'),
-      accessKeyId: required(vars, 'S3_ACCESS_KEY_ID'),
-      secretAccessKey: required(vars, 'S3_SECRET_ACCESS_KEY'),
-      forcePathStyle: flag('S3_FORCE_PATH_STYLE', vars.S3_FORCE_PATH_STYLE),
+      region: value('S3_REGION') ?? 'us-east-1',
+      bucket: required('S3_BUCKET'),
+      accessKeyId: required('S3_ACCESS_KEY_ID'),
+      secretAccessKey: required('S3_SECRET_ACCESS_KEY'),
+      forcePathStyle: flag(`${scope}S3_FORCE_PATH_STYLE`, value('S3_FORCE_PATH_STYLE')),
       ...(prefix ? { prefix } : {}),
     },
   }
@@ -102,6 +140,44 @@ const schedule = (value: string | undefined): CronSchedule => {
   }
 }
 
+const SMTP_SECURITY: readonly SmtpSecurity[] = ['starttls', 'tls', 'none']
+
+const smtpSettings = (vars: NodeVars, from: string): SmtpSettings => {
+  const host = present(vars.SMTP_HOST)
+  if (!host) throw new ConfigurationError('SMTP_HOST is required with EMAIL_PROVIDER=smtp')
+  const security = (present(vars.SMTP_SECURITY) ?? 'starttls') as SmtpSecurity
+  if (!SMTP_SECURITY.includes(security)) throw new ConfigurationError('SMTP_SECURITY must be starttls, tls or none')
+  const username = present(vars.SMTP_USERNAME)
+  const password = vars.SMTP_PASSWORD === undefined || vars.SMTP_PASSWORD === '' ? undefined : vars.SMTP_PASSWORD
+  if ((username === undefined) !== (password === undefined)) throw new ConfigurationError('SMTP_USERNAME and SMTP_PASSWORD go together')
+  if (username !== undefined && security === 'none') throw new ConfigurationError('SMTP_USERNAME needs SMTP_SECURITY=starttls or tls')
+  const port = present(vars.SMTP_PORT) === undefined ? undefined : integer('SMTP_PORT', vars.SMTP_PORT, 0, 1, 65535)
+  const helo = present(vars.SMTP_HELO)
+  return {
+    provider: 'smtp',
+    from,
+    host,
+    security,
+    ...(port !== undefined ? { port } : {}),
+    ...(username !== undefined && password !== undefined ? { username, password } : {}),
+    ...(helo ? { helo } : {}),
+  }
+}
+
+const emailSettings = (vars: NodeVars): NodeEmailSettings | undefined => {
+  if (present(vars.EMAIL_PROVIDER) !== 'smtp') {
+    try {
+      return parseEmailSettings(vars)
+    } catch (error) {
+      if (error instanceof ConfigurationError && /EMAIL_PROVIDER must be/.test(error.message)) throw new ConfigurationError('EMAIL_PROVIDER must be none, console, ses or smtp')
+      throw error
+    }
+  }
+  const from = present(vars.EMAIL_FROM)
+  if (!from) throw new ConfigurationError('EMAIL_FROM is required when EMAIL_PROVIDER is set')
+  return smtpSettings(vars, from)
+}
+
 export const parseNodeConfig = (vars: NodeVars): NodeConfig => {
   const dataDir = present(vars.DATA_DIR) ?? DEFAULT_DATA_DIR
   return {
@@ -109,8 +185,11 @@ export const parseNodeConfig = (vars: NodeVars): NodeConfig => {
     host: present(vars.HOST) ?? DEFAULT_HOST,
     trustProxy: flag('TRUST_PROXY', vars.TRUST_PROXY),
     databasePath: present(vars.DATABASE_PATH) ?? joinPath(dataDir, 'git-forge.sqlite'),
-    storage: storageConfig(vars, dataDir),
+    storage: storageConfig(vars, '', joinPath(dataDir, 'objects'))!,
     schedule: schedule(vars.SCHEDULE),
     jobConcurrency: integer('JOB_CONCURRENCY', vars.JOB_CONCURRENCY, DEFAULT_JOB_CONCURRENCY, 1, 64),
+    email: emailSettings(vars),
+    lfsPublishDir: present(vars.LFS_PUBLISH_DIR) ?? null,
+    backup: storageConfig(vars, 'BACKUP_', null),
   }
 }

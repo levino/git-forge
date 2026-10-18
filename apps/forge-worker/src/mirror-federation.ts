@@ -42,7 +42,7 @@ import { handleAttestation, recordChecksums, runSpotCheck, sendAttestation } fro
 import { type MirrorContext, mirrorUnitOptions, runMirrorSync, type ScheduledMirrorRun } from './mirrors.ts'
 
 export type ForgeJob =
-  | { readonly kind: 'mirror-sync'; readonly repository: string; readonly remote: string; readonly reason: 'notification' | 'schedule' | 'configure' | 'units' }
+  | { readonly kind: 'mirror-sync'; readonly repository: string; readonly remote: string; readonly reason: 'notification' | 'schedule' | 'configure' | 'units' | 'webhook' | 'continue' }
   | { readonly kind: 'mirror-pack'; readonly repository: string; readonly remote: string; readonly pack: string }
   | { readonly kind: 'mirror-lfs'; readonly repository: string; readonly remote: string; readonly oid: string; readonly size: number }
   | { readonly kind: 'mirror-notify'; readonly repository: string; readonly issuer: string; readonly callback: string }
@@ -64,6 +64,8 @@ export type MirrorFederation = MirrorContext & {
 }
 
 const DAY = 24 * 60 * 60 * 1000
+
+export const MIRROR_STEPS_PER_JOB = 4
 
 const json = (status: number, body: unknown) =>
   new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } })
@@ -135,24 +137,29 @@ export const syncAndNotify = async (federation: MirrorFederation, repo: Reposito
   return result
 }
 
+const syncStepped = async (federation: MirrorFederation, repo: RepositoryName, config: MirrorConfig): Promise<SyncResult> => {
+  const result = await runMirrorSync(federation, repo, config, { deferLfs: true, maxSteps: MIRROR_STEPS_PER_JOB })
+  if (result.status === 'pending') await federation.jobs.enqueue({ kind: 'mirror-sync', repository: nameOf(repo), remote: config.remote, reason: 'continue' })
+  if (result.status !== 'ok') return result
+  await afterSync(federation, repo, config, result)
+  for (const pointer of (await readMirrorStatus(federation.storage, repo, config.remote))?.lfsPending ?? []) {
+    if (federation.unitBytes > 0 && pointer.size > federation.unitBytes) continue
+    await federation.jobs.enqueue({ kind: 'mirror-lfs', repository: nameOf(repo), remote: config.remote, oid: pointer.oid, size: pointer.size })
+  }
+  return result
+}
+
 const syncInUnits = async (federation: MirrorFederation, repo: RepositoryName, config: MirrorConfig): Promise<SyncResult | null> => {
   const unit = mirrorUnitOptions(federation, repo, config, federation.unitBytes)
   const plan = await planPackCopy(unit)
-  if (plan === null) return syncAndNotify(federation, repo, config)
+  if (plan === null) return syncStepped(federation, repo, config)
   const copyable = plan.filter((pack) => !pack.oversized)
   for (const pack of copyable) await federation.jobs.enqueue({ kind: 'mirror-pack', repository: nameOf(repo), remote: config.remote, pack: pack.name })
   if (plan.length > 0) {
     if (copyable.length === 0) console.log(JSON.stringify({ event: 'mirror-oversized', repository: nameOf(repo), remote: config.remote, packs: plan }))
     return null
   }
-  const result = await runMirrorSync(federation, repo, config, { deferLfs: true })
-  if (result.status !== 'ok') return result
-  await afterSync(federation, repo, config, result)
-  for (const pointer of (await readMirrorStatus(federation.storage, repo, config.remote))?.lfsPending ?? []) {
-    if (pointer.size > federation.unitBytes) continue
-    await federation.jobs.enqueue({ kind: 'mirror-lfs', repository: nameOf(repo), remote: config.remote, oid: pointer.oid, size: pointer.size })
-  }
-  return result
+  return syncStepped(federation, repo, config)
 }
 
 const mirrorConfigOf = async (federation: MirrorFederation, repository: string, remote: string) => {
@@ -208,7 +215,7 @@ export const runJob = async (federation: MirrorFederation, job: ForgeJob): Promi
     }
     case 'mirror-sync': {
       const { repo, config } = await mirrorConfigOf(federation, job.repository, job.remote)
-      const result = federation.unitBytes > 0 ? await syncInUnits(federation, repo, config) : await syncAndNotify(federation, repo, config)
+      const result = federation.unitBytes > 0 ? await syncInUnits(federation, repo, config) : await syncStepped(federation, repo, config)
       if (result?.status === 'failed') throw new Error(result.error ?? 'mirror sync failed')
     }
   }

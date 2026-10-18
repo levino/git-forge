@@ -19,11 +19,13 @@ discussions.
 ## M2 — Git LFS
 
 - [x] Batch API (presigned URLs where the storage can sign, upload through the function otherwise)
+- [x] Presigned R2 URLs in the Worker (`R2_*` S3 credentials, `withPresigner` over the binding), LFS objects up to R2's single-PUT limit
 - [x] Verify step (size, SHA-256) before an object counts as present
 - [x] Reject pushes referencing missing LFS objects
 - [x] Per-object size limit (`MAX_LFS_OBJECT_BYTES` in the Worker)
 - [x] Media URLs `/{owner}/{repo}/media/{oid}` and raw endpoint `/{owner}/{repo}/raw/{ref}/{path}` resolving LFS pointers (CDN pull-zone friendly: immutable caching, ETag, Range, HEAD)
-- [ ] Optional: publish public LFS objects to a CDN bucket on push
+- [ ] Keyless large LFS uploads: `git forge` as a git-lfs custom transfer agent (set up by `git forge auth login`), uploading parts of at most 64 MB through the Worker into an R2 multipart upload via the binding (resumable, size and SHA-256 verified before the object counts as present); plain git-lfs keeps the single PUT up to the body limit
+- [x] Optional: publish public LFS objects to a CDN bucket on push (`LfsPublisher` adapter, keyed by oid, `CDN_BUCKET` / `LFS_PUBLISH_DIR`, backfill endpoint; design §7)
 
 ## M3 — Accounts and federation
 
@@ -36,11 +38,16 @@ discussions.
 - [x] Instance keys (Ed25519), `/.well-known/openid-configuration`, `/.well-known/jwks.json`
 - [x] Short-lived instance JWTs, trust table "issuer X may read repo Y", optional pinned thumbprint
 - [x] Device flow (`git forge auth login`, RFC 8628) and git credential helper (`git forge auth git-credential`)
+- [x] CLI login: paste a PKCE-bound code (default), `--browser-redirect`, `--device`; `--scopes`; consent with host, IP, time, phishing warning
+- [x] `git forge repo create`
+- [x] Rate limits on login and device endpoints; purging expired challenges and device codes
+- [x] One read / write / admin access choice for tokens and consent pages
 - [x] Break-glass key (offline Ed25519, one-hour admin session)
-- [ ] Login follow-ups: OIDC groups → teams, session list and revocation in the UI, rate limits on login and device endpoints, purging expired challenges and device codes, branch protection API with sessions, device-flow scope choice
+- [x] Session list and revocation, list and unlink linked OIDC identities (account page)
+- [ ] Login follow-ups: OIDC groups → teams
 - [ ] SAML, SCIM
 - [x] Branch protection rules (patterns, force push, deletion, push restrictions, admin bypass) enforced in `receive-pack`, API under `/api/repos/{owner}/{repo}/branches/{branch}/protection`
-- [ ] Branch protection API and push policy wired into the Worker app (needs accounts on D1 there)
+- [x] Branch protection API and push policy wired into the Worker app (accounts on D1), API with browser sessions and CSRF
 
 ## M4 — Mirrors
 
@@ -53,6 +60,8 @@ discussions.
 - [x] Native streaming hashes (`crypto.DigestStream` behind a `DigestFactory` seam) and one job per pack / LFS object with a byte budget (`MIRROR_UNIT_BYTES`), oversized units stay pending (design §12)
 - [x] Plain clones of a mirror check out the upstream default branch: read-side `refs/heads/*` view of one remote, own refs win, detach materializes it
 - [x] Mirror overview API: signed attestations from mirrors, ref checksum history, state/lag/alarms, spot checks (design §10); UI in M6
+- [x] Non-forge upstreams: stepped fetch shared with imports (commit ranges, split commits, across queued jobs, refs move when complete), `.lfsconfig` endpoint
+- [x] GitHub backups: push webhooks per mirror (HMAC-SHA256, optional registration via the GitHub API), sealed upstream tokens, bulk "mirror all repositories of a user/org" API and form
 
 ## M5 — Deployment and adapters
 
@@ -63,16 +72,19 @@ discussions.
 - [x] Shared storage conformance suite for all adapters
 - [x] Local S3 test environment (versitygw; Garage, SeaweedFS, RustFS evaluated)
 - [x] Headless deployment on a Raspberry Pi: `apps/forge-node` serves the Worker's router over `node:http` with an SQLite file, `FsStorage` or `S3Storage`, an in-process job queue and a cron schedule; explicit `migrate` command; single executables for `linux-x64`/`linux-arm64` (Bun) in every release, Dockerfile, systemd units; E2E with a Worker under `wrangler dev` mirroring in both directions
-- [ ] Publish the `apps/forge-node` image to a container registry (multi-arch) from the release workflow
-- [ ] Durable jobs for Node deployments (job table in SQLite), so queued mirror jobs survive a restart instead of waiting for the next notification or scheduled run
+- [x] Publish the `apps/forge-node` image to a container registry (multi-arch) from the release workflow (`ghcr.io/levino/git-forge-node`, `linux/amd64` and `linux/arm64`)
+- [x] Durable jobs for Node deployments (job table in SQLite, migration `0021_jobs`, leases so a crash re-runs), so queued mirror jobs survive a restart instead of waiting for the next notification or scheduled run
 
 ## M5a — Large pushes
 
 - [x] Streaming receive-pack and upload-pack with bounded memory, `packfile-uris`, geometric compaction
 - [x] Server-side import: create or update a repository by pulling from a URL (no request body limit), in resumable steps driven by a queue
+- [x] Import from GitHub (opt-in): issues, pull requests, comments, reviews, review comments, labels, milestones, releases and assets with their numbers, authors and times (migration `0023_imports`, design §7 *metadata*)
 - [x] Chunked push helper: `git forge push` splits history into pushes below the platform body limit, using the unmodified git client; single executables per platform from the release workflow
 - [x] Import and mirror sync: stream fetched packs into the streaming indexer (via `ingestPack`)
-- [ ] Remote helper `git-remote-forge`: resumable multipart pack upload directly to object storage via presigned URLs, then a finalize call that indexes the pack and updates refs
+- [x] Import commits, blobs and LFS objects of any size; LFS endpoint from `.lfsconfig` (#51)
+- [x] Remote helper `git-remote-forge`: resumable pack upload in parts (presigned or through the function), then a finalize call that indexes the pack and updates refs
+- [ ] Finalize beyond one invocation's CPU budget (queued or stepwise)
 
 ## M5b — CI and distribution
 
@@ -84,22 +96,26 @@ Design: [design.md §15](design.md#ci).
 - [x] Spike, part 1: dispatch on push, one ephemeral JIT runner per job via `RunnerLauncher`, `needs` with skip on failure; job tokens (`GITHUB_TOKEN` read over Git HTTP, runtime token per job), instance secrets
 - [x] Spike, part 1: Cloudflare Container definition for the runner (Dockerfile, `wrangler.jsonc`)
 - [x] Spike, part 2: the real-runner integration test runs in GitHub CI
-- [ ] Deploy the runner container and deploy a hello-world Worker with `wrangler` from our own CI
+- [x] Runner container on Cloudflare Containers from the instance repository: Workers Builds builds `runner/Dockerfile`, `basic` instance type by default, inactivity timeout for jobs longer than 15 minutes
+- [ ] Hello-world workflow on the production instance; deploy a Worker with `wrangler` from our own CI
 - [x] `uses:` actions: `ActionDownloadInfo` with tarballs streamed from repositories on the forge (mirrors of `actions/checkout`, …), name mapping, optional fallback to github.com tarballs; shallow fetch (`deepen`) for `actions/checkout`
 - [x] Expressions server-side: job-level `if`, `runs-on` expressions, `strategy`/`matrix` (include/exclude, fail-fast, max-parallel), job outputs across `needs`, `env`/`defaults`, step `if`/`continue-on-error`/`timeout-minutes`, workflow `concurrency`
 - [x] Cancellation (`JobCancellation`), job timeouts, reaper for expired locks, dead runners and lost launches, re-runs (all, failed, one job) as new attempts
 - [x] Per-repository and per-environment secrets (AES-GCM in SQLite under an instance key), environments with required reviewers (`pending_deployments`), no secrets for untrusted runs
 - [x] `workflow_dispatch` (typed inputs), `schedule` (cron table + Worker cron), `pull_request` trigger function (`queueRunsForPullRequest`, wired to collaboration's events); check runs per job through a `CheckRunSink`
 - [x] `pull_request` runs from the collaboration package's pull request events; check runs written with its store
-- [ ] `paths` filters; job-level `concurrency`; configuration variables (`vars`)
-- [ ] Broker and run service (v2 flow), results service, message encryption; then cache, artifacts, OIDC id tokens
+- [x] `paths`/`paths-ignore` filters; job-level `concurrency`; repository and environment variables (`vars`)
+- [x] Results service without a broker: `actions/cache@v4` (v1 and v2), artifacts v4, OIDC ID tokens (ES256 or EdDSA)
+- [ ] Official artifact actions v4 on non-`*.localhost` hosts (client-side GHES check in `@actions/artifact`), artifacts v3
+- [ ] Verify ID token trust against real AWS / Google Cloud accounts
+- [ ] Broker and run service (v2 flow), message encryption (not needed so far)
 - [ ] External providers: signed `workflow_job` webhook delivery, GitHub App auth (JWT → installation token, manifest flow) and PATs on `/api/v3`, org-level runners; try WarpBuild Enterprise, AWS CodeBuild, RunsOn
 - [ ] `container:` and `services:` (Docker-in-Docker in the runner container)
-- [ ] Web UI for runs and live logs
+- [x] Web UI for runs and live logs (runs per workflow, jobs, log polling, cancel, re-run all, failed or one job)
 - [x] "Deploy to Cloudflare" button in the README pointing at the instance template; template wired to accounts (`BOOTSTRAP_TOKEN`)
 - [x] Release artifact (bundled worker + migrations + checksums) and instance template with pinned version
-- [ ] Create `levino/git-forge-instance`, add the deploy key secret `INSTANCE_TEMPLATE_DEPLOY_KEY`, cut the first release
-- [ ] Verify the Deploy button, Workers Builds settings and automatic provisioning of D1/R2 of the template against a real Cloudflare account
+- [x] Minimal instance template: one `wrangler.toml` whose `[build]` command downloads and verifies the pinned bundle, resources provisioned from it, self-migrating Worker, first admin via a one-time `instance_admin_claims` row; Deploy button on the monorepo subdirectory; release notes print the `V`/`S` pin and the release workflow pins it in the template
+- [ ] Verify the Deploy button against a real Cloudflare account
 
 ## M6 — Web UI (Astro SSR)
 
@@ -113,12 +129,19 @@ Design: [design.md §18](design.md#18-web-ui).
 - [x] Login pages (sign-in, invite, device code entry, break-glass) rendered by the UI from the login package's page models; sessions in the middleware; account menu with sign-out
 - [x] Account settings: personal access tokens (create, revoke), passkeys (add, remove), linking an OIDC identity
 - [x] Notifications inbox (unread/all, mark read, done, all read) and repository releases (list, tag page, notes, asset downloads)
-- [ ] List and unlink linked OIDC identities, list and end sessions
-- [ ] Organizations and teams
-- [ ] Repository settings (visibility, collaborators, branch protection, federation trust)
-- [ ] Mirror settings, status and alarms
-- [ ] Blame, syntax highlighting in diffs and Markdown code blocks
-- [ ] Explore and profile listings without one access check per repository
+- [x] New repository page (owner, name, visibility, default branch) and repository import with a status page; "New" in the navbar and on the dashboard
+- [x] List and unlink linked OIDC identities, list and end sessions
+- [x] Organizations and teams (create, members and owners, teams, team members, team repository roles)
+- [x] JSON API for organizations and teams on the same operations (`/api/orgs/…`)
+- [x] Instance admin page and API (admins, trusted instances, list of this instance's mirrors with their sync state and alarms, `GET /api/admin/mirrors`)
+- [ ] Mirror overview UI on top of the attestation API of design §10 (lag, ref checksum history, spot checks)
+- [x] Repository settings (visibility, collaborators, branch protection, federation trust)
+- [x] Repository lifecycle: description, website, topics (`/api/v3` shape), rename and transfer with redirects for pages, API, Git and LFS, archive (read-only), soft delete with a 7-day grace period, account and organization renames; stable storage prefixes (migration `0024`)
+- [x] Mirror settings, status and alarms (add, sync, deep check, detach)
+- [x] Blame, syntax highlighting in diffs and Markdown code blocks
+- [x] Explore and profile listings without one access check per repository (one SQL query, stored default branch and last commit time, sort and paging)
+- [x] Search box and results page (repositories, issues and pull requests, discussions, users)
+- [ ] Issue/PR UI: labels, assignees, milestones, reviewer requests, suggested changes, `#N` autolinks in rendered Markdown
 
 ## M7 — Collaboration
 
@@ -133,18 +156,20 @@ Design: [design.md §17](design.md#17-collaboration).
 - [x] Commit statuses and check runs (storage and API; CI writes them)
 - [x] Discussions: categories, threads, answers
 - [x] REST API under `/api/v3` with GitHub-compatible shapes, wired into the Worker
+- [x] Web UI: issues (list, new, timeline, comment, close/reopen), pull requests (list, new, conversation with reviews, checks and merge box, commits, files with inline line comments), discussions (categories, threads, replies, answers)
 - [ ] Pull requests from forks
 - [ ] CODEOWNERS parsing for `require_code_owner_reviews`
 - [ ] Rename detection in merges (renames are reported as conflicts today)
 - [ ] In-browser conflict resolution
-- [ ] Reactions, search (FTS5), notifications
+- [x] Search (FTS5): repositories, issues, pull requests, discussions with comments, users; access-filtered; `/api/search`, `/api/v3/search/*`
+- [ ] Reactions, notifications
 - [ ] Web UI for issues, pull requests and discussions (separate work package)
 - [ ] Submit via form
 
 ## Later
 
 - [x] Email adapter in the core, Amazon SES v2 implementation (`@git-forge/ses`), console adapter for development
-- [ ] SMTP email adapter for the Node deployment
+- [x] SMTP email adapter for the Node deployment (`@git-forge/smtp`: STARTTLS or implicit TLS, `AUTH PLAIN`/`LOGIN`)
 - [x] Notifications: event log, watching and participating subscriptions, mentions, per-user settings, inbox API (`/api/v3/notifications`), email digests (instant, hourly, daily) via the job queue (design §16)
 - [x] Event producers: push, create/delete, mirror alarms, CI job and run completion, releases
 - [ ] Event producers: issues, pull requests, reviews, comments (builders exist; emitted by the collaboration package)
@@ -152,7 +177,9 @@ Design: [design.md §17](design.md#17-collaboration).
 - [ ] Webhooks: `POST …/hooks/{id}/tests`, GitHub App installations, encrypted secrets
 - [x] Releases: GitHub-compatible REST API, tags created on publish, assets stored as LFS objects behind the media URL, download redirects
 - [ ] Releases: source archives (`tarball_url`, `zipball_url`), generated release notes, web UI
-- [x] Backups at the bucket level (design §19): bucket replication to an Object-Lock bucket, D1 Time Travel and exports; documented, no code
+- [x] Built-in backups (design §19): scheduled bounded `backup` jobs copy a database dump and every object into a write-once `BACKUP` target (R2 bucket lock, S3 Object Lock) with SHA-256 verification; admin panel and API (status, run now, verify); `git-forge-node restore`, `restore-sql`, `backup-verify` (migration `0029_backups`)
 - [ ] Partial visibility
 - [x] External mirror verification: ref checksums, signed attestations, byte-range spot checks of packs and LFS objects, signed overview (design §10)
-- [ ] Pages
+- [x] Pages (design §20): branch source (`/` or `/docs`, redeploy on push), tar upload deployments, GitHub's Pages REST API, `PAGES_HOST` pattern and `PAGES_DOMAINS` from config, immutable content-addressed deployments with atomic switch, LFS files via media URLs, content types, `404.html`, CDN cache headers, private sites via a session handoff to a host-only cookie
+- [x] Pages: deployments from stored workflow artifacts, so `actions/deploy-pages` works unchanged
+- [ ] Pages: settings in the web UI, preview deployments, `pages/health`

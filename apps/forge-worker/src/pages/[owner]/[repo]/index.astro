@@ -4,11 +4,13 @@ import RepoHeader from '../../../components/RepoHeader.astro'
 import TreeBrowser from '../../../components/TreeBrowser.astro'
 import Layout from '../../../layouts/Layout.astro'
 import { browse } from '../../../ui/browse.ts'
+import { importStateFor } from '../../../ui/new-repository.ts'
 import { openRepository } from '../../../ui/repository.ts'
 
 if (Astro.params.repo!.endsWith('.git')) return Astro.redirect(`/${Astro.params.owner}/${Astro.params.repo!.slice(0, -4)}`, 301)
 const repo = await openRepository(Astro.locals.forge, Astro.locals.principal, Astro.params.owner!, Astro.params.repo!)
 const view = repo.kind === 'ok' ? await browse(repo, [], 'tree') : null
+const imported = repo.kind === 'ok' && view?.kind === 'empty' ? await importStateFor(Astro.locals.forge, Astro.locals.session, repo.name) : null
 ---
 
 {
@@ -17,7 +19,7 @@ const view = repo.kind === 'ok' ? await browse(repo, [], 'tree') : null
   ) : (
     <Layout title={`${repo.name.owner}/${repo.name.name}`}>
       <RepoHeader repo={repo} tab="code" />
-      <TreeBrowser repo={repo} view={view} />
+      <TreeBrowser repo={repo} view={view} importing={imported !== null} />
     </Layout>
   )
 }

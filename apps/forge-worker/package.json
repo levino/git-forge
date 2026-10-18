@@ -8,6 +8,7 @@
     "./app": "./src/app.ts",
     "./config": "./src/config.ts",
     "./mirror-federation": "./src/mirror-federation.ts",
+    "./backup": "./src/backup.ts",
     "./test/*": "./test/*"
   },
   "scripts": {
@@ -33,7 +34,9 @@
     "@git-forge/collaboration": "workspace:*",
     "@git-forge/core": "workspace:*",
     "@git-forge/notifications": "workspace:*",
+    "@git-forge/pages": "workspace:*",
     "@git-forge/releases": "workspace:*",
+    "@git-forge/s3": "workspace:*",
     "@git-forge/ses": "workspace:*",
     "astro": "7.4.0",
     "rehype-sanitize": "6.0.0",

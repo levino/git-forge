@@ -1,10 +1,10 @@
 import { readAll, SizeLimitError } from './bytes.ts'
 import { parseRange } from './content.ts'
 import { advertiseReceivePack, type PushOutcome, receivePack, type ReceiveOptions, type RefPolicy } from './receive-pack.ts'
-import { handleLfsRequest, type LfsHttpOptions, type ObjectAccess } from './lfs-http.ts'
+import { handleLfsRequest, type LfsHttpOptions } from './lfs-http.ts'
 import { lfsPushCheck } from './lfs.ts'
+import { handleUploadRequest, type UploadHttpOptions, uploadLimits } from './pack-upload-http.ts'
 import { gitPrefix, isValidName, readRefs, type RepositoryName } from './repository.ts'
-import type { ContentPolicy } from './restricted.ts'
 import type { Storage } from './storage.ts'
 import { advertiseUploadPackV2, type PackfileUri, uploadPackV2 } from './upload-pack.ts'
 
@@ -25,9 +25,8 @@ export type GitHttpOptions = {
   readonly receive?: Omit<ReceiveOptions, 'storage' | 'repo'>
   readonly onPush?: (repo: RepositoryName, outcome: PushOutcome) => Promise<void>
   readonly lfs?: LfsHttpOptions | false
+  readonly uploads?: UploadHttpOptions | false
   readonly packfileUris?: (request: Request, repo: RepositoryName) => PackfileUri | undefined | Promise<PackfileUri | undefined>
-  readonly contentPolicy?: (request: Request, repo: RepositoryName) => Promise<ContentPolicy | null>
-  readonly objectAccess?: ObjectAccess
 }
 
 export const publicPackfileUris =
@@ -159,11 +158,29 @@ export const handleGitRequest = async (request: Request, options: GitHttpOptions
       storage,
       ...(options.authorize ? { authorize: options.authorize } : {}),
       ...(options.lfs ? { lfs: options.lfs } : {}),
-      ...(options.objectAccess ? { objectAccess: options.objectAccess } : {}),
     })
     if (lfs) return lfs
   }
   const limit = options.maxRequestBytes ?? 64 * 1024 * 1024
+  if (options.uploads !== false) {
+    const uploads = await handleUploadRequest(request, repo, path, {
+      storage,
+      ...(options.authorize ? { authorize: options.authorize } : {}),
+      limits: uploadLimits(options.uploads, options.maxPushBytes ?? options.maxRequestBytes ?? Number.POSITIVE_INFINITY),
+      presignExpiresInSeconds: options.uploads?.presignExpiresInSeconds ?? 3600,
+      ...(options.uploads?.presignPut ? { presignPut: options.uploads.presignPut } : {}),
+      receive: async (incoming) => ({
+        ...options.receive,
+        storage,
+        repo,
+        policy: combinePolicies(options.receive?.policy, await options.pushPolicy?.(incoming, repo)),
+        beforeUpdate: withLfsCheck(options, repo),
+      }),
+      ...(options.onPush ? { onPush: options.onPush } : {}),
+      ...(options.receive?.now ? { now: options.receive.now } : {}),
+    })
+    if (uploads) return uploads
+  }
   const service = url.searchParams.get('service')
   const isReceive = service === 'git-receive-pack' || path === '/git-receive-pack'
   const isGitPath = path === '/git-upload-pack' || path === '/git-receive-pack' || DUMB_PATHS.some((pattern) => pattern.test(path))
@@ -207,11 +224,10 @@ export const handleGitRequest = async (request: Request, options: GitHttpOptions
   if (request.method === 'POST' && path === '/git-receive-pack') {
     const pushLimit = options.maxPushBytes ?? options.maxRequestBytes ?? Number.POSITIVE_INFINITY
     const policy = combinePolicies(options.receive?.policy, await options.pushPolicy?.(request, repo))
-    const contentPolicy = (await options.contentPolicy?.(request, repo)) ?? options.receive?.contentPolicy
     let received: Awaited<ReturnType<typeof receivePack>>
     try {
       received = await receivePack(
-        { ...options.receive, storage, repo, policy, beforeUpdate: withLfsCheck(options, repo), ...(contentPolicy ? { contentPolicy } : {}) },
+        { ...options.receive, storage, repo, policy, beforeUpdate: withLfsCheck(options, repo) },
         limited(bodyStream(request), pushLimit),
       )
     } catch (error) {

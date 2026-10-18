@@ -1,10 +1,10 @@
 import { matchContentRoute, matchGitRoute } from '@git-forge/core'
 
-const FORGE_PREFIXES = ['/api/', '/_services/', '/.well-known/', '/login/']
+const FORGE_PREFIXES = ['/api/', '/_services/', '/_pages/', '/.well-known/', '/login/', '/twirp/']
 
 const FORGE_PATHS = new Set(['/api', '/login', '/logout'])
 
-const GIT_SUBPATH = /^\/(HEAD|info\/refs|git-upload-pack|git-receive-pack|objects\/.+|info\/lfs(\/.*)?|releases\/download\/.+)$/
+const GIT_SUBPATH = /^\/(HEAD|info\/refs|git-upload-pack|git-receive-pack|objects\/.+|info\/lfs(\/.*)?|forge\/uploads(\/.*)?|releases\/download\/.+)$/
 
 export const isForgePath = (pathname: string): boolean => {
   if (FORGE_PATHS.has(pathname) || FORGE_PREFIXES.some((prefix) => pathname.startsWith(prefix))) return true

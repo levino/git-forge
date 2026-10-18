@@ -149,6 +149,11 @@ export const repositoryJson = (
   full_name: `${repository.owner}/${repository.name}`,
   private: repository.visibility === 'private',
   visibility: repository.visibility,
+  description: repository.description,
+  homepage: repository.homepage,
+  topics: repository.topics,
+  archived: repository.archived,
+  disabled: false,
   owner: {
     login: repository.owner,
     id: repository.ownerId,

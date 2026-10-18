@@ -1,0 +1,77 @@
+---
+import Breadcrumbs from '../../../../components/Breadcrumbs.astro'
+import NotFound from '../../../../components/NotFound.astro'
+import RefPicker from '../../../../components/RefPicker.astro'
+import RepoHeader from '../../../../components/RepoHeader.astro'
+import Layout from '../../../../layouts/Layout.astro'
+import { isoTime, relativeTime, shortId } from '../../../../ui/format.ts'
+import { blameView, parsePage } from '../../../../ui/history.ts'
+import { blameUrl, blobUrl, commitUrl, openRepository } from '../../../../ui/repository.ts'
+
+const repo = await openRepository(Astro.locals.forge, Astro.locals.principal, Astro.params.owner!, Astro.params.repo!)
+const segments = (Astro.params.path ?? '').split('/').filter((segment) => segment !== '')
+const depth = parsePage(Astro.url.searchParams.get('depth'))
+const view = repo.kind === 'ok' ? await blameView(repo, segments, depth) : null
+const now = Math.floor(Date.now() / 1000)
+---
+
+{
+  repo.kind !== 'ok' || view?.kind !== 'blame' ? (
+    <NotFound />
+  ) : (
+    <Layout title={`Blame · ${view.target.path.join('/')} · ${repo.name.owner}/${repo.name.name}`} wide>
+      <RepoHeader repo={repo} tab="code" />
+      <div class="flex flex-wrap items-center gap-3 mb-3">
+        <RefPicker repo={repo} current={view.target.ref} link={(ref: string) => blameUrl(repo.name, ref, view.target.path)} />
+        <Breadcrumbs repo={repo} refName={view.target.ref} path={view.target.path} />
+        <a class="btn btn-xs ml-auto" href={blobUrl(repo.name, view.target.ref, view.target.path)}>
+          View file
+        </a>
+      </div>
+      <div class="border border-base-300 rounded-box overflow-x-auto">
+        <table class="font-mono text-xs leading-5 w-full border-separate border-spacing-0" aria-label="Blame">
+          {view.ranges.map((range) => (
+            <tbody class="border-t border-base-300">
+              {view.lines.slice(range.start - 1, range.start - 1 + range.count).map((line, offset) => (
+                <tr id={`L${range.start + offset}`} class="code-line target:bg-warning/20">
+                  {offset === 0 && (
+                    <td rowspan={range.count} class="align-top px-3 py-0.5 w-64 max-w-64 font-sans bg-base-200 border-t border-base-300">
+                      {range.commit ? (
+                        <div class="flex gap-2 items-baseline min-w-0">
+                          <a href={commitUrl(repo.name, range.commit.id)} class="truncate hover:underline min-w-0 flex-1" title={range.commit.summary}>
+                            {range.commit.summary}
+                          </a>
+                          <time datetime={isoTime(range.commit.committer.timestamp)} class="text-base-content/60 whitespace-nowrap" title={range.commit.author.name}>
+                            {relativeTime(range.commit.committer.timestamp, now)}
+                          </time>
+                          <a href={commitUrl(repo.name, range.commit.id)} class="font-mono text-base-content/60 hover:underline">
+                            {shortId(range.commit.id)}
+                          </a>
+                        </div>
+                      ) : (
+                        <span class="text-base-content/60">Older history not loaded</span>
+                      )}
+                    </td>
+                  )}
+                  <td class="select-none text-right pr-3 pl-4 w-px text-base-content/50 align-top">
+                    <a href={`#L${range.start + offset}`} class="hover:underline">
+                      {range.start + offset}
+                    </a>
+                  </td>
+                  <td class="whitespace-pre pr-4">{line.map((token) => (token.style ? <span style={token.style}>{token.content}</span> : token.content))}</td>
+                </tr>
+              ))}
+            </tbody>
+          ))}
+        </table>
+      </div>
+      {view.more && (
+        <p class="mt-4 text-center">
+          <a class="btn btn-sm" href={`?depth=${view.depth + 1}`}>
+            Load more history
+          </a>
+        </p>
+      )}
+    </Layout>
+  )
+}

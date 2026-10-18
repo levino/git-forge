@@ -32,13 +32,13 @@ const ago = (iso: string | undefined) => (iso ? relativeTime(Math.floor(Date.par
   !view ? (
     <NotFound />
   ) : (
-    <Layout title="Instance administration">
-      <h1 class="text-2xl font-semibold mb-6">Instance administration</h1>
+    <Layout title="Instance administration" narrow>
+      <h1 class="text-xl font-semibold mb-5">Instance administration</h1>
       {outcome && <div role={outcome.kind === 'error' ? 'alert' : 'status'} class:list={['alert mb-6', outcome.kind === 'error' ? 'alert-error' : 'alert-success']}>{outcome.message}</div>}
-      <div class="grid gap-10 md:grid-cols-2 mb-10">
-        <section aria-labelledby="admins">
-          <h2 id="admins" class="text-xl font-semibold mb-2">Admins</h2>
-          <ul class="border border-base-300 rounded-box divide-y divide-base-300 mb-4">
+      <div class="grid gap-x-6 md:grid-cols-2 items-start">
+        <section class="panel" aria-labelledby="admins">
+          <h2 id="admins" class="panel-title">Admins</h2>
+          <ul class="border border-base-300 rounded-box divide-y divide-base-300">
             {view.admins.map((admin) => (
               <li class="flex items-center gap-2 px-4 py-2">
                 <a href={`/${admin.login}`} class="link link-hover font-semibold flex-1">{admin.login}</a>
@@ -54,17 +54,17 @@ const ago = (iso: string | undefined) => (iso ? relativeTime(Math.floor(Date.par
           <form method="post" class="flex flex-wrap items-end gap-2" aria-label="Add an admin">
             <input type="hidden" name="csrf" value={session.csrf} />
             <input type="hidden" name="action" value="add-admin" />
-            <label class="flex flex-col gap-1 text-sm">User<input name="login" class="input input-sm" required autocomplete="off" /></label>
+            <label class="field">User<input name="login" class="input input-sm" required autocomplete="off" /></label>
             <button class="btn btn-sm">Add admin</button>
           </form>
         </section>
-        <section aria-labelledby="instances">
-          <h2 id="instances" class="text-xl font-semibold mb-2">Trusted instances</h2>
-          <p class="text-sm text-base-content/70 mb-2">Instances whose signed tokens this instance accepts. Each repository still decides which of them may read it.</p>
+        <section class="panel" aria-labelledby="instances">
+          <h2 id="instances" class="panel-title">Trusted instances</h2>
+          <p class="text-base-content/70">Instances whose signed tokens this instance accepts. Each repository still decides which of them may read it.</p>
           {view.trustedInstances.length === 0 ? (
-            <p class="mb-4 text-base-content/70">No trusted instances.</p>
+            <p class="text-base-content/70">No trusted instances.</p>
           ) : (
-            <ul class="border border-base-300 rounded-box divide-y divide-base-300 mb-4">
+            <ul class="border border-base-300 rounded-box divide-y divide-base-300">
               {view.trustedInstances.map((trusted) => (
                 <li class="flex flex-wrap items-center gap-2 px-4 py-2">
                   <span class="font-mono text-sm break-all flex-1">{trusted.issuer}</span>
@@ -82,14 +82,14 @@ const ago = (iso: string | undefined) => (iso ? relativeTime(Math.floor(Date.par
           <form method="post" class="flex flex-wrap items-end gap-2" aria-label="Trust an instance">
             <input type="hidden" name="csrf" value={session.csrf} />
             <input type="hidden" name="action" value="trust" />
-            <label class="flex flex-col gap-1 text-sm">Issuer<input name="issuer" type="url" class="input input-sm font-mono" required placeholder="https://mirror.example" /></label>
-            <label class="flex flex-col gap-1 text-sm">Key thumbprint (optional)<input name="thumbprint" class="input input-sm font-mono" autocomplete="off" /></label>
+            <label class="field">Issuer<input name="issuer" type="url" class="input input-sm font-mono" required placeholder="https://mirror.example" /></label>
+            <label class="field">Key thumbprint (optional)<input name="thumbprint" class="input input-sm font-mono" autocomplete="off" /></label>
             <button class="btn btn-sm">Trust</button>
           </form>
         </section>
       </div>
-      <section aria-labelledby="mirrors">
-        <h2 id="mirrors" class="text-xl font-semibold mb-2">Mirrors</h2>
+      <section class="panel" aria-labelledby="mirrors">
+        <h2 id="mirrors" class="panel-title">Mirrors</h2>
         {mirrors.length === 0 ? (
           <p class="text-base-content/70">No repository on this instance mirrors another one.</p>
         ) : (

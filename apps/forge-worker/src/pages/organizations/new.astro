@@ -12,10 +12,10 @@ if (Astro.request.method === 'POST') {
 }
 ---
 
-<Layout title="New organization">
-  <h1 class="text-2xl font-semibold mb-4">New organization</h1>
+<Layout title="New organization" narrow>
+  <h1 class="text-xl font-semibold mb-5">New organization</h1>
   {outcome?.kind === 'error' && <div role="alert" class="alert alert-error mb-4">{outcome.message}</div>}
-  <form method="post" class="flex flex-col gap-3 max-w-md" aria-label="New organization">
+  <form method="post" class="panel max-w-2xl" aria-label="New organization">
     <input type="hidden" name="csrf" value={session.csrf} />
     <input type="hidden" name="action" value="create" />
     <label class="text-sm font-semibold" for="login">Organization name</label>

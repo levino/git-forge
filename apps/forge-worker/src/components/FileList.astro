@@ -1,11 +1,12 @@
 ---
 import type { DirectoryEntry } from '@git-forge/core'
 import { blobUrl, type OpenRepository, treeUrl } from '../ui/repository.ts'
+import Icon from './Icon.astro'
 
-type Props = { repo: OpenRepository; refName: string; path: readonly string[]; entries: readonly DirectoryEntry[] }
+type Props = { repo: OpenRepository; refName: string; path: readonly string[]; entries: readonly DirectoryEntry[]; lfs?: ReadonlySet<string> }
 
-const { repo, refName, path, entries } = Astro.props
-const icon = (entry: DirectoryEntry) => (entry.kind === 'tree' ? '📁' : entry.kind === 'submodule' ? '📦' : entry.kind === 'symlink' ? '🔗' : '📄')
+const { repo, refName, path, entries, lfs = new Set<string>() } = Astro.props
+const icon = (entry: DirectoryEntry) => (entry.kind === 'tree' ? 'folder' : entry.kind === 'submodule' ? 'submodule' : entry.kind === 'symlink' ? 'symlink' : lfs.has(entry.name) ? 'lfs' : 'file')
 const href = (entry: DirectoryEntry) =>
   entry.kind === 'tree' ? treeUrl(repo.name, refName, [...path, entry.name]) : entry.kind === 'submodule' ? null : blobUrl(repo.name, refName, [...path, entry.name])
 ---
@@ -14,9 +15,10 @@ const href = (entry: DirectoryEntry) =>
   <tbody>
     {
       path.length > 0 && (
-        <tr>
-          <td>
-            <a href={treeUrl(repo.name, refName, path.slice(0, -1))} class="link link-hover" aria-label="Parent directory">
+        <tr class="hover:bg-base-200/60">
+          <td class="py-2">
+            <a href={treeUrl(repo.name, refName, path.slice(0, -1))} class="flex items-center gap-2.5 hover:underline" aria-label="Parent directory">
+              <Icon name="folder" class="size-4 text-primary/70" />
               ..
             </a>
           </td>
@@ -25,16 +27,17 @@ const href = (entry: DirectoryEntry) =>
     }
     {
       entries.map((entry) => (
-        <tr class="hover:bg-base-200">
-          <td class="flex items-center gap-2 min-w-0">
-            <span aria-hidden="true">{icon(entry)}</span>
+        <tr class="hover:bg-base-200/60">
+          <td class="flex items-center gap-2.5 min-w-0 py-2">
+            <Icon name={icon(entry)} class:list={['size-4', entry.kind === 'tree' ? 'text-primary/70' : 'text-base-content/50']} />
             {href(entry) ? (
-              <a href={href(entry)} class="link link-hover truncate">
+              <a href={href(entry)} class="hover:underline hover:text-primary truncate">
                 {entry.name}
               </a>
             ) : (
               <span class="truncate">{entry.name}</span>
             )}
+            {lfs.has(entry.name) && <span class="badge badge-xs">LFS</span>}
             <span class="sr-only">{entry.kind === 'tree' ? '(directory)' : entry.kind === 'submodule' ? '(submodule)' : ''}</span>
           </td>
         </tr>

@@ -1,23 +1,49 @@
 ---
 import type { RepositorySubject } from '@git-forge/accounts'
+import { isoTime, relativeTime } from '../ui/format.ts'
+import { repositorySummaries } from '../ui/listing.ts'
 import { repoUrl } from '../ui/repository.ts'
+import EmptyState from './EmptyState.astro'
+import Icon from './Icon.astro'
 
 type Props = { repositories: readonly RepositorySubject[]; showOwner?: boolean; empty?: string }
 
 const { repositories, showOwner = true, empty = 'No repositories yet.' } = Astro.props
+const summaries = await repositorySummaries(Astro.locals.forge, repositories)
+const now = Math.floor(Date.now() / 1000)
 ---
 
 {
-  repositories.length === 0 ? (
-    <p class="text-base-content/70">{empty}</p>
+  summaries.length === 0 ? (
+    <EmptyState icon="repo" title={empty} />
   ) : (
-    <ul class="border border-base-300 rounded-box divide-y divide-base-300" aria-label="Repositories">
-      {repositories.map((repo) => (
-        <li class="flex flex-wrap items-center gap-2 px-4 py-3">
-          <a href={repoUrl(repo)} class="link link-hover font-semibold break-all">
-            {showOwner ? `${repo.owner}/${repo.name}` : repo.name}
-          </a>
-          <span class="badge badge-outline badge-sm">{repo.visibility === 'public' ? 'Public' : 'Private'}</span>
+    <ul class="border border-base-300 rounded-box divide-y divide-base-300 bg-base-100" aria-label="Repositories">
+      {summaries.map((repo) => (
+        <li class="flex items-start gap-3 px-4 py-3">
+          <Icon name={repo.visibility === 'public' ? 'repo' : 'lock'} class="size-4 mt-0.5 text-base-content/50" />
+          <div class="min-w-0 flex-1">
+            <div class="flex flex-wrap items-center gap-2">
+              <a href={repoUrl(repo)} class="font-semibold text-primary hover:underline break-all">
+                {showOwner ? `${repo.owner}/${repo.name}` : repo.name}
+              </a>
+              <span class="badge badge-sm">{repo.visibility === 'public' ? 'Public' : 'Private'}</span>
+            </div>
+            <p class="mt-1 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-base-content/60">
+              {repo.defaultBranch && (
+                <span class="flex items-center gap-1 font-mono">
+                  <Icon name="branch" class="size-3.5" />
+                  {repo.defaultBranch}
+                </span>
+              )}
+              {repo.updatedAt !== null ? (
+                <span>
+                  Updated <time datetime={isoTime(repo.updatedAt)}>{relativeTime(repo.updatedAt, now)}</time>
+                </span>
+              ) : (
+                <span>Empty</span>
+              )}
+            </p>
+          </div>
         </li>
       ))}
     </ul>

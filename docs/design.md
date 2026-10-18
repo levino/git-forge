@@ -1988,8 +1988,11 @@ progress answers 409.
 
 ### Rendering
 
-- Tailwind CSS with daisyUI, themes `light` (default) and `dark`
-  (`prefers-color-scheme`). The stylesheet is compiled at build time
+- Tailwind CSS with daisyUI, own themes `forge` (default) and `forge-dark`
+  (`prefers-color-scheme`) in `src/styles/global.css`: neutral base, one blue
+  accent, flat buttons, system font stack. Icons are inline Lucide paths
+  (MIT) in `src/components/Icon.astro`; avatars are initials coloured from a
+  hash of the name. The stylesheet is compiled at build time
   (`?inline`) and served by the Worker at `/-/style.css?v=<hash>` with an
   immutable cache header, so pages stay small and the release needs no asset
   directory.
@@ -2002,9 +2005,12 @@ progress answers 409.
   relative images to the raw endpoint.
 - LFS files are previewed through the media URL (images, video, audio, PDF),
   binary files through the raw URL at the commit id.
+- Repository lists read each repository's `refs.json` and head commit for
+  the default branch and the last update time. Tree views mark LFS files by
+  the `filter=lfs` patterns of the `.gitattributes` files on the path.
 - No client-side framework. Interactive bits use native elements
   (`<details>` dropdowns); islands are added only where a page needs them
-  (passkey ceremonies, diff line comments).
+  (passkey ceremonies, diff line comments, copy buttons).
 
 ### Tests
 

@@ -105,7 +105,7 @@ export type BranchProtectionApiOptions = {
   readonly prefix?: string
 }
 
-type JsonObject = Record<string, unknown>
+export type JsonObject = Record<string, unknown>
 
 const json = (status: number, body: unknown, headers: Record<string, string> = {}): Response =>
   new Response(status === 204 ? null : JSON.stringify(body), {
@@ -115,28 +115,28 @@ const json = (status: number, body: unknown, headers: Record<string, string> = {
 
 const failed = (errors: readonly string[]) => json(422, { message: 'Validation Failed', errors: errors.map((message) => ({ message })) })
 
-class ValidationError extends Error {}
+export class ProtectionValidationError extends Error {}
 
 const isObject = (value: unknown): value is JsonObject => typeof value === 'object' && value !== null && !Array.isArray(value)
 
 const bool = (body: JsonObject, key: string, fallback = false): boolean => {
   const value = body[key]
   if (value === undefined || value === null) return fallback
-  if (typeof value !== 'boolean') throw new ValidationError(`${key} must be a boolean`)
+  if (typeof value !== 'boolean') throw new ProtectionValidationError(`${key} must be a boolean`)
   return value
 }
 
 const strings = (body: JsonObject, key: string): string[] => {
   const value = body[key]
   if (value === undefined || value === null) return []
-  if (!Array.isArray(value) || !value.every((item) => typeof item === 'string')) throw new ValidationError(`${key} must be an array of strings`)
+  if (!Array.isArray(value) || !value.every((item) => typeof item === 'string')) throw new ProtectionValidationError(`${key} must be an array of strings`)
   return value as string[]
 }
 
 const section = (body: JsonObject, key: string): JsonObject | null => {
   const value = body[key]
   if (value === undefined || value === null) return null
-  if (!isObject(value)) throw new ValidationError(`${key} must be an object or null`)
+  if (!isObject(value)) throw new ProtectionValidationError(`${key} must be an object or null`)
   return value
 }
 
@@ -144,7 +144,7 @@ const enforceAdminsOf = (value: unknown): boolean => {
   if (value === undefined || value === null) return false
   if (typeof value === 'boolean') return value
   if (isObject(value) && typeof value.enabled === 'boolean') return value.enabled
-  throw new ValidationError('enforce_admins must be a boolean or null')
+  throw new ProtectionValidationError('enforce_admins must be a boolean or null')
 }
 
 const toggle = (body: JsonObject, key: string): boolean => {
@@ -153,7 +153,7 @@ const toggle = (body: JsonObject, key: string): boolean => {
   return bool(body, key)
 }
 
-const parseSettings = async (body: JsonObject, store: ProtectionStore, repository: RepositorySubject): Promise<BranchProtectionSettings> => {
+export const parseBranchProtectionSettings = async (body: JsonObject, store: ProtectionStore, repository: RepositorySubject): Promise<BranchProtectionSettings> => {
   const checks = section(body, 'required_status_checks')
   const reviews = section(body, 'required_pull_request_reviews')
   const restrictions = section(body, 'restrictions')
@@ -162,7 +162,7 @@ const parseSettings = async (body: JsonObject, store: ProtectionStore, repositor
         ...strings(checks, 'contexts'),
         ...(Array.isArray(checks.checks)
           ? checks.checks.map((check) => {
-              if (!isObject(check) || typeof check.context !== 'string') throw new ValidationError('checks must be objects with a context')
+              if (!isObject(check) || typeof check.context !== 'string') throw new ProtectionValidationError('checks must be objects with a context')
               return check.context
             })
           : []),
@@ -172,7 +172,7 @@ const parseSettings = async (body: JsonObject, store: ProtectionStore, repositor
   if (reviews && reviews.required_approving_review_count !== undefined) {
     const value = reviews.required_approving_review_count
     if (typeof value !== 'number' || !Number.isInteger(value) || value < 0 || value > MAX_REQUIRED_APPROVALS) {
-      throw new ValidationError(`required_approving_review_count must be an integer between 0 and ${MAX_REQUIRED_APPROVALS}`)
+      throw new ProtectionValidationError(`required_approving_review_count must be an integer between 0 and ${MAX_REQUIRED_APPROVALS}`)
     }
     count = value
   }
@@ -180,7 +180,7 @@ const parseSettings = async (body: JsonObject, store: ProtectionStore, repositor
     const ids: string[] = []
     for (const name of names) {
       const found = await find(name)
-      if (!found) throw new ValidationError(`unknown ${what} ${name}`)
+      if (!found) throw new ProtectionValidationError(`unknown ${what} ${name}`)
       ids.push(found.id)
     }
     return ids
@@ -188,10 +188,10 @@ const parseSettings = async (body: JsonObject, store: ProtectionStore, repositor
   let pushAllowances: BranchProtectionSettings['restrictions'] = null
   if (restrictions) {
     const teamSlugs = strings(restrictions, 'teams')
-    if (teamSlugs.length > 0 && repository.ownerKind !== 'organization') throw new ValidationError('teams can only be used for organization repositories')
+    if (teamSlugs.length > 0 && repository.ownerKind !== 'organization') throw new ProtectionValidationError('teams can only be used for organization repositories')
     const roles = strings(restrictions, 'roles')
     const invalid = roles.find((role) => !isRole(role))
-    if (invalid !== undefined) throw new ValidationError(`unknown role ${invalid}`)
+    if (invalid !== undefined) throw new ProtectionValidationError(`unknown role ${invalid}`)
     pushAllowances = {
       users: await resolve(
         strings(restrictions, 'users'),
@@ -266,7 +266,7 @@ const render = async (store: ProtectionStore, rule: BranchProtectionRule, url: s
   }
 }
 
-const auditActor = (principal: Principal): AuditActor => {
+export const protectionAuditActor = (principal: Principal): AuditActor => {
   switch (principal.kind) {
     case 'user':
       return { kind: 'user', id: principal.id }
@@ -331,7 +331,7 @@ export const handleBranchProtectionRequest = async (request: Request, options: B
   const existing = rules.find((rule) => rule.pattern === pattern) ?? null
   if (request.method === 'GET') return existing ? json(200, await render(store, existing, ruleUrl(pattern))) : json(404, { message: 'Branch not protected' })
   if (request.method === 'DELETE') {
-    return (await store.deleteBranchProtection(repository.id, pattern, auditActor(principal))) ? json(204, null) : json(404, { message: 'Branch not protected' })
+    return (await store.deleteBranchProtection(repository.id, pattern, protectionAuditActor(principal))) ? json(204, null) : json(404, { message: 'Branch not protected' })
   }
   let body: unknown
   try {
@@ -342,11 +342,11 @@ export const handleBranchProtectionRequest = async (request: Request, options: B
   if (!isObject(body)) return json(400, { message: 'Body must be a JSON object' })
   try {
     validateBranchPattern(pattern)
-    const settings = await parseSettings(body, store, repository)
-    const rule = await store.setBranchProtection(repository.id, pattern, settings, auditActor(principal))
+    const settings = await parseBranchProtectionSettings(body, store, repository)
+    const rule = await store.setBranchProtection(repository.id, pattern, settings, protectionAuditActor(principal))
     return json(200, await render(store, rule, ruleUrl(pattern)))
   } catch (error) {
-    if (error instanceof ValidationError || error instanceof AccountsError || error instanceof BranchPatternError) return failed([error.message])
+    if (error instanceof ProtectionValidationError || error instanceof AccountsError || error instanceof BranchPatternError) return failed([error.message])
     throw error
   }
 }

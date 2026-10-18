@@ -226,6 +226,9 @@ importers:
       '@git-forge/notifications':
         specifier: workspace:*
         version: link:../../packages/notifications
+      '@git-forge/pages':
+        specifier: workspace:*
+        version: link:../../packages/pages
       '@git-forge/releases':
         specifier: workspace:*
         version: link:../../packages/releases
@@ -453,6 +456,31 @@ importers:
       '@git-forge/core':
         specifier: workspace:*
         version: link:../core
+    devDependencies:
+      '@git-forge/accounts-node':
+        specifier: workspace:*
+        version: link:../accounts-node
+      '@types/node':
+        specifier: 22.20.5
+        version: 22.20.5
+      typescript:
+        specifier: 6.0.3
+        version: 6.0.3
+      vitest:
+        specifier: 4.1.11
+        version: 4.1.11(@types/node@22.20.5)(vite@8.3.4(@types/node@22.20.5))
+
+  packages/pages:
+    dependencies:
+      '@git-forge/accounts':
+        specifier: workspace:*
+        version: link:../accounts
+      '@git-forge/core':
+        specifier: workspace:*
+        version: link:../core
+      '@git-forge/notifications':
+        specifier: workspace:*
+        version: link:../notifications
     devDependencies:
       '@git-forge/accounts-node':
         specifier: workspace:*

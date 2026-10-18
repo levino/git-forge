@@ -13,6 +13,7 @@ describe('routing between the UI and the forge', () => {
     '/api/health',
     '/api/v3/repos/a/b/actions/runs',
     '/_services/actions/_apis/connectionData',
+    '/_pages/authorize',
     '/.well-known/jwks.json',
     '/login',
     '/login/device',

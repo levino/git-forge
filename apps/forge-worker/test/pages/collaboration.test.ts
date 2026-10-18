@@ -52,7 +52,7 @@ const render = async (page: Parameters<AstroContainer['renderToResponse']>[0], p
   return { status: response.status, location: response.headers.get('Location'), html: await response.text() }
 }
 
-const sessionOf = (principal: UserPrincipal): UiSession => ({ principal, csrf: 'csrf-token' })
+const sessionOf = (principal: UserPrincipal): UiSession => ({ principal, csrf: 'csrf-token', sessionId: 'session-1' })
 
 beforeAll(async () => {
   forge = await nodeForge()

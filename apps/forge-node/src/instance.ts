@@ -3,7 +3,7 @@ import { dirname } from 'node:path'
 import type { DatabaseSync } from 'node:sqlite'
 import { applyMigrations, type Database, MIGRATIONS, pendingMigrations } from '@git-forge/accounts'
 import { openSqliteDatabase } from '@git-forge/accounts-node'
-import { continueImport, createConsoleEmailSender, type EmailSender, type FetchFunction, type ImportJob, type JobOutcome, type Storage } from '@git-forge/core'
+import { continueImport, createConsoleEmailSender, type EmailSender, type FetchFunction, type ImportJob, type JobOutcome, type Storage, storagePublisher } from '@git-forge/core'
 import { FsStorage, nodeDigests } from '@git-forge/node'
 import { S3Storage } from '@git-forge/s3'
 import { createSesEmailSender } from '@git-forge/ses'
@@ -127,6 +127,7 @@ export const createInstance = async (vars: NodeVars, overrides: InstanceOverride
     digests: nodeDigests,
     jobs,
     scheduleImport: (job, delaySeconds) => imports.enqueue(job, { delaySeconds }),
+    ...(config.lfsPublishDir ? { lfsPublisher: storagePublisher(new FsStorage(config.lfsPublishDir), vars.LFS_PUBLISH_PREFIX?.trim() ?? '') } : {}),
     ...(overrides.fetch ? { fetch: overrides.fetch } : {}),
     ...(overrides.now ? { now: overrides.now } : {}),
     ...(actions

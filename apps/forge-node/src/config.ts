@@ -26,6 +26,7 @@ export type NodeVars = ForgeVars & {
   readonly SMTP_USERNAME?: string
   readonly SMTP_PASSWORD?: string
   readonly SMTP_HELO?: string
+  readonly LFS_PUBLISH_DIR?: string
 }
 
 export type SmtpSettings = {
@@ -52,6 +53,7 @@ export type NodeConfig = {
   readonly schedule: CronSchedule
   readonly jobConcurrency: number
   readonly email: NodeEmailSettings | undefined
+  readonly lfsPublishDir: string | null
 }
 
 export const DEFAULT_PORT = 8080
@@ -172,5 +174,6 @@ export const parseNodeConfig = (vars: NodeVars): NodeConfig => {
     schedule: schedule(vars.SCHEDULE),
     jobConcurrency: integer('JOB_CONCURRENCY', vars.JOB_CONCURRENCY, DEFAULT_JOB_CONCURRENCY, 1, 64),
     email: emailSettings(vars),
+    lfsPublishDir: present(vars.LFS_PUBLISH_DIR) ?? null,
   }
 }

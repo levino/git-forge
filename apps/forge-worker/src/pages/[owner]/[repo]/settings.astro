@@ -1,0 +1,236 @@
+---
+import { ROLES } from '@git-forge/accounts'
+import NotFound from '../../../components/NotFound.astro'
+import RepoHeader from '../../../components/RepoHeader.astro'
+import Layout from '../../../layouts/Layout.astro'
+import { ForgeError, type RepositorySettings } from '../../../app.ts'
+import { openRepository } from '../../../ui/repository.ts'
+import { settingsAction, type SettingsOutcome } from '../../../ui/settings.ts'
+
+const { forge, principal } = Astro.locals
+let session = Astro.locals.session
+const repo = await openRepository(forge, principal, Astro.params.owner!, Astro.params.repo!)
+if (repo.kind === 'ok' && !session) return Astro.redirect(`/login?return_to=${encodeURIComponent(Astro.url.pathname)}`)
+let outcome: SettingsOutcome | null = null
+if (repo.kind === 'ok' && Astro.request.method === 'POST') {
+  const verified = await forge.verifySessionWrite(Astro.request)
+  if (!verified) outcome = { kind: 'error', status: 403, message: 'The form expired. Reload the page and try again.' }
+  else {
+    session = verified
+    outcome = await settingsAction(forge, verified, repo.name, await Astro.request.formData(), forge.issuer(Astro.request))
+  }
+  if (outcome.kind === 'error') Astro.response.status = outcome.status
+}
+let data: RepositorySettings | null = null
+let rules: Awaited<ReturnType<typeof forge.settings.branchProtection>> = []
+if (repo.kind === 'ok' && session) {
+  try {
+    data = await forge.settings.read(session.principal, repo.name)
+    rules = await forge.settings.branchProtection(session.principal, repo.name)
+  } catch (error) {
+    if (!(error instanceof ForgeError)) throw error
+  }
+}
+Astro.response.headers.set('Cache-Control', 'no-store')
+---
+
+{
+  repo.kind !== 'ok' || !data || !session ? (
+    <NotFound />
+  ) : (
+    <Layout title={`Settings · ${repo.name.owner}/${repo.name.name}`}>
+      <RepoHeader repo={repo} tab="settings" />
+      {outcome && <div role={outcome.kind === 'error' ? 'alert' : 'status'} class:list={['alert mb-6', outcome.kind === 'error' ? 'alert-error' : 'alert-success']}>{outcome.message}</div>}
+
+      <section class="mb-10" aria-labelledby="visibility">
+        <h2 id="visibility" class="text-xl font-semibold mb-2">Visibility</h2>
+        <form method="post" class="flex flex-wrap items-center gap-2">
+          <input type="hidden" name="csrf" value={session.csrf} />
+          <input type="hidden" name="action" value="visibility" />
+          <select name="visibility" class="select select-sm w-auto" aria-label="Visibility">
+            <option value="private" selected={data.repository.visibility === 'private'}>Private</option>
+            <option value="public" selected={data.repository.visibility === 'public'}>Public</option>
+          </select>
+          <button class="btn btn-sm">Save</button>
+        </form>
+      </section>
+
+      <section class="mb-10" aria-labelledby="collaborators">
+        <h2 id="collaborators" class="text-xl font-semibold mb-2">Collaborators</h2>
+        {data.collaborators.length > 0 && (
+          <ul class="border border-base-300 rounded-box divide-y divide-base-300 mb-4">
+            {data.collaborators.map((collaborator) => (
+              <li class="flex flex-wrap items-center gap-2 px-4 py-2">
+                <a href={`/${collaborator.login}`} class="link link-hover font-semibold flex-1">{collaborator.login}</a>
+                <form method="post" class="flex gap-2">
+                  <input type="hidden" name="csrf" value={session.csrf} />
+                  <input type="hidden" name="action" value="collaborator" />
+                  <input type="hidden" name="login" value={collaborator.login} />
+                  <select name="role" class="select select-xs w-auto" aria-label={`Role of ${collaborator.login}`}>
+                    {ROLES.map((role) => <option selected={role === collaborator.role}>{role}</option>)}
+                  </select>
+                  <button class="btn btn-xs">Save</button>
+                </form>
+                <form method="post">
+                  <input type="hidden" name="csrf" value={session.csrf} />
+                  <input type="hidden" name="action" value="remove-collaborator" />
+                  <input type="hidden" name="login" value={collaborator.login} />
+                  <button class="btn btn-xs btn-error btn-outline" aria-label={`Remove ${collaborator.login}`}>Remove</button>
+                </form>
+              </li>
+            ))}
+          </ul>
+        )}
+        <form method="post" class="flex flex-wrap items-end gap-2" aria-label="Add a collaborator">
+          <input type="hidden" name="csrf" value={session.csrf} />
+          <input type="hidden" name="action" value="collaborator" />
+          <label class="flex flex-col gap-1 text-sm">
+            User
+            <input name="login" class="input input-sm" required autocomplete="off" />
+          </label>
+          <label class="flex flex-col gap-1 text-sm">
+            Role
+            <select name="role" class="select select-sm">
+              {ROLES.map((role) => <option selected={role === 'write'}>{role}</option>)}
+            </select>
+          </label>
+          <button class="btn btn-sm">Add</button>
+        </form>
+      </section>
+
+      <section class="mb-10" aria-labelledby="protection">
+        <h2 id="protection" class="text-xl font-semibold mb-2">Branch protection</h2>
+        {rules.map(({ rule, names }) => (
+          <details class="border border-base-300 rounded-box mb-2">
+            <summary class="px-4 py-2 cursor-pointer flex flex-wrap gap-2 items-center">
+              <span class="font-mono font-semibold">{rule.pattern}</span>
+              {rule.requiredPullRequestReviews && <span class="badge badge-sm">{rule.requiredPullRequestReviews.requiredApprovingReviewCount} approvals</span>}
+              {rule.requiredStatusChecks && <span class="badge badge-sm">checks: {rule.requiredStatusChecks.contexts.join(', ') || 'none'}</span>}
+              {!rule.allowForcePushes && <span class="badge badge-sm">no force pushes</span>}
+            </summary>
+            <div class="p-4 border-t border-base-300">
+              <form method="post" class="flex flex-col gap-2" aria-label={`Protection for ${rule.pattern}`}>
+                <input type="hidden" name="csrf" value={session.csrf} />
+                <input type="hidden" name="action" value="protection" />
+                <input type="hidden" name="pattern" value={rule.pattern} />
+                <label class="flex items-center gap-2"><input type="checkbox" class="checkbox checkbox-sm" name="require_reviews" checked={rule.requiredPullRequestReviews !== null} /> Require pull request reviews</label>
+                <label class="flex items-center gap-2 pl-6">Approvals <input type="number" min="0" max="6" name="approvals" class="input input-xs w-16" value={String(rule.requiredPullRequestReviews?.requiredApprovingReviewCount ?? 1)} /></label>
+                <label class="flex items-center gap-2 pl-6"><input type="checkbox" class="checkbox checkbox-sm" name="dismiss_stale_reviews" checked={rule.requiredPullRequestReviews?.dismissStaleReviews ?? false} /> Dismiss stale approvals on new commits</label>
+                <label class="flex items-center gap-2 pl-6"><input type="checkbox" class="checkbox checkbox-sm" name="require_last_push_approval" checked={rule.requiredPullRequestReviews?.requireLastPushApproval ?? false} /> Require approval of the latest push</label>
+                <label class="flex items-center gap-2"><input type="checkbox" class="checkbox checkbox-sm" name="require_checks" checked={rule.requiredStatusChecks !== null} /> Require status checks</label>
+                <label class="flex items-center gap-2 pl-6">Checks <input name="contexts" class="input input-xs flex-1" value={rule.requiredStatusChecks?.contexts.join(', ') ?? ''} /></label>
+                <label class="flex items-center gap-2 pl-6"><input type="checkbox" class="checkbox checkbox-sm" name="strict" checked={rule.requiredStatusChecks?.strict ?? false} /> Branch must be up to date</label>
+                <label class="flex items-center gap-2"><input type="checkbox" class="checkbox checkbox-sm" name="restrict_pushes" checked={rule.restrictions !== null} /> Restrict who can push</label>
+                <label class="flex items-center gap-2 pl-6">Users <input name="push_users" class="input input-xs flex-1" value={names.users.map((user) => user.login).join(', ')} /></label>
+                <label class="flex items-center gap-2 pl-6">Teams <input name="push_teams" class="input input-xs flex-1" value={names.teams.map((team) => team.slug).join(', ')} /></label>
+                <label class="flex items-center gap-2 pl-6">Roles <input name="push_roles" class="input input-xs flex-1" value={rule.restrictions?.roles.join(', ') ?? ''} /></label>
+                <label class="flex items-center gap-2"><input type="checkbox" class="checkbox checkbox-sm" name="allow_force_pushes" checked={rule.allowForcePushes} /> Allow force pushes</label>
+                <label class="flex items-center gap-2"><input type="checkbox" class="checkbox checkbox-sm" name="allow_deletions" checked={rule.allowDeletions} /> Allow deletion</label>
+                <label class="flex items-center gap-2"><input type="checkbox" class="checkbox checkbox-sm" name="enforce_admins" checked={rule.enforceAdmins} /> Apply to administrators</label>
+                <button class="btn btn-sm self-start">Save rule</button>
+              </form>
+              <form method="post" class="mt-2">
+                <input type="hidden" name="csrf" value={session.csrf} />
+                <input type="hidden" name="action" value="remove-protection" />
+                <input type="hidden" name="pattern" value={rule.pattern} />
+                <button class="btn btn-xs btn-error btn-outline">Remove rule</button>
+              </form>
+            </div>
+          </details>
+        ))}
+        <form method="post" class="flex flex-wrap items-end gap-2 mt-4" aria-label="Protect a branch">
+          <input type="hidden" name="csrf" value={session.csrf} />
+          <input type="hidden" name="action" value="protection" />
+          <label class="flex flex-col gap-1 text-sm">
+            Branch name pattern
+            <input name="pattern" class="input input-sm font-mono" required placeholder={repo.defaultBranch ?? 'main'} />
+          </label>
+          <label class="flex items-center gap-2 text-sm pb-2"><input type="checkbox" class="checkbox checkbox-sm" name="require_reviews" /> Require reviews</label>
+          <button class="btn btn-sm">Add rule</button>
+        </form>
+      </section>
+
+      <section class="mb-10" aria-labelledby="mirrors">
+        <h2 id="mirrors" class="text-xl font-semibold mb-2">Mirrors</h2>
+        {data.mirrors.map(({ config, status }) => (
+          <div class="border border-base-300 rounded-box mb-2 p-4">
+            <p class="flex flex-wrap items-center gap-2">
+              <span class="font-semibold">{config.remote}</span>
+              <span class="font-mono text-sm break-all">{config.url}</span>
+              <span class="badge badge-sm">{config.detachedAt ? 'detached' : config.mode}</span>
+              {status?.lastRun && <span class:list={['badge badge-sm', status.lastRun.ok === false ? 'badge-error' : 'badge-success']}>{status.lastRun.ok === false ? 'last sync failed' : 'synced'}</span>}
+            </p>
+            {status?.lastSuccessAt && <p class="text-sm text-base-content/70">Last success: {status.lastSuccessAt}</p>}
+            {status?.lastRun?.error && <p class="text-sm text-error">{status.lastRun.error}</p>}
+            {status && status.alarms.length > 0 && (
+              <div role="alert" class="alert alert-warning my-2 flex-col items-start">
+                <p class="font-semibold">{status.alarms.length} alarm{status.alarms.length === 1 ? '' : 's'}: the upstream rewrote or deleted history; the old state is archived.</p>
+                <ul class="text-sm font-mono">
+                  {status.alarms.slice(-5).map((alarm) => <li>{alarm.kind} {alarm.ref} → {alarm.archivedAs}</li>)}
+                </ul>
+              </div>
+            )}
+            {status && status.lfsPending.length > 0 && <p class="text-sm">{status.lfsPending.length} LFS objects pending</p>}
+            {status?.lastDeepCheck && <p class="text-sm">Deep check {status.lastDeepCheck.at}: {status.lastDeepCheck.ok ? 'ok' : status.lastDeepCheck.problems.join('; ')}</p>}
+            {!config.detachedAt && (
+              <form method="post" class="flex flex-wrap gap-2 mt-2">
+                <input type="hidden" name="csrf" value={session.csrf} />
+                <input type="hidden" name="remote" value={config.remote} />
+                <button class="btn btn-xs" name="action" value="sync-mirror">Sync now</button>
+                <button class="btn btn-xs" name="action" value="verify-mirror">Deep check</button>
+                <button class="btn btn-xs btn-warning btn-outline" name="action" value="detach-mirror">Detach</button>
+              </form>
+            )}
+          </div>
+        ))}
+        <form method="post" class="flex flex-wrap items-end gap-2 mt-4" aria-label="Add a mirror">
+          <input type="hidden" name="csrf" value={session.csrf} />
+          <input type="hidden" name="action" value="add-mirror" />
+          <label class="flex flex-col gap-1 text-sm flex-1 min-w-60">
+            Upstream URL
+            <input name="url" type="url" class="input input-sm font-mono" required placeholder="https://forge.example/owner/repo.git" />
+          </label>
+          <label class="flex flex-col gap-1 text-sm">
+            Sync
+            <select name="mode" class="select select-sm"><option value="auto">automatic</option><option value="manual">manual</option></select>
+          </label>
+          <label class="flex flex-col gap-1 text-sm">
+            Authentication
+            <select name="auth" class="select select-sm"><option value="none">none</option><option value="instance">instance token</option></select>
+          </label>
+          <label class="flex items-center gap-2 text-sm pb-2"><input type="checkbox" class="checkbox checkbox-sm" name="lfs" checked /> Git LFS</label>
+          <button class="btn btn-sm">Add mirror</button>
+        </form>
+      </section>
+
+      <section class="mb-10" aria-labelledby="federation">
+        <h2 id="federation" class="text-xl font-semibold mb-2">Federation</h2>
+        <p class="text-sm text-base-content/70 mb-2">Trusted instances listed here may read this repository (Git and Git LFS), for example to mirror it.</p>
+        {data.instances.length > 0 && (
+          <ul class="border border-base-300 rounded-box divide-y divide-base-300 mb-4">
+            {data.instances.map((instance) => (
+              <li class="flex flex-wrap items-center gap-2 px-4 py-2">
+                <span class="font-mono flex-1 break-all">{instance.issuer}</span>
+                <form method="post">
+                  <input type="hidden" name="csrf" value={session.csrf} />
+                  <input type="hidden" name="action" value="revoke-instance" />
+                  <input type="hidden" name="issuer" value={instance.issuer} />
+                  <button class="btn btn-xs btn-error btn-outline" aria-label={`Revoke ${instance.issuer}`}>Revoke</button>
+                </form>
+              </li>
+            ))}
+          </ul>
+        )}
+        <form method="post" class="flex flex-wrap items-end gap-2" aria-label="Grant an instance">
+          <input type="hidden" name="csrf" value={session.csrf} />
+          <input type="hidden" name="action" value="grant-instance" />
+          <label class="flex flex-col gap-1 text-sm flex-1 min-w-60">
+            Instance URL
+            <input name="issuer" type="url" class="input input-sm font-mono" required placeholder="https://mirror.example" />
+          </label>
+          <button class="btn btn-sm">Grant read access</button>
+        </form>
+      </section>
+    </Layout>
+  )
+}

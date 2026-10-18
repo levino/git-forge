@@ -49,5 +49,3 @@ export const createRateLimiter = (db: Database, now: () => number = Date.now) =>
 
   purge: async (): Promise<number> => (await db.run(sql('DELETE FROM rate_limits WHERE expires_at <= ?', now()))).changes,
 })
-
-export type RateLimiter = ReturnType<typeof createRateLimiter>

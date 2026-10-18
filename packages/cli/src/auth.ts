@@ -160,7 +160,7 @@ export const pasteLogin = async (host: string, io: BrowserIO, request: LoginRequ
 const CALLBACK_PAGE = (message: string) =>
   `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>git forge</title></head><body style="font-family:system-ui,sans-serif;margin:3rem"><p>${message}</p></body></html>`
 
-export const waitForCallback = (timeoutMs = 10 * 60 * 1000): Promise<{ readonly redirectUri: string; readonly result: Promise<URLSearchParams>; readonly close: () => void }> =>
+const waitForCallback = (timeoutMs = 10 * 60 * 1000): Promise<{ readonly redirectUri: string; readonly result: Promise<URLSearchParams>; readonly close: () => void }> =>
   new Promise((ready, fail) => {
     let settle: (params: URLSearchParams) => void = () => undefined
     let reject: (error: Error) => void = () => undefined
@@ -275,7 +275,7 @@ export type LoginArguments = {
 
 export const parseLoginArguments = (args: readonly string[]): LoginArguments => {
   let target: string | undefined
-  let scope: Scope = 'repo:write'
+  let scope: Scope = DEFAULT_SCOPE
   let mode: LoginArguments['mode'] = 'paste'
   let browser = true
   let git = true

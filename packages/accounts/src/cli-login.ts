@@ -4,13 +4,9 @@ import { constantTimeEqual } from './sessions.ts'
 
 export const CLI_AUTHORIZE_PATH = '/login/cli'
 
-export const CLI_TOKEN_PATH = '/login/cli/token'
-
 export const CLI_OOB_REDIRECT = 'urn:ietf:wg:oauth:2.0:oob'
 
 export const CLI_REQUEST_TTL_MS = 10 * 60 * 1000
-
-export const CLI_START_PATH = '/login/cli/start'
 
 export const AUTHORIZATION_CODE_GRANT = 'authorization_code'
 

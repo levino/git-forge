@@ -25,27 +25,13 @@ git forge auth status
 git forge auth logout https://forge.example
 ```
 
-`auth login` prints a short link such as
-`https://forge.example/login/cli/Xy3…` and opens it when a browser can reach
-it (`$BROWSER`, `open`, `xdg-open` with a display; not over SSH, in
-Codespaces or dev containers; `--no-browser` never opens one). Sign in with
-OIDC or a passkey, check the request (client host, IP, time, access), approve,
-and paste the one-time code the page shows at the `Paste the code:` prompt.
-The code only works together with the PKCE verifier the CLI kept, once, for
-10 minutes. Other ways in:
-
-| Option | Meaning |
-|---|---|
-| `--scopes repo:read\|repo:write\|repo:admin` | Access to request; default `repo:write` (Git and Git LFS). The consent page can lower it, never raise it. Admin also allows the JSON API, e.g. `repo create`. |
-| `--browser-redirect` | Instead of pasting, receive the code on `http://127.0.0.1:<random port>/callback` (RFC 8252). Needs the browser on the same machine. |
-| `--device` | RFC 8628 device flow for clients without a prompt; prints the link with the user code to click. |
-| `--no-browser` | Print the link only. |
-| `--no-setup-git` | Skip the git configuration. |
-
-The forge issues a personal access token with the granted scope, valid for 90
-days. It is stored in `~/.config/git-forge/hosts.json`
-(`$XDG_CONFIG_HOME/git-forge`, or `GIT_FORGE_CONFIG_DIR`), mode `0600`, and
-git is configured globally to use it for that host only:
+`auth login` prints a short link (opened when a local browser is available),
+you approve in the browser and paste the one-time code shown there. Options:
+`--scopes repo:read|repo:write|repo:admin` (default `repo:write`),
+`--browser-redirect` (code via `http://127.0.0.1:<port>`), `--device`
+(RFC 8628), `--no-browser`, `--no-setup-git`. The token (90 days) is stored in
+`~/.config/git-forge/hosts.json` (mode `0600`, or `GIT_FORGE_CONFIG_DIR`) and
+git uses it for that host:
 
 ```ini
 [credential "https://forge.example"]
@@ -68,12 +54,8 @@ git forge repo create acme/site --public --remote origin
 git forge repo create notes                  # owned by you, private
 ```
 
-`repo create [<owner>/]<name> [--private|--public] [--default-branch <b>]
-[--remote <name>] [--host <url>]` calls `POST /api/repos` with the stored
-token, which needs `repo:admin` (`git forge auth login --scopes repo:admin`).
-It prints the clone URL and with `--remote` adds it to the current repository.
-The forge is `--host`, else the host of `origin` if you are logged in there,
-else the only host in `hosts.json`.
+`repo create` needs a `repo:admin` token, prints the clone URL and with
+`--remote` adds it to the current repository.
 
 ## Installation
 

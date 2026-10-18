@@ -36,10 +36,10 @@ discussions.
 - [x] Instance keys (Ed25519), `/.well-known/openid-configuration`, `/.well-known/jwks.json`
 - [x] Short-lived instance JWTs, trust table "issuer X may read repo Y", optional pinned thumbprint
 - [x] Device flow (`git forge auth login`, RFC 8628) and git credential helper (`git forge auth git-credential`)
-- [x] Command-line login by pasting a PKCE-bound one-time code from a short link (default), loopback redirect (`--browser-redirect`), device flow (`--device`); scope choice (`--scopes repo:admin`), consent pages with client host, IP, time and phishing warning
-- [x] `git forge repo create [<owner>/]<name> [--private|--public] [--default-branch] [--remote]`
-- [x] Rate limits on login, device and CLI endpoints (SQLite sliding window); purging expired challenges, device codes and CLI requests on the schedule
-- [x] One access choice (read / write / admin, cumulative) for personal access tokens and consent pages
+- [x] CLI login: paste a PKCE-bound code (default), `--browser-redirect`, `--device`; `--scopes`; consent with host, IP, time, phishing warning
+- [x] `git forge repo create`
+- [x] Rate limits on login and device endpoints; purging expired challenges and device codes
+- [x] One read / write / admin access choice for tokens and consent pages
 - [x] Break-glass key (offline Ed25519, one-hour admin session)
 - [ ] Login follow-ups: OIDC groups → teams, session list and revocation in the UI
 - [ ] SAML, SCIM

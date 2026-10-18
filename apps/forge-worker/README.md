@@ -173,21 +173,19 @@ their tokens and passkeys at `/settings`.
 | `POST /login/passkey/options`, `POST /login/passkey` | WebAuthn authentication (discoverable credentials, user verification required). |
 | `POST /login/passkey/register/options` `{invite?, login?}`, `POST /login/passkey/register` `{handle, credential, name?}` | WebAuthn registration, attestation `none`. With a session (and CSRF token) it adds a passkey to that account; with an invite or `SELF_SIGNUP` it creates the account. |
 | `GET /login/invite/{code}` | Invite page (OIDC or passkey). |
-| `POST /login/cli/start` `client_id=git-forge-cli&redirect_uri=…&code_challenge=…&scope=…&client_name=…&client_host=…[&state=…]` | Starts a command-line login: stores the PKCE challenge (S256), the requested scope, the reported host and the request IP under a random id for 10 minutes and returns `{request_id, authorization_url, expires_in}` with the short link `/login/cli/{id}`. `redirect_uri` is `urn:ietf:wg:oauth:2.0:oob` (paste a code) or `http://127.0.0.1:{port}/…`, `http://[::1]:{port}/…`, `http://localhost:{port}/…` (needs `state`). |
-| `GET /login/cli/{id}`, `POST /login/cli/{id}` | Consent page: requires a session, shows client, host, IP, time, the access choice (at most the requested scope) and a phishing warning; approve or deny with the CSRF token. Approve shows a one-time code (out of band) or redirects to the loopback URI with `code` and `state`; deny redirects with `error=access_denied`. |
-| `POST /login/cli/token` `grant_type=authorization_code&client_id=git-forge-cli&code=…&code_verifier=…&redirect_uri=…` | Redeems the code once with the PKCE verifier: a personal access token with the granted scope, 90 days (`access_token`, `scope`, `login`, `expires_in`), or `invalid_grant`. |
-| `POST /login/device/code` `client_id=git-forge-cli&client_name=…&client_host=…&scope=…` | RFC 8628 device authorization: `device_code`, `user_code` (`BCDF-GHJK`), `verification_uri`, `verification_uri_complete`, 15 minutes, interval 5 s. Unknown scopes: `invalid_scope`. |
-| `GET /login/device?user_code=…`, `POST /login/device` | The user-code page: requires a session, shows client, reported host, request IP (and the browser's), time, the access choice and a phishing warning; approve or deny with the CSRF token. |
-| `POST /login/device/token` | Polling: `authorization_pending`, `slow_down` (interval + 5 s), `access_denied`, `expired_token`, or a personal access token with the granted scope valid 90 days (`access_token`, `scope`, `login`, `expires_in`). Each approval yields exactly one token. |
+| `POST /login/cli/start` | Starts a CLI login (PKCE S256, scope, `redirect_uri` out-of-band or loopback); returns `authorization_url` `/login/cli/{id}`. |
+| `GET\|POST /login/cli/{id}` | Consent page; approve shows a one-time code or redirects to the loopback URI. |
+| `POST /login/cli/token` | Redeems the code once with the PKCE verifier for a token with the granted scope. |
+| `POST /login/device/code` `client_id=git-forge-cli&client_host=…&scope=…` | RFC 8628 device authorization, 15 minutes, interval 5 s. |
+| `GET /login/device?user_code=…`, `POST /login/device` | Consent page (session, CSRF). |
+| `POST /login/device/token` | Polling: `authorization_pending`, `slow_down`, `access_denied`, `expired_token`, or a 90-day token with the granted scope. |
 | `GET\|POST /login/break-glass` | Paste a token signed with the offline break-glass key; opens a one-hour session for an instance admin. |
 | `POST /logout` | Revokes the session (CSRF token required). |
 | `GET /api/session` | `{login, userId, method, expiresAt, csrfToken, admin}` or `401`. |
 | `GET /api/user/passkeys`, `DELETE /api/user/passkeys/{id}` | The signed-in user's passkeys. |
 
-Login, consent and token endpoints are rate-limited per client address
-(`CF-Connecting-IP`) and answer `429` with `Retry-After` beyond the limits;
-the scheduled handler purges expired challenges, device codes, CLI requests
-and rate-limit windows (design §8).
+Login endpoints are rate-limited per `CF-Connecting-IP` (`429`); the cron
+purges expired login state (design §8).
 
 Session cookies are `HttpOnly`, `SameSite=Lax`, `Path=/`, 30 days (break-glass
 one hour), and on `https` origins `Secure` with the `__Host-` prefix
@@ -510,11 +508,9 @@ argument.
   `@git-forge/accounts`: invite and self-signup, phishing origin, missing user
   verification, replayed counters, CSRF and origin checks, OIDC without
   invite, unbound and forged callbacks, the device flow (pending, slow_down,
-  approve, deny, one token per approval, scope at most as requested, host, IP
-  and time on the consent page), the command-line login (paste code bound to
-  the PKCE verifier, single use, loopback redirect only to loopback URIs,
-  CSP form-action), rate limits per client address, purging on the schedule
-  and break-glass (replay, non-admin, foreign key).
+  approve, deny, one token per approval, scope cap), the CLI login (paste,
+  loopback), rate limits, purging and break-glass (replay, non-admin, foreign
+  key).
 - `test/e2e/login.e2e.test.ts` starts `wrangler dev` against a mock OIDC
   provider (ES256) on a local HTTP server: an unknown identity is refused, an
   invite links it to the bootstrapped admin, the session creates a
@@ -525,9 +521,8 @@ argument.
   alone; `--browser-redirect` (loopback) and `--device` log in too; a passkey-only account is created from
   an invite and signs in again; the break-glass key opens an admin session
   once.
-- `test/browser/cli-login.spec.ts` approves command-line logins in Chromium:
-  the code page with copy button, and the redirect to a loopback server after
-  the consent form (CSP `form-action`).
+- `test/browser/cli-login.spec.ts`: CLI consent in Chromium (code page,
+  loopback redirect under the CSP).
 - `test/unit/events.test.ts` pushes with
   the real `git` client into a forge without a job queue and checks the push
   webhook (commits read from the object database), watcher notifications and

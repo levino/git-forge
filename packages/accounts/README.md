@@ -98,9 +98,9 @@ triggers with `RAISE`), all of which D1, Durable Objects and libSQL support.
 | `sessions` | browser sessions: SHA-256 of the session id, user, method (`oidc`, `passkey`, `break-glass`), expiry, last use, revocation (migration `0006`) |
 | `webauthn_credentials` | passkeys: credential id, user handle, COSE algorithm (`-7`, `-8`, `-257`), public key as JWK, signature counter, AAGUID, revocation |
 | `login_challenges` | one-time state of OIDC logins, WebAuthn ceremonies and used break-glass `jti`s, keyed by the hash of their handle, with expiry |
-| `device_authorizations` | device flow: hash of the device code, user code, status (`pending`, `approved`, `denied`, `consumed`), requested and granted scope, reported client host, request IP, poll interval, issued token |
-| `cli_authorizations` | command-line login (migration 0022): hash of the request id, hash of the one-time code, status, PKCE challenge, redirect URI, state, scope, client host, request IP, user, issued token |
-| `rate_limits` | sliding-window counters: hashed bucket (limit name and client address), window start, count |
+| `device_authorizations` | device flow: hash of the device code, user code, status (`pending`, `approved`, `denied`, `consumed`), scope, client host, request IP, poll interval, issued token |
+| `cli_authorizations` | CLI login: hashed request id and code, PKCE challenge, redirect URI, scope, client host, IP |
+| `rate_limits` | sliding-window counters per hashed bucket |
 | `invites` | hash of the invite code, fixed login or existing user, expiry, redemption |
 | `actions_*` | CI state of `@git-forge/actions`: runners, hashed CI tokens, sessions, runs, jobs, timeline records, log index (migration `0005`; the schema lives here so that all D1 migrations come from one directory) |
 | `collaboration_settings`, `repository_numbers`, `issues`, `issue_*`, `labels`, `milestones`, `pull_requests`, `pull_request_reviews`, `review_comments`, `review_requests`, `commit_statuses`, `check_runs`, `discussion*` | collaboration data of `@git-forge/collaboration` (migration `0008`); integer IDs for GitHub compatibility, never synced to mirrors |
@@ -177,15 +177,9 @@ Account rules:
   user register a passkey, which creates the account in the same step. A
   signed-in user adds more passkeys (CSRF token required). The user handle is
   random and the same for all passkeys of a user.
-- Command-line logins (paste a PKCE-bound code, loopback redirect, device
-  flow; `cli-login.ts`, `login.ts`) issue a personal access token with the
-  requested scope or less (`grantedScope`), default `repo:write`, 90 days,
-  named after the client. Scopes are cumulative ceilings; `accessChoices`
-  renders them as one read / write / admin choice.
-- `createRateLimiter` (`rate-limit.ts`) counts requests per hashed bucket in a
-  sliding window; `createLoginHandler` applies `LOGIN_RATE_LIMITS` per client
-  address (`clientAddress` option). `purgeExpired` deletes expired challenges,
-  device authorizations, CLI requests and rate-limit windows.
+- CLI logins (`cli-login.ts`, `login.ts`) issue a 90-day token with at most
+  the requested scope; `rate-limit.ts` holds the sliding-window limiter,
+  `purgeExpired` the cleanup.
 - A break-glass token only works for an existing, enabled instance admin,
   once (`jti`), and gives a one-hour session.
 

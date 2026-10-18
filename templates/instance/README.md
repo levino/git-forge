@@ -78,6 +78,41 @@ routes = [{ pattern = "git.example.com", custom_domain = true }]
 
 and set the var `PUBLIC_URL` to `https://git.example.com`.
 
+### Pages
+
+Repository sites (like GitHub Pages) are off until `PAGES_HOST` is set. Use
+a domain of its own, add the wildcard as a route on its zone and, per
+repository, custom domains:
+
+```toml
+routes = [
+  { pattern = "git.example.com", custom_domain = true },
+  { pattern = "*.pages.example.net/*", zone_name = "example.net" },
+  { pattern = "docs.example.com", custom_domain = true },
+]
+
+[vars]
+PUBLIC_URL = "https://git.example.com"
+PAGES_HOST = "{owner}.pages.example.net"
+PAGES_DOMAINS = '{"docs.example.com": "acme/handbook"}'
+```
+
+Then enable a site with `POST /api/v3/repos/{owner}/{repo}/pages`
+(`{"source": {"branch": "main", "path": "/"}}`). Details:
+[forge-worker README, Pages](https://github.com/levino/git-forge/blob/main/apps/forge-worker/README.md#pages).
+
+### Public LFS bucket
+
+To copy the LFS objects of public repositories into a public bucket on push
+(keyed by oid), add a second bucket and optionally set `LFS_PUBLISH_PREFIX`
+under `[vars]`. A pull-zone CDN in front of the media URLs needs none of this.
+
+```toml
+[[r2_buckets]]
+binding = "CDN_BUCKET"
+bucket_name = "git-forge-cdn"
+```
+
 ## First admin
 
 **With OIDC** (see [Login](#login)): open the instance once (any page, so the
@@ -146,6 +181,8 @@ OIDC_NAME = "Example ID"
 | `UI` | `true` | `false` for a headless instance (for example a backup mirror): Git, LFS and the API only. |
 | `MAX_LFS_OBJECT_BYTES`, `MIRROR_INTERVAL_MINUTES`, `MIRROR_DEEP_CHECK_DAYS` | see the forge-worker README | Limits and mirror schedule. |
 | `EMAIL_PROVIDER` | `none` | `ses` or `console`, see [Email](#notifications-email-and-webhooks). |
+| `PAGES_HOST`, `PAGES_DOMAINS`, `PAGES_MAX_AGE` | none: no Pages; `60` | Pages hosts, custom domains and cache lifetime, see [Pages](#pages). |
+| `LFS_PUBLISH_PREFIX` | | Key prefix in `CDN_BUCKET`, see [Public LFS bucket](#public-lfs-bucket). |
 
 ## Login
 

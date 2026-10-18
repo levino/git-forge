@@ -14,6 +14,7 @@ import {
   type RunnerLauncher,
   type SecretsProvider,
   GITHUB_TOKEN_PREFIX,
+  getJobById,
   getRun,
   type JobRow,
   listCurrentJobs,
@@ -101,7 +102,9 @@ import {
   ImportRunningError,
   isValidImportUrl,
   isValidName,
+  listLfsOids,
   listMirrors,
+  type LfsPublisher,
   type MirrorConfig,
   type MirrorSettings,
   type MirrorStatus,
@@ -111,6 +114,7 @@ import {
   ObjectDatabase,
   type PackfileUri,
   publicPackfileUris,
+  publishLfsObjects,
   type PushOutcome,
   readAll,
   readMirrorConfig,
@@ -159,6 +163,7 @@ import {
   workflowRunEvent,
   type ThreadRow,
 } from '@git-forge/notifications'
+import { type ArtifactSource, createPages, isPagesJob, type PagesJob } from '@git-forge/pages'
 import { type AssetRow, createReleaseStore, handleReleasesRequest, type ReleaseRow } from '@git-forge/releases'
 import { activityEvent } from './collaboration-events.ts'
 import { mirrorOverview, recordChecksums, signOverview } from './mirror-verification.ts'
@@ -195,9 +200,15 @@ export type ForgeOptions = ForgeSettings & {
   readonly scheduleImport?: ImportScheduler
   readonly email?: EmailSender
   readonly renderLoginPage?: LoginPageRenderer
+  readonly artifacts?: ArtifactSource
+  readonly lfsPublisher?: LfsPublisher
 }
 
-export type AppJob = ForgeJob | NotificationJob
+export type LfsPublishJob = { readonly kind: 'lfs-publish'; readonly owner: string; readonly name: string; readonly oids: readonly string[] | null }
+
+export type AppJob = ForgeJob | NotificationJob | PagesJob | LfsPublishJob
+
+export const LFS_PUBLISH_BATCH = 100
 
 export type WaitUntil = (promise: Promise<unknown>) => void
 
@@ -333,6 +344,7 @@ export type RepositoryAccess = {
 
 export type Forge = {
   readonly fetch: (request: Request, waitUntil?: WaitUntil) => Promise<Response>
+  readonly isPagesRequest: (request: Request) => boolean
   readonly services: ForgeServices
   readonly scheduled: (at?: Date) => Promise<ScheduledMirrorRun[]>
   readonly actionsTick: () => Promise<ActionsTick | null>
@@ -511,6 +523,83 @@ export const createForge = (options: ForgeOptions): Forge => {
     adminOf(await principalOf(request), repo)
 
   const releaseStore = createReleaseStore(db, () => now().getTime())
+
+  const jobTokenRepository = async (request: Request): Promise<RepositoryName | null> => {
+    if (!options.actions) return null
+    const credential = parseAuthorization(request.headers.get('Authorization'))
+    const secret = credential.kind === 'secret' ? credential.secret : null
+    if (!secret?.startsWith(GITHUB_TOKEN_PREFIX)) return null
+    const grant = await verifyToken(db, secret, 'github', now().getTime())
+    if (!grant?.owner || !grant.repo || !grant.job_id) return null
+    const job = await getJobById(db, grant.job_id)
+    const run = job ? await getRun(db, job.run_id) : null
+    return run && run.trusted === 1 && run.event !== 'pull_request' ? { owner: grant.owner, name: grant.repo } : null
+  }
+
+  const pages = createPages({
+    db,
+    storage,
+    directory: store,
+    hosts: options.pages?.hosts ?? null,
+    forgeUrl: options.publicUrl ?? null,
+    baseUrl: issuerFor,
+    authenticate: apiPrincipal,
+    authenticateToken: (request) => authenticateRequest(request, authenticateOptions(request)),
+    sessionUser: async (request) => {
+      const active = await readActiveSession(request, loginOptions(request))
+      return active ? sessionUserPrincipal(active.session) : null
+    },
+    isInstanceAdmin: store.isInstanceAdmin,
+    jobTokenRepository,
+    ...(options.artifacts ? { artifacts: options.artifacts } : {}),
+    ...(options.jobs ? { schedule: (job: PagesJob) => options.jobs!.enqueue(job) } : {}),
+    ...(options.digests ? { digests: options.digests } : {}),
+    ...(options.pages?.maxAgeSeconds !== undefined ? { maxAgeSeconds: options.pages.maxAgeSeconds } : {}),
+    now: () => now().getTime(),
+    log: (event) => console.log(JSON.stringify(event)),
+  })
+
+  const publishLfs = async (job: LfsPublishJob): Promise<void> => {
+    const publisher = options.lfsPublisher
+    const repository = await store.findRepository(job.owner, job.name)
+    if (!publisher || repository?.visibility !== 'public') return
+    const repo = { owner: repository.owner, name: repository.name }
+    if (job.oids === null) {
+      let batch: string[] = []
+      for await (const oid of listLfsOids(storage, repo)) {
+        batch.push(oid)
+        if (batch.length === LFS_PUBLISH_BATCH) {
+          await scheduleLfsPublish({ ...job, oids: batch })
+          batch = []
+        }
+      }
+      if (batch.length > 0) await scheduleLfsPublish({ ...job, oids: batch })
+      return
+    }
+    const summary = await publishLfsObjects(storage, repo, publisher, job.oids)
+    console.log(JSON.stringify({ event: 'lfs-published', repository: `${repo.owner}/${repo.name}`, published: summary.published.length, present: summary.present.length, missing: summary.missing.length }))
+  }
+
+  const scheduleLfsPublish = async (job: LfsPublishJob): Promise<void> => {
+    if (options.jobs) await options.jobs.enqueue(job)
+    else await publishLfs(job)
+  }
+
+  const publishAfterPush = async (repo: RepositoryName, outcome: PushOutcome): Promise<void> => {
+    const oids = [...new Set((outcome.lfsPointers ?? []).map((pointer) => pointer.oid))]
+    if (!options.lfsPublisher || oids.length === 0 || !outcome.results.some((result) => result.ok)) return
+    if ((await store.findRepository(repo.owner, repo.name))?.visibility !== 'public') return
+    for (let i = 0; i < oids.length; i += LFS_PUBLISH_BATCH) await scheduleLfsPublish({ kind: 'lfs-publish', owner: repo.owner, name: repo.name, oids: oids.slice(i, i + LFS_PUBLISH_BATCH) })
+  }
+
+  const publishRepositoryLfs = async (request: Request, params: string[]): Promise<Response> => {
+    const { repository } = await requireRepositoryAdmin(request, repoName(params))
+    if (!options.lfsPublisher) throw new HttpError(503, 'no LFS publish target is configured')
+    if (repository.visibility !== 'public') throw new HttpError(422, 'only public repositories are published')
+    await scheduleLfsPublish({ kind: 'lfs-publish', owner: repository.owner, name: repository.name, oids: null })
+    return json(202, { queued: true })
+  }
+
   const notifications = createNotifications({
     db,
     directory: store,
@@ -1269,6 +1358,11 @@ export const createForge = (options: ForgeOptions): Forge => {
         console.error(JSON.stringify({ event: 'ref-checksum-failed', repository: `${repo.owner}/${repo.name}`, error: String(error) })),
       )
     }
+    const published = Promise.all([pages.onPush(repo, outcome, principal), publishAfterPush(repo, outcome)]).catch((error: unknown) =>
+      console.error(JSON.stringify({ event: 'pages-or-publish-failed', repository: `${repo.owner}/${repo.name}`, error: String(error) })),
+    )
+    if (waitUntil && !options.jobs) waitUntil(published)
+    else await published
     if (options.actions) await queueRunsForPush(dispatchOptions(request), { repo, outcome, actor: principal?.kind === 'user' ? principal.login : (principal?.kind ?? 'unknown') })
     if (!outcome.results.some((result) => result.ok)) return
     const events = emitPushEvents(request, repo, outcome, principal).catch((error: unknown) =>
@@ -1363,6 +1457,7 @@ export const createForge = (options: ForgeOptions): Forge => {
     { method: 'POST', pattern: new RegExp(`^${REPO}/mirrors/${SEGMENT}/sync$`), handler: syncMirrorRoute },
     { method: 'POST', pattern: new RegExp(`^${REPO}/mirrors/${SEGMENT}/detach$`), handler: detachMirrorRoute },
     { method: 'POST', pattern: new RegExp(`^${REPO}/mirrors/${SEGMENT}/verify$`), handler: verifyMirrorRoute },
+    { method: 'POST', pattern: new RegExp(`^${REPO}/lfs/publish$`), handler: publishRepositoryLfs },
   ]
 
   const route = async (request: Request): Promise<Response | null> => {
@@ -1390,6 +1485,8 @@ export const createForge = (options: ForgeOptions): Forge => {
   }
 
   const handle = async (request: Request, waitUntil?: WaitUntil): Promise<Response> => {
+    const site = await pages.serve(request)
+    if (site) return site
     const wellKnown = options.instanceKey ? handleWellKnownRequest(request, { issuer: issuerFor(request), keys: [options.instanceKey.publicJwk] }) : null
     if (wellKnown) return wellKnown
     const federated = federation ? await handleFederationRequest(federation, request) : null
@@ -1422,6 +1519,8 @@ export const createForge = (options: ForgeOptions): Forge => {
       onTagCreated: (repo, outcome, principal) => afterPush(request, repo, outcome, waitUntil, principal),
     })
     if (releases) return releases
+    const pagesApi = await pages.api(request)
+    if (pagesApi) return pagesApi
     const collaboration = await handleCollaborationApi(request, {
       ...collaborationOptions(request, waitUntil),
       authenticate: apiPrincipal,
@@ -1463,6 +1562,7 @@ export const createForge = (options: ForgeOptions): Forge => {
 
   return {
     fetch: handle,
+    isPagesRequest: pages.isPagesRequest,
     services: {
       storage,
       store,
@@ -1559,6 +1659,8 @@ export const createForge = (options: ForgeOptions): Forge => {
     },
     runJob: async (job) => {
       if (isNotificationJob(job)) return notifications.runJob(job)
+      if (isPagesJob(job)) return pages.runJob(job)
+      if (job.kind === 'lfs-publish') return publishLfs(job)
       if (!federation) throw new Error('jobs need PUBLIC_URL, INSTANCE_KEY and a job queue')
       await runJob(federation, job)
     },

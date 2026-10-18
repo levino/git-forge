@@ -35,7 +35,9 @@ Environment variables. The names shared with the Worker mean the same
 `ACTIONS_SECRETS_KEY`, `ACTIONS_REPOSITORIES`, `ACTIONS_GITHUB_FALLBACK`,
 `ACTIONS_INSTANCE_ID`, and the login settings `OIDC_ISSUER`,
 `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`, `OIDC_NAME`, `OIDC_SCOPES`,
-`SELF_SIGNUP`, `PASSKEYS`, `BREAK_GLASS_PUBLIC_KEY`. Push notifications need `PUBLIC_URL` and
+`SELF_SIGNUP`, `PASSKEYS`, `BREAK_GLASS_PUBLIC_KEY`, and the Pages settings
+`PAGES_HOST`, `PAGES_DOMAINS`, `PAGES_MAX_AGE` (point the Pages hosts at the
+same process; behind a proxy keep the `Host` header). Push notifications need `PUBLIC_URL` and
 `INSTANCE_KEY`; without them mirrors sync only on the schedule. With
 `ACTIONS=true` CI is served, but there is no runner launcher: jobs wait for a
 runner registered by hand. Every five minutes the instance runs scheduled
@@ -56,7 +58,8 @@ Only for this app:
 | `S3_PREFIX` | none | Key prefix inside the bucket, e.g. `git-forge/`. |
 | `S3_FORCE_PATH_STYLE` | `false` | `true` for `https://host/bucket/key` URLs (most self-hosted S3 servers). |
 | `SCHEDULE` | `17 3 * * *` | Cron expression (five fields, UTC; `@hourly`, `@daily` also work) for the safety-net run: enqueues a sync for every auto mirror whose last run is older than `MIRROR_INTERVAL_MINUTES`, plus the periodic deep checks. Same as the Worker's Cron Trigger. |
-| `JOB_CONCURRENCY` | `2` | Background jobs (mirror syncs, notifications, deep checks) running at once. Imports run one step at a time. |
+| `JOB_CONCURRENCY` | `2` | Background jobs (mirror syncs, notifications, deep checks, Pages deployments, LFS publish) running at once. Imports run one step at a time. |
+| `LFS_PUBLISH_DIR` | none | Directory that receives the LFS objects of public repositories on push, one file per oid (`LFS_PUBLISH_PREFIX` prepends a path), for a web server or CDN to serve. The Worker's `CDN_BUCKET` counterpart. |
 
 Invalid values stop the process with exit code 2 and a message instead of
 falling back to a default.

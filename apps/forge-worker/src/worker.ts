@@ -8,8 +8,10 @@ export { RunnerContainer } from './runner-container.ts'
 
 export default {
   async fetch(request, env, context): Promise<Response> {
-    if (uiEnabled(env)) return handle(request, env as never, context)
-    return (await forgeFor(env)).fetch(request, (promise) => context.waitUntil(promise))
+    if (!uiEnabled(env)) return (await forgeFor(env)).fetch(request, (promise) => context.waitUntil(promise))
+    const forge = await forgeFor(env)
+    if (forge.isPagesRequest(request)) return forge.fetch(request, (promise) => context.waitUntil(promise))
+    return handle(request, env as never, context)
   },
   ...backgroundHandlers,
 } satisfies ExportedHandler<Env, ImportJob | AppJob>

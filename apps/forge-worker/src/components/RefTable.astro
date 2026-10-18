@@ -2,6 +2,8 @@
 import type { CommitInfo, NamedRef } from '@git-forge/core'
 import { isoTime, relativeTime, shortId } from '../ui/format.ts'
 import { commitUrl, commitsUrl, type OpenRepository, treeUrl } from '../ui/repository.ts'
+import EmptyState from './EmptyState.astro'
+import Icon from './Icon.astro'
 
 type Props = { repo: OpenRepository; refs: readonly { ref: NamedRef; commit: CommitInfo | null }[]; label: string }
 
@@ -11,17 +13,18 @@ const now = Math.floor(Date.now() / 1000)
 
 {
   refs.length === 0 ? (
-    <p>No {label.toLowerCase()} yet.</p>
+    <EmptyState icon={label === 'Tags' ? 'tag' : 'branch'} title={`No ${label.toLowerCase()} yet.`} />
   ) : (
     <ul class="border border-base-300 rounded-box divide-y divide-base-300" aria-label={label}>
       {refs.map(({ ref, commit }) => (
-        <li class="flex flex-wrap items-center gap-x-4 gap-y-1 px-4 py-3">
-          <a href={treeUrl(repo.name, ref.name)} class="font-mono link link-hover font-semibold break-all">
+        <li class="flex flex-wrap items-center gap-x-3 gap-y-1 px-4 py-2.5">
+          <Icon name={ref.kind === 'branch' ? 'branch' : 'tag'} class="size-4 text-base-content/50" />
+          <a href={treeUrl(repo.name, ref.name)} class="font-mono text-xs font-semibold text-primary hover:underline break-all">
             {ref.name}
           </a>
           {ref.kind === 'branch' && ref.name === repo.defaultBranch && <span class="badge badge-sm">default</span>}
           {commit && (
-            <span class="text-sm text-base-content/70 min-w-0 flex-1 truncate">
+            <span class="text-xs text-base-content/60 min-w-0 flex-1 truncate">
               <a class="font-mono link link-hover" href={commitUrl(repo.name, commit.id)}>
                 {shortId(commit.id)}
               </a>{' '}
@@ -29,6 +32,7 @@ const now = Math.floor(Date.now() / 1000)
             </span>
           )}
           <a href={commitsUrl(repo.name, ref.name)} class="btn btn-xs ml-auto">
+            <Icon name="history" class="size-3.5" />
             Commits
           </a>
         </li>

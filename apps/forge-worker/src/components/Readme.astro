@@ -1,16 +1,17 @@
 ---
 import type { Readme } from '../ui/browse.ts'
+import Icon from './Icon.astro'
 
 type Props = { readme: Readme }
 
 const { readme } = Astro.props
 ---
 
-<section class="border border-base-300 rounded-box mt-6" aria-labelledby="readme-title">
-  <h2 id="readme-title" class="px-4 py-2 border-b border-base-300 font-semibold text-sm">{readme.name}</h2>
+<section class="border border-base-300 rounded-box mt-4" aria-labelledby="readme-title">
+  <h2 id="readme-title" class="px-4 py-2.5 border-b border-base-300 font-semibold text-sm flex items-center gap-2"><Icon name="book" class="size-4 text-base-content/60" />{readme.name}</h2>
   {
     readme.html !== null ? (
-      <article class="markdown-body p-6 overflow-x-auto" set:html={readme.html} />
+      <article class="markdown-body px-6 py-5 overflow-x-auto" set:html={readme.html} />
     ) : (
       <pre class="p-6 whitespace-pre-wrap text-sm">{readme.text}</pre>
     )

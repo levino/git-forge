@@ -1,5 +1,6 @@
 ---
 import type { OpenRepository } from '../ui/repository.ts'
+import Icon from './Icon.astro'
 
 type Props = { repo: OpenRepository; current: string; link: (ref: string) => string }
 
@@ -8,10 +9,11 @@ const { repo, current, link } = Astro.props
 
 <details class="dropdown">
   <summary class="btn btn-sm max-w-60" aria-label={`Switch branch or tag, current: ${current}`}>
-    <span class="truncate font-mono">{current}</span>
-    <span aria-hidden="true">▾</span>
+    <Icon name={repo.tags.some((tag) => tag.name === current) ? 'tag' : 'branch'} />
+    <span class="truncate font-mono text-xs">{current}</span>
+    <Icon name="chevron" class="size-3.5 opacity-60" />
   </summary>
-  <div class="dropdown-content bg-base-100 border border-base-300 rounded-box shadow-lg z-10 w-72 max-h-96 overflow-y-auto p-2">
+  <div class="dropdown-content bg-base-100 border border-base-300 rounded-box shadow-md z-10 w-72 mt-1 max-h-96 overflow-y-auto p-2">
     {repo.branches.length > 0 && <p class="menu-title px-2 text-xs">Branches</p>}
     <ul class="menu menu-sm w-full p-0">
       {

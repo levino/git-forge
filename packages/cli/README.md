@@ -39,7 +39,7 @@ git forge auth logout https://forge.example
 you approve in the browser and paste the one-time code shown there; without a
 terminal on stdin it uses the device flow. Options:
 `--scopes repo:read|repo:write|repo:admin` (default `repo:write`),
-`--browser-redirect` (code via `http://127.0.0.1:<port>`), `--device`
+`--paste` (force the paste flow), `--browser-redirect` (code via `http://127.0.0.1:<port>`), `--device`
 (RFC 8628), `--no-browser`, `--no-setup-git`. The token (90 days) is stored in
 `~/.config/git-forge/hosts.json` (mode `0600`, or `GIT_FORGE_CONFIG_DIR`) and
 git uses it for that host:

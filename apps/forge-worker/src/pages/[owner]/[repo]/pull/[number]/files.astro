@@ -1,0 +1,130 @@
+---
+import { can, createReviewComment, getPullSummary, listReviewComments, pullFiles } from '@git-forge/collaboration'
+import DiffView, { type LineComment } from '../../../../../components/DiffView.astro'
+import NotFound from '../../../../../components/NotFound.astro'
+import PullHeader from '../../../../../components/PullHeader.astro'
+import RepoHeader from '../../../../../components/RepoHeader.astro'
+import Layout from '../../../../../layouts/Layout.astro'
+import { field, type FormOutcome, parseNumber, renderBody, runForm, scopeFor, unlessMissing } from '../../../../../ui/collaboration.ts'
+import { plural } from '../../../../../ui/format.ts'
+import { blobUrl, openRepository, repoUrl } from '../../../../../ui/repository.ts'
+
+const { forge, principal, session } = Astro.locals
+const repo = await openRepository(forge, principal, Astro.params.owner!, Astro.params.repo!)
+const number = parseNumber(Astro.params.number)
+let outcome: FormOutcome | null = null
+if (repo.kind === 'ok' && number !== null && Astro.request.method === 'POST') {
+  outcome = await runForm(forge, Astro.request, repo, async (scope, form) => {
+    const comment = await createReviewComment(scope, number, {
+      path: field(form, 'path'),
+      line: Number(field(form, 'line')),
+      side: field(form, 'side') === 'LEFT' ? 'LEFT' : 'RIGHT',
+      body: field(form, 'body'),
+      commitId: field(form, 'commit') || undefined,
+    })
+    return `${repoUrl(repo.name, 'pull', String(number), 'files')}#discussion-${comment.id}`
+  })
+  if (outcome.kind === 'redirect') return Astro.redirect(outcome.location, 303)
+  Astro.response.status = outcome.status
+}
+const scope = repo.kind === 'ok' ? await scopeFor(forge, Astro.request, principal, repo) : null
+const pull = scope && number !== null ? await unlessMissing(getPullSummary(scope, number)) : null
+const files = scope && pull ? await pullFiles(scope, pull.number) : []
+const reviewComments = scope && pull ? await listReviewComments(scope, pull.number) : []
+const rendered =
+  repo.kind === 'ok'
+    ? await Promise.all(
+        reviewComments.map(async (comment) => ({ comment, html: (await renderBody(repo, comment.body)) ?? '' })),
+      )
+    : []
+const inline = (path: string): LineComment[] =>
+  rendered
+    .filter(({ comment }) => comment.path === path && comment.line !== null && !comment.outdated)
+    .map(({ comment, html }) => ({ id: comment.id, author: comment.author.login, html, line: comment.line!, side: comment.side }))
+const outdated = rendered.filter(({ comment }) => comment.outdated || comment.line === null)
+const commentable = Boolean(session && scope && pull && can(scope, 'review:submit', { locked: pull.locked }) && pull.state === 'open')
+const additions = files.reduce((sum, file) => sum + file.additions, 0)
+const deletions = files.reduce((sum, file) => sum + file.deletions, 0)
+---
+
+{
+  repo.kind !== 'ok' || !pull ? (
+    <NotFound />
+  ) : (
+    <Layout title={`Files · Pull request #${pull.number} · ${repo.name.owner}/${repo.name.name}`} wide>
+      <RepoHeader repo={repo} tab="pulls" />
+      <PullHeader repo={repo} pull={pull} tab="files" />
+      {outcome?.kind === 'error' && <div role="alert" class="alert alert-error mb-4">{outcome.message}</div>}
+      <p class="mb-4 text-sm">
+        {plural(files.length, 'changed file')} with <span class="text-success">{plural(additions, 'addition')}</span> and{' '}
+        <span class="text-error">{plural(deletions, 'deletion')}</span>.
+      </p>
+      {outdated.length > 0 && (
+        <details class="mb-4 border border-base-300 rounded-box">
+          <summary class="px-4 py-2 cursor-pointer text-sm">{plural(outdated.length, 'outdated comment')}</summary>
+          <ul class="divide-y divide-base-300">
+            {outdated.map(({ comment, html }) => (
+              <li id={`discussion-${comment.id}`} class="px-4 py-2 text-sm">
+                <p>
+                  <span class="font-semibold">{comment.author.login}</span> on <span class="font-mono">{comment.path}</span>
+                </p>
+                <div class="markdown-body" set:html={html} />
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
+      <div class="flex flex-col gap-4">
+        {files.map((file, index) => (
+          <DiffView file={file} index={index} href={file.status === 'removed' ? null : blobUrl(repo.name, pull.headSha, file.path.split('/'))} comments={inline(file.path)} commentable={commentable} />
+        ))}
+      </div>
+      {commentable && session && (
+        <template id="line-comment-template">
+          <tr data-line-comment-row>
+            <td colspan="3" class="p-2 bg-base-200 font-sans">
+              <form method="post" class="flex flex-col gap-2" aria-label="Comment on line">
+                <input type="hidden" name="csrf" value={session.csrf} />
+                <input type="hidden" name="commit" value={pull.headSha} />
+                <input type="hidden" name="path" />
+                <input type="hidden" name="line" />
+                <input type="hidden" name="side" />
+                <label class="text-sm font-semibold" data-line-label>Comment</label>
+                <textarea name="body" rows="3" class="textarea w-full font-mono text-sm" required aria-label="Comment" />
+                <div class="flex gap-2 justify-end">
+                  <button type="button" class="btn btn-sm" data-cancel>Cancel</button>
+                  <button class="btn btn-sm btn-primary">Add comment</button>
+                </div>
+              </form>
+            </td>
+          </tr>
+        </template>
+        <script is:inline>
+          document.addEventListener('click', (event) => {
+            const target = event.target instanceof Element ? event.target : null
+            const cancel = target?.closest('[data-cancel]')
+            if (cancel) {
+              cancel.closest('[data-line-comment-row]')?.remove()
+              return
+            }
+            const button = target?.closest('[data-comment-line]')
+            if (!button) return
+            const row = button.closest('tr')
+            const section = button.closest('section[data-path]')
+            const template = document.getElementById('line-comment-template')
+            if (!row || !section || !template) return
+            document.querySelectorAll('[data-line-comment-row]').forEach((open) => open.remove())
+            const fragment = template.content.cloneNode(true)
+            const form = fragment.querySelector('form')
+            form.elements.path.value = section.dataset.path
+            form.elements.line.value = row.dataset.line
+            form.elements.side.value = row.dataset.side
+            fragment.querySelector('[data-line-label]').textContent = `Comment on line ${row.dataset.line}`
+            row.after(fragment)
+            row.nextElementSibling.querySelector('textarea').focus()
+          })
+        </script>
+      )}
+    </Layout>
+  )
+}

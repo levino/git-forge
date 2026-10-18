@@ -1,0 +1,36 @@
+---
+import type { PullRequest } from '@git-forge/collaboration'
+import { repoUrl, type OpenRepository } from '../ui/repository.ts'
+import IssueHeader from './IssueHeader.astro'
+
+type Props = { repo: OpenRepository; pull: PullRequest; tab: 'conversation' | 'commits' | 'files' }
+
+const { repo, pull, tab } = Astro.props
+const state = pull.merged
+  ? { label: 'Merged', badge: 'badge-secondary' }
+  : pull.state === 'closed'
+    ? { label: 'Closed', badge: 'badge-error' }
+    : pull.draft
+      ? { label: 'Draft', badge: 'badge-ghost' }
+      : { label: 'Open', badge: 'badge-success' }
+const base = repoUrl(repo.name, 'pull', String(pull.number))
+const tabs = [
+  { id: 'conversation', label: 'Conversation', href: base },
+  { id: 'commits', label: 'Commits', href: `${base}/commits` },
+  { id: 'files', label: 'Files changed', href: `${base}/files` },
+] as const
+---
+
+<IssueHeader issue={pull} state={state} />
+<p class="-mt-4 mb-4 text-sm">
+  wants to merge <code class="badge badge-ghost font-mono">{pull.headRef}</code> into <code class="badge badge-ghost font-mono">{pull.baseRef}</code>
+</p>
+<nav class="tabs tabs-border mb-6 overflow-x-auto flex-nowrap" aria-label="Pull request">
+  {
+    tabs.map((item) => (
+      <a href={item.href} class:list={['tab whitespace-nowrap', { 'tab-active': item.id === tab }]} aria-current={item.id === tab ? 'page' : undefined}>
+        {item.label}
+      </a>
+    ))
+  }
+</nav>

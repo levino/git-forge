@@ -119,6 +119,7 @@ Design: [design.md §18](design.md#18-web-ui).
 - [ ] Mirror settings, status and alarms
 - [ ] Blame, syntax highlighting in diffs and Markdown code blocks
 - [ ] Explore and profile listings without one access check per repository
+- [ ] Issue/PR UI: labels, assignees, milestones, reviewer requests, suggested changes, `#N` autolinks in rendered Markdown
 
 ## M7 — Collaboration
 
@@ -133,6 +134,7 @@ Design: [design.md §17](design.md#17-collaboration).
 - [x] Commit statuses and check runs (storage and API; CI writes them)
 - [x] Discussions: categories, threads, answers
 - [x] REST API under `/api/v3` with GitHub-compatible shapes, wired into the Worker
+- [x] Web UI: issues (list, new, timeline, comment, close/reopen), pull requests (list, new, conversation with reviews, checks and merge box, commits, files with inline line comments), discussions (categories, threads, replies, answers)
 - [ ] Pull requests from forks
 - [ ] CODEOWNERS parsing for `require_code_owner_reviews`
 - [ ] Rename detection in merges (renames are reported as conflicts today)

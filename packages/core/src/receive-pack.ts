@@ -21,6 +21,8 @@ export const RECEIVE_CAPABILITIES = `report-status delete-refs side-band-64k qui
 
 export const ARCHIVE_PREFIX = 'refs/archive/'
 
+export const UPSTREAM_PREFIX = 'refs/upstream/'
+
 export const advertiseReceivePack = (state: RefsState): Uint8Array => {
   const refs = sortedRefs(state)
   const lines =
@@ -79,9 +81,10 @@ const parseRequest = (body: Uint8Array): { commands: RefCommand[]; capabilities:
   return { commands, capabilities, pack: rest }
 }
 
-const validRefName = (name: string): boolean =>
+export const validRefName = (name: string): boolean =>
   name.startsWith('refs/') &&
   !name.startsWith(ARCHIVE_PREFIX) &&
+  !name.startsWith(UPSTREAM_PREFIX) &&
   !name.endsWith('/') &&
   !name.endsWith('.lock') &&
   !name.endsWith('.') &&
@@ -91,7 +94,7 @@ const validRefName = (name: string): boolean =>
   !/[\x00-\x20\x7f~^:?*[\\]/.test(name) &&
   !name.split('/').some((part) => part.startsWith('.') || part.length === 0)
 
-const archiveName = (name: string, at: Date): string =>
+export const archiveName = (name: string, at: Date): string =>
   `${ARCHIVE_PREFIX}${at.toISOString().replace(/[:.]/g, '-')}/${name.slice('refs/'.length)}`
 
 const report = (outcome: Pick<PushOutcome, 'unpack' | 'results'>, useSideband: boolean): Uint8Array => {

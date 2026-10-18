@@ -283,6 +283,7 @@ the [accounts README](../packages/accounts/README.md#branch-protection).
   pages/deployments/<sha256>.json   # immutable Pages manifest, keyed by its own hash (§20)
   import/status.json                # progress of the last import
   import/commits.txt                # commit order of the last import
+  import/blobs.txt                  # blobs of the commit an import is splitting
   README.txt                        # plain text: what this is, how to read it
 tmp/<repo>/<timestamp>-<uuid>/<n>   # staging chunks of a push or fetch, expired by the bucket
 tmp/<repo>/<timestamp>-<uuid>/asset # a release asset upload without a declared SHA-256 (§16)
@@ -308,7 +309,9 @@ tmp/<repo>/<timestamp>-<uuid>/part/<nnnnn>  # its parts, 1-based, five digits
   which is only known at the end, and `put` needs a key and a size. The chunks
   are read back once to write the final pack and never again. The `Storage`
   interface has no delete; operators expire `tmp/` with a bucket lifecycle
-  rule (e.g. one day). Pushes up to one chunk never touch `tmp/`.
+  rule (e.g. one day). Pushes up to one chunk never touch `tmp/`. Fetched
+  packs are staged the same way; chunks of failed attempts and unlisted packs
+  are never reused and stay until expired.
 - **Upload sessions** (§7) live under `tmp/`: one session record, one object
   per part, written once; unfinished uploads expire with the `tmp/` rule.
 - **Pages files** are stored the same way, under the SHA-256 of their
@@ -403,11 +406,34 @@ as a sequence of stateless steps, each persisting its progress in
    `want` the last commit of the range, `have` every earlier range end and all
    local tips, so the server sends exactly the new objects; store the pack,
    check connectivity, collect LFS pointers. A step whose pack exceeds
-   `maxStepBytes` (32 MiB) is retried with a quarter of the commits; small
-   packs double the range. A final fetch picks up tag objects. Servers without
-   `filter`, and dumb servers, are fetched in one step.
-4. *lfs* — 100 LFS objects per step via the upstream's batch API; missing
-   objects are recorded, not fatal.
+   `maxStepBytes` (32 MiB), or with a delta result above 64 MiB, is retried
+   with a quarter of the commits; small packs double the range. A final fetch
+   without byte limit picks up tag objects. Servers without `filter`, and dumb
+   servers, are fetched in one step.
+
+   *Split* — a one-commit range that is still too large is spread over steps
+   (`split` in the state): fetch it with `filter blob:none` into a pack that
+   stays unlisted, write the missing blobs of its new trees to
+   `import/blobs.txt`, then `want` them by id in batches (halved on overflow,
+   doubled after small packs); a batch of one blob has no byte limit and
+   arrives undeltified (no `thin-pack`), so the indexer only streams it. After
+   the last batch the tree pack is listed and the commit becomes a cut.
+   Unlisted until complete, an abandoned split never exposes a commit without
+   its blobs. github.com supports both (no `object-info`). Bound: one blob per
+   invocation, about 6 s CPU per 100 MiB (JavaScript inflate and SHA-1), so
+   about 1 GiB at `cpu_ms` 60000.
+4. *lfs* — via the upstream's batch API, at most 100 objects and
+   `maxLfsStepBytes` (512 MiB) per step, at least one object; objects are
+   streamed into storage with native SHA-256 (`DigestStream`, `node:crypto`),
+   so any size up to the storage's single `put` (5 GiB on R2) works;
+   `MAX_LFS_OBJECT_BYTES` only limits uploads. A 538 MB object costs about
+   1.7 s CPU. Missing objects are recorded, not fatal.
+   Endpoint precedence as in git-lfs: `lfsUrl`, then `.lfsconfig` of the
+   default branch (other tips, then tags, only if it has none; `lfs.url`
+   before `remote.origin.lfsurl`), then `<url>.git/info/lfs`. URLs are
+   normalized (http(s), no credentials, trailing `/objects/batch` removed);
+   other keys are ignored. The token goes to a `.lfsconfig` endpoint only if
+   it has the import URL's origin.
 5. *refs* — update refs via compare-and-swap and rewrite `info/refs`; an
    empty repository adopts the upstream `HEAD`.
 

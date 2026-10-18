@@ -73,6 +73,7 @@ discussions.
 - [x] Server-side import: create or update a repository by pulling from a URL (no request body limit), in resumable steps driven by a queue
 - [x] Chunked push helper: `git forge push` splits history into pushes below the platform body limit, using the unmodified git client; single executables per platform from the release workflow
 - [x] Import and mirror sync: stream fetched packs into the streaming indexer (via `ingestPack`)
+- [x] Import commits, blobs and LFS objects of any size; LFS endpoint from `.lfsconfig` (#51)
 - [x] Remote helper `git-remote-forge`: resumable pack upload in parts (presigned or through the function), then a finalize call that indexes the pack and updates refs
 - [ ] Finalize beyond one invocation's CPU budget (queued or stepwise)
 

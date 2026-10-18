@@ -11,7 +11,7 @@ writes into `out-dir` (default `release/dist`):
 
 | File | Content |
 |---|---|
-| `git-forge-worker.mjs` | `apps/forge-worker` bundled by `wrangler deploy --dry-run` into one ES module without imports. Instances upload it with `no_bundle: true`, unchanged. |
+| `git-forge-worker.mjs` | `apps/forge-worker` bundled by `wrangler deploy --dry-run --containers-rollout=none` (no container image build) into one ES module without imports. Instances upload it with `no_bundle: true`, unchanged. |
 | `migrations.tar.gz` | `migrations/*.sql` for D1, collected from the packages listed in `migration_dirs`. Built reproducibly (sorted, zero mtime, `gzip -n`). |
 | `SHA256SUMS` | `sha256sum` output for the two files above. |
 

@@ -1,4 +1,5 @@
 import { fromUtf8, toHex } from './bytes.ts'
+import { type DigestFactory, javascriptDigests } from './digest.ts'
 import { createSha256 } from './hash.ts'
 import type { GitObject } from './objects.ts'
 import { repositoryPrefix, type RepositoryName } from './repository.ts'
@@ -144,8 +145,8 @@ export const lfsBatch = async (
 
 export class LfsIntegrityError extends Error {}
 
-export const verifyingStream = (expected: LfsObjectSpec): TransformStream<Uint8Array, Uint8Array> => {
-  const hash = createSha256()
+export const verifyingStream = (expected: LfsObjectSpec, digests: DigestFactory = javascriptDigests): TransformStream<Uint8Array, Uint8Array> => {
+  const hash = digests('SHA-256')
   let seen = 0
   return new TransformStream({
     transform(chunk, controller) {
@@ -154,9 +155,9 @@ export const verifyingStream = (expected: LfsObjectSpec): TransformStream<Uint8A
       hash.update(chunk)
       controller.enqueue(chunk)
     },
-    flush() {
+    async flush() {
       if (seen !== expected.size) throw new LfsIntegrityError(`body has ${seen} bytes, expected ${expected.size}`)
-      const actual = toHex(hash.digest())
+      const actual = toHex(await hash.digest())
       if (actual !== expected.oid) throw new LfsIntegrityError(`body has sha256 ${actual}, expected ${expected.oid}`)
     },
   })

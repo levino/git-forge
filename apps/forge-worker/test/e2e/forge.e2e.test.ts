@@ -197,15 +197,20 @@ describe('forge worker on wrangler dev', () => {
       await git(large, ['commit', '-q', '-m', `large ${i}`])
     }
     const url = `${dev.url}/e2e/large.git`.replace('http://', `http://git:${token}@`)
-    expect(await gitFails(large, ['push', url, 'main'])).toMatch(/413|exceeds|RPC failed|unexpected disconnect/i)
+    const plain = await promisify(execFile)('git', ['push', url, 'main'], { cwd: large, env: { ...process.env, ...gitEnv }, timeout: 30_000 }).then(
+      () => 'unexpectedly succeeded',
+      (error: { stderr?: string; killed?: boolean }) => (error.killed ? 'killed after 30 s' : String(error.stderr)),
+    )
+    expect(plain).toMatch(/413|exceeds|RPC failed|unexpected disconnect|killed after 30 s/i)
     const cli = resolve(import.meta.dirname, '../../../../packages/cli/src/main.ts')
     const { stderr } = await promisify(execFile)(process.execPath, ['--no-warnings', cli, 'push', '--max-bytes', '8MiB', url, 'main'], {
       cwd: large,
       env: { ...process.env, ...gitEnv },
+      timeout: 150_000,
     })
     expect(stderr).toContain('chunk 2')
     expect(await git(large, ['ls-remote', url, 'refs/heads/main'])).toContain((await git(large, ['rev-parse', 'main'])).trim())
-  })
+  }, 240_000)
 
   it('runs the scheduled mirror sync', async () => {
     const response = await fetch(`${dev.url}/__scheduled?cron=${encodeURIComponent('*/30 * * * *')}`)

@@ -5,7 +5,7 @@ import { streamFrom } from './pack-indexer.ts'
 import { emptyPack, generatePack, sidebandFrames, storedPacks, withTrailer } from './pack-writer.ts'
 import { DELIM, FLUSH, packetText, parsePackets, pkt, sideband, SIDEBAND_DATA, SIDEBAND_ERROR, SIDEBAND_PROGRESS } from './pktline.ts'
 import { AGENT } from './receive-pack.ts'
-import { type LoadedPack, ObjectDatabase, type RefsState, type RepositoryName, readRefs, sortedRefs } from './repository.ts'
+import { type AdvertisedRefs, advertisedRefs, type LoadedPack, ObjectDatabase, type RepositoryName, readRefs, sortedRefs } from './repository.ts'
 import type { Storage } from './storage.ts'
 import { MissingObjectError, objectsToSend } from './walk.ts'
 
@@ -55,7 +55,7 @@ const parseRequest = (body: Uint8Array): Request => {
   return { command, args }
 }
 
-const lsRefs = async (state: RefsState, odb: ObjectDatabase, args: readonly string[]): Promise<Uint8Array> => {
+const lsRefs = async (state: AdvertisedRefs, odb: ObjectDatabase, args: readonly string[]): Promise<Uint8Array> => {
   const symrefs = args.includes('symrefs')
   const peel = args.includes('peel')
   const unborn = args.includes('unborn')
@@ -92,7 +92,7 @@ const uriSection = async (packs: readonly LoadedPack[], protocols: readonly stri
   return [pkt('packfile-uris\n'), ...lines, DELIM]
 }
 
-const fetch = async (state: RefsState, odb: ObjectDatabase, args: readonly string[], options: UploadPackOptions): Promise<AsyncIterable<Uint8Array> | Uint8Array> => {
+const fetch = async (state: AdvertisedRefs, odb: ObjectDatabase, args: readonly string[], options: UploadPackOptions): Promise<AsyncIterable<Uint8Array> | Uint8Array> => {
   const wants = new Set<ObjectId>()
   const haves: ObjectId[] = []
   let done = false
@@ -184,9 +184,9 @@ export const uploadPackV2 = async (
   const request = parseRequest(body)
   switch (request.command) {
     case 'ls-refs':
-      return streamOf(await lsRefs(refs.state, odb, request.args))
+      return streamOf(await lsRefs(advertisedRefs(refs.state), odb, request.args))
     case 'fetch': {
-      const result = await fetch(refs.state, odb, request.args, options)
+      const result = await fetch(advertisedRefs(refs.state), odb, request.args, options)
       return result instanceof Uint8Array ? streamOf(result) : streamFrom(result)
     }
     default:

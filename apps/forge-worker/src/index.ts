@@ -1,13 +1,17 @@
 import { d1Database } from '@git-forge/accounts'
-import { consumeJobs, QueueJobs, R2Storage } from '@git-forge/cloudflare'
+import { consumeJobs, digestStreams, QueueJobs, R2Storage } from '@git-forge/cloudflare'
 import { continueImport, type ImportJob, type ImportScheduler } from '@git-forge/core'
 import { createForge, type Forge } from './app.ts'
-import { type ForgeVars, parseSettings } from './config.ts'
+import { type ForgeVars, parseActionsSettings, parseSettings } from './config.ts'
 import type { ForgeJob } from './mirror-federation.ts'
+import { containerLauncher } from './runner-launcher.ts'
+
+export { RunnerContainer } from './runner-container.ts'
 
 export type Env = ForgeVars & {
   readonly BUCKET: R2Bucket
   readonly DB: D1Database
+  readonly RUNNER?: DurableObjectNamespace
   readonly IMPORTS?: Queue<ImportJob>
   readonly JOBS?: Queue<ForgeJob>
 }
@@ -22,15 +26,26 @@ let forge: Promise<Forge> | undefined
 
 const forgeFor = (env: Env): Promise<Forge> => {
   forge ??= parseSettings(env)
-    .then((settings) =>
-      createForge({
+    .then((settings) => {
+      const actions = parseActionsSettings(env)
+      return createForge({
         ...settings,
         storage: new R2Storage(env.BUCKET),
         db: d1Database(env.DB),
+        digests: digestStreams,
         ...(env.IMPORTS ? { scheduleImport: importScheduler(env.IMPORTS) } : {}),
         ...(env.JOBS ? { jobs: new QueueJobs(env.JOBS) } : {}),
-      }),
-    )
+        ...(actions
+          ? {
+              actions: {
+                instanceId: actions.instanceId,
+                secrets: async () => actions.secrets,
+                ...(env.RUNNER ? { launcher: containerLauncher(env.RUNNER) } : {}),
+              },
+            }
+          : {}),
+      })
+    })
     .catch((error: unknown) => {
       forge = undefined
       throw error

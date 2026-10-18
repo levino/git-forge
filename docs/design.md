@@ -12,9 +12,9 @@ own storage and their own users. This is a light form of federation: no shared
 admin, no shared database, only signed server-to-server access to Git content
 and LFS objects.
 
-First use case: the digital village archive of Rössing (texts, content
-collections, photos, scans, videos; ~100 GB for the foreseeable future). The
-forge itself is not archive-specific.
+It is a general-purpose forge. Sizing assumptions in this document (e.g.
+§12, ~100 GB with large media in LFS) come from a first real deployment, a
+media-heavy archive; nothing in the forge is specific to it.
 
 License: MIT.
 
@@ -31,7 +31,7 @@ License: MIT.
 
 ### Non-goals
 
-Git over SSH (see §9), CI/Actions, package registry, Codespaces, Copilot,
+Git over SSH (see §9), package registry, Codespaces, Copilot,
 code search, Projects, security scanning, cross-instance forks, syncing issues
 or pull requests between instances.
 
@@ -88,7 +88,7 @@ issues, pull requests and discussions.
 
 **Later / maybe**
 
-- Actions (via compute adapter), Pages.
+- Pages.
 - Partial visibility within a repository (levels, derived views).
 - Encrypted full backups for mirrors without read access to plaintext.
 - External verification of mirrors (§10).
@@ -116,6 +116,27 @@ example on a Raspberry Pi.
   descend from the previously mirrored value, the downstream instance archives
   the old value (§5), applies the new one and raises an alarm. Divergence is
   never merged automatically.
+- **Plain clones of a mirror check out the upstream default branch.** Git
+  clients only check out `refs/heads/*`, so a mirror shows one remote's
+  `refs/upstream/{remote}/heads/*` and `…/tags/*` additionally as
+  `refs/heads/*` and `refs/tags/*` (a read-side view, nothing is stored
+  twice) and points `HEAD` at the upstream default branch. The view is named
+  in `refs.json` as the optional field `mirrorView: { remote, head }`, set by
+  the first sync of a remote (only one remote provides it) and its `head`
+  follows the upstream `HEAD`. `advertisedRefs(state)` computes the view and
+  is used for every read: protocol v2 `ls-refs` and `fetch`, the static
+  `info/refs` and `HEAD` files (so a plain clone from the bucket behaves the
+  same), raw URLs and the ref state in push notifications.
+  `refs/upstream/*` stays visible, so mirrors of mirrors are unchanged.
+  - **Own refs win:** a real `refs/heads/X` of the repository shadows the
+    view's `X`; nothing local is ever hidden.
+  - **Writes see real refs only:** `receive-pack` advertises `refs.json` as
+    stored, so pushing `X` to a mirror creates a real branch (which then
+    shadows the view) and branch protection never sees virtual refs.
+  - **Detach materializes the view:** `detachMirror` writes the view into
+    real `refs/heads/*` and `refs/tags/*`, points `HEAD` at the default
+    branch and drops `mirrorView`; `refs/upstream/*` stay. The repository
+    then continues as a primary.
 - **Users of a mirror are independent of the upstream.** Who may read a mirror
   is decided by its operator. If the upstream and its identity provider
   disappear, the mirror stays usable with its own users and can simply be
@@ -226,8 +247,8 @@ the [accounts README](../packages/accounts/README.md#branch-protection).
   `via: 'push'`; the pull request merge will pass `via: 'pull-request'` with
   approvals and statuses and call the same function. Required reviews
   therefore already block direct pushes; required status checks block pushes
-  whose commit has no passing statuses (no CI exists yet, so in practice all
-  direct pushes).
+  whose commit has no passing statuses (CI does not report statuses yet, so in
+  practice all direct pushes).
 - **Pre-receive policy:** receive-pack asks the `pushPolicy` hook once per
   request, which loads the rules and the actor before the ref transaction and
   returns a synchronous per-ref check. A violation rejects only that ref with
@@ -409,7 +430,8 @@ pass through the function on upload.
 `refs/upstream/{remote}/*` (archive and alarm on rewrites), fetch missing LFS
 objects via the Batch API and verify their hashes. Two strategies:
 
-- **Copy-only** (default between instances, `strategy: 'copy'`): upstream
+- **Copy-only** (between instances; the Worker uses `strategy: 'auto'`,
+  which copies whenever the upstream serves `objects/info/packs`): upstream
   packs are already indexed and immutable, so the mirror reads the dumb-HTTP
   files (`info/refs`, `HEAD`, `objects/info/packs`) and copies every pack it
   lacks, with its `.idx`, as is under the same name. Checks per pack, all
@@ -517,8 +539,8 @@ SQLite database. A new instance works without an external identity provider.
 | Break-glass key | Later: offline admin key (Ed25519), works without any IdP |
 | SAML, SCIM | Later, for organizations that require them |
 
-For the village archive: people log in via OIDC with ZITADEL; apps and
-automations use app tokens; mirrors use instance federation (§4).
+Typical setup: people log in via OIDC or passkeys; apps and automations use
+app tokens; mirrors use instance federation (§4).
 
 **Instance admins and bootstrap.** Instance admins (table `instance_admins`)
 create users and tokens, trust other instances and count as admins of every
@@ -568,7 +590,7 @@ dev environments) need real machines, started on demand via API.
 | Search in issues | SQLite FTS5 |
 | Web UI | Astro SSR |
 | Releases, Pages | Bucket + CDN |
-| CI (later) | Compute adapter, e.g. with `act` |
+| CI | Actions service emulating GHES for the official `actions/runner`; compute adapter starts one runner per job (§15) |
 
 Every building block is an interface; Cloudflare is the first implementation.
 
@@ -590,7 +612,7 @@ database.
 | Per-repository consistency | Durable Object | conditional writes (S3 CAS), single-writer process |
 | Scheduling, jobs | Cron Triggers, Queues (Workflows for long jobs) | `Deno.cron`, systemd timers, job table, in-process queue |
 | Email | Mail service via API | SMTP |
-| Compute for CI (later) | Containers | Fly Machines, Hetzner Cloud, … |
+| Compute for CI | Containers | external per-minute providers via the GHES API (WarpBuild, AWS CodeBuild, RunsOn), Fly Machines, a local process |
 
 **Jobs:** the core defines `JobQueue<J>` (`enqueue(job, { delaySeconds })`),
 `jobRetryDelaySeconds` (10 s doubling, capped at 1 h) and `PermanentJobError`.
@@ -661,13 +683,14 @@ development container:
 
 | per invocation (CPU ms) | small repo (0.9 MiB pack) | medium repo (14.1 MiB pack) |
 |---|---|---|
-| notification request, in-process replay | 1.4–2.1 | 1.3–1.5 |
-| copy-only sync of a 1-commit push, replay | 4.6–5.4 | 4.1–5.6 |
-| delivering a notification, replay | 0.6–0.7 | 0.6–3.1 |
-| same three through Node's HTTP stack | 4.5, 8.7–14.0, 1.7–2.0 | 6.4–10.0, 8.9–13.3, — |
-| copy-only sync of the initial push, replay | 21.8 | 157 |
-| re-indexing sync (fetch strategy) for comparison | 195 | 858 |
-| deep check | 606 | 2 624 |
+| notification request, in-process replay | 1.3–1.5 | 1.1–2.5 |
+| copy-only sync of a 1-commit push, replay | 4.7–10.2 | 4.1–5.0 |
+| delivering a notification, replay | 0.7 | 0.6–0.8 |
+| same three through Node's HTTP stack | 4.3–4.8, 8.9–14.1, 1.6–2.1 | 7.0–10.0, 10.6–14.9, — |
+| copy-only sync of the initial push, replay, JavaScript hashes | 19.7 | 140 |
+| the same with a native streaming hash | 10.2 | 65 |
+| re-indexing sync (fetch strategy) for comparison | 215 | 851 |
+| deep check | 574 | 2 651 |
 
 The replay rows run the same code in process against a storage snapshot and
 recorded upstream responses; they exclude Node's JavaScript HTTP client and
@@ -697,33 +720,46 @@ Result:
   downstream subscriber, each in its own invocation, i.e. at roughly half the
   10 ms budget, with ~30 subrequests (≈ 25 storage operations + 5 fetches)
   per sync. Queues, Cron and D1 stay far below their free allowances.
-- **Bulk data does not fit.** Verifying bytes in JavaScript costs 6.3 ms per
-  MiB of pack (SHA-1) and 7.7 ms per MiB of LFS object (SHA-256), so the
-  initial copy of a repository, any push with more than about 0.8 MiB of new
-  pack data and any LFS object above about 1 MiB exceed 10 ms. The deep
-  check and the re-indexing sync never fit.
+- **Bulk data needs units.** Verifying bytes in JavaScript costs about 6 ms
+  per MiB of pack (SHA-1) and 7 ms per MiB of LFS object (SHA-256). With
+  `crypto.DigestStream` (native) hashing costs 1.2–1.8 ms per MiB; the rest
+  of a bulk copy in the Node measurement (about 4 ms per MiB) is mostly
+  Node's JavaScript implementation of web streams, which is native in
+  workerd. A Free-plan mirror therefore copies one pack or LFS object per
+  invocation and sets a byte budget per unit (`MIRROR_UNIT_BYTES`, e.g.
+  1 MiB to stay safely inside 10 ms; check the real CPU time in Workers Logs
+  and raise it). The deep check and the re-indexing sync never fit.
 
-Changes that would make a pure mirror fit more often (proposed, not built):
+What was done about it:
 
-1. **Native streaming hashes.** Pass a hash factory to `verifyingPackStream`
-   and the LFS verification; on Workers back it with `crypto.DigestStream`
-   (non-standard, native, [docs](https://developers.cloudflare.com/workers/runtime-apis/web-crypto/)),
-   elsewhere with the JavaScript implementation. Native SHA-1/SHA-256 cost
-   1.8/1.3 ms per MiB in the same measurement, so packs of ~3 MiB and LFS
-   objects of ~5 MiB would fit.
-2. **One unit of bytes per invocation.** Enqueue one job per pack and per
-   LFS object and update the refs in a final job once all packs are
-   present, so the budget applies per pack instead of per push. Anything
-   larger than the budget stays pending (like `lfsPending`) for a paid
-   instance or a Node/Pi mirror to fetch; the mirror on Free then only
-   follows.
-3. **Ranged object reads.** `ObjectDatabase` loads a whole pack to read one
-   object (fast-forward check, peeling refs). Reading single entries by range
-   keeps a sync cheap when a ref moves onto an object inside a large old
-   pack (e.g. a tag on an old commit).
-4. **Seed on a larger runtime.** The initial copy (and the deep check) runs
-   once on Workers Paid, a Node instance or a Pi; afterwards the same bucket
-   is served by a Free-plan worker. The bucket layout is the same everywhere.
+1. **Native streaming hashes (built).** `verifyingPackStream` and the LFS
+   `verifyingStream` take a `DigestFactory` (`@git-forge/core`,
+   `javascriptDigests` by default). The Worker passes `digestStreams` from
+   `@git-forge/cloudflare`, backed by `crypto.DigestStream` (non-standard,
+   native, [docs](https://developers.cloudflare.com/workers/runtime-apis/web-crypto/));
+   it is tested against the JavaScript hashes in workerd.
+2. **One unit of bytes per invocation (built).** With `MIRROR_UNIT_BYTES` set,
+   a sync job first plans (`planPackCopy`: missing packs and their sizes from
+   `HEAD` requests, stored as `pendingPacks` in the mirror status), then
+   enqueues one `mirror-pack` job per pack (`copyPendingPack`: copy, verify,
+   register, record the LFS pointers it contains). The job that copies the
+   last pack enqueues the final sync, which only updates the refs and defers
+   LFS (`deferLfs`); each LFS object then gets its own `mirror-lfs` job
+   (`mirrorPendingLfsObject`). Packs above the budget stay in `pendingPacks`
+   with `oversized: true` and the refs are not moved past them; LFS objects
+   above the budget stay in `lfsPending`. A later sync with a larger budget
+   (Workers Paid, a Node instance, a Pi) picks them up; the bucket layout is
+   the same everywhere. Without `MIRROR_UNIT_BYTES` everything runs in one
+   job as before.
+3. **Ranged object reads (by the streaming work).** `ObjectDatabase` reading
+   single entries by range instead of whole packs is part of the bounded-memory
+   rework of `ObjectDatabase` (block cache with ranged storage reads) and is
+   not duplicated here.
+4. **Seed on a larger runtime (documentation).** The initial copy of a large
+   repository and the deep check run once on Workers Paid, a Node instance
+   or a Pi with the same bucket (or with the Free-plan instance's bucket via
+   its S3 API); afterwards the Free-plan worker only follows small pushes.
+   Oversized units left by a Free-plan mirror are picked up the same way.
 5. Deploy a Free-plan instance without `limits.cpu_ms` in `wrangler.jsonc`
    (the key is rejected there).
 
@@ -763,6 +799,10 @@ Changes that would make a pure mirror fit more often (proposed, not built):
 - C2SP tlog-tiles (https://github.com/C2SP/C2SP/blob/main/tlog-tiles.md)
 - isomorphic-git — pack index, merge in JavaScript
 - go-git v6 — `receive_pack.go` as reference for server flows and hooks
+- actions/runner — the runner and its SDK (`VssHttpClientBase`, `MessageListener`,
+  `JobDispatcher`, pipeline contracts) define the CI protocol
+- ChristopherHX/runner.server and ChristopherHX/github-act-runner — open
+  reimplementations of the Actions service and the runner protocol
 - Git docs: pack-protocol, http-protocol, protocol-v2; tests t5550/t5551/t5541
 - git-lfs — Batch API specification and integration tests
 - Radicle — signed refs per participant
@@ -772,27 +812,213 @@ Changes that would make a pure mirror fit more often (proposed, not built):
 
 ### CI
 
-CI emulates the GitHub runner stack so the unmodified official
-`actions/runner` and existing per-minute providers work:
+Decision (18 Oct 2026, research in issue #7): CI **emulates the GitHub
+runner stack**. Workflows are GitHub Actions YAML, jobs run on the
+**unmodified official [`actions/runner`](https://github.com/actions/runner)**,
+and the forge looks like a GitHub Enterprise Server (GHES) to everything
+outside: the runner, and later external per-minute runner providers.
 
-- A GHES-style API under `/api/v3`: runner REST (`generate-jitconfig`,
-  registration tokens), GitHub App auth and PATs, signed `workflow_job`
-  webhooks for external providers.
-- The Actions service the runner talks to: connection data and token
-  exchange, sessions and message long-poll (or broker and run service), job
-  acquire/renew/complete, timeline, logs, later cache, artifacts and OIDC.
-- First compute backend: **Cloudflare Containers / Sandbox SDK**. Per job the
-  forge starts a container with the runner and a JIT config and discards it
-  afterwards (billed per 10 ms, scale to zero, up to 4 vCPU / 12 GiB, rootless
-  Docker-in-Docker).
-- External backends later via the same API: WarpBuild Enterprise, AWS
-  CodeBuild, RunsOn (research in issue #7).
+Why: the runner, the action ecosystem and the providers all exist already.
+`actions/runner` treats every host that is not `github.com` / `*.ghe.com` as
+GHES, so a forge that answers under `/api/v3` and speaks the runner's service
+protocol can use all of them. The alternatives from issue #7 (Gitea's
+`act_runner` protocol, Buildkite, GitLab runner emulation) would lock us out
+of either the official runner or the providers.
+
+#### Architecture
+
+```
+git push ──► receive-pack ──► onPush
+                                │ read .github/workflows/*.yml at the new tip
+                                │ parseWorkflow (core, pure) + triggeredByPush
+                                ▼
+                      actions_runs / actions_jobs (SQLite)
+                                │ per queued job: JIT runner (RSA key, ephemeral)
+                                ▼
+                      RunnerLauncher (compute adapter)
+                       ├─ Cloudflare Container: official runner image, --jitconfig
+                       ├─ local process (tests, Pi)
+                       └─ later: external provider via GHES API + workflow_job webhook
+                                │
+           unmodified actions/runner ──HTTPS──► Actions service  /_services/actions
+                                                connectionData, OAuth, sessions,
+                                                message long-poll, job renew/finish,
+                                                timeline, logs ──► bucket
+```
+
+Pieces and where they live:
+
+| Piece | Package | Notes |
+|---|---|---|
+| YAML subset parser, workflow/job model, push filters, reading workflow files from a commit | `@git-forge/core` (`yaml.ts`, `workflow.ts`) | Pure functions. Unsupported YAML (anchors, tags, multi-document, multi-line plain scalars) and unsupported workflow keys are rejected with all problems listed, never silently ignored. |
+| Actions service (runner protocol) | `@git-forge/actions` (`service.ts`) | Mounted at `/_services/actions`; that URL is the runner's `ServerUrl`. |
+| GHES REST subset | `@git-forge/actions` (`rest.ts`) | Under `/api/v3`. |
+| Job message, template tokens, context data | `@git-forge/actions` (`job-message.ts`, `template.ts`) | Pure. `${{ }}` in strings becomes a `format()` expression token, so the runner evaluates expressions exactly as on GitHub. |
+| Dispatch: push → runs → jobs → JIT runners, `needs` ordering | `@git-forge/actions` (`dispatch.ts`) | Jobs with `needs` wait in `pending` and are queued (or skipped) when their needs complete. |
+| Runner container | `apps/forge-worker` (`runner-container.ts`, `runner-launcher.ts`, `runner/Dockerfile`), declared in `apps/forge-worker/wrangler.jsonc` (opt-in snippet in `templates/instance`) | Cloudflare Containers; the only Cloudflare-specific part. A plain Durable Object class on `ctx.container`, so the release bundle stays one module without imports. |
+
+#### Runner protocol
+
+The spike implements the "legacy" distributed-task flow (`use_v2_flow:
+false`), which the runner still supports for GHES. Endpoints, relative to the
+service URL (route templates published through `connectionData`, the same
+location IDs as in the runner SDK and in ChristopherHX/runner.server):
+
+| Endpoint | Purpose |
+|---|---|
+| `GET _apis/connectionData`, `OPTIONS _apis` | Location service: maps location GUIDs to route templates. |
+| `POST _apis/v1/auth/` | OAuth 2 client-credentials with an RS256/PS256 JWT client assertion signed by the runner's RSA key; answers a short-lived runner token. Unauthenticated calls get `401` with `WWW-Authenticate: Bearer`, which makes the runner fetch a token. |
+| `POST/DELETE _apis/v1/AgentSession/1[/{sessionId}]` | Session per listener process. Messages are not encrypted (no session key); TLS protects them. |
+| `GET/DELETE _apis/v1/Message/1[/{messageId}]` | Long-poll (≤ 50 s, polling the job table) for a `PipelineAgentJobRequest`. A job is claimed atomically (`UPDATE … WHERE status = 'queued'`); an unacknowledged message is re-delivered to the same session. |
+| `GET/PATCH _apis/v1/AgentRequest/1/{requestId}` | Renew the job lock (first renew = job started) and finish it. |
+| `PATCH _apis/v1/Timeline/{scope}/{hub}/{plan}/{timelineId}` | Timeline records (job and steps). |
+| `POST _apis/v1/Logfiles/{scope}/{hub}/{plan}[/{logId}]` | Step logs, stored as append-only chunks in the bucket. |
+| `POST _apis/v1/TimeLineWebConsoleLog/…` | Live console lines, stored in the bucket. |
+| `POST _apis/v1/FinishJob/{scope}/{hub}/{plan}` | `JobCompleted` event from the worker: result, then `needs` advance. |
+| `PUT …/attachments/{recordId}/{type}/{name}` | Step summaries and other attachments. |
+| `POST _apis/v1/ActionDownloadInfo/…` | Not implemented: `uses:` steps fail with a clear error. |
+| `GET/POST _apis/v1/AgentPools`, `_apis/v1/Agent/1` | Classic `config.sh` registration with a registration token. |
+
+The job message is built server-side from the job model: `run` steps become
+`ActionStep`s with a `script` reference; `uses` steps get a `repository` /
+`containerRegistry` reference; job and workflow `env` become
+`environmentVariables`; the `github` context is filled from the run; the job
+token is `system.github.token`; secrets are variables with `isSecret: true`
+(so the runner masks them and exposes them as the `secrets` context).
+
+#### GHES API (`/api/v3`)
+
+Implemented for repositories: `POST …/actions/runners/generate-jitconfig`,
+`POST …/actions/runners/registration-token` (and `remove-token`),
+`GET …/actions/runners[?name=]`, `GET/DELETE …/actions/runners/{id}`,
+`POST /api/v3/actions/runner-registration` (`RemoteAuth`), `GET
+…/actions/runs[/{id}[/jobs]]`, `GET …/actions/jobs/{id}[/logs]`, `GET
+/api/v3/meta`. Pure functions for signed `workflow_job` webhooks
+(`X-Hub-Signature-256`) exist; delivering them to providers, GitHub App auth
+(JWT → installation token) and org-level runners come with the provider work
+package.
+
+#### Tokens and permissions
+
+All CI credentials are random opaque tokens, stored only as SHA-256 hashes in
+`actions_tokens`, with an expiry and a kind:
+
+| Kind | Holder | Grants |
+|---|---|---|
+| `registration` | `config.sh` | Register one runner for one repository (1 h). |
+| `runner` | Runner listener | Its own sessions, messages and job requests (1 h, renewed via OAuth). |
+| `runtime` | Runner worker (`SystemVssConnection`) | Timeline, logs and completion of exactly one job (plan id checked on every call). Revoked when the job completes. |
+| `github` | Steps (`GITHUB_TOKEN`) | Read access to the job's repository over Git HTTP. Revoked when the job completes. |
+
+The forge never trusts IDs from the runner: the runner is derived from the
+token, a session must belong to that runner, a job request must be assigned to
+it, and a runtime token must match the plan in the URL. Runner management
+(REST) needs repository admin rights; until accounts are wired in, that is the
+instance admin token.
+
+#### Compute backends
+
+`RunnerLauncher.launch({ jobId, encodedJitConfig, labels, … })` is the compute
+adapter. The dispatcher creates one ephemeral JIT runner per queued job, binds
+the job to it and calls the launcher; if the launch fails, the job is unbound
+and stays queued for any registered runner with matching labels.
+
+- **Cloudflare Containers (first backend):** billed per 10 ms, scale to
+  zero, up to 4 vCPU / 12 GiB, rootless Docker-in-Docker (needed later for
+  `container:` and `services:`). `RunnerContainer` is a Durable Object
+  container class, one instance per job (`env.RUNNER.idFromName(jobId)`),
+  that starts its container with the entrypoint `run.sh --jitconfig <config>`
+  and keeps the object alive until the container exits. The image
+  (`runner/Dockerfile`, in the app and in the instance template) is the
+  official `ghcr.io/actions/actions-runner` image plus Git and Node.js. Like
+  every other resource it comes from the wrangler config (`containers`, the
+  `RUNNER` Durable Object binding and its migration, in every environment of
+  `apps/forge-worker`; in the instance template it is a documented opt-in and
+  `ACTIONS` is off by default until image builds in Workers Builds are
+  verified): `wrangler deploy` builds the image and pushes it to the
+  Cloudflare registry, so the deploy environment needs Docker. Durable Object
+  containers cannot pull external images by reference, only digest-pinned
+  images from the Cloudflare registry or a local Dockerfile. The release
+  bundle is built with `wrangler deploy --dry-run --containers-rollout=none`,
+  which skips the image. The runner is ephemeral: it exits after one job, the
+  container stops and is discarded. Deployment is untested so far.
+- **Local process:** the integration test copies the downloaded runner into a
+  temporary directory per job and starts it with `--jitconfig`. The same works
+  on a Pi or against `wrangler dev`.
+- **External providers (later):** WarpBuild Enterprise, AWS CodeBuild and
+  RunsOn call `generate-jitconfig` / `registration-token` themselves after a
+  `workflow_job` webhook; the forge only has to deliver signed webhooks and
+  accept GitHub App or PAT authentication on `/api/v3`.
+
+#### Secrets
+
+Secrets come from a `SecretsProvider` adapter (`(owner, repo) → name/value`).
+The Worker reads instance secrets from the `ACTIONS_SECRETS` secret (a JSON
+object, e.g. `{"CLOUDFLARE_API_TOKEN": "…"}`). They are sent only inside the
+job message to the runner of that job, marked secret. Later: per-repository
+and per-environment secrets encrypted in the database, required reviewers for
+environments, and no secrets for runs triggered from forks.
+
+#### Data
+
+- SQLite, migration `packages/accounts/migrations/0005_actions.sql`, applied by
+  `wrangler d1 migrations apply` like every other migration and shipped in
+  the release's `migrations.tar.gz`: `actions_runners`, `actions_tokens`,
+  `actions_sessions`, `actions_runs`, `actions_jobs`,
+  `actions_timeline_records`, `actions_logs`.
+- Bucket, append-only, written with `If-None-Match: *`:
+  `repos/<owner>/<repo>/actions/jobs/<jobId>/logs/<logId>/<chunk>`,
+  `…/console/<recordId>/<startLine>` and
+  `…/attachments/<recordId>/<type>/<name>`. Like the rest of the bucket
+  layout this is a durable format.
+
+#### Spike status and known gaps
+
+- The protocol is implemented from the runner sources and runner.server and
+  tested step by step with our own client in Node and in `wrangler dev` (D1).
+  The end-to-end test with the real runner downloads the latest release and
+  skips when that is impossible; in the environment where the spike was
+  written GitHub downloads were blocked, so **the real runner has not run
+  against the forge yet**. That is the first thing to do next.
+- `uses:` actions (needs `ActionDownloadInfo` with tarballs, ideally from
+  mirrored action repositories), so no `actions/checkout` yet.
+- Job-level `if`, `strategy`/`matrix`, `container`, `services`, reusable
+  workflows, `concurrency`, `workflow_dispatch` inputs, job outputs across
+  `needs`.
+- Cancellation, job timeouts and a reaper for expired locks and dead runners.
+- Broker / run service (v2 flow), results service, cache, artifacts, OIDC
+  tokens.
+- Message encryption with the session key.
+- Web UI for runs and logs; check runs / commit statuses.
 
 ### Deployment
 
 Deployments run in our own CI: a job calls `wrangler deploy` with a Cloudflare
 API token stored as an instance secret. No Cloudflare Workers Builds and no
 GitHub mirror are needed.
+
+For example:
+
+```yaml
+on:
+  push:
+    branches: [main]
+jobs:
+  deploy:
+    runs-on: [self-hosted, linux]
+    steps:
+      - name: Checkout
+        env:
+          TOKEN: ${{ github.token }}
+        run: |
+          auth=$(printf 'x-access-token:%s' "$TOKEN" | base64 | tr -d '\n')
+          git -c http.extraHeader="Authorization: Basic $auth" clone -q "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" .
+      - run: npm ci && npx wrangler deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+```
+
+`actions/checkout` is replaced by a `git clone` step until `uses:` works.
 
 ### Distribution, new instances and updates
 

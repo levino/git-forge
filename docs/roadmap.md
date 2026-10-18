@@ -49,7 +49,8 @@ discussions.
 - [x] Archive and alarm on rewritten upstream history (tested across three instances)
 - [x] Push-notified sync: signed notifications (EdDSA JWT, ref state only) to subscribed mirrors, subscriptions via authenticated federation call, job queue with exponential backoff, idempotent duplicates, chains of mirrors; the Cron Trigger is only a daily safety net
 - [x] Copy-only sync: copy upstream packs and indexes as stored (byte-identical), verify index consistency and pack trailer while streaming; deep check (re-hash everything, recompute indexes, walk refs) on demand or every 30 days
-- [ ] Native streaming hashes (`crypto.DigestStream`) and one job per pack / LFS object, so a mirror fits the Workers Free plan beyond small pushes (see design §12)
+- [x] Native streaming hashes (`crypto.DigestStream` behind a `DigestFactory` seam) and one job per pack / LFS object with a byte budget (`MIRROR_UNIT_BYTES`), oversized units stay pending (design §12)
+- [x] Plain clones of a mirror check out the upstream default branch: read-side `refs/heads/*` view of one remote, own refs win, detach materializes it
 - [ ] Mirror overview
 
 ## M5 — Deployment and adapters
@@ -72,10 +73,23 @@ discussions.
 
 ## M5b — CI and distribution
 
-- [ ] Spike: official `actions/runner` registers via JIT config, runs one job in a Cloudflare Container and deploys a hello-world Worker with `wrangler`
-- [ ] Actions service: sessions, jobs, timeline, logs; then cache, artifacts, OIDC
-- [ ] Workflow parsing and job scheduling, secrets
-- [ ] GHES-style `/api/v3` runner API and `workflow_job` webhooks for external providers (WarpBuild, CodeBuild, RunsOn)
+Design: [design.md §15](design.md#ci).
+
+- [x] Spike, part 1: YAML subset parser and workflow/job model in core (pure), push filters
+- [x] Spike, part 1: Actions service, legacy flow (connectionData, OAuth client assertion, sessions, message long-poll, job renew/finish, timeline, logs, console lines, attachments)
+- [x] Spike, part 1: GHES REST subset (`generate-jitconfig`, `registration-token`, `runner-registration`, list/get/delete runners, runs, jobs, job logs)
+- [x] Spike, part 1: dispatch on push, one ephemeral JIT runner per job via `RunnerLauncher`, `needs` with skip on failure; job tokens (`GITHUB_TOKEN` read over Git HTTP, runtime token per job), instance secrets
+- [x] Spike, part 1: Cloudflare Container definition for the runner (Dockerfile, `wrangler.jsonc`)
+- [ ] Spike, part 2: run the real-runner integration test where GitHub downloads are allowed and fix what it finds; deploy the container and deploy a hello-world Worker with `wrangler` from our own CI
+- [ ] `uses:` actions: `ActionDownloadInfo` with tarballs from mirrored action repositories (`actions/checkout`, `actions/setup-node`, …)
+- [ ] Expressions server-side: job-level `if`, `runs-on` expressions, `strategy`/`matrix`, job outputs across `needs`
+- [ ] Cancellation, job timeouts, reaper for expired locks and dead runners, re-runs
+- [ ] Per-repository and per-environment secrets (encrypted in SQLite), environments with required reviewers, no secrets for fork runs
+- [ ] `workflow_dispatch`, `pull_request`, `schedule` triggers; commit statuses / check runs (feeds required status checks)
+- [ ] Broker and run service (v2 flow), results service, message encryption; then cache, artifacts, OIDC id tokens
+- [ ] External providers: signed `workflow_job` webhook delivery, GitHub App auth (JWT → installation token, manifest flow) and PATs on `/api/v3`, org-level runners; try WarpBuild Enterprise, AWS CodeBuild, RunsOn
+- [ ] `container:` and `services:` (Docker-in-Docker in the runner container)
+- [ ] Web UI for runs and live logs
 - [x] "Deploy to Cloudflare" button in the README pointing at the instance template; template wired to accounts (`BOOTSTRAP_TOKEN`)
 - [x] Release artifact (bundled worker + migrations + checksums) and instance template with pinned version
 - [ ] Create `levino/git-forge-instance`, add the deploy key secret `INSTANCE_TEMPLATE_DEPLOY_KEY`, cut the first release

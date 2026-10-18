@@ -16,9 +16,43 @@ export type RepositoryName = {
   readonly name: string
 }
 
+export type MirrorView = {
+  readonly remote: string
+  readonly head?: string
+}
+
 export type RefsState = {
   readonly head: string
   readonly refs: Readonly<Record<string, ObjectId>>
+  readonly mirrorView?: MirrorView
+}
+
+export type AdvertisedRefs = {
+  readonly head: string
+  readonly refs: Readonly<Record<string, ObjectId>>
+}
+
+const VIEWED = ['heads/', 'tags/']
+
+export const mirrorViewRefs = (state: RefsState): Record<string, ObjectId> => {
+  const view: Record<string, ObjectId> = {}
+  if (!state.mirrorView) return view
+  const prefix = `refs/upstream/${state.mirrorView.remote}/`
+  for (const [name, id] of Object.entries(state.refs)) {
+    if (!name.startsWith(prefix)) continue
+    const rest = name.slice(prefix.length)
+    if (!VIEWED.some((kind) => rest.startsWith(kind))) continue
+    const virtual = `refs/${rest}`
+    if (state.refs[virtual] === undefined) view[virtual] = id
+  }
+  return view
+}
+
+export const advertisedRefs = (state: RefsState): AdvertisedRefs => {
+  if (!state.mirrorView) return { head: state.head, refs: state.refs }
+  const refs = { ...state.refs, ...mirrorViewRefs(state) }
+  const head = state.mirrorView.head !== undefined && refs[state.mirrorView.head] !== undefined ? state.mirrorView.head : state.head
+  return { head, refs }
 }
 
 export const NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/
@@ -74,10 +108,11 @@ export const writeRefs = async (storage: Storage, repo: RepositoryName, state: R
   return result.ok
 }
 
-export const sortedRefs = (state: RefsState): [string, ObjectId][] =>
+export const sortedRefs = (state: Pick<RefsState, 'refs'>): [string, ObjectId][] =>
   Object.entries(state.refs).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
 
-export const writeServerInfo = async (storage: Storage, repo: RepositoryName, state: RefsState, odb: ObjectDatabase): Promise<void> => {
+export const writeServerInfo = async (storage: Storage, repo: RepositoryName, stored: RefsState, odb: ObjectDatabase): Promise<void> => {
+  const state = advertisedRefs(stored)
   const lines: string[] = []
   for (const [name, id] of sortedRefs(state)) {
     lines.push(`${id}\t${name}\n`)

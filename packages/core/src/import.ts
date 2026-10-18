@@ -418,7 +418,7 @@ const updateRefs = async (context: StepContext, state: ImportState): Promise<Imp
     const adoptHead = Object.keys(current.state.refs).length === 0 && state.head !== undefined && state.targets[state.head] !== undefined
     const head = adoptHead ? (state.head as string) : current.state.head
     const done = { ...state, phase: 'done' as const, updates: plan.updates, finishedAt: context.now().toISOString() }
-    const next: RefsState = { head, refs: plan.refs }
+    const next: RefsState = { ...current.state, head, refs: plan.refs }
     if (plan.updates.length === 0 && head === current.state.head) {
       await writeServerInfo(options.storage, options.repo, current.state, odb)
       return done

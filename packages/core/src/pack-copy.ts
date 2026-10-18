@@ -1,5 +1,6 @@
 import { compareBytes, equalBytes, readAll, readUint32, utf8 } from './bytes.ts'
-import { createSha1, sha1 } from './hash.ts'
+import { type DigestFactory, javascriptDigests } from './digest.ts'
+import { sha1 } from './hash.ts'
 import { PackIndex } from './pack-index.ts'
 import { expectOk, type Remote, RemoteError, remoteRequest, remoteUrl } from './remote.ts'
 import { packKey, type RepositoryName } from './repository.ts'
@@ -59,8 +60,8 @@ export type PackExpectation = {
   readonly checksum: Uint8Array
 }
 
-export const verifyingPackStream = (expected: PackExpectation): TransformStream<Uint8Array, Uint8Array> => {
-  const hash = createSha1()
+export const verifyingPackStream = (expected: PackExpectation, digests: DigestFactory = javascriptDigests): TransformStream<Uint8Array, Uint8Array> => {
+  const hash = digests('SHA-1')
   const header = new Uint8Array(12)
   let headerFilled = 0
   let seen = 0
@@ -95,10 +96,10 @@ export const verifyingPackStream = (expected: PackExpectation): TransformStream<
       }
       tail = combined.slice(combined.length - keep)
     },
-    flush(controller) {
+    async flush(controller) {
       if (seen !== expected.size) return fail(controller, `expected ${expected.size} bytes, got ${seen}`)
       if (headerFilled < 12 || tail.length !== 20) return fail(controller, 'truncated')
-      if (!equalBytes(hash.digest(), tail)) return fail(controller, 'trailer checksum mismatch')
+      if (!equalBytes(await hash.digest(), tail)) return fail(controller, 'trailer checksum mismatch')
       if (!equalBytes(tail, expected.checksum)) return fail(controller, 'trailer differs from its index')
       controller.enqueue(tail)
     },
@@ -132,6 +133,7 @@ export type CopyPackOptions = {
   readonly repo: RepositoryName
   readonly name: string
   readonly maxPackBytes?: number
+  readonly digests?: DigestFactory
 }
 
 export const copyPack = async (options: CopyPackOptions): Promise<CopiedPack> => {
@@ -163,10 +165,11 @@ export const copyPack = async (options: CopyPackOptions): Promise<CopiedPack> =>
   }
   const index = verifyPackIndex(idx, size)
   const expectation = { size, objects: index.count, checksum: index.packChecksum }
+  const verifier = verifyingPackStream(expectation, options.digests)
   const verified =
     source instanceof ReadableStream
-      ? source.pipeThrough(verifyingPackStream(expectation))
-      : await readAll(new Response(source as Uint8Array<ArrayBuffer>).body!.pipeThrough(verifyingPackStream(expectation)))
+      ? source.pipeThrough(verifier)
+      : await readAll(new Response(source as Uint8Array<ArrayBuffer>).body!.pipeThrough(verifier))
   await storage.put(packKey(repo, name), verified, size, { contentType: 'application/x-git-packed-objects' })
   await storage.put(packKey(repo, idxName), idx, idx.length, { contentType: 'application/x-git-packed-objects-toc' })
   return { name, bytes: size, objects: index.count, reused: false }

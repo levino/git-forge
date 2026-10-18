@@ -334,7 +334,7 @@ describe('import endpoint', () => {
 })
 
 describe('deployment configuration', () => {
-  it('gives every wrangler environment its own Worker, bucket, database and job queue with the same vars and migrations', async () => {
+  it('gives every wrangler environment its own Worker, bucket, database, job queue and runner container with the same vars and migrations', async () => {
     const { readFileSync } = await import('node:fs')
     const { env, ...app } = JSON.parse(readFileSync(new URL('../../wrangler.jsonc', import.meta.url), 'utf8')) as Record<string, unknown> & {
       env: Record<string, Record<string, unknown>>
@@ -362,7 +362,14 @@ describe('deployment configuration', () => {
         d1_databases: [{ binding: 'DB', database_name: `git-forge-${name}`, migrations_dir: migrations }],
         vars: app.vars,
         secrets: { required: ['BOOTSTRAP_TOKEN'] },
+        containers: app.containers,
+        durable_objects: app.durable_objects,
+        migrations: app.migrations,
       })
     }
+    expect(app.containers).toEqual([{ class_name: 'RunnerContainer', image: './runner/Dockerfile', instance_type: 'standard-1', max_instances: 4 }])
+    expect(app.durable_objects).toEqual({ bindings: [{ name: 'RUNNER', class_name: 'RunnerContainer' }] })
+    expect(app.migrations).toEqual([{ tag: 'v1', new_sqlite_classes: ['RunnerContainer'] }])
+    expect(app.dev).toEqual({ enable_containers: false })
   })
 })

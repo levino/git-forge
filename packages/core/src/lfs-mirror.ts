@@ -1,4 +1,5 @@
 import { utf8 } from './bytes.ts'
+import type { DigestFactory } from './digest.ts'
 import { LfsIntegrityError, lfsObjectKey, type LfsObjectSpec, verifyingStream } from './lfs.ts'
 import { expectOk, type Remote, RemoteError, remoteRequest } from './remote.ts'
 import type { RepositoryName } from './repository.ts'
@@ -27,6 +28,7 @@ export type LfsMirrorOptions = {
   readonly endpoint?: string
   readonly objects: readonly LfsPointer[]
   readonly batchSize?: number
+  readonly digests?: DigestFactory
   readonly concurrency?: number
 }
 
@@ -83,7 +85,7 @@ const download = async (
     return { ok: false, reason: `download failed with HTTP ${response.status}` }
   }
   try {
-    await options.storage.put(lfsObjectKey(options.repo, pointer.oid), response.body.pipeThrough(verifyingStream(pointer)), pointer.size, {
+    await options.storage.put(lfsObjectKey(options.repo, pointer.oid), response.body.pipeThrough(verifyingStream(pointer, options.digests)), pointer.size, {
       ifNoneMatch: '*',
       contentType: 'application/octet-stream',
     })

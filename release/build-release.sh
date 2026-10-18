@@ -10,7 +10,7 @@ out=$(cd "$out" && pwd)
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
-(cd "$root/apps/forge-worker" && WRANGLER_SEND_METRICS=false ./node_modules/.bin/wrangler deploy --dry-run --outdir "$work/bundle" >"$work/wrangler.log" 2>&1) || {
+(cd "$root/apps/forge-worker" && WRANGLER_SEND_METRICS=false ./node_modules/.bin/wrangler deploy --dry-run --containers-rollout=none --outdir "$work/bundle" >"$work/wrangler.log" 2>&1) || {
   cat "$work/wrangler.log" >&2
   exit 1
 }

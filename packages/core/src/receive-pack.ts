@@ -240,7 +240,7 @@ export const receivePack = async (
       archived: atomic && anyFailed ? [] : archived,
     }
     if (finalResults.every((result) => !result.ok)) return { response: report(outcome, useSideband), outcome }
-    const state: RefsState = { head: current.state.head, refs }
+    const state: RefsState = { ...current.state, refs }
     if (await writeRefs(storage, repo, state, current.etag)) {
       await writeServerInfo(storage, repo, state, odb)
       return { response: report(outcome, useSideband), outcome }

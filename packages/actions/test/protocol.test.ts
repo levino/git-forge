@@ -117,11 +117,17 @@ describe('Actions service protocol', () => {
 
   it('runs a job through session, message, renew, timeline, logs and completion', async () => {
     const config = decodeJitConfig(launches[0]!.encodedJitConfig) as Runner
-    const token = await exchangeToken(config)
+    const crashed = await exchangeToken(config)
+    expect(crashed.split('.').map((part, index) => (index < 2 ? Object.keys(JSON.parse(atob(part.replace(/-/g, '+').replace(/_/g, '/')))).length > 0 : part.length > 0))).toEqual([true, true, true])
     const agentId = config['.runner']['AgentId']
-    const session = (await (await call(`${SERVICE_PATH}/_apis/v1/AgentSession/1`, { method: 'POST', token, body: JSON.stringify({ ownerName: 'test', agent: { id: agentId } }) })).json()) as {
-      sessionId: string
-    }
+    const openSession = async (token: string) =>
+      ((await (await call(`${SERVICE_PATH}/_apis/v1/AgentSession/1`, { method: 'POST', token, body: JSON.stringify({ ownerName: 'test', agent: { id: agentId } }) })).json()) as { sessionId: string })
+        .sessionId
+    const first = await openSession(crashed)
+    expect((await call(`${SERVICE_PATH}/_apis/v1/Message/1?sessionId=${first}`, { token: crashed })).status).toBe(200)
+    expect(await call(`${SERVICE_PATH}/_apis/v1/AgentSession/1/${first}`, { method: 'DELETE', token: crashed })).toHaveProperty('status', 204)
+    const token = await exchangeToken(config)
+    const session = { sessionId: await openSession(token) }
     const messageResponse = await call(`${SERVICE_PATH}/_apis/v1/Message/1?sessionId=${session.sessionId}&status=Online`, { token })
     expect(messageResponse.status).toBe(200)
     const message = (await messageResponse.json()) as { messageId: number; messageType: string; body: string }
@@ -142,6 +148,7 @@ describe('Actions service protocol', () => {
     const endpoint = job.resources.endpoints[0]
     expect(endpoint).toMatchObject({ name: 'SystemVssConnection', url: `${server.url}${SERVICE_PATH}` })
     const runtimeToken = endpoint.authorization.parameters.AccessToken as string
+    expect(JSON.parse(atob(runtimeToken.split('.')[1]!.replace(/-/g, '+').replace(/_/g, '/')))).toMatchObject({ sub: 'runtime', orchid: job.jobId })
     const githubToken = job.variables['system.github.token'].value as string
     expect(await call(`${SERVICE_PATH}/_apis/v1/Message/1/${message.messageId}?sessionId=${session.sessionId}`, { method: 'DELETE', token })).toHaveProperty('status', 204)
 

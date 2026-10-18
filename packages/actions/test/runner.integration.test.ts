@@ -42,6 +42,8 @@ const downloadRunner = async (): Promise<{ dir: string } | { skip: string }> => 
 
 const runner = await downloadRunner()
 
+const JOB_DEADLINE_MS = 120_000
+
 const WORKFLOW = `name: Deploy
 on:
   push:
@@ -81,7 +83,7 @@ afterAll(async () => {
 })
 
 describe.skipIf('skip' in runner)(`official actions/runner${'skip' in runner ? ` (skipped: ${runner.skip})` : ''}`, () => {
-  it('registers via JIT config, checks out from the forge, runs steps and a wrangler deploy', { timeout: 600_000 }, async () => {
+  it('registers via JIT config, checks out from the forge, runs steps and a wrangler deploy', { timeout: 240_000 }, async () => {
     const runnerDir = (runner as { dir: string }).dir
     const output: string[] = []
     const launches: RunnerLaunch[] = []
@@ -120,14 +122,15 @@ describe.skipIf('skip' in runner)(`official actions/runner${'skip' in runner ? `
 
     expect(launches).toHaveLength(1)
     const requestId = launches[0]!.requestId
-    const deadline = Date.now() + 540_000
+    const deadline = Date.now() + JOB_DEADLINE_MS
     let job = await getJob(forge.db, requestId)
-    while (job?.status !== 'completed' && Date.now() < deadline) {
+    while (job?.status !== 'completed' && Date.now() < deadline && children.some((child) => child.exitCode === null && child.signalCode === null)) {
       await new Promise((resolve) => setTimeout(resolve, 1000))
       job = await getJob(forge.db, requestId)
     }
     const logs = await (await fetch(`${server.url}/api/v3/repos/acme/site/actions/jobs/${requestId}/logs`, { headers: { Authorization: `Bearer ${ADMIN_TOKEN}` } })).text()
-    const diagnostics = `runner output:\n${output.join('').slice(-20_000)}\njob logs:\n${logs.slice(-20_000)}`
+    const requests = server.requests.map((request) => `${request.status} ${request.method} ${request.path}`).join('\n')
+    const diagnostics = `runner output:\n${output.join('').slice(-20_000)}\nforge requests:\n${requests.slice(-20_000)}\njob logs:\n${logs.slice(-20_000)}`
     expect(job?.status, diagnostics).toBe('completed')
     expect(job?.conclusion, diagnostics).toBe('success')
     expect(logs, diagnostics).toContain('hello from acme/site')

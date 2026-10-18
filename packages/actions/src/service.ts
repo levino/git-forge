@@ -529,7 +529,9 @@ const runnerRoutes = async (context: Context, segments: readonly string[]): Prom
     if (method === 'POST' && tail.length === 1) return createSessionRoute(context, runner)
     if (method === 'DELETE' && tail.length === 2) {
       await closeSession(context.options.db, tail[1]!, runner.id, context.now)
-      if (runner.ephemeral && runner.jobId) await removeRunner(context.options.db, runner.id, context.now)
+      if (runner.ephemeral && runner.jobId && (await getJobById(context.options.db, runner.jobId))?.status === 'completed') {
+        await removeRunner(context.options.db, runner.id, context.now)
+      }
       return empty(204)
     }
   }

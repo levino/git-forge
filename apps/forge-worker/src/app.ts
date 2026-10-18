@@ -6,7 +6,7 @@ import {
   queueRunsForPush,
   type RunnerLauncher,
   type SecretsProvider,
-  TOKEN_PREFIX,
+  GITHUB_TOKEN_PREFIX,
   verifyToken,
 } from '@git-forge/actions'
 import {
@@ -526,7 +526,7 @@ export const createForge = (options: ForgeOptions): Forge => {
     return async (request, repo, access, ...rest) => {
       const credential = parseAuthorization(request.headers.get('Authorization'))
       const secret = credential.kind === 'secret' ? credential.secret : null
-      if (access === 'read' && secret?.startsWith(TOKEN_PREFIX.github)) {
+      if (access === 'read' && secret?.startsWith(GITHUB_TOKEN_PREFIX)) {
         const grant = await verifyToken(db, secret, 'github', now().getTime())
         if (grant && grant.owner === repo.owner && grant.repo === repo.name) return null
       }

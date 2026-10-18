@@ -1,4 +1,4 @@
-import { base64UrlEncode, type Database, first, randomBytes, sha256Hex, sql } from '@git-forge/accounts'
+import { base64UrlEncode, type Database, first, randomBytes, sha256Hex, sql, utf8 } from '@git-forge/accounts'
 import type { RunnerPublicKey } from './keys.ts'
 
 export type TokenKind = 'registration' | 'runner' | 'runtime' | 'github'
@@ -173,10 +173,32 @@ export type TokenGrant = {
   readonly ttlMs: number
 }
 
-export const TOKEN_PREFIX: Readonly<Record<TokenKind, string>> = { registration: 'gfg_', runner: 'gfr_', runtime: 'gfa_', github: 'gfs_' }
+export const GITHUB_TOKEN_PREFIX = 'gfs_'
+
+export const TOKEN_ISSUER = 'git-forge-actions'
+
+const base64UrlJson = (value: unknown): string => base64UrlEncode(utf8(JSON.stringify(value)))
+
+const JWT_SHAPE = /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/
+
+const mintToken = (grant: TokenGrant, now: number): string => {
+  if (grant.kind === 'github') return `${GITHUB_TOKEN_PREFIX}${base64UrlEncode(randomBytes(32))}`
+  const seconds = Math.floor(now / 1000)
+  const payload = {
+    iss: TOKEN_ISSUER,
+    aud: TOKEN_ISSUER,
+    sub: grant.kind,
+    jti: crypto.randomUUID(),
+    nbf: seconds - 60,
+    iat: seconds,
+    exp: Math.floor((now + grant.ttlMs) / 1000),
+    ...(grant.jobId ? { orchid: grant.jobId } : {}),
+  }
+  return `${base64UrlJson({ typ: 'JWT', alg: 'HS256' })}.${base64UrlJson(payload)}.${base64UrlEncode(randomBytes(32))}`
+}
 
 export const issueToken = async (db: Database, grant: TokenGrant, now: number): Promise<string> => {
-  const token = `${TOKEN_PREFIX[grant.kind]}${base64UrlEncode(randomBytes(32))}`
+  const token = mintToken(grant, now)
   await db.run(
     sql(
       'INSERT INTO actions_tokens (hash, kind, runner_id, job_id, owner, repo, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
@@ -193,7 +215,7 @@ export const issueToken = async (db: Database, grant: TokenGrant, now: number): 
 }
 
 export const verifyToken = async (db: Database, token: string, kind: TokenKind, now: number): Promise<TokenRow | null> => {
-  if (!token.startsWith(TOKEN_PREFIX[kind])) return null
+  if (kind === 'github' ? !token.startsWith(GITHUB_TOKEN_PREFIX) : !JWT_SHAPE.test(token)) return null
   const row = await first<TokenRow>(db, sql('SELECT * FROM actions_tokens WHERE hash = ?', await sha256Hex(token)))
   return row && row.kind === kind && row.expires_at > now ? row : null
 }
@@ -221,6 +243,7 @@ export const touchSession = async (db: Database, id: string, now: number): Promi
 export const closeSession = async (db: Database, id: string, runnerId: number, now: number): Promise<void> => {
   await db.batch([
     sql('UPDATE actions_sessions SET closed_at = ? WHERE id = ? AND runner_id = ? AND closed_at IS NULL', now, id, runnerId),
+    sql("UPDATE actions_jobs SET status = 'queued', session_id = NULL, assigned_at = NULL WHERE session_id = ? AND runner_id = ? AND status = 'assigned'", id, runnerId),
     sql('UPDATE actions_runners SET status = ? WHERE id = ?', 'offline', runnerId),
   ])
 }

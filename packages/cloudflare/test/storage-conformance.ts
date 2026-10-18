@@ -61,6 +61,20 @@ export const describeStorageConformance = (name: string, make: () => Storage | P
       expect(await storage.head('long.bin')).toBeNull()
     })
 
+    it('stores nothing when the body stream errors', async () => {
+      const storage = await make()
+      let sent = false
+      const failing = new ReadableStream<Uint8Array>({
+        pull(controller) {
+          if (sent) return controller.error(new Error('integrity check failed'))
+          sent = true
+          controller.enqueue(utf8('abcd'))
+        },
+      })
+      await expect(storage.put('failing.bin', failing, 8, { ifNoneMatch: '*' })).rejects.toThrow()
+      expect(await storage.head('failing.bin')).toBeNull()
+    })
+
     it('serves byte ranges and reports the full object size', async () => {
       const storage = await make()
       const bytes = utf8('0123456789')

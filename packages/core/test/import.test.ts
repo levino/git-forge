@@ -6,7 +6,7 @@ import { handleGitRequest } from '../src/http.ts'
 import {
   commitOrder,
   continueImport,
-  ingestInMemory,
+  ingestStreamed,
   type ImportJob,
   ImportRunningError,
   importStep,
@@ -156,6 +156,20 @@ describe('import ref plan', () => {
 })
 
 describe('server-side import', () => {
+  it('takes over an import that made no progress for half an hour, e.g. after a restart', async () => {
+    const storage = new MemoryStorage()
+    const url = 'https://example.org/source.git'
+    const started = new Date('2026-10-18T12:00:00Z')
+    await startImport(storage, target, { url, commitsPerStep: 8 }, started)
+    const later = (minutes: number) => new Date(started.getTime() + minutes * 60_000)
+    await expect(startImport(storage, target, { url }, later(29))).rejects.toBeInstanceOf(ImportRunningError)
+    const resumed = await startImport(storage, target, { url }, later(31))
+    expect(resumed).toMatchObject({ phase: 'discover', commitsPerStep: 8, createdAt: started.toISOString(), updatedAt: later(31).toISOString() })
+    await expect(startImport(storage, target, { url }, later(32))).rejects.toBeInstanceOf(ImportRunningError)
+    const replaced = await startImport(storage, target, { url: 'https://example.org/other.git' }, later(70))
+    expect(replaced).toMatchObject({ url: 'https://example.org/other.git', phase: 'discover', createdAt: later(70).toISOString() })
+  })
+
   it('imports a repository from a git http server in bounded steps', async () => {
     const source = await sourceRepo(60)
     const remote = await serve(httpBackendHandler(source.root))
@@ -170,8 +184,9 @@ describe('server-side import', () => {
       repo: target,
       maxStepBytes: 400_000,
       ingestPack: async (odb, pack) => {
-        ingested.push(pack.length)
-        return ingestInMemory(odb, pack)
+        const stored = await ingestStreamed(odb, pack)
+        ingested.push(stored.bytes)
+        return stored
       },
     })
     expect(ingested.length).toBe(state.fetched.packs)

@@ -11,7 +11,9 @@ core `Storage` and an accounts `Database` and returns `{ fetch, services,
 scheduled, runJob }`. `src/cloudflare.ts` wires the Cloudflare bindings
 (`R2Storage`, `d1Database`, `QueueJobs` and the queue consumer) and parses the
 vars (`src/config.ts`). The same app runs in Node for the unit tests and the
-benchmark.
+benchmark, and as a deployment of its own without Cloudflare and without the
+web UI in [apps/forge-node](../forge-node) (which imports `forge-worker/app`
+and `forge-worker/config`).
 
 The Worker entry is `src/worker.ts`, an Astro SSR app (`@astrojs/cloudflare`,
 `astro.config.ts`): the middleware (`src/middleware.ts`) hands Git, LFS, media,
@@ -33,7 +35,9 @@ read functions of `@git-forge/core` and check access with the same
 | `BOOTSTRAP_TOKEN` | secret | Allows exactly one successful `POST /api/bootstrap`, which creates the first instance admin. |
 | `INSTANCE_KEY` | secret, optional | Ed25519 private JWK of this instance. Needed to mirror private repositories from other instances; also publishes `/.well-known/openid-configuration` and `/.well-known/jwks.json`. Generate with `pnpm --filter forge-worker instance-key`. |
 | `PUBLIC_URL` | var, optional | Base URL of the instance, used as its issuer (when minting) and audience (when verifying instance tokens). Defaults to the origin of the request; scheduled sync with instance tokens needs it set. |
-| `MAX_PUSH_BYTES` | var | Largest accepted push request, default 16 MiB. Larger files belong in Git LFS. |
+| `MAX_PUSH_BYTES` | var, optional | Largest accepted push request. Unset by default: pushes are streamed, so only Cloudflare's request body limit applies (see Large pushes). |
+| `PACKFILE_URI_BASE` | var, optional | Base URL for `packfile-uris` (e.g. a CDN in front of the forge). Defaults to the origin of the request. Pack URIs are only offered for repositories anyone may read. |
+| `COMPACT_MAX_BYTES` | var, optional | Largest pack compaction run after a push through `waitUntil`, default 128 MiB; `0` disables it. |
 | `MAX_LFS_OBJECT_BYTES` | var | Largest accepted LFS object, default 100 MiB (Cloudflare's request body limit on the Free and Pro plans). Larger objects get a per-object error in the batch API and `413` on `PUT`. |
 | `MIRROR_INTERVAL_MINUTES` | var | Minimum time between two scheduled syncs of a mirror, default 30; `wrangler.jsonc` sets 1440 (daily) because notifications carry the real-time updates; `0` syncs on every cron tick. |
 | `MIRROR_UNIT_BYTES` | var | `0` (default): a mirror sync copies all new packs and LFS objects in one job. Otherwise a byte budget per invocation: one job per pack and per LFS object, a final job moves the refs, units above the budget stay pending (`docs/design.md` §12). For a mirror on the Workers Free plan. |
@@ -79,7 +83,7 @@ There is no global "public read" switch any more.
 | `POST\|DELETE /api/federation/subscriptions` `{repository, callback}` | trusted instance (instance JWT) | Subscribes to push notifications for a repository it may read; the callback must be below its own issuer URL. |
 | `POST /api/federation/notify/{owner}/{name}/{remote}` | trusted upstream (signed body, `application/jwt`) | Push notification. `401` for an untrusted issuer, unknown key, bad signature, wrong audience or expired token; `403` if this mirror does not follow that repository; `200 up-to-date` for a duplicate; `202 queued` otherwise. |
 | `POST /api/repos/{owner}/{name}/mirrors/{remote}/detach` | repository admin | Stops syncing. |
-| `POST /api/repos/{owner}/{name}/import` `{url, token?, username?, lfs?, lfsUrl?, commitsPerStep?, visibility?, defaultBranch?}` | repository admin or instance admin; for a new repository the owner or an instance admin | Imports from a Git URL (smart HTTP v2 or dumb HTTP) without a request body limit, creating the repository first if needed (as `POST /api/repos`). `token` is sent as HTTP Basic password with `username` (default `git`), travels only in the queue messages and is never stored. Refs land in `refs/heads/*` and `refs/tags/*`; rewritten refs are archived, local refs missing upstream are kept. `202` with the state and a `Location`, `409` while an import runs. |
+| `POST /api/repos/{owner}/{name}/import` `{url, token?, username?, lfs?, lfsUrl?, commitsPerStep?, visibility?, defaultBranch?}` | repository admin or instance admin; for a new repository the owner or an instance admin | Imports from a Git URL (smart HTTP v2 or dumb HTTP) without a request body limit, creating the repository first if needed (as `POST /api/repos`). `token` is sent as HTTP Basic password with `username` (default `git`), travels only in the queue messages and is never stored. Refs land in `refs/heads/*` and `refs/tags/*`; rewritten refs are archived, local refs missing upstream are kept. `202` with the state and a `Location`, `409` while an import runs; an import without progress for 30 minutes (its worker or process died) is taken over and continues from its last step. |
 | `GET /api/repos/{owner}/{name}/import` | repository admin | Import state: `phase` (`discover`, `graph`, `fetch`, `lfs`, `refs`, `done`, `failed`), progress, ref updates, missing LFS objects, last error. Starting a failed import again with the same URL resumes it. |
 | `GET /api/health` | anyone | `{"ok": true}` |
 
@@ -150,6 +154,14 @@ npx wrangler login
 openssl rand -base64 32 | npx wrangler secret put BOOTSTRAP_TOKEN
 pnpm run deploy
 npx wrangler d1 migrations apply DB --remote
+```
+
+Pushes larger than one staging chunk (4 MiB) are staged under `tmp/` while
+they are indexed (`docs/design.md` §6). The forge never deletes anything, so
+let the bucket expire that prefix:
+
+```sh
+npx wrangler r2 bucket lifecycle add git-forge expire-staging tmp/ --expire-days 1
 ```
 
 The first `wrangler deploy` creates the bucket, the database and the import
@@ -260,16 +272,26 @@ npx wrangler dev dist/server/entry.mjs --config wrangler.jsonc --env beta --port
 
 ## Large pushes
 
-The Worker rejects pushes above `MAX_PUSH_BYTES`, and Cloudflare rejects
-request bodies above 100 MB on Free/Pro. Two ways around it:
+The Worker no longer caps pushes itself (`MAX_PUSH_BYTES` is optional), so the
+limit is Cloudflare's request body size for the zone's plan: 100 MB on Free
+and Pro, 200 MB on Business and 500 MB by default on Enterprise (check the
+current Workers limits). A push larger than that fails with HTTP 413 before it
+reaches the Worker. Ways around it:
 
-- `git forge push` from `packages/cli` splits a push into several pushes
-  below a budget: `git forge push --max-bytes 16MiB <url> main`.
-- Import the repository from where it already lives with
-  `POST /api/repos/{owner}/{name}/import`. Each step runs as one queue
-  message with its own CPU budget (`limits.cpu_ms`) and fetches about
-  `commitsPerStep` commits and at most 32 MiB of pack (`docs/design.md` §7,
-  Import).
+- **Git LFS for large files.** LFS objects go straight to the bucket through
+  presigned URLs and never pass through the Worker.
+- **Chunked pushes.** `git forge push` from `packages/cli` splits a push into
+  several pushes below a budget: `git forge push --max-bytes 90MiB <url> main`.
+  Each push only carries the objects the forge does not have yet.
+- **Server-side import.** Import the repository from where it already lives
+  with `POST /api/repos/{owner}/{name}/import`. Each step runs as one queue
+  message with its own CPU budget (`limits.cpu_ms`), fetches about
+  `commitsPerStep` commits and at most 32 MiB of pack, and streams it into the
+  same indexer as a push (`docs/design.md` §7, Import). Mirrors fetch the same
+  way.
+
+Every staging chunk is one R2 write and is read back once when the final pack
+is written, so a 500 MB push performs a few hundred R2 operations.
 
 ## Local development
 
@@ -331,8 +353,11 @@ argument.
   repositories are private by default, pushes incrementally, force-pushes and
   checks the previous tip under `refs/archive/`, imports the generated
   repository from a local token-protected `git http-backend` server stepped
-  through the local queue, pushes 24 MiB with `git forge push` against the
-  16 MiB limit, and fires the Cron Trigger through `/__scheduled`.
+  through the local queue, pushes a 12 MiB pack that is staged in R2 while it
+  is indexed, checks that pushes trigger compaction through `waitUntil` and
+  clones with `packfile-uris`, pushes 24 MiB with `git forge push` against a
+  16 MiB `MAX_PUSH_BYTES` (standing in for the platform limit), and fires the
+  Cron Trigger through `/__scheduled`.
 - `test/e2e/federation.e2e.test.ts` starts the `alpha`, `beta` and `gamma`
   environments as three `wrangler dev` processes with their own keys. It
   pushes a private repository with Git LFS objects to alpha with the real
@@ -373,47 +398,108 @@ The R2 adapter itself is tested inside workerd in `packages/cloudflare`.
 
 ## CPU time and memory
 
-`pnpm --filter forge-worker bench` runs the same request handler in Node.js
-(the same V8 engine as workerd) with in-memory storage, drives it with the real
-`git` client and records process CPU time per operation. Process CPU time
-includes V8's garbage-collector threads, so these are upper bounds; the Worker
-also spends no CPU time while waiting for R2. Measured on the development
-container (Node 22.22, git 2.43):
+`pnpm --filter forge-worker bench [small medium large xl xxl]` runs the same
+request handler in Node.js (the same V8 engine as workerd) with `FsStorage`
+from `@git-forge/node` (so stored data does not count as memory), drives it
+with the real `git` client and records process CPU time per operation. Process
+CPU time includes V8's garbage-collector threads and the file system calls of
+`FsStorage`, so these are upper bounds; the Worker also spends no CPU time
+while waiting for R2. Measured on the development container (Node 22.22,
+git 2.43, 4 vCPUs) with the default budgets (16 MiB object cache, 4 MiB
+staging chunks):
 
 | operation | requests | CPU total (ms) | CPU max per request (ms) | wall (ms) | peak JS memory (MiB) |
 |---|---|---|---|---|---|
-| push small (120 commits, 1047 objects, 0.9 MiB pack) | 3 | 274 | 268 | 213 | 11 |
-| clone v2 small | 3 | 1170 | 1164 | 791 | 21 |
-| clone dumb small | 8 | 10 | 3 | 92 | 4 |
-| push medium (500 commits, 4382 objects, 14.1 MiB pack) | 4 | 1590 | 1581 | 1266 | 59 |
-| clone v2 medium | 3 | 6002 | 5981 | 4742 | 123 |
-| clone dumb medium | 8 | 32 | 28 | 377 | 14 |
-| push large (600 commits, 5272 objects, 32.0 MiB pack) | 4 | 2734 | 2728 | 2259 | 104 |
-| clone v2 large | 3 | 10110 | 10031 | 8556 | 64 |
-| clone dumb large | 8 | 100 | 97 | 774 | 64 |
+| push small (120 commits, 1047 objects, 0.9 MiB pack) | 3 | 451 | 441 | 259 | 17 |
+| clone v2 small | 3 | 49 | 36 | 89 | 0 |
+| clone v2 with packfile-uris small | 4 | 19 | 7 | 98 | 3 |
+| clone dumb small | 8 | 16 | 3 | 87 | 2 |
+| push incremental small (20 commits) | 3 | 245 | 240 | 159 | 7 |
+| fetch incremental small | 3 | 156 | 142 | 134 | 5 |
+| clone v2 small (2 packs) | 3 | 63 | 54 | 94 | 6 |
+| compact small (2 packs into 1) | 0 | 172 | 172 | 131 | 8 |
+| push medium (500 commits, 4382 objects, 14.1 MiB pack) | 4 | 1418 | 1411 | 873 | 37 |
+| clone v2 medium | 3 | 132 | 119 | 413 | 0 |
+| clone v2 with packfile-uris medium | 4 | 47 | 29 | 340 | 14 |
+| clone dumb medium | 8 | 73 | 63 | 346 | 10 |
+| push incremental medium (20 commits) | 3 | 320 | 315 | 169 | 11 |
+| fetch incremental medium | 3 | 274 | 260 | 255 | 10 |
+| clone v2 medium (2 packs) | 3 | 356 | 350 | 443 | 18 |
+| compact medium (2 packs into 1) | 0 | 751 | 751 | 515 | 24 |
+| push large (600 commits, 5272 objects, 32.0 MiB pack) | 4 | 2290 | 2279 | 1589 | 44 |
+| clone v2 large | 3 | 309 | 293 | 778 | 0 |
+| clone v2 with packfile-uris large | 4 | 120 | 102 | 671 | 20 |
+| clone dumb large | 8 | 107 | 96 | 740 | 23 |
+| push incremental large (20 commits) | 3 | 327 | 323 | 187 | 13 |
+| fetch incremental large | 3 | 327 | 319 | 326 | 11 |
+| clone v2 large (2 packs) | 3 | 729 | 718 | 799 | 22 |
+| compact large (2 packs into 1) | 0 | 1131 | 1131 | 849 | 22 |
+| push xl (400 commits, 1680 objects, 200.6 MiB pack) | 4 | 9154 | 9145 | 7469 | 37 |
+| clone v2 xl | 3 | 1483 | 1473 | 3524 | 26 |
+| clone v2 with packfile-uris xl | 4 | 720 | 702 | 3052 | 31 |
+| clone dumb xl | 8 | 719 | 707 | 3079 | 32 |
+| push incremental xl (20 commits) | 3 | 218 | 213 | 123 | 11 |
+| fetch incremental xl | 3 | 177 | 168 | 841 | 17 |
+| clone v2 xl (2 packs) | 3 | 3140 | 3131 | 3659 | 29 |
+| compact xl (2 packs into 1) | 0 | 3278 | 3278 | 2702 | 36 |
+| push xxl (1000 commits, 4200 objects, 1025.6 MiB pack) | 4 | 50048 | 50022 | 44300 | 38 |
+| clone v2 xxl | 3 | 5943 | 5922 | 26543 | 24 |
+| clone v2 with packfile-uris xxl | 4 | 2698 | 2672 | 20113 | 33 |
+| clone dumb xxl | 8 | 2792 | 2766 | 21155 | 34 |
+| push incremental xxl (20 commits) | 3 | 193 | 185 | 137 | 6 |
+| fetch incremental xxl | 3 | 211 | 200 | 472 | 0 |
+| clone v2 xxl (2 packs) | 3 | 13188 | 13181 | 24937 | 38 |
+| compact xxl (2 packs into 1) | 0 | 14425 | 14425 | 12918 | 35 |
 
-The peak memory column samples the JS heap plus array buffers every 5 ms, so
-short peaks can be missed, and it includes the stored data of the in-memory
-storage.
+`small`, `medium` and `large` are text-heavy histories with some binary
+files; `xl` and `xxl` mostly consist of incompressible 5 and 10 MiB blobs. The
+"incremental" rows push 20 more commits and pull them into an existing clone;
+"2 packs" clones before compaction, "compact" then merges both packs. The
+peak memory column samples the JS heap plus array buffers every 5 ms without
+forcing garbage collection, so it includes garbage that V8 has not collected
+yet and short peaks can be missed. `packages/node/test/streaming-memory.test.ts`
+checks the bound with a 64 MiB push under a 4 MiB budget and a 96 MiB heap
+limit.
+
+Before the streaming core (same container, measured with in-memory storage
+whose data counted as memory), a 32 MiB push cost 2.7 s of CPU and a protocol
+v2 clone of it 10.1 s; the core buffered whole requests and response packs,
+pushes were capped at 16 MiB and clones beyond about 15 MiB risked running out
+of memory.
 
 Conclusions for the configuration:
 
-- **Push** costs roughly 0.1–0.3 s of CPU per MiB of pack (inflating, hashing
-  and indexing every object). This fits easily into the default 30 s.
-- **Clone over protocol v2** is the expensive path: the core currently builds
-  a fresh pack in memory for every fetch, about 0.3–0.4 s of CPU per MiB of
-  repository. `wrangler.jsonc` therefore raises `limits.cpu_ms` to 60 000
-  (the maximum is 300 000) to leave headroom as repositories grow.
-- **Clone over dumb HTTP** only streams stored packs from R2 and costs almost
-  no CPU. For large public repositories it is the cheap path, and it could
-  also be served directly from a public R2 bucket.
-- **Memory** is the tighter limit: a Worker isolate has 128 MB. The core
-  buffers a whole push request and, for protocol v2 fetches, the whole
-  response pack. That is why `MAX_PUSH_BYTES` defaults to 16 MiB, and why
-  protocol v2 clones of repositories beyond roughly 15 MiB of packs may run
-  out of memory until the core streams pack generation. CPU time for a real
-  request is visible in Workers Logs (`observability` is enabled) and with
-  `npx wrangler tail`.
+- **Memory no longer grows with the pack.** A push keeps a byte-budgeted
+  object cache (16 MiB), one staging chunk (4 MiB) and about 60–100 bytes of
+  metadata per object (id, offset, CRC, type, delta base, hash table slots)
+  — the same order as the `.idx` file itself. Peaks stayed below 50 MiB for
+  every size up to 1 GiB. The 128 MB isolate therefore limits a single push
+  to roughly half a million objects, not to a number of bytes. Objects that
+  are delta bases are materialized whole, so a single huge, delta-compressed
+  file can still need a few times its own size; such objects are limited to
+  64 MiB and large files belong in LFS anyway.
+- **Push** costs about 45–75 ms of CPU per MiB for large packs (inflating,
+  hashing and CRC-ing every object, writing staging chunks and the final
+  pack) and up to 0.15 s per MiB for packs of many small text objects, whose
+  inflated size is several times the pack size. A 1 GiB pack needs about 50 s
+  of CPU, well within the maximum `limits.cpu_ms` of 300 000; `wrangler.jsonc`
+  sets 60 000, which covers about 1 GiB of incompressible or 400 MiB of
+  text-heavy pack. Raise it if you expect larger initial pushes.
+- **Clone over protocol v2** streams the stored pack verbatim when there is
+  one pack (about 6 ms of CPU per MiB, mostly for the side-band framing), and
+  concatenates several packs with a recomputed header and trailer otherwise
+  (about 13–16 ms per MiB, dominated by SHA-1). Compaction after each push keeps
+  the number of packs logarithmic in the number of pushes. With
+  `packfile-uris` (clients that set `fetch.uriProtocols`, e.g.
+  `git -c fetch.uriProtocols=https clone …`) the client downloads the stored
+  packs directly; behind a CDN (`PACKFILE_URI_BASE`) those downloads cost the
+  Worker nothing.
+- **Incremental fetches** walk the commits the client has, the new commits and
+  the trees of the boundary commits, then copy stored entries (including
+  deltas, sent as thin-pack deltas when the client has the base) instead of
+  recompressing them.
+- **Clone over dumb HTTP** remains the cheapest path for public repositories
+  and could also be served directly from a public R2 bucket.
 
 ## A pure mirror on the Workers Free plan
 
@@ -503,14 +589,14 @@ Workers and R2 pricing pages before relying on them.
 - **Workers Paid:** 5 USD per month, including 10 million requests and
   30 million CPU milliseconds; beyond that 0.30 USD per million requests and
   0.02 USD per million CPU milliseconds. With the measurements above, the
-  included CPU time covers about 100 000 pushes of a 1 MiB pack or about
-  5 000 protocol v2 clones of a 14 MiB repository per month; a 14 MiB clone
-  beyond the allowance costs about 0.0001 USD.
+  included CPU time covers about 60 000 pushes of a 1 MiB pack or about
+  20 000 protocol v2 clones of a 200 MiB repository per month.
 - **R2:** 0.015 USD per GB-month after 10 GB free, 4.50 USD per million
   Class A operations (writes, lists) after 1 million free, 0.36 USD per
   million Class B operations (reads) after 10 million free, and no egress
   fees. A push performs about six writes (pack, index, pack list, refs, server
-  info) and a few reads; a clone a handful of reads. For a 100 GB archive
+  info) plus one write and one read per 4 MiB staging chunk, and a few reads;
+  a clone a handful of reads. For a 100 GB archive
   storage dominates: about 1.35 USD per month.
 - **D1** holds accounts, tokens, trust and the audit log: a few row reads
   per Git request, well within the free allowance for small instances.

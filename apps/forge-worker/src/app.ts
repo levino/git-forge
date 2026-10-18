@@ -36,6 +36,7 @@ import {
 } from '@git-forge/accounts'
 import {
   type Authorize,
+  compactRepository,
   configureMirror,
   createRepository,
   deepCheckMirror,
@@ -52,6 +53,9 @@ import {
   listMirrors,
   MirrorExistsError,
   MirrorNotFoundError,
+  type PackfileUri,
+  publicPackfileUris,
+  type PushOutcome,
   readAll,
   readMirrorConfig,
   readImportState,
@@ -92,6 +96,8 @@ export type ForgeOptions = ForgeSettings & {
   readonly scheduleImport?: ImportScheduler
 }
 
+export type WaitUntil = (promise: Promise<unknown>) => void
+
 export const ACTIONS_SERVICE_PATH = '/_services/actions'
 
 export type ForgeServices = {
@@ -110,7 +116,7 @@ export type RepositoryAccess = {
 }
 
 export type Forge = {
-  readonly fetch: (request: Request) => Promise<Response>
+  readonly fetch: (request: Request, waitUntil?: WaitUntil) => Promise<Response>
   readonly services: ForgeServices
   readonly scheduled: (at?: Date) => Promise<ScheduledMirrorRun[]>
   readonly runJob: (job: ForgeJob) => Promise<void>
@@ -608,7 +614,21 @@ export const createForge = (options: ForgeOptions): Forge => {
     return match.handler(request, params)
   }
 
-  const handle = async (request: Request): Promise<Response> => {
+  const compactAfterPush = (waitUntil: WaitUntil | undefined) => async (repo: RepositoryName, outcome: PushOutcome) => {
+    if (!outcome.pack || options.compactMaxBytes === 0) return
+    const compaction = compactRepository(storage, repo, { maxBytes: options.compactMaxBytes }).catch((error: unknown) =>
+      console.error(JSON.stringify({ event: 'compaction-failed', repo: `${repo.owner}/${repo.name}`, error: String(error) })),
+    )
+    if (waitUntil) waitUntil(compaction)
+    else await compaction
+  }
+
+  const packfileUris = async (request: Request, repo: RepositoryName, authorize: Authorize): Promise<PackfileUri | undefined> => {
+    const anonymous = new Request(request.url, { method: 'GET' })
+    return (await authorize(anonymous, repo, 'read', 'git')) ? undefined : publicPackfileUris(options.packfileUriBase)(request, repo)
+  }
+
+  const handle = async (request: Request, waitUntil?: WaitUntil): Promise<Response> => {
     const wellKnown = options.instanceKey ? handleWellKnownRequest(request, { issuer: issuerFor(request), keys: [options.instanceKey.publicJwk] }) : null
     if (wellKnown) return wellKnown
     const federated = federation ? await handleFederationRequest(federation, request) : null
@@ -634,16 +654,14 @@ export const createForge = (options: ForgeOptions): Forge => {
       storage,
       authorize,
       pushPolicy: access.pushPolicy,
-      maxRequestBytes: options.maxPushBytes,
+      ...(options.maxPushBytes !== undefined ? { maxPushBytes: options.maxPushBytes } : {}),
       lfs: { maxObjectBytes: options.maxLfsObjectBytes },
-      ...(options.actions || federation
-        ? {
-            onPush: async (repo, outcome) => {
-              if (federation) await notifyAfterPush(federation)(repo, outcome)
-              if (options.actions) await queueRunsForPush(dispatchOptions(request), { repo, outcome, actor: await actorOf(request) })
-            },
-          }
-        : {}),
+      packfileUris: (incoming, repo) => packfileUris(incoming, repo, authorize),
+      onPush: async (repo, outcome) => {
+        await compactAfterPush(waitUntil)(repo, outcome)
+        if (federation) await notifyAfterPush(federation)(repo, outcome)
+        if (options.actions) await queueRunsForPush(dispatchOptions(request), { repo, outcome, actor: await actorOf(request) })
+      },
     })
     return git ?? json(404, { error: 'not found' })
   }

@@ -183,6 +183,8 @@ export const startInstance = async (name: string, options: InstanceOptions = {})
     instanceKey: key,
     bootstrapToken: BOOTSTRAP_TOKEN,
     maxPushBytes: 64 * 1024 * 1024,
+    packfileUriBase: undefined,
+    compactMaxBytes: 0,
     maxLfsObjectBytes: DEFAULT_MAX_LFS_OBJECT_BYTES,
     mirrorIntervalMinutes: 24 * 60,
     allowInsecureFederation: true,

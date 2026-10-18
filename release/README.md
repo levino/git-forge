@@ -20,7 +20,10 @@ in `git-forge.json`.
 
 The release workflow also attaches the single executables of the `git-forge`
 CLI (`packages/cli/build-executables.sh`, built with Bun) and their checksums
-in a separate `CLI-SHA256SUMS`.
+in a separate `CLI-SHA256SUMS`, and the single executables of
+`git-forge-node` (`apps/forge-node/build-executables.sh`, `linux-x64` and
+`linux-arm64`, an instance without Cloudflare) with their checksums in
+`NODE-SHA256SUMS`.
 
 `.github/workflows/release.yml` runs the script on every `v*` tag, on a push to
 `main` that changes `release/VERSION` (it then creates the tag `v<VERSION>` on

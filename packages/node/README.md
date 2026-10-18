@@ -1,8 +1,15 @@
 # @git-forge/node
 
-Node-only adapters for git-forge. Currently `FsStorage`: the core `Storage`
-interface on a local directory, for tests and for self-hosting on a Raspberry
-Pi or NAS.
+Node-only adapters for git-forge (they also run on Bun):
+
+- `FsStorage`: the core `Storage` interface on a local directory, for tests
+  and for self-hosting on a Raspberry Pi or NAS.
+- `serve(handler, options)` / `nodeHandler(handler, options)`: serve a
+  `fetch`-style handler (`(Request) => Promise<Response>`) over `node:http`.
+- `nodeDigests`: the core `DigestFactory` on `node:crypto`, much faster than
+  the JavaScript fallback.
+
+`apps/forge-node` combines them into a full instance.
 
 ```ts
 import { FsStorage } from '@git-forge/node'
@@ -34,6 +41,21 @@ by any static web server and cloned via dumb HTTP without the forge.
 - **Listing** walks only the directories that can contain the prefix and yields
   keys in lexicographic order, like S3.
 
+## HTTP
+
+`serve` listens on `host:port` (default `127.0.0.1`, a free port) and returns
+`{ server, url, close }`. Request bodies reach the handler as a stream
+(`Readable.toWeb`, `duplex: 'half'`), never buffered; response bodies are
+written chunk by chunk with backpressure (`drain`). When the client goes away,
+the request's `signal` aborts and the response stream is cancelled. Repeated
+request headers are combined, multiple `Set-Cookie` headers are kept,
+responses to `HEAD` have no body. The request URL uses the `Host` header;
+with `trustProxy: true` it uses `X-Forwarded-Proto` and `X-Forwarded-Host`
+instead. An exception in the handler becomes a `500` (reported to
+`onError`); one after the headers were sent destroys the connection. There is
+no overall request timeout, since pushes and clones can take long; header
+reading is limited to 60 s.
+
 ## Restrictions
 
 - Keys must be relative, `/`-separated, without empty, `.` or `..` segments
@@ -50,4 +72,7 @@ by any static web server and cloned via dumb HTTP without the forge.
 suite from `@git-forge/core/test/storage-conformance.ts` on a temporary
 directory, plus file-system specifics: plain-file layout, keys that would
 escape the root, no leftover temporary files, compare-and-swap across separate
-instances, stale and held locks.
+instances, stale and held locks. `test/http.test.ts` covers streaming in
+both directions, headers, `HEAD`, errors, forwarded origins and client
+disconnects; `test/digest.test.ts` compares `nodeDigests` with the JavaScript
+digests.

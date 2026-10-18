@@ -21,6 +21,9 @@ bucket_name = "git-forge"
 binding = "DB"
 database_name = "git-forge"
 
+[[send_email]]
+name = "EMAIL"
+
 [[queues.producers]]
 binding = "IMPORTS"
 queue = "git-forge-imports"

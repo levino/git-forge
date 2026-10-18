@@ -58,8 +58,9 @@ read functions of `@git-forge/core` and check access with the same
 | `ACTIONS_CACHE_MAX_DAYS` | var, optional | Cache entries are evicted this many days after creation, default 30 (bucket lifecycle rule: `docs/design.md` §15). |
 | `UI` | var | `false` turns the web UI off: every request goes to the forge and `/` answers the health JSON. For headless instances such as backup mirrors. Default: on. |
 | `ALLOW_INSECURE_WEBHOOKS` | var | `true` allows webhook URLs over plain HTTP and to local or private hosts. Only for local tests. |
-| `EMAIL_PROVIDER` | var | `none` (default, no emails), `console` (logs each email as a JSON line; the default of the test environments) or `ses` (Amazon SES v2, `@git-forge/ses`). |
-| `EMAIL_FROM` | var | Sender address, e.g. `Forge <forge@example.org>`; required with a provider. |
+| `EMAIL` | `send_email` binding, optional | Cloudflare Email Service. |
+| `EMAIL_PROVIDER` | var | `none`, `console` (logs each email as a JSON line; the default of the test environments), `cloudflare` (the `EMAIL` binding; default when it exists) or `ses` (Amazon SES v2, `@git-forge/ses`). Without a binding the default is `none`. |
+| `EMAIL_FROM` | var | Sender address, e.g. `Forge <forge@example.org>`; required with a provider, except `cloudflare`, which defaults to `Forge <forge@<PUBLIC_URL host>>`. |
 | `SES_REGION` | var | SES region, e.g. `eu-central-1`. |
 | `SES_ACCESS_KEY_ID`, `SES_SECRET_ACCESS_KEY` | secrets | IAM credentials with `ses:SendEmail`. |
 | `SES_ENDPOINT`, `SES_CONFIGURATION_SET` | var, optional | Override of `https://email.<region>.amazonaws.com` (tests) and a configuration set. |
@@ -132,7 +133,8 @@ There is no global "public read" switch any more.
 | `POST /api/federation/attestations` | trusted mirror (signed body, `application/jwt`) | A mirror's signed ref checksum after a sync. `401` for an untrusted issuer or invalid token, `404` if the issuer may not read the repository, `202` when recorded (and a spot check is enqueued at most once a day). |
 | `POST /api/repos/{owner}/{name}/import` `{url, token?, username?, lfs?, lfsUrl?, commitsPerStep?, visibility?, defaultBranch?}` | repository admin or instance admin; for a new repository the owner or an instance admin | Imports from a Git URL (smart HTTP v2 or dumb HTTP) without a request body limit, creating the repository first if needed (as `POST /api/repos`). `token` is sent as HTTP Basic password with `username` (default `git`), travels only in the queue messages and is never stored. Refs land in `refs/heads/*` and `refs/tags/*`; rewritten refs are archived, local refs missing upstream are kept. Without `lfsUrl` the LFS endpoint comes from `.lfsconfig` (git-lfs precedence); LFS objects of any size are imported. `202` with the state and a `Location`, `409` while an import runs; an import without progress for 30 minutes (its worker or process died) is taken over and continues from its last step. |
 | `GET /api/repos/{owner}/{name}/import` | repository admin | Import state: `phase` (`discover`, `graph`, `fetch`, `lfs`, `refs`, `done`, `failed`), progress, ref updates, missing LFS objects, last error. Starting a failed import again with the same URL resumes it. |
-| `POST /api/admin/invites` `{login?, user?, email?, expiresInDays?}` | instance admin | Invite for a new account (`login` fixed or chosen by the invitee) or for an existing `user` (to add a passkey or link OIDC). Returns `{code, url, expiresAt}`; the URL is `/login/invite/{code}`, valid once, 7 days by default. |
+| `POST /api/admin/invites` `{login?, user?, email?, expiresInDays?}` | instance admin | Invite for a new account (`login` fixed or chosen by the invitee) or for an existing `user` (to add a passkey or link OIDC). Returns `{code, url, expiresAt, emailed}`; the URL is `/login/invite/{code}`, valid once, 7 days by default. With `email` and a provider the link is also emailed. |
+| `POST /api/admin/email/test` `{to?}` | instance admin | Sends a test email to `to` or the admin's address. Returns `{id}`; `422` without a provider or when the provider rejects it. |
 | `GET /api/user` | token or session | The authenticated user: `{id, login, admin, via, ceiling}`. |
 | `GET /api/health` | anyone | `{"ok": true}` |
 

@@ -40,7 +40,7 @@ export type SmtpSettings = {
   readonly helo?: string
 }
 
-export type NodeEmailSettings = EmailSettings | SmtpSettings
+export type NodeEmailSettings = Exclude<EmailSettings, { readonly provider: 'cloudflare' }> | SmtpSettings
 
 export type StorageConfig = { readonly kind: 'fs'; readonly dir: string } | { readonly kind: 's3'; readonly config: S3StorageConfig }
 
@@ -152,9 +152,10 @@ const smtpSettings = (vars: NodeVars, from: string): SmtpSettings => {
 const emailSettings = (vars: NodeVars): NodeEmailSettings | undefined => {
   if (present(vars.EMAIL_PROVIDER) !== 'smtp') {
     try {
-      return parseEmailSettings(vars)
+      const settings = parseEmailSettings(vars)
+      return settings?.provider === 'cloudflare' ? undefined : settings
     } catch (error) {
-      if (error instanceof ConfigurationError && /EMAIL_PROVIDER must be/.test(error.message)) throw new ConfigurationError('EMAIL_PROVIDER must be none, console, ses or smtp')
+      if (error instanceof ConfigurationError && /EMAIL_PROVIDER (must be|=cloudflare)/.test(error.message)) throw new ConfigurationError('EMAIL_PROVIDER must be none, console, ses or smtp')
       throw error
     }
   }

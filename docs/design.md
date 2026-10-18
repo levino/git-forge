@@ -917,7 +917,7 @@ database.
 | Per-repository consistency | Durable Object | conditional writes (S3 CAS), single-writer process |
 | Scheduling, jobs | Cron Triggers, Queues (Workflows for long jobs) | `Deno.cron`, systemd timers, job table, in-process queue |
 | Public LFS bucket (`LfsPublisher`) | second R2 bucket (`CDN_BUCKET`) | any `Storage`: S3 bucket, local directory (`LFS_PUBLISH_DIR`) |
-| Email | Amazon SES v2 HTTP API (`@git-forge/ses`, SigV4 via `aws4fetch`, runs on Workers and Node) | SMTP for the Node deployment (`@git-forge/smtp`); a console adapter for development |
+| Email | Cloudflare Email Service (`send_email` binding, `@git-forge/cloudflare`); Amazon SES v2 HTTP API (`@git-forge/ses`, SigV4 via `aws4fetch`, runs on Workers and Node) | SMTP for the Node deployment (`@git-forge/smtp`); a console adapter for development |
 | Compute for CI | Containers | external per-minute providers via the GHES API (WarpBuild, AWS CodeBuild, RunsOn), Fly Machines, a local process |
 
 **Jobs:** the core defines `JobQueue<J>` (`enqueue(job, { delaySeconds })`),
@@ -1785,7 +1785,14 @@ and `5xx` are retried by the job queue. SMTP (`@git-forge/smtp`, `node:net`
 and `node:tls`, Node only): one connection per message, STARTTLS (required),
 implicit TLS or plain without credentials, `AUTH PLAIN`/`LOGIN`, MIME with
 base64 parts. `5xx` throws `EmailRejectedError`, everything else `SmtpError`
-(retried).
+(retried). Cloudflare (`createCloudflareEmailSender`, `send_email` binding
+`EMAIL`): the structured `send()` form; rate, quota, internal and delivery
+errors are retried, every other error code is permanent. With the binding
+and no `EMAIL_PROVIDER` the Worker uses it, sending from `EMAIL_FROM` or
+`Forge <forge@<PUBLIC_URL host>>`; without either address email stays off.
+Arbitrary recipients need Workers Paid; on the free plan only verified
+Email Routing destinations receive mail. `POST /api/admin/email/test` (and
+the button on `/-/admin`) sends a test message through the same sender.
 
 Digests: when a notification should be emailed, the user's
 `digest_due_at` is claimed by compare-and-swap (`… WHERE digest_due_at IS

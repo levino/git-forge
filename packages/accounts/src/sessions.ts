@@ -85,7 +85,8 @@ export const isUnsafeMethod = (method: string): boolean => !['GET', 'HEAD', 'OPT
 
 export const sameOrigin = (request: Request, origin: string): boolean => {
   const presented = request.headers.get('Origin')
-  if (presented !== null) return presented === origin
   const fetchSite = request.headers.get('Sec-Fetch-Site')
+  if (presented === 'null') return fetchSite === 'same-origin'
+  if (presented !== null) return presented === origin
   return fetchSite === null || fetchSite === 'same-origin' || fetchSite === 'none'
 }

@@ -52,7 +52,7 @@ discussions.
 - [x] Copy-only sync: copy upstream packs and indexes as stored (byte-identical), verify index consistency and pack trailer while streaming; deep check (re-hash everything, recompute indexes, walk refs) on demand or every 30 days
 - [x] Native streaming hashes (`crypto.DigestStream` behind a `DigestFactory` seam) and one job per pack / LFS object with a byte budget (`MIRROR_UNIT_BYTES`), oversized units stay pending (design §12)
 - [x] Plain clones of a mirror check out the upstream default branch: read-side `refs/heads/*` view of one remote, own refs win, detach materializes it
-- [ ] Mirror overview (UI: M6)
+- [x] Mirror overview API: signed attestations from mirrors, ref checksum history, state/lag/alarms, spot checks (design §10); UI in M6
 
 ## M5 — Deployment and adapters
 
@@ -98,8 +98,8 @@ Design: [design.md §15](design.md#ci).
 - [ ] Web UI for runs and live logs
 - [x] "Deploy to Cloudflare" button in the README pointing at the instance template; template wired to accounts (`BOOTSTRAP_TOKEN`)
 - [x] Release artifact (bundled worker + migrations + checksums) and instance template with pinned version
-- [ ] Create `levino/git-forge-instance`, add the deploy key secret `INSTANCE_TEMPLATE_DEPLOY_KEY`, cut the first release
-- [ ] Verify the Deploy button, Workers Builds settings and automatic provisioning of D1/R2 of the template against a real Cloudflare account
+- [x] Minimal instance template: one `wrangler.toml` whose `[build]` command downloads and verifies the pinned bundle, resources provisioned from it, self-migrating Worker, first admin via a one-time `instance_admin_claims` row; Deploy button on the monorepo subdirectory; release notes print the `V`/`S` pin and the release workflow pins it in the template
+- [ ] Verify the Deploy button against a real Cloudflare account
 
 ## M6 — Web UI (Astro SSR)
 
@@ -113,6 +113,7 @@ Design: [design.md §18](design.md#18-web-ui).
 - [x] Login pages (sign-in, invite, device code entry, break-glass) rendered by the UI from the login package's page models; sessions in the middleware; account menu with sign-out
 - [x] Account settings: personal access tokens (create, revoke), passkeys (add, remove), linking an OIDC identity
 - [x] Notifications inbox (unread/all, mark read, done, all read) and repository releases (list, tag page, notes, asset downloads)
+- [x] New repository page (owner, name, visibility, default branch) and repository import with a status page; "New" in the navbar and on the dashboard
 - [ ] List and unlink linked OIDC identities, list and end sessions
 - [ ] Organizations and teams
 - [ ] Repository settings (visibility, collaborators, branch protection, federation trust)
@@ -154,8 +155,9 @@ Design: [design.md §17](design.md#17-collaboration).
 - [ ] Webhooks: `POST …/hooks/{id}/tests`, GitHub App installations, encrypted secrets
 - [x] Releases: GitHub-compatible REST API, tags created on publish, assets stored as LFS objects behind the media URL, download redirects
 - [ ] Releases: source archives (`tarball_url`, `zipball_url`), generated release notes, web UI
-- [ ] Encrypted full backups, partial visibility
-- [ ] External mirror verification
-- [x] Pages (design §19): branch source (`/` or `/docs`, redeploy on push), tar upload deployments, GitHub's Pages REST API, `PAGES_HOST` pattern and `PAGES_DOMAINS` from config, immutable content-addressed deployments with atomic switch, LFS files via media URLs, content types, `404.html`, CDN cache headers, private sites via a session handoff to a host-only cookie
+- [x] Backups at the bucket level (design §19): bucket replication to an Object-Lock bucket, D1 Time Travel and exports; documented, no code
+- [ ] Partial visibility
+- [x] External mirror verification: ref checksums, signed attestations, byte-range spot checks of packs and LFS objects, signed overview (design §10)
+- [x] Pages (design §20): branch source (`/` or `/docs`, redeploy on push), tar upload deployments, GitHub's Pages REST API, `PAGES_HOST` pattern and `PAGES_DOMAINS` from config, immutable content-addressed deployments with atomic switch, LFS files via media URLs, content types, `404.html`, CDN cache headers, private sites via a session handoff to a host-only cookie
 - [ ] Pages: deployments from workflow artifacts (`ArtifactSource` once CI stores artifacts), so `actions/deploy-pages` works unchanged
 - [ ] Pages: settings in the web UI, preview deployments, `pages/health`

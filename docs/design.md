@@ -1942,7 +1942,7 @@ Issues, pull requests, reviews, commit statuses, check runs and discussions
   package.
 - **Limits of v1.** Same-repository pull requests only (forks later),
   computing mergeability and file lists loads the involved objects through
-  the in-memory object database, no reactions, no search,
+  the in-memory object database, no reactions,
   no CODEOWNERS parsing, no in-browser conflict resolution.
 
 ## 18. Web UI
@@ -1983,7 +1983,7 @@ bundle.
 - Pages hosts (§20) never reach Astro: `worker.ts` hands every request whose
   host matches `PAGES_HOST` or `PAGES_DOMAINS` to `createForge` directly.
   `/_pages/` (the Pages session handoff) is a forge path on the forge host.
-- Reserved first path segments: `api`, `explore`, `login`, `logout`,
+- Reserved first path segments: `api`, `explore`, `search`, `login`, `logout`,
   `settings`, `notifications`, `organizations`, `orgs`, `new`, `-` (assets,
   login and admin pages) and the other page routes. Account names must not
   use them: `RESERVED_LOGINS` of `@git-forge/accounts` is checked when an
@@ -2001,8 +2001,8 @@ the `Authorization` header, as for the API. Repository pages call `repositoryAcc
 repo, role)`, the same function the JSON API uses for its admin checks, which
 wraps `checkRepositoryAccess` from `@git-forge/accounts` and adds instance
 admins. Private repositories answer 404 to visitors who may not read them,
-like the Git endpoints. Lists (home, explore, profiles) filter with the same
-function.
+like the Git endpoints. Lists and search filter in SQL with the same rules
+(see *Lists and search*).
 
 Writes from pages (settings forms) need the session and its CSRF token:
 `verifySessionWrite` is `checkSession` of the login package (same origin and
@@ -2046,6 +2046,47 @@ xdiff, §17), the same code pull requests use.
 They read through `ObjectDatabase` like the Git endpoints. The UI layer
 (`src/ui/*.ts`) only composes them into view models; `.astro` files only
 render.
+
+Blame (`/{owner}/{repo}/blame/{ref}/{path}`) is `blame` in core: newest
+commit first, lines unchanged against a parent pass to it (the first parent
+that has them wins at merges, as in git), the rest belong to the commit. No
+rename, move or copy detection; files up to 512 KiB. Each `depth` step walks
+500 more commits (at most 20 steps, *Load more history*); lines not reached
+show *Older history not loaded*. Tested against `git blame`.
+
+### Lists and search
+
+- **Repository lists** (home, explore, profiles, `GET /api/repos?owner=&sort=updated|name&page=&per_page=`)
+  are one query: `listReadableRepositories` of `@git-forge/accounts`.
+  `readableRepositories(principal)` is the SQL form of `resolveAccess` plus
+  the instance-admin rule of `repositoryAccess` (public, owner,
+  collaborators, organization owners, members with a base role or a team
+  role, apps, granted instances with `git:read`, token ceiling and
+  repository list); a test compares it with `checkRepositoryAccess` for every
+  principal kind. Sorting by last commit or name, `LIMIT/OFFSET` paging,
+  total via `count(*) OVER ()`.
+- **Stored summary.** `repositories.default_branch`, `last_commit_at`
+  (committer time of the default branch head, ms) and `stats_at` (migration
+  `0026`). `refreshRepository` rewrites them after every push (also merges and
+  release tags), every mirror sync with ref updates and every import step.
+  Rows without `stats_at` (repositories from before `0026`) are filled the
+  first time a list shows them; after that lists read no storage.
+- **Full-text search** with FTS5 (migration `0026`): `search_repositories`
+  (owner, name, description, topics; the last two stay empty until
+  repositories have metadata), `search_accounts` (login, display name) and
+  external-content tables over `issues` (title, body; pull requests
+  included), `issue_comments`, `discussions` and `discussion_comments`.
+  Triggers update them inside the writing statement; the migration backfills,
+  `POST /api/admin/search/rebuild` (instance admins) rebuilds. Review
+  comments are not indexed.
+- **Queries.** Words become prefix terms (`"word"*`, all must match, at most
+  12); qualifiers `repo:owner/name`, `user:`/`org:`, `is:issue|pr|open|closed`.
+  Ranked by bm25, filtered with `readableRepositories`, disabled owners
+  hidden, issues need `has_issues` (pull requests always), discussions
+  `has_discussions`. `GET /api/search?q=&type=repositories|issues|discussions|users&page=&per_page=`
+  and `GET /api/v3/search/{repositories,issues,users}` answer with GitHub's
+  `{ total_count, incomplete_results, items }` and reduced item shapes; the
+  page `/search` and the navbar box call the same `search`.
 
 ### Collaboration pages
 
@@ -2155,7 +2196,9 @@ progress answers 409.
 - Syntax highlighting is server-side with shiki's JavaScript regex engine (no
   WebAssembly) and a fixed set of grammars; tokens carry light and dark
   colours as CSS variables. Files above 256 KiB or with unknown types are
-  shown unhighlighted.
+  shown unhighlighted. Diffs highlight the old and the new side of each hunk
+  separately. Fenced Markdown code blocks (`language-*`) are highlighted after
+  `rehype-sanitize`, so only highlighter spans carry styles.
 - Markdown (README, `.md` files) goes through remark/rehype with GFM and
   `rehype-sanitize` (GitHub's schema); relative links point to the blob view,
   relative images to the raw endpoint.
@@ -2171,7 +2214,9 @@ progress answers 409.
 ### Tests
 
 - `packages/core/test/browse.test.ts`: read model against a real pushed
-  repository.
+  repository; `blame.test.ts`: blame against `git blame` across a merge.
+- `packages/accounts-node/test/search.test.ts`: the SQL access filter against
+  `checkRepositoryAccess`, FTS backfill, triggers and private repositories.
 - `apps/forge-worker/test/unit/ui.test.ts`: routing split, origin check,
   Markdown sanitizing and link rewriting, highlighting.
 - `apps/forge-worker/test/pages/`: pages rendered with Astro's container API
@@ -2208,7 +2253,10 @@ instance, kept somewhere that cannot be rewritten.
 - **Database.** D1 Time Travel restores any minute of the last 30 days
   (Workers Paid; 7 days on Free). For longer retention export the database
   daily and put the dump into the same locked bucket. On Node, take an online
-  copy of the SQLite file.
+  copy of the SQLite file. `wrangler d1 export` refuses databases with
+  virtual tables, so since migration `0026` (FTS5 search tables) D1 exports
+  need a workaround; the search tables are derived data
+  (`POST /api/admin/search/rebuild`).
 - **Consistency.** Copy the database first, then the bucket: every row
   refers only to objects that exist by then, and objects are never removed.
 - **No encryption.** Backups are plain copies of the bucket and the

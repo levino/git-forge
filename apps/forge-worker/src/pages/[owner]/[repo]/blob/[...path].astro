@@ -9,7 +9,7 @@ import RepoHeader from '../../../../components/RepoHeader.astro'
 import Layout from '../../../../layouts/Layout.astro'
 import { browse, previewKind } from '../../../../ui/browse.ts'
 import { formatBytes, plural } from '../../../../ui/format.ts'
-import { blobUrl, commitsUrl, mediaUrl, openRepository, rawUrl, treeUrl } from '../../../../ui/repository.ts'
+import { blameUrl, blobUrl, commitsUrl, mediaUrl, openRepository, rawUrl, treeUrl } from '../../../../ui/repository.ts'
 
 const repo = await openRepository(Astro.locals.forge, Astro.locals.principal, Astro.params.owner!, Astro.params.repo!)
 const segments = (Astro.params.path ?? '').split('/').filter((segment) => segment !== '')
@@ -47,6 +47,11 @@ const preview = previewKind(name)
             {view.markdown !== null && (
               <a class="btn btn-xs" href={showSource ? '?' : '?plain=1'}>
                 {showSource ? 'Preview' : 'Code'}
+              </a>
+            )}
+            {view.content.kind === 'text' && (
+              <a class="btn btn-xs" href={blameUrl(repo.name, view.target.ref, view.target.path)}>
+                Blame
               </a>
             )}
             <a class="btn btn-xs" href={rawUrl(repo.name, view.target.ref, view.target.path)}>

@@ -63,6 +63,8 @@ export const treeUrl = (repo: RepositoryName, ref: string, path: readonly string
 
 export const blobUrl = (repo: RepositoryName, ref: string, path: readonly string[]): string => repoUrl(repo, 'blob', encodePath([...ref.split('/'), ...path]))
 
+export const blameUrl = (repo: RepositoryName, ref: string, path: readonly string[]): string => repoUrl(repo, 'blame', encodePath([...ref.split('/'), ...path]))
+
 export const rawUrl = (repo: RepositoryName, ref: string, path: readonly string[]): string => repoUrl(repo, 'raw', encodePath([...ref.split('/'), ...path]))
 
 export const commitsUrl = (repo: RepositoryName, ref: string, path: readonly string[] = []): string =>

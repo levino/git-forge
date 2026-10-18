@@ -127,12 +127,14 @@
   color: var(--color-base-content);
 }
 
-.code-line span {
+.code-line span,
+.hl span {
   color: var(--shiki-light);
 }
 
 @media (prefers-color-scheme: dark) {
-  .code-line span {
+  .code-line span,
+  .hl span {
     color: var(--shiki-dark);
   }
 }

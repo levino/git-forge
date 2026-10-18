@@ -1,5 +1,10 @@
 import {
+  blame,
+  type BlameRange,
   type CommitInfo,
+  DEFAULT_BLAME_COMMITS,
+  readBlobContent,
+  resolveTarget,
   commitChanges,
   commitLog,
   diffFile,
@@ -9,6 +14,7 @@ import {
   type RefTarget,
   resolveRefAndPath,
 } from '@git-forge/core'
+import { type HighlightedLine, highlightLines } from './highlight.ts'
 import type { OpenRepository } from './repository.ts'
 
 export const COMMITS_PER_PAGE = 30
@@ -60,4 +66,21 @@ export const commitView = async (repo: OpenRepository, id: string): Promise<Comm
     files.push(file)
   }
   return { kind: 'commit', commit, files, truncated: changes.length > shown.length, added, deleted }
+}
+
+export type BlameView =
+  | { readonly kind: 'blame'; readonly target: RefTarget; readonly ranges: readonly BlameRange[]; readonly lines: readonly HighlightedLine[]; readonly more: boolean; readonly depth: number }
+  | { readonly kind: 'not-found' }
+
+export const MAX_BLAME_DEPTH = 20
+
+export const blameView = async (repo: OpenRepository, segments: readonly string[], depth: number): Promise<BlameView> => {
+  const target = await resolveRefAndPath(repo.odb, repo.refs, segments)
+  const resolved = target ? await resolveTarget(repo.odb, target.commit, target.path) : null
+  const content = resolved?.kind === 'blob' ? await readBlobContent(repo.odb, resolved.entry) : null
+  if (!target || resolved?.kind !== 'blob' || content?.kind !== 'text') return { kind: 'not-found' }
+  const bounded = Math.min(depth, MAX_BLAME_DEPTH)
+  const result = await blame(repo.odb, target.commit, target.path, bounded * DEFAULT_BLAME_COMMITS)
+  if (!result) return { kind: 'not-found' }
+  return { kind: 'blame', target, ranges: result.ranges, lines: await highlightLines(content.text, resolved.entry.name), more: !result.complete && bounded < MAX_BLAME_DEPTH, depth: bounded }
 }

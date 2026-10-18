@@ -4,11 +4,11 @@ import Icon from '../../components/Icon.astro'
 import NotFound from '../../components/NotFound.astro'
 import RepoList from '../../components/RepoList.astro'
 import Layout from '../../layouts/Layout.astro'
-import { visibleRepositories } from '../../ui/listing.ts'
+import { repositoryPage } from '../../ui/listing.ts'
 
 const { forge, principal } = Astro.locals
 const account = await forge.store.findAccount(Astro.params.owner!)
-const repositories = account ? await visibleRepositories(forge, principal, account.login) : []
+const repositories = account ? await repositoryPage(forge, principal, Astro.url, account.login) : null
 const membership = account?.kind === 'organization' ? (await forge.organizations.view(principal, account.login)).membership !== null || (await forge.isInstanceAdmin(principal)) : false
 const organization = account?.kind === 'organization'
 ---
@@ -38,9 +38,9 @@ const organization = account?.kind === 'organization'
         <section aria-labelledby="repositories">
           <h2 id="repositories" class="text-base font-semibold mb-3 flex items-center gap-2">
             <Icon name="repo" class="size-4 text-base-content/60" />
-            Repositories <span class="badge badge-sm">{repositories.length}</span>
+            Repositories <span class="badge badge-sm">{repositories?.total}</span>
           </h2>
-          <RepoList repositories={repositories} showOwner={false} />
+          {repositories && <RepoList listing={repositories} showOwner={false} />}
         </section>
       </div>
     </Layout>

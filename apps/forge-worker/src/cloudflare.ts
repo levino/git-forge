@@ -106,6 +106,7 @@ export const backgroundHandlers = {
         schedule: importScheduler(queue),
         ...(jobs ? { scheduleLfs: (job) => jobs.enqueue(job) } : {}),
       })
+      await (await forgeFor(env)).refreshRepository(message.body)
       console.log(JSON.stringify({ event: 'import-step', repo: `${message.body.owner}/${message.body.name}`, phase: state.phase, steps: state.steps, error: state.error }))
       message.ack()
     }

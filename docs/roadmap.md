@@ -37,10 +37,10 @@ discussions.
 - [x] Short-lived instance JWTs, trust table "issuer X may read repo Y", optional pinned thumbprint
 - [x] Device flow (`git forge auth login`, RFC 8628) and git credential helper (`git forge auth git-credential`)
 - [x] Break-glass key (offline Ed25519, one-hour admin session)
-- [ ] Login follow-ups: OIDC groups → teams, session list and revocation in the UI, rate limits on login and device endpoints, purging expired challenges and device codes, branch protection API with sessions, device-flow scope choice
+- [ ] Login follow-ups: OIDC groups → teams, session list and revocation in the UI, rate limits on login and device endpoints, purging expired challenges and device codes, device-flow scope choice
 - [ ] SAML, SCIM
 - [x] Branch protection rules (patterns, force push, deletion, push restrictions, admin bypass) enforced in `receive-pack`, API under `/api/repos/{owner}/{repo}/branches/{branch}/protection`
-- [ ] Branch protection API and push policy wired into the Worker app (needs accounts on D1 there)
+- [x] Branch protection API and push policy wired into the Worker app (accounts on D1), API with browser sessions and CSRF
 
 ## M4 — Mirrors
 

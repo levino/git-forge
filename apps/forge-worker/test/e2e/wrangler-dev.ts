@@ -32,8 +32,19 @@ export type WranglerDevOptions = {
   readonly port?: number
 }
 
+const PORT_TAKEN = /EADDRINUSE|address already in use/i
+
 export const startWranglerDev = async (options: WranglerDevOptions): Promise<WranglerDev> => {
-  const port = options.port ?? (await freePort())
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await startOnce(options, options.port ?? (await freePort()))
+    } catch (error) {
+      if (options.port !== undefined || attempt >= 3 || !PORT_TAKEN.test(String(error))) throw error
+    }
+  }
+}
+
+const startOnce = async (options: WranglerDevOptions, port: number): Promise<WranglerDev> => {
   const persist = mkdtempSync(join(tmpdir(), 'git-forge-wrangler-'))
   const environment = { ...process.env, WRANGLER_SEND_METRICS: 'false', CI: '1', NO_COLOR: '1' }
   const envArgs = options.env ? ['--env', options.env] : []

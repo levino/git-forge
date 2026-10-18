@@ -21,6 +21,10 @@ export const adminAction = async (forge: ForgeServices, session: UiSession, form
         const trusted = await instance.trust(principal, text(form, 'issuer'), text(form, 'thumbprint') || null)
         return { kind: 'ok', message: `${trusted.issuer} is now trusted.` }
       }
+      case 'rename-account': {
+        const renamed = await forge.renameAccount(principal, text(form, 'from'), text(form, 'login'))
+        return { kind: 'ok', message: `${text(form, 'from')} is now ${renamed.login}.` }
+      }
       case 'distrust':
         await instance.distrust(principal, text(form, 'issuer'))
         return { kind: 'ok', message: `${text(form, 'issuer')} is no longer trusted.` }

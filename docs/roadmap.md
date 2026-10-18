@@ -136,6 +136,7 @@ Design: [design.md §18](design.md#18-web-ui).
 - [x] Instance admin page and API (admins, trusted instances, list of this instance's mirrors with their sync state and alarms, `GET /api/admin/mirrors`)
 - [ ] Mirror overview UI on top of the attestation API of design §10 (lag, ref checksum history, spot checks)
 - [x] Repository settings (visibility, collaborators, branch protection, federation trust)
+- [x] Repository lifecycle: description, website, topics (`/api/v3` shape), rename and transfer with redirects for pages, API, Git and LFS, archive (read-only), soft delete with a 7-day grace period, account and organization renames; stable storage prefixes (migration `0024`)
 - [x] Mirror settings, status and alarms (add, sync, deep check, detach)
 - [x] Blame, syntax highlighting in diffs and Markdown code blocks
 - [x] Explore and profile listings without one access check per repository (one SQL query, stored default branch and last commit time, sort and paging)

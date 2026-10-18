@@ -37,7 +37,10 @@ const now = Math.floor(Date.now() / 1000)
                 {showOwner ? `${repo.owner}/${repo.name}` : repo.name}
               </a>
               <span class="badge badge-sm">{repo.visibility === 'public' ? 'Public' : 'Private'}</span>
+              {repo.archived && <span class="badge badge-warning badge-sm">Archived</span>}
             </div>
+            {repo.description && <p class="mt-1 text-sm text-base-content/70">{repo.description}</p>}
+            {repo.topics.length > 0 && <p class="mt-1 flex flex-wrap gap-1">{repo.topics.map((topic) => <span class="badge badge-primary badge-soft badge-sm">{topic}</span>)}</p>}
             <p class="mt-1 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-base-content/60">
               {repo.defaultBranch && (
                 <span class="flex items-center gap-1 font-mono">

@@ -91,6 +91,16 @@ const ago = (iso: string | undefined) => (iso ? relativeTime(Math.floor(Date.par
             <button class="btn btn-sm">Trust</button>
           </form>
         </section>
+        <section aria-labelledby="rename-account">
+          <h2 id="rename-account" class="text-xl font-semibold mb-2">Rename an account</h2>
+          <form method="post" class="flex flex-wrap items-end gap-2">
+            <input type="hidden" name="csrf" value={session.csrf} />
+            <input type="hidden" name="action" value="rename-account" />
+            <label class="flex flex-col gap-1 text-sm">Account<input name="from" class="input input-sm font-mono" required /></label>
+            <label class="flex flex-col gap-1 text-sm">New name<input name="login" class="input input-sm font-mono" required /></label>
+            <button class="btn btn-sm">Rename</button>
+          </form>
+        </section>
       </div>
       <section class="panel" aria-labelledby="mirrors">
         <h2 id="mirrors" class="panel-title">Mirrors</h2>

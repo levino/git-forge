@@ -116,6 +116,27 @@ example on a Raspberry Pi.
   descend from the previously mirrored value, the downstream instance archives
   the old value (§5), applies the new one and raises an alarm. Divergence is
   never merged automatically.
+- **Plain clones of a mirror check out the upstream default branch.** Git
+  clients only check out `refs/heads/*`, so a mirror shows one remote's
+  `refs/upstream/{remote}/heads/*` and `…/tags/*` additionally as
+  `refs/heads/*` and `refs/tags/*` (a read-side view, nothing is stored
+  twice) and points `HEAD` at the upstream default branch. The view is named
+  in `refs.json` as the optional field `mirrorView: { remote, head }`, set by
+  the first sync of a remote (only one remote provides it) and its `head`
+  follows the upstream `HEAD`. `advertisedRefs(state)` computes the view and
+  is used for every read: protocol v2 `ls-refs` and `fetch`, the static
+  `info/refs` and `HEAD` files (so a plain clone from the bucket behaves the
+  same), raw URLs and the ref state in push notifications.
+  `refs/upstream/*` stays visible, so mirrors of mirrors are unchanged.
+  - **Own refs win:** a real `refs/heads/X` of the repository shadows the
+    view's `X`; nothing local is ever hidden.
+  - **Writes see real refs only:** `receive-pack` advertises `refs.json` as
+    stored, so pushing `X` to a mirror creates a real branch (which then
+    shadows the view) and branch protection never sees virtual refs.
+  - **Detach materializes the view:** `detachMirror` writes the view into
+    real `refs/heads/*` and `refs/tags/*`, points `HEAD` at the default
+    branch and drops `mirrorView`; `refs/upstream/*` stay. The repository
+    then continues as a primary.
 - **Users of a mirror are independent of the upstream.** Who may read a mirror
   is decided by its operator. If the upstream and its identity provider
   disappear, the mirror stays usable with its own users and can simply be

@@ -14,6 +14,7 @@ import {
   verifyMirrorNotification,
 } from '@git-forge/accounts'
 import {
+  advertisedRefs,
   deepCheckMirror,
   isMirrorDue,
   isValidName,
@@ -99,7 +100,7 @@ const deliverNotification = async (federation: MirrorFederation, job: Extract<Fo
     issuer: federation.issuer,
     audience: job.issuer,
     repository: job.repository,
-    refs: refs.state.refs,
+    refs: advertisedRefs(refs.state).refs,
   })
   const response = await send(federation, new Request(job.callback, { method: 'POST', headers: { 'Content-Type': NOTIFICATION_MEDIA_TYPE }, body: token }))
   await response.body?.cancel()

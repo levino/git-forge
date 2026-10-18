@@ -13,6 +13,9 @@ import type { AuthorizationSupplier, FetchFunction, Remote, RemoteRef } from './
 import {
   isValidName,
   ObjectDatabase,
+  advertisedRefs,
+  type MirrorView,
+  mirrorViewRefs,
   readRefs,
   type RefsState,
   registerPacks,
@@ -192,8 +195,26 @@ const updateConfig = async (
 export const setMirrorMode = (storage: Storage, repo: RepositoryName, mode: MirrorMode, remote = DEFAULT_REMOTE): Promise<MirrorConfig> =>
   updateConfig(storage, repo, remote, (config) => ({ ...config, mode }))
 
-export const detachMirror = (storage: Storage, repo: RepositoryName, remote = DEFAULT_REMOTE, now = new Date()): Promise<MirrorConfig> =>
-  updateConfig(storage, repo, remote, (config) => (config.detachedAt ? config : { ...config, detachedAt: now.toISOString() }))
+export const materializeMirrorView = async (storage: Storage, repo: RepositoryName, remote: string): Promise<boolean> => {
+  for (let attempt = 0; attempt < 10; attempt++) {
+    const current = await readRefs(storage, repo)
+    if (!current) throw new Error(`repository ${repo.owner}/${repo.name} not found`)
+    if (current.state.mirrorView?.remote !== remote) return false
+    const advertised = advertisedRefs(current.state)
+    const state: RefsState = { head: advertised.head, refs: { ...current.state.refs, ...mirrorViewRefs(current.state) } }
+    if (await writeRefs(storage, repo, state, current.etag)) {
+      await writeServerInfo(storage, repo, state, new ObjectDatabase(storage, repo))
+      return true
+    }
+  }
+  throw new Error('could not materialize the mirror view')
+}
+
+export const detachMirror = async (storage: Storage, repo: RepositoryName, remote = DEFAULT_REMOTE, now = new Date()): Promise<MirrorConfig> => {
+  const config = await updateConfig(storage, repo, remote, (current) => (current.detachedAt ? current : { ...current, detachedAt: now.toISOString() }))
+  await materializeMirrorView(storage, repo, remote)
+  return config
+}
 
 export const isMirrorDue = (config: MirrorConfig, status: MirrorStatus | null, now: Date, intervalMs: number, staleRunMs = 6 * 60 * 60 * 1000): boolean => {
   if (config.mode !== 'auto' || config.detachedAt) return false
@@ -519,7 +540,7 @@ export const syncMirror = async (options: SyncOptions): Promise<SyncResult> => {
       lfsPending = lfs.missing
       result = { ...result, lfs }
     }
-    const plan = await updateUpstreamRefs(storage, repo, odb, remoteName, upstream.refs, now())
+    const plan = await updateUpstreamRefs(storage, repo, odb, remoteName, upstream.refs, upstream.head, now())
     result = { ...result, status: 'ok', updates: plan.updates, alarms: plan.alarms }
     const finishedAt = now().toISOString()
     await saveStatus(storage, repo, remoteName, (status) => ({
@@ -544,23 +565,32 @@ export const syncMirror = async (options: SyncOptions): Promise<SyncResult> => {
   }
 }
 
+const nextMirrorView = (current: MirrorView | undefined, remote: string, upstreamHead: string | undefined): MirrorView | undefined => {
+  if (current && current.remote !== remote) return current
+  const head = upstreamHead ?? current?.head
+  return { remote, ...(head ? { head } : {}) }
+}
+
 const updateUpstreamRefs = async (
   storage: Storage,
   repo: RepositoryName,
   odb: ObjectDatabase,
   remote: string,
   upstream: ReadonlyMap<string, ObjectId>,
+  upstreamHead: string | undefined,
   at: Date,
 ): Promise<RefPlan> => {
   for (let attempt = 0; attempt < 10; attempt++) {
     const current = await readRefs(storage, repo)
     if (!current) throw new Error(`repository ${repo.owner}/${repo.name} not found`)
     const plan = await planRefUpdates(current.state.refs, remote, upstream, at, (oldId, newId) => isAncestor(odb, oldId, newId))
-    if (plan.updates.length === 0) {
+    const view = nextMirrorView(current.state.mirrorView, remote, upstreamHead)
+    const viewChanged = view?.remote !== current.state.mirrorView?.remote || view?.head !== current.state.mirrorView?.head
+    if (plan.updates.length === 0 && !viewChanged) {
       await writeServerInfo(storage, repo, current.state, odb)
       return plan
     }
-    const state: RefsState = { head: current.state.head, refs: plan.refs }
+    const state: RefsState = { ...current.state, refs: plan.refs, ...(view ? { mirrorView: view } : {}) }
     if (await writeRefs(storage, repo, state, current.etag)) {
       await writeServerInfo(storage, repo, state, odb)
       return plan

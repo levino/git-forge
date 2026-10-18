@@ -1,12 +1,12 @@
 import { fromUtf8 } from './bytes.ts'
 import { looksLikeText } from './content.ts'
-import { diffLines, type LineDiff, splitLines } from './diff.ts'
+import { diffTrees, type TreeChange } from './diff.ts'
 import type { ObjectId } from './hash.ts'
 import { type LfsObjectSpec, parseLfsPointer } from './lfs.ts'
 import { isSubmodule, isTreeMode, parseCommitMetadata, parseTag, parseTree, type Signature, type TreeEntry } from './objects.ts'
 import { advertisedRefs, type ObjectDatabase, type RefsState } from './repository.ts'
 
-export type CommitDetails = {
+export type CommitInfo = {
   readonly id: ObjectId
   readonly tree: ObjectId
   readonly parents: readonly ObjectId[]
@@ -26,7 +26,7 @@ export type NamedRef = { readonly kind: RefKind; readonly name: string; readonly
 
 const UNKNOWN: Signature = { name: '', email: '', timestamp: 0, timezone: '+0000' }
 
-export const parseCommitDetails = (id: ObjectId, data: Uint8Array): CommitDetails => {
+export const parseCommitInfo = (id: ObjectId, data: Uint8Array): CommitInfo => {
   const metadata = parseCommitMetadata(data)
   return {
     id,
@@ -39,9 +39,9 @@ export const parseCommitDetails = (id: ObjectId, data: Uint8Array): CommitDetail
   }
 }
 
-export const readCommit = async (odb: ObjectDatabase, id: ObjectId): Promise<CommitDetails | null> => {
+export const readCommit = async (odb: ObjectDatabase, id: ObjectId): Promise<CommitInfo | null> => {
   const object = await odb.read(id)
-  return object?.type === 'commit' ? parseCommitDetails(id, object.data) : null
+  return object?.type === 'commit' ? parseCommitInfo(id, object.data) : null
 }
 
 export const entryKind = (entry: TreeEntry): EntryKind =>
@@ -120,9 +120,9 @@ export type LogOptions = {
 
 export const DEFAULT_MAX_LOG_WALK = 10_000
 
-export type LogPage = { readonly commits: readonly CommitDetails[]; readonly more: boolean }
+export type LogPage = { readonly commits: readonly CommitInfo[]; readonly more: boolean }
 
-const touchesPath = async (odb: ObjectDatabase, commit: CommitDetails, path: readonly string[]): Promise<boolean> => {
+const touchesPath = async (odb: ObjectDatabase, commit: CommitInfo, path: readonly string[]): Promise<boolean> => {
   const own = await entryAt(odb, commit.tree, path)
   if (commit.parents.length === 0) return own !== null
   for (const parent of commit.parents) {
@@ -140,8 +140,8 @@ export const commitLog = async (odb: ObjectDatabase, start: ObjectId, options: L
   const wanted = skip + options.limit + 1
   const seen = new Set<ObjectId>([start])
   const first = await readCommit(odb, start)
-  const queue: CommitDetails[] = first ? [first] : []
-  const matched: CommitDetails[] = []
+  const queue: CommitInfo[] = first ? [first] : []
+  const matched: CommitInfo[] = []
   const maxWalk = options.maxWalk ?? DEFAULT_MAX_LOG_WALK
   let walked = 0
   while (queue.length > 0 && matched.length < wanted && walked++ < maxWalk) {
@@ -159,87 +159,10 @@ export const commitLog = async (odb: ObjectDatabase, start: ObjectId, options: L
   return { commits: matched.slice(skip, skip + options.limit), more: matched.length > skip + options.limit }
 }
 
-export const lastCommitFor = async (odb: ObjectDatabase, start: ObjectId, path: readonly string[]): Promise<CommitDetails | null> =>
+export const lastCommitFor = async (odb: ObjectDatabase, start: ObjectId, path: readonly string[]): Promise<CommitInfo | null> =>
   (await commitLog(odb, start, { limit: 1, path })).commits[0] ?? null
 
-export type ChangeStatus = 'added' | 'deleted' | 'modified'
-
-export type FileChange = {
-  readonly status: ChangeStatus
-  readonly path: string
-  readonly oldId: ObjectId | null
-  readonly newId: ObjectId | null
-  readonly oldMode: string | null
-  readonly newMode: string | null
-}
-
-const treeMap = async (odb: ObjectDatabase, tree: ObjectId | null): Promise<Map<string, TreeEntry>> => {
-  if (tree === null) return new Map()
-  const object = await odb.read(tree)
-  if (object?.type !== 'tree') return new Map()
-  return new Map(parseTree(object.data).map((entry) => [entry.name, entry]))
-}
-
-export const diffTrees = async (odb: ObjectDatabase, oldTree: ObjectId | null, newTree: ObjectId | null, prefix = ''): Promise<FileChange[]> => {
-  if (oldTree === newTree) return []
-  const [before, after] = await Promise.all([treeMap(odb, oldTree), treeMap(odb, newTree)])
-  const names = [...new Set([...before.keys(), ...after.keys()])].sort()
-  const changes: FileChange[] = []
-  for (const name of names) {
-    const a = before.get(name) ?? null
-    const b = after.get(name) ?? null
-    if (a && b && a.id === b.id && a.mode === b.mode) continue
-    const path = `${prefix}${name}`
-    const aTree = a !== null && isTreeMode(a.mode)
-    const bTree = b !== null && isTreeMode(b.mode)
-    if (aTree || bTree) {
-      changes.push(...(await diffTrees(odb, aTree ? a.id : null, bTree ? b.id : null, `${path}/`)))
-      if (a && !aTree) changes.push({ status: 'deleted', path, oldId: a.id, newId: null, oldMode: a.mode, newMode: null })
-      if (b && !bTree) changes.push({ status: 'added', path, oldId: null, newId: b.id, oldMode: null, newMode: b.mode })
-      continue
-    }
-    changes.push({
-      status: a && b ? 'modified' : a ? 'deleted' : 'added',
-      path,
-      oldId: a?.id ?? null,
-      newId: b?.id ?? null,
-      oldMode: a?.mode ?? null,
-      newMode: b?.mode ?? null,
-    })
-  }
-  return changes.sort((x, y) => (x.path < y.path ? -1 : x.path > y.path ? 1 : 0))
-}
-
-export type FileDiff =
-  | { readonly kind: 'text'; readonly diff: LineDiff }
-  | { readonly kind: 'binary' }
-  | { readonly kind: 'lfs'; readonly before: LfsObjectSpec | null; readonly after: LfsObjectSpec | null }
-  | { readonly kind: 'submodule' }
-
-export const MAX_DIFF_BLOB_BYTES = 512 * 1024
-
-const blobSide = async (odb: ObjectDatabase, id: ObjectId | null, mode: string | null) => {
-  if (id === null || mode === null) return { kind: 'none' as const }
-  if (mode === '160000') return { kind: 'submodule' as const }
-  const object = await odb.read(id)
-  if (object?.type !== 'blob') return { kind: 'none' as const }
-  const pointer = mode === '120000' ? null : parseLfsPointer(object.data)
-  if (pointer) return { kind: 'lfs' as const, pointer }
-  if (object.data.length > MAX_DIFF_BLOB_BYTES || !looksLikeText(object.data)) return { kind: 'binary' as const }
-  return { kind: 'text' as const, lines: splitLines(fromUtf8(object.data)) }
-}
-
-export const diffFile = async (odb: ObjectDatabase, change: FileChange): Promise<FileDiff> => {
-  const [before, after] = await Promise.all([blobSide(odb, change.oldId, change.oldMode), blobSide(odb, change.newId, change.newMode)])
-  if (before.kind === 'submodule' || after.kind === 'submodule') return { kind: 'submodule' }
-  if (before.kind === 'lfs' || after.kind === 'lfs') {
-    return { kind: 'lfs', before: before.kind === 'lfs' ? before.pointer : null, after: after.kind === 'lfs' ? after.pointer : null }
-  }
-  if (before.kind === 'binary' || after.kind === 'binary') return { kind: 'binary' }
-  return { kind: 'text', diff: diffLines(before.kind === 'text' ? before.lines : [], after.kind === 'text' ? after.lines : []) }
-}
-
-export const commitChanges = async (odb: ObjectDatabase, commit: CommitDetails): Promise<FileChange[]> => {
+export const commitChanges = async (odb: ObjectDatabase, commit: CommitInfo): Promise<TreeChange[]> => {
   const parent = commit.parents[0] ? await readCommit(odb, commit.parents[0]) : null
   return diffTrees(odb, parent?.tree ?? null, commit.tree)
 }

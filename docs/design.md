@@ -529,8 +529,10 @@ public CDN bucket on push.
 **Submit via form** — the server creates blob, tree and commit on a proposal
 branch.
 
-**Merge pull request** — fast-forward or conflict-free rebase/merge only;
-reject on conflict.
+**Merge pull request** — merge commit, squash or rebase, computed in core
+without a git binary (§17): the same tree as `git merge`, refused on any
+conflict. New objects go into one new pack; the base branch moves with
+compare-and-swap. No in-browser conflict resolution yet.
 
 ## 8. Identity and permissions
 
@@ -676,7 +678,7 @@ dev environments) need real machines, started on demand via API.
 
 Every building block is an interface; Cloudflare is the first implementation.
 
-**Cloudflare deployment.** One Worker serves the web UI (§17), Git, LFS, media
+**Cloudflare deployment.** One Worker serves the web UI (§18), Git, LFS, media
 and raw URLs, the JSON API and the well-known federation documents, and runs
 mirror sync from a Cron Trigger. It binds one R2 bucket (`BUCKET`) and one D1 database (`DB`).
 The Worker never migrates its database: `wrangler d1 migrations apply` does,
@@ -1142,7 +1144,7 @@ update themselves.
     result bundled by `wrangler deploy --dry-run` into one ES module whose
     only imports are workerd built-ins (`cloudflare:workers`), uploaded by
     instances with `no_bundle: true`, so workerd runs exactly the released
-    bytes. The web UI is part of it (§17); there is no separate asset
+    bytes. The web UI is part of it (§18); there is no separate asset
     directory.
   - `migrations.tar.gz`: the D1 migrations (`migrations/*.sql`, currently from
     `packages/accounts`), built reproducibly.
@@ -1365,7 +1367,81 @@ wait for the scheduled handler.
   `generate_release_notes`, `make_latest` (the latest release is the newest
   published non-prerelease).
 
-## 17. Web UI
+## 17. Collaboration
+
+Issues, pull requests, reviews, commit statuses, check runs and discussions
+(`@git-forge/collaboration`, API in its
+[README](../packages/collaboration/README.md)). Decisions:
+
+- **Database only, never synced.** All collaboration data lives in the
+  instance's SQLite database (migration `0008_collaboration`). Nothing of it
+  is written to the bucket, so a mirror or a plain bucket clone carries no
+  issues or reviews (§4). Pull requests keep their head and base shas in the
+  database; there are no `refs/pull/*` refs. The only Git writes are merge
+  results, which are repository content like any push.
+- **GitHub semantics and shapes.** Every pull request is an issue; issues,
+  pull requests and discussions share one number sequence per repository.
+  Roles are GitHub's (read, triage, write, maintain, admin); readers may open
+  issues, pull requests and discussions and comment unless the repository
+  turns `read_can_participate` off. The REST API under `/api/v3` uses
+  GitHub's paths and JSON shapes where reasonable, so existing tools work;
+  IDs are integers except users and repositories. Markdown bodies are stored
+  raw; rendering is the UI's job.
+- **One permission function.** `allowed(permission, subject)` is pure; the
+  subject comes from the verified token or session (`openRepository`), never
+  from the request body. Read-only tokens never mutate.
+- **Push tracking without a hook dependency.** Pull requests compare their
+  stored shas with `refs.json` on every read and on every push
+  (`handlePushedRefs` from `onPush`). A moved head records an event and,
+  with `dismiss_stale_reviews`, dismisses approvals; a base branch that
+  contains the head marks the pull request merged; commits pushed to the
+  default branch close issues they reference with a closing keyword. Ancestry
+  walks for this are bounded (1000 commits).
+- **Diff and merge in core, identical to git.** `xdiff.ts` is a port of
+  git's xdiff (Myers with git's heuristics, record cleanup, change
+  compaction) and of its zealous three-way line merge, so line diffs and
+  clean/conflict decisions match `git diff` and `git merge-file` byte for
+  byte (checked against git on randomized inputs). `diff.ts` adds tree diffs
+  with exact-rename detection, binary detection (a NUL in the first 8000
+  bytes, like git), LFS pointer detection and git's patch format.
+  `merge.ts` computes merge bases (with a virtual merge base for criss-cross
+  histories, as `ort` does), the three-way tree merge (trivial cases, mode
+  merge, text merge, modify/delete, directory/file) and the three methods:
+  merge commit (parents base and head), squash (parent base), rebase
+  (cherry-picks parents first, drops commits that become empty, refuses
+  merge commits). Results are compared commit by commit with `git merge
+  --no-ff`, `git merge --squash` and `git rebase --force-rebase`. Rename
+  detection is not implemented; to stay safe, situations where git's rename
+  or directory-rename detection could change the outcome (a file deleted on
+  both sides while a similar file was added on one side, a directory removed
+  on one side while the other adds to it) are reported as conflicts. The
+  merge is therefore never clean where git conflicts, and identical where
+  both are clean.
+- **Branch protection on merge.** The merge calls the same
+  `evaluateBranchUpdate(rule, actor, update, { via: 'pull-request', … })` as
+  receive-pack, with approvals from reviewers with write access (the
+  author's own reviews never count), requested changes, the last-push
+  approval, the strict up-to-date flag and the latest statuses and check
+  runs of the head. `require_code_owner_reviews` is only satisfiable while
+  the base has no `CODEOWNERS` file. Required status checks on direct pushes
+  still see no statuses (the push policy is synchronous); the pull request
+  is the path that satisfies them.
+- **Statuses and check runs** are stored here and written by CI (directly
+  through `recordCommitStatus` / `recordCheckRun`) or by anyone with write
+  access through the API.
+- **Hooks.** After a merge the host's `onBranchUpdated` runs the same
+  pipeline as a push (CI dispatch, mirror notifications, `push` events).
+  Every mutation reports an activity (`onActivity`) that the Worker turns
+  into notification events (§16: `issues`, `issue_comment`,
+  `pull_request`, `pull_request_review`, `pull_request_review_comment`);
+  the collaboration package itself does not depend on the notifications
+  package.
+- **Limits of v1.** Same-repository pull requests only (forks later),
+  computing mergeability and file lists loads the involved objects through
+  the in-memory object database, no reactions, no search,
+  no CODEOWNERS parsing, no in-browser conflict resolution.
+
+## 18. Web UI
 
 The web UI is server-rendered Astro (`@astrojs/cloudflare`) inside the same
 Worker as everything else. There is one Worker per instance and one release
@@ -1440,8 +1516,9 @@ Repository browsing uses pure functions in `@git-forge/core`
 (`browse.ts`, `diff.ts`): `resolveRefAndPath` (refs with slashes, tags,
 full commit ids; the mirror view of `advertisedRefs`), `resolveTarget`,
 `readBlobContent` (text, binary, LFS pointer), `commitLog` (date order,
-path filter, paging, at most 10 000 commits walked per call), `diffTrees`, `diffFile` and `diffLines` (Myers, capped
-edit distance, unified hunks identical to `git diff --diff-algorithm=myers`).
+path filter, paging, at most 10 000 commits walked per call), and for
+commit diffs `diffTrees` and `diffFile` of the shared diff module (git's
+xdiff, §17), the same code pull requests use.
 They read through `ObjectDatabase` like the Git endpoints. The UI layer
 (`src/ui/*.ts`) only composes them into view models; `.astro` files only
 render.
@@ -1469,7 +1546,7 @@ render.
 ### Tests
 
 - `packages/core/test/browse.test.ts`: read model against a real pushed
-  repository, line diffs compared with `git diff`.
+  repository.
 - `apps/forge-worker/test/unit/ui.test.ts`: routing split, origin check,
   Markdown sanitizing and link rewriting, highlighting.
 - `apps/forge-worker/test/pages/`: pages rendered with Astro's container API

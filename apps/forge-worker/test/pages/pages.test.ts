@@ -177,7 +177,7 @@ describe('repository pages', () => {
     const { status, html } = await render(Commit, `/alice/site/commit/${head}`, { owner: 'alice', repo: 'site', id: head })
     expect(status).toBe(200)
     expect(html).toContain('Fix the answer')
-    expect(html).toContain('@@ -1,1 +1,2 @@')
+    expect(html).toContain('@@ -1 +1,2 @@')
     expect(html).toContain('export const answer = 42')
     expect(html).toContain(`href="/alice/site/commit/${first}"`)
     expect((await render(Commit, '/alice/site/commit/abc', { owner: 'alice', repo: 'site', id: 'abc' })).status).toBe(404)

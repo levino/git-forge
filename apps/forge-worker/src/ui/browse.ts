@@ -1,6 +1,6 @@
 import {
   type BlobContent,
-  type CommitDetails,
+  type CommitInfo,
   type DirectoryEntry,
   lastCommitFor,
   readBlobContent,
@@ -18,7 +18,7 @@ export type TreeView = {
   readonly kind: 'tree'
   readonly target: RefTarget
   readonly entries: readonly DirectoryEntry[]
-  readonly latest: CommitDetails | null
+  readonly latest: CommitInfo | null
   readonly readme: Readme | null
 }
 
@@ -29,7 +29,7 @@ export type BlobView = {
   readonly content: BlobContent
   readonly lines: readonly HighlightedLine[] | null
   readonly markdown: string | null
-  readonly latest: CommitDetails | null
+  readonly latest: CommitInfo | null
 }
 
 export type BrowseView = TreeView | BlobView | { readonly kind: 'not-found' } | { readonly kind: 'empty' }

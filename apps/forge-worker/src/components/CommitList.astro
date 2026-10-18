@@ -1,14 +1,14 @@
 ---
-import type { CommitDetails, RepositoryName } from '@git-forge/core'
+import type { CommitInfo, RepositoryName } from '@git-forge/core'
 import { isoTime, relativeTime, shortId } from '../ui/format.ts'
 import { commitUrl, treeUrl } from '../ui/repository.ts'
 
-type Props = { repo: RepositoryName; commits: readonly CommitDetails[] }
+type Props = { repo: RepositoryName; commits: readonly CommitInfo[] }
 
 const { repo, commits } = Astro.props
 const now = Math.floor(Date.now() / 1000)
-const day = (commit: CommitDetails) => isoTime(commit.committer.timestamp).slice(0, 10)
-const groups: { day: string; commits: CommitDetails[] }[] = []
+const day = (commit: CommitInfo) => isoTime(commit.committer.timestamp).slice(0, 10)
+const groups: { day: string; commits: CommitInfo[] }[] = []
 for (const commit of commits) {
   const last = groups[groups.length - 1]
   if (last && last.day === day(commit)) last.commits.push(commit)

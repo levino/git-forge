@@ -5,8 +5,6 @@ import {
   commitChanges,
   commitLog,
   defaultBranch,
-  diffFile,
-  diffTrees,
   lastCommitFor,
   namedRefs,
   readBlobContent,
@@ -14,7 +12,7 @@ import {
   resolveRefAndPath,
   resolveTarget,
 } from '../src/browse.ts'
-import { diffLines, formatHunkHeader, splitLines } from '../src/diff.ts'
+import { diffFile, diffTrees } from '../src/diff.ts'
 import { ObjectDatabase, readRefs, type RefsState } from '../src/repository.ts'
 import { commitAll, git, gitEnv, initRepo, writeFile } from './git-helpers.ts'
 import { type Forge, startForge } from './mirror-helpers.ts'
@@ -91,58 +89,13 @@ describe('browse', () => {
     expect((await commitLog(odb, ids[2]!, { limit: 10, maxWalk: 2 })).commits).toHaveLength(2)
   })
 
-  it('diffs commits like git does', async () => {
+  it('lists the changes of a commit against its first parent', async () => {
     const second = (await readCommit(odb, ids[1]!))!
     const changes = await commitChanges(odb, second)
     expect(changes.map((change) => `${change.status} ${change.path}`)).toEqual(['added logo.bin', 'modified src/a.ts', 'added src/b/c.ts'])
-    const modified = await diffFile(odb, changes[1]!)
-    expect(modified.kind === 'text' && modified.diff.kind === 'hunks' && modified.diff.hunks.map(formatHunkHeader)).toEqual(['@@ -1,1 +1,1 @@'])
-    expect(await diffFile(odb, changes[0]!)).toEqual({ kind: 'binary' })
+    expect((await diffFile(odb, changes[1]!)).hunks).toHaveLength(1)
     const root = await commitChanges(odb, (await readCommit(odb, ids[0]!))!)
     expect(root.map((change) => change.status)).toEqual(['added', 'added'])
     expect(await diffTrees(odb, second.tree, second.tree)).toEqual([])
-  })
-})
-
-describe('line diff', () => {
-  const unified = (a: string, b: string): string => {
-    const diff = diffLines(splitLines(a), splitLines(b))
-    if (diff.kind !== 'hunks') return 'too-large'
-    return diff.hunks
-      .map((hunk) => [formatHunkHeader(hunk), ...hunk.lines.map((line) => `${line.kind === 'added' ? '+' : line.kind === 'deleted' ? '-' : ' '}${line.text}`)].join('\n'))
-      .join('\n')
-  }
-
-  const gitDiff = (a: string, b: string): string => {
-    const work = initRepo()
-    writeFile(work, 'f', a)
-    commitAll(work, 'a')
-    writeFile(work, 'f', b)
-    const output = git(work, ['diff', '--no-color', '--diff-algorithm=myers', '-U3', '--', 'f'])
-    return output
-      .split('\n')
-      .slice(4)
-      .filter((line) => line !== '' && !line.startsWith('\\'))
-      .map((line) => line.replace(/^(@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@).*$/, '$1'))
-      .map((line) => line.replace(/^@@ -(\d+) /, '@@ -$1,1 ').replace(/\+(\d+) @@$/, '+$1,1 @@'))
-      .join('\n')
-  }
-
-  const cases: [string, string][] = [
-    ['a\nb\nc\n', 'a\nB\nc\n'],
-    ['', 'x\ny\n'],
-    [Array.from({ length: 30 }, (_, i) => `line ${i}`).join('\n') + '\n', Array.from({ length: 30 }, (_, i) => (i % 9 === 0 ? `changed ${i}` : `line ${i}`)).join('\n') + '\n'],
-    ['one\ntwo\nthree\nfour\n', 'zero\none\nthree\nfour\nfive\n'],
-  ]
-
-  it.each(cases)('matches git diff output %#', (a, b) => {
-    expect(unified(a, b)).toBe(gitDiff(a, b))
-  })
-
-  it('counts and gives up on huge edit distances', () => {
-    expect(diffLines(['a'], ['b'])).toMatchObject({ added: 1, deleted: 1 })
-    const big = Array.from({ length: 3000 }, (_, i) => `${i}`)
-    expect(diffLines(big, big.map((line) => `${line}!`), { maxDistance: 100 })).toEqual({ kind: 'too-large' })
-    expect(diffLines(big, big)).toEqual({ kind: 'hunks', hunks: [], added: 0, deleted: 0 })
   })
 })

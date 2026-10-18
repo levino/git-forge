@@ -1,9 +1,9 @@
 ---
-import type { CommitDetails, NamedRef } from '@git-forge/core'
+import type { CommitInfo, NamedRef } from '@git-forge/core'
 import { isoTime, relativeTime, shortId } from '../ui/format.ts'
 import { commitUrl, commitsUrl, type OpenRepository, treeUrl } from '../ui/repository.ts'
 
-type Props = { repo: OpenRepository; refs: readonly { ref: NamedRef; commit: CommitDetails | null }[]; label: string }
+type Props = { repo: OpenRepository; refs: readonly { ref: NamedRef; commit: CommitInfo | null }[]; label: string }
 
 const { repo, refs, label } = Astro.props
 const now = Math.floor(Date.now() / 1000)

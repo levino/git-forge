@@ -144,6 +144,7 @@ OIDC_NAME = "Example ID"
 | `BREAK_GLASS_PUBLIC_KEY` | | Public half of the offline break-glass key, see the [forge-worker README](https://github.com/levino/git-forge/tree/main/apps/forge-worker#break-glass-key). |
 | `UI` | `true` | `false` for a headless instance (for example a backup mirror): Git, LFS and the API only. |
 | `MAX_LFS_OBJECT_BYTES`, `MIRROR_INTERVAL_MINUTES`, `MIRROR_DEEP_CHECK_DAYS` | see the forge-worker README | Limits and mirror schedule. |
+| `R2_ACCOUNT_ID`, `R2_BUCKET`, `R2_S3_ENDPOINT` | none: LFS through the Worker | Presigned LFS uploads straight to R2, see [Large LFS objects](#large-lfs-objects). |
 | `EMAIL_PROVIDER` | `none` | `ses` or `console`, see [Email](#notifications-email-and-webhooks). |
 
 ## Login
@@ -177,6 +178,35 @@ lists repositories, `https://<your-instance>/alice/site` shows the files, the
 README, commits, diffs, branches, tags and previews of LFS images, video,
 audio and PDFs. Public repositories are visible to everyone, private ones only
 with access.
+
+## Large LFS objects
+
+By default LFS uploads pass through the Worker, so a single object is limited
+to Cloudflare's request body limit (100 MB on Free and Pro) and
+`MAX_LFS_OBJECT_BYTES` defaults to 100 MiB. For larger objects, let clients
+upload straight to R2 through presigned URLs:
+
+1. In the dashboard, **R2 → Manage API tokens → Create API token** with
+   "Object Read & Write" for the instance's bucket only. It shows an access key
+   id and a secret access key (the S3 credentials).
+2. Set the vars in `[vars]` of `wrangler.toml` and the two secrets:
+
+   | Name | Value |
+   |---|---|
+   | `R2_ACCOUNT_ID` | Your Cloudflare account id (32 hex characters). |
+   | `R2_BUCKET` | The `bucket_name` of the `BUCKET` binding. |
+   | `R2_S3_ENDPOINT` | Optional, only for a bucket in a jurisdiction, e.g. `https://<account>.eu.r2.cloudflarestorage.com`. |
+   | `MAX_LFS_OBJECT_BYTES` | Raise as needed, up to R2's single-upload limit of about 5 GiB, e.g. `1073741824` for 1 GiB. |
+
+   ```sh
+   npx wrangler@4 secret put R2_ACCESS_KEY_ID
+   npx wrangler@4 secret put R2_SECRET_ACCESS_KEY
+   ```
+
+The batch API then hands out URLs signed for exactly the announced size and
+SHA-256, and the forge re-hashes every uploaded object before it counts as
+present. Setting only some of the four values stops the Worker with a
+configuration error.
 
 ## Imports
 

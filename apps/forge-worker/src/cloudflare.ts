@@ -1,9 +1,10 @@
 import { d1Database, MIGRATIONS, migrateOnStart } from '@git-forge/accounts'
 import { consumeJobs, digestStreams, QueueJobs, R2Storage } from '@git-forge/cloudflare'
 import { continueImport, createConsoleEmailSender, type EmailSender, type ImportJob, type ImportScheduler } from '@git-forge/core'
+import { S3Storage } from '@git-forge/s3'
 import { createSesEmailSender } from '@git-forge/ses'
 import { type AppJob, createForge, type Forge } from './app.ts'
-import { ACTIONS_CRON, type EmailSettings, type ForgeVars, loadSecretsKey, parseActionsSettings, parseEmailSettings, parseSettings, uiEnabled } from './config.ts'
+import { ACTIONS_CRON, type EmailSettings, type ForgeVars, loadSecretsKey, parseActionsSettings, parseEmailSettings, parseR2PresignSettings, parseSettings, uiEnabled } from './config.ts'
 import { containerLauncher } from './runner-launcher.ts'
 import { captureLoginPage } from './ui/login-pages.ts'
 
@@ -36,11 +37,13 @@ export const forgeFor = (env: Env): Promise<Forge> => {
       const actions = parseActionsSettings(env)
       const secretsKey = await loadSecretsKey(actions)
       const email = emailSender(parseEmailSettings(env))
+      const presign = parseR2PresignSettings(env)
       return createForge({
         ...settings,
         storage: new R2Storage(env.BUCKET),
         db: d1Database(env.DB),
         digests: digestStreams,
+        ...(presign ? { lfsPresigner: new S3Storage(presign) } : {}),
         ...(uiEnabled(env) ? { renderLoginPage: captureLoginPage } : {}),
         ...(env.IMPORTS ? { scheduleImport: importScheduler(env.IMPORTS) } : {}),
         ...(env.JOBS ? { jobs: new QueueJobs(env.JOBS) } : {}),

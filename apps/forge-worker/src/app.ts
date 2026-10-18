@@ -83,6 +83,7 @@ import {
   MirrorNotFoundError,
   ObjectDatabase,
   type PackfileUri,
+  type Presigner,
   publicPackfileUris,
   type PushOutcome,
   readAll,
@@ -96,6 +97,7 @@ import {
   startImport,
   type Storage,
   type SyncResult,
+  withPresigner,
   ZERO_ID,
 } from '@git-forge/core'
 import {
@@ -165,6 +167,7 @@ export type ForgeOptions = ForgeSettings & {
   readonly actions?: ActionsOptions
   readonly jobs?: JobQueue<AppJob>
   readonly digests?: DigestFactory
+  readonly lfsPresigner?: Presigner
   readonly scheduleImport?: ImportScheduler
   readonly email?: EmailSender
   readonly renderLoginPage?: LoginPageRenderer
@@ -333,6 +336,7 @@ type Route = { readonly pattern: RegExp; readonly method: string; readonly handl
 
 export const createForge = (options: ForgeOptions): Forge => {
   const { storage, db } = options
+  const presigningStorage = options.lfsPresigner ? withPresigner(storage, options.lfsPresigner) : storage
   const now = options.now ?? (() => new Date())
   const store: AccountsStore = createAccountsStore(db, { now: () => now().getTime() })
   const verification = createMirrorVerificationStore(db, { now: () => now().getTime() })
@@ -1142,11 +1146,11 @@ export const createForge = (options: ForgeOptions): Forge => {
     const content = await handleContentRequest(request, { storage, authorize: withSessionReads(authorize) })
     if (content) return content
     const git = await handleGitRequest(request, {
-      storage,
+      storage: presigningStorage,
       authorize,
       pushPolicy: access.pushPolicy,
       ...(options.maxPushBytes !== undefined ? { maxPushBytes: options.maxPushBytes } : {}),
-      lfs: { maxObjectBytes: options.maxLfsObjectBytes },
+      lfs: { maxObjectBytes: options.maxLfsObjectBytes, ...(options.digests ? { digests: options.digests } : {}) },
       packfileUris: (incoming, repo) => packfileUris(incoming, repo, authorize),
       onPush: async (repo, outcome) => {
         await compactAfterPush(waitUntil)(repo, outcome)

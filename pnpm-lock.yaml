@@ -223,6 +223,9 @@ importers:
       '@git-forge/releases':
         specifier: workspace:*
         version: link:../../packages/releases
+      '@git-forge/s3':
+        specifier: workspace:*
+        version: link:../../packages/s3
       '@git-forge/ses':
         specifier: workspace:*
         version: link:../../packages/ses

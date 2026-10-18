@@ -1,11 +1,12 @@
 import { generateSigningKey, type SigningKey } from '@git-forge/accounts'
-import { type ImportJob, readImportState, readRefs } from '@git-forge/core'
+import { type ImportJob, lfsObjectKey, readImportState, readRefs, sha256Hex } from '@git-forge/core'
+import { S3Storage } from '@git-forge/s3'
 import { commitAll, initRepo, sampleHistory, tempDir, writeFile } from '@git-forge/core/test/git-helpers.ts'
 import { type RunningServer, startServer } from '@git-forge/core/test/http-server.ts'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { basicAuthorization, secretMatches } from '../../src/app.ts'
 import { git, gitFails } from '../e2e/history.ts'
-import { DEFAULT_COMPACT_MAX_BYTES, DEFAULT_MAX_LFS_OBJECT_BYTES, loadSecretsKey, parseActionsSettings, parseSettings } from '../../src/config.ts'
+import { DEFAULT_COMPACT_MAX_BYTES, DEFAULT_MAX_LFS_OBJECT_BYTES, loadSecretsKey, parseActionsSettings, parseR2PresignSettings, parseSettings } from '../../src/config.ts'
 import { upstreamRepository } from '../../src/mirrors.ts'
 import { bootstrap, BOOTSTRAP_TOKEN, call, type NodeForge, nodeForge } from '../support/node-forge.ts'
 
@@ -77,6 +78,78 @@ describe('settings', () => {
     expect(upstreamRepository('https://a.example/acme/site.git')).toBe('acme/site')
     expect(upstreamRepository('https://a.example/acme/site')).toBe('acme/site')
     expect(upstreamRepository('https://a.example/acme')).toBeNull()
+  })
+})
+
+describe('presigned LFS URLs on R2', () => {
+  const ACCOUNT = '0123456789abcdef0123456789abcdef'
+  const r2Vars = { R2_ACCOUNT_ID: ACCOUNT, R2_BUCKET: 'levins-git-forge', R2_ACCESS_KEY_ID: 'key-id', R2_SECRET_ACCESS_KEY: 'secret' }
+  const repo = { owner: 'admin', name: 'assets' }
+  const big = { oid: 'b'.repeat(64), size: 600 * 1024 * 1024 }
+
+  it('parses the R2 S3 credentials, all or nothing', () => {
+    expect(parseR2PresignSettings({})).toBeUndefined()
+    expect(parseR2PresignSettings({ R2_ACCOUNT_ID: ACCOUNT, R2_BUCKET: 'b' })).toBeUndefined()
+    expect(parseR2PresignSettings(r2Vars)).toEqual({
+      endpoint: `https://${ACCOUNT}.r2.cloudflarestorage.com`,
+      region: 'auto',
+      bucket: 'levins-git-forge',
+      accessKeyId: 'key-id',
+      secretAccessKey: 'secret',
+      forcePathStyle: true,
+    })
+    expect(parseR2PresignSettings({ ...r2Vars, R2_ACCOUNT_ID: '', R2_S3_ENDPOINT: 'https://eu.r2.example' })?.endpoint).toBe('https://eu.r2.example')
+    expect(() => parseR2PresignSettings({ ...r2Vars, R2_SECRET_ACCESS_KEY: '' })).toThrow(/R2_SECRET_ACCESS_KEY/)
+    expect(() => parseR2PresignSettings({ ...r2Vars, R2_BUCKET: ' ' })).toThrow(/R2_BUCKET/)
+    expect(() => parseR2PresignSettings({ ...r2Vars, R2_ACCOUNT_ID: 'nope' })).toThrow(/R2_ACCOUNT_ID/)
+    expect(() => parseR2PresignSettings({ ...r2Vars, R2_ACCOUNT_ID: '', R2_S3_ENDPOINT: 'not a url' })).toThrow(/R2_S3_ENDPOINT/)
+  })
+
+  const setup = async (presign: boolean) => {
+    const config = parseR2PresignSettings(r2Vars)
+    const forge = await nodeForge({ maxLfsObjectBytes: 1024 * 1024 * 1024, ...(presign && config ? { lfsPresigner: new S3Storage(config) } : {}) })
+    const admin = await bootstrap(forge, BASE)
+    expect((await call(forge, BASE, 'POST', '/api/repos', admin, repo)).status).toBe(201)
+    const lfs = (path: string, body: unknown) =>
+      forge.fetch(
+        new Request(`${BASE}/admin/assets.git/info/lfs/objects/${path}`, {
+          method: 'POST',
+          headers: { Authorization: basic(admin), 'Content-Type': 'application/vnd.git-lfs+json' },
+          body: JSON.stringify(body),
+        }),
+      )
+    const batch = async (operation: string, objects: readonly { oid: string; size: number }[]) =>
+      (await json<{ objects: { actions?: Record<string, { href: string; header?: Record<string, string> }> }[] }>(await lfs('batch', { operation, objects }))).objects[0]
+        ?.actions
+    return { forge, lfs, batch }
+  }
+
+  it('hands out R2 URLs signed for the exact length and SHA-256, on the binding key layout, and re-hashes on verify', async () => {
+    const { forge, lfs, batch } = await setup(true)
+    const upload = await batch('upload', [big])
+    const put = new URL(upload?.upload?.href ?? '')
+    expect(`${put.origin}${put.pathname}`).toBe(`https://${ACCOUNT}.r2.cloudflarestorage.com/levins-git-forge/${lfsObjectKey(repo, big.oid)}`)
+    expect(put.searchParams.get('X-Amz-SignedHeaders')).toBe('content-length;host;x-amz-checksum-sha256')
+    expect(put.searchParams.get('X-Amz-Credential')).toMatch(/^key-id\/\d{8}\/auto\/s3\/aws4_request$/)
+    expect(upload?.upload?.header).toEqual({ 'content-length': String(big.size), 'x-amz-checksum-sha256': btoa('»'.repeat(32)) })
+    expect(upload?.verify?.href).toBe(`${BASE}/admin/assets.git/info/lfs/objects/verify`)
+
+    const data = new TextEncoder().encode('stored through the binding')
+    const oid = sha256Hex(data)
+    await forge.storage.put(lfsObjectKey(repo, oid), data, data.length)
+    const download = new URL((await batch('download', [{ oid, size: data.length }]))?.download?.href ?? '')
+    expect(download.host).toBe(`${ACCOUNT}.r2.cloudflarestorage.com`)
+    expect(download.searchParams.get('X-Amz-Signature')).toMatch(/^[0-9a-f]{64}$/)
+
+    expect((await lfs('verify', { oid, size: data.length })).status).toBe(200)
+    const forged = 'c'.repeat(64)
+    await forge.storage.put(lfsObjectKey(repo, forged), data, data.length)
+    expect((await lfs('verify', { oid: forged, size: data.length })).status).toBe(422)
+  })
+
+  it('keeps proxying LFS through the Worker without R2 credentials', async () => {
+    const { batch } = await setup(false)
+    expect((await batch('upload', [big]))?.upload?.href).toBe(`${BASE}/admin/assets.git/info/lfs/objects/${big.oid}`)
   })
 })
 

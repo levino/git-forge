@@ -13,6 +13,7 @@ import {
   storeLfsObject,
   verifyLfsObject,
 } from './lfs.ts'
+import type { DigestFactory } from './digest.ts'
 import { readRefs, type RepositoryName } from './repository.ts'
 import type { Storage } from './storage.ts'
 
@@ -20,6 +21,7 @@ export type LfsHttpOptions = {
   readonly expiresInSeconds?: number
   readonly maxJsonBytes?: number
   readonly maxObjectBytes?: number
+  readonly digests?: DigestFactory
 }
 
 export type LfsContext = {
@@ -103,7 +105,10 @@ export const handleLfsRequest = async (request: Request, repo: RepositoryName, p
       const denied = await context.authorize?.(request, repo, 'write', 'lfs')
       if (denied) return denied
       const spec = parseSpec(await readJson(request, 64 * 1024))
-      const result = await verifyLfsObject(storage, repo, spec, { checkHash: storage.presignPut !== undefined })
+      const result = await verifyLfsObject(storage, repo, spec, {
+        checkHash: storage.presignPut !== undefined,
+        ...(context.lfs?.digests ? { digests: context.lfs.digests } : {}),
+      })
       return result.ok ? json(200, { message: 'ok' }) : failure(result.status, result.message)
     }
     const oid = OBJECT_PATH.exec(path)?.[1]

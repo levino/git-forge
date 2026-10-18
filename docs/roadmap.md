@@ -19,6 +19,7 @@ discussions.
 ## M2 — Git LFS
 
 - [x] Batch API (presigned URLs where the storage can sign, upload through the function otherwise)
+- [x] Presigned R2 URLs in the Worker (`R2_*` S3 credentials, `withPresigner` over the binding), LFS objects up to R2's single-PUT limit
 - [x] Verify step (size, SHA-256) before an object counts as present
 - [x] Reject pushes referencing missing LFS objects
 - [x] Per-object size limit (`MAX_LFS_OBJECT_BYTES` in the Worker)

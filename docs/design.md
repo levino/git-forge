@@ -649,7 +649,10 @@ switch.
 **Size limits.** Git pushes are only limited by the platform's request body
 limit unless `MAX_PUSH_BYTES` is set; single LFS
 objects by `MAX_LFS_OBJECT_BYTES` (default 100 MiB, the request body limit of
-Cloudflare's Free and Pro plans), enforced in the batch API and on `PUT`.
+Cloudflare's Free and Pro plans), enforced in the batch API and on `PUT`. With
+presigned R2 URLs (§11) uploads never reach the Worker, so the limit can be
+raised up to R2's single-`PUT` limit (about 5 GiB); the presigned URL is
+signed for the announced size, so the batch API's check is binding.
 
 ## 9. Git over SSH
 
@@ -826,6 +829,24 @@ plain directory per key, lock files for conditional writes), `R2Storage`
 (`@git-forge/s3`, any S3 API including R2's, with presigning). Presigned LFS
 uploads bind `Content-Length` and `x-amz-checksum-sha256` into the signature,
 so the bucket rejects any other content.
+
+**Presigning on top of a binding.** `withPresigner(storage, presigner)` (core)
+takes `get`, `head`, `put` and `list` from one storage and `presignGet` /
+`presignPut` from another. The Worker uses it when the R2 S3 credentials are
+configured (`R2_ACCOUNT_ID` or `R2_S3_ENDPOINT`, `R2_BUCKET`,
+`R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`): everything still goes through the
+`BUCKET` binding (`R2Storage`), and an `S3Storage` on R2's S3 endpoint
+(`https://<account>.r2.cloudflarestorage.com`, region `auto`, path style,
+same bucket, no prefix) only signs URLs, so the key layout is the same on both
+paths. Only the Git/LFS handler gets the composed storage, so only LFS hands
+out presigned URLs (pack URIs stay public dumb-HTTP URLs). R2 checks
+`x-amz-checksum-sha256` on `PutObject` (since June 2023); independent of
+that, a storage that presigns makes the verify step re-hash the stored object
+through the binding before it counts as present, with the platform's
+streaming digest (`DigestFactory`; `crypto.DigestStream` on Workers, about 2 s
+CPU time for 600 MB against a `cpu_ms` budget of 60 s, the JavaScript
+fallback about 7 s). Without the credentials, LFS objects are proxied through
+the Worker as before.
 
 **Local S3 test environment:** MinIO is discontinued. versitygw (posix
 backend) is used; it passed the full suite, as did RustFS. SeaweedFS lists in

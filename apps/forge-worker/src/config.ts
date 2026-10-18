@@ -12,6 +12,7 @@ import {
   type PrivateJwk,
   type SigningKey,
 } from '@git-forge/accounts'
+import type { S3StorageConfig } from '@git-forge/s3'
 
 export type ForgeVars = {
   readonly PUBLIC_URL?: string
@@ -21,6 +22,11 @@ export type ForgeVars = {
   readonly PACKFILE_URI_BASE?: string
   readonly COMPACT_MAX_BYTES?: string
   readonly MAX_LFS_OBJECT_BYTES?: string
+  readonly R2_ACCOUNT_ID?: string
+  readonly R2_BUCKET?: string
+  readonly R2_ACCESS_KEY_ID?: string
+  readonly R2_SECRET_ACCESS_KEY?: string
+  readonly R2_S3_ENDPOINT?: string
   readonly MIRROR_INTERVAL_MINUTES?: string
   readonly ALLOW_INSECURE_FEDERATION?: string
   readonly ACTIONS?: string
@@ -205,6 +211,22 @@ export const parseLoginSettings = (vars: ForgeVars): LoginSettings => {
     throw error
   }
   return { oidc: parseOidcSettings(vars), selfSignup: vars.SELF_SIGNUP === 'true', breakGlassKey }
+}
+
+export const parseR2PresignSettings = (vars: ForgeVars): S3StorageConfig | undefined => {
+  const accountId = present(vars.R2_ACCOUNT_ID)
+  const configured = present(vars.R2_S3_ENDPOINT)
+  const bucket = present(vars.R2_BUCKET)
+  const accessKeyId = present(vars.R2_ACCESS_KEY_ID)
+  const secretAccessKey = present(vars.R2_SECRET_ACCESS_KEY)
+  if (!accessKeyId && !secretAccessKey) return undefined
+  if (!accessKeyId || !secretAccessKey || !bucket || (!accountId && !configured)) {
+    throw new ConfigurationError('presigned LFS URLs need R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET and R2_ACCOUNT_ID (or R2_S3_ENDPOINT)')
+  }
+  if (!configured && !/^[0-9a-f]{32}$/i.test(accountId ?? '')) throw new ConfigurationError('R2_ACCOUNT_ID must be the 32-character Cloudflare account id')
+  const endpoint = configured ?? `https://${accountId}.r2.cloudflarestorage.com`
+  if (!URL.canParse(endpoint)) throw new ConfigurationError('R2_S3_ENDPOINT must be a URL')
+  return { endpoint, region: 'auto', bucket, accessKeyId, secretAccessKey, forcePathStyle: true }
 }
 
 export const parseSettings = async (vars: ForgeVars): Promise<ForgeSettings> => {

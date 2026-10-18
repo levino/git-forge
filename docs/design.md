@@ -12,9 +12,9 @@ own storage and their own users. This is a light form of federation: no shared
 admin, no shared database, only signed server-to-server access to Git content
 and LFS objects.
 
-First use case: the digital village archive of Rössing (texts, content
-collections, photos, scans, videos; ~100 GB for the foreseeable future). The
-forge itself is not archive-specific.
+It is a general-purpose forge. Sizing assumptions in this document (e.g.
+§12, ~100 GB with large media in LFS) come from a first real deployment, a
+media-heavy archive; nothing in the forge is specific to it.
 
 License: MIT.
 
@@ -476,8 +476,8 @@ SQLite database. A new instance works without an external identity provider.
 | Break-glass key | Later: offline admin key (Ed25519), works without any IdP |
 | SAML, SCIM | Later, for organizations that require them |
 
-For the village archive: people log in via OIDC with ZITADEL; apps and
-automations use app tokens; mirrors use instance federation (§4).
+Typical setup: people log in via OIDC or passkeys; apps and automations use
+app tokens; mirrors use instance federation (§4).
 
 **Instance admins and bootstrap.** Instance admins (table `instance_admins`)
 create users and tokens, trust other instances and count as admins of every

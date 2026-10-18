@@ -21,7 +21,7 @@ discussions.
 - [ ] Batch API with presigned URLs (in progress)
 - [ ] Verify step (size, SHA-256) before an object counts as present
 - [ ] Reject pushes referencing missing LFS objects
-- [ ] Media URLs `/{owner}/{repo}/media/{oid}` and raw endpoint resolving LFS pointers
+- [x] Media URLs `/{owner}/{repo}/media/{oid}` and raw endpoint `/{owner}/{repo}/raw/{ref}/{path}` resolving LFS pointers (CDN pull-zone friendly: immutable caching, ETag, Range, HEAD)
 - [ ] Optional: publish public LFS objects to a CDN bucket on push
 
 ## M3 — Accounts and federation

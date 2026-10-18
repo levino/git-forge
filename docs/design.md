@@ -191,12 +191,58 @@ pass through the function on upload.
 `refs/upstream/{remote}/*` (archive and alarm on rewrites), fetch missing LFS
 objects via the Batch API and verify their hashes.
 
-**Media URLs (LFS onto a CDN without CI)** — the forge serves
-content-addressed, immutable URLs such as `/{owner}/{repo}/media/{oid}` and a
-path/ref-based raw endpoint that resolves LFS pointers. Both redirect to
-presigned bucket URLs or stream the object. A CDN (e.g. a Bunny pull zone) in
-front caches them. Optional later: a "publish" setting that copies public LFS
-objects into a public CDN bucket on push.
+**Media URLs (LFS onto a CDN without CI)** — two read-only endpoints that a
+pull-zone CDN (e.g. Bunny) can sit in front of. The CDN pulls on a cache miss;
+there is no upload or publish step.
+
+- `GET|HEAD /{owner}/{repo}/media/{oid}[/{filename}]` streams the LFS object
+  with that SHA-256 oid from the bucket. Content-addressed, so
+  `Cache-Control: public, max-age=31536000, immutable` and the strong ETag
+  `"{oid}"`. The optional trailing file name sets `Content-Type` (by
+  extension) and `Content-Disposition: inline`; without it the type is sniffed
+  from the first 64 bytes (images, video, audio, PDF, fonts, archives),
+  otherwise `application/octet-stream`. The file name does not change the
+  bytes, only the headers.
+- `GET|HEAD /{owner}/{repo}/raw/{ref}/{path}` resolves `{ref}` and walks the
+  trees to `{path}`. `{ref}` is a full 40-character commit (or tag object) id,
+  a tag, a branch (names with slashes work: the longest prefix of the path
+  that names a ref wins, tags before branches as in `git rev-parse`) or
+  `HEAD`. Abbreviated ids are not resolved. A plain blob is streamed with its
+  Git blob id as ETag; an LFS pointer answers `302` to
+  `/{owner}/{repo}/media/{oid}/{basename}` (relative, so a CDN keeps its own
+  host), so the large bytes are cached once, immutably, however many refs
+  point at them. Directories, submodules and pointers whose object is not in
+  the bucket answer `404`.
+- Caching of raw responses (including the redirect): full commit ids are
+  immutable; branches, tags and `HEAD` get `public, max-age=60` (core option
+  `refMaxAgeSeconds`) because they move.
+- Both support single `Range` requests (`206`, `416` with
+  `Content-Range: bytes */size`; multi-range requests get the full body),
+  `If-Range`, `If-None-Match` (`304`) and `HEAD`.
+- Served content must not run script on the forge origin: every response
+  carries `X-Content-Type-Options: nosniff` and, except PDFs (browser PDF
+  viewers refuse sandboxed documents), `Content-Security-Policy: default-src
+  'none'; …; sandbox`. HTML is never labelled `text/html`; unknown types are
+  `text/plain` if valid UTF-8, else `application/octet-stream`.
+- Permissions use the same `Authorize` callback as Git and LFS with access
+  `read`: public repositories anonymously, private ones need a token. A CDN
+  pulls private content with a read-only token that the pull zone adds to
+  every origin request (`Authorization: Bearer <token>`; in Bunny an Edge
+  Rule "Set Request Header" or origin header setting). Everything the CDN
+  caches is then readable by whoever can reach the CDN URL, so for private
+  repositories the pull zone itself must restrict access (e.g. Bunny token
+  authentication / signed URLs) or the repository should be public. Until
+  accounts are wired in, the Worker offers a single `READ_TOKEN` for this;
+  later a PAT or app token with the `read` role.
+- Core: `matchContentRoute`, `resolveRevision`, `resolvePath`, `resolveRaw`,
+  `parseRange` and the content-type helpers are pure functions;
+  `handleContentRequest` builds the HTTP responses. Plain blobs are read
+  through the object database, which still loads packs into memory (see
+  Push); LFS bytes are always streamed from the bucket, ranges via ranged
+  bucket reads.
+
+Optional later: a "publish" setting that copies public LFS objects into a
+public CDN bucket on push.
 
 **Submit via form** — the server creates blob, tree and commit on a proposal
 branch.

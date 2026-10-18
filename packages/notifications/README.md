@@ -2,7 +2,7 @@
 
 Events, notifications, email digests and webhooks. Design and rationale:
 [design.md §16](../../docs/design.md#16-notifications-webhooks-email-and-releases).
-Tables: `packages/accounts/migrations/0006_notifications.sql`.
+Tables: `packages/accounts/migrations/0007_notifications.sql`.
 
 ## Emitting events
 

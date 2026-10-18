@@ -1,4 +1,16 @@
-import { importSigningKey, normalizeIssuer, type PrivateJwk, type SigningKey } from '@git-forge/accounts'
+import {
+  BreakGlassError,
+  DEFAULT_OIDC_SCOPES,
+  importSigningKey,
+  normalizeIssuer,
+  normalizeOidcIssuer,
+  type OidcClientConfig,
+  OidcError,
+  type OkpPublicJwk,
+  parseBreakGlassPublicKey,
+  type PrivateJwk,
+  type SigningKey,
+} from '@git-forge/accounts'
 
 export type ForgeVars = {
   readonly PUBLIC_URL?: string
@@ -23,6 +35,19 @@ export type ForgeVars = {
   readonly SES_SECRET_ACCESS_KEY?: string
   readonly SES_ENDPOINT?: string
   readonly SES_CONFIGURATION_SET?: string
+  readonly OIDC_ISSUER?: string
+  readonly OIDC_CLIENT_ID?: string
+  readonly OIDC_CLIENT_SECRET?: string
+  readonly OIDC_NAME?: string
+  readonly OIDC_SCOPES?: string
+  readonly SELF_SIGNUP?: string
+  readonly BREAK_GLASS_PUBLIC_KEY?: string
+}
+
+export type LoginSettings = {
+  readonly oidc: OidcClientConfig | undefined
+  readonly selfSignup: boolean
+  readonly breakGlassKey: OkpPublicJwk | undefined
 }
 
 export type ForgeSettings = {
@@ -38,6 +63,7 @@ export type ForgeSettings = {
   readonly deepCheckDays: number
   readonly mirrorUnitBytes: number
   readonly allowInsecureWebhooks?: boolean
+  readonly login?: LoginSettings
 }
 
 export type EmailSettings =
@@ -110,6 +136,34 @@ export const parseInstanceKey = async (value: string | undefined): Promise<Signi
   }
 }
 
+export const parseOidcSettings = (vars: ForgeVars): OidcClientConfig | undefined => {
+  const issuer = present(vars.OIDC_ISSUER)
+  const clientId = present(vars.OIDC_CLIENT_ID)
+  if (!issuer && !clientId) return undefined
+  if (!issuer || !clientId) throw new ConfigurationError('OIDC_ISSUER and OIDC_CLIENT_ID must be set together')
+  let normalized: string
+  try {
+    normalized = normalizeOidcIssuer(issuer)
+  } catch (error) {
+    if (error instanceof OidcError) throw new ConfigurationError(error.message)
+    throw error
+  }
+  const scopes = present(vars.OIDC_SCOPES)?.split(/\s+/) ?? [...DEFAULT_OIDC_SCOPES]
+  return { issuer: normalized, clientId, clientSecret: present(vars.OIDC_CLIENT_SECRET), scopes, name: present(vars.OIDC_NAME) ?? 'single sign-on' }
+}
+
+export const parseLoginSettings = (vars: ForgeVars): LoginSettings => {
+  const breakGlass = present(vars.BREAK_GLASS_PUBLIC_KEY)
+  let breakGlassKey: OkpPublicJwk | undefined
+  try {
+    breakGlassKey = breakGlass ? parseBreakGlassPublicKey(breakGlass) : undefined
+  } catch (error) {
+    if (error instanceof BreakGlassError) throw new ConfigurationError(error.message)
+    throw error
+  }
+  return { oidc: parseOidcSettings(vars), selfSignup: vars.SELF_SIGNUP === 'true', breakGlassKey }
+}
+
 export const parseSettings = async (vars: ForgeVars): Promise<ForgeSettings> => {
   const publicUrl = present(vars.PUBLIC_URL)
   return {
@@ -125,6 +179,7 @@ export const parseSettings = async (vars: ForgeVars): Promise<ForgeSettings> => 
     deepCheckDays: positiveInteger(vars.MIRROR_DEEP_CHECK_DAYS, DEFAULT_DEEP_CHECK_DAYS, true),
     mirrorUnitBytes: positiveInteger(vars.MIRROR_UNIT_BYTES, 0, true),
     allowInsecureWebhooks: vars.ALLOW_INSECURE_WEBHOOKS === 'true',
+    login: parseLoginSettings(vars),
   }
 }
 

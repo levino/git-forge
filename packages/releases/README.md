@@ -1,7 +1,7 @@
 # @git-forge/releases
 
 GitHub-compatible releases. Design: [design.md §16](../../docs/design.md#releases).
-Tables: `releases`, `release_assets` (migration `0006_notifications.sql`).
+Tables: `releases`, `release_assets` (migration `0007_notifications.sql`).
 
 `handleReleasesRequest(request, options)` serves:
 

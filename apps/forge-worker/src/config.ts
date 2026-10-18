@@ -15,6 +15,14 @@ export type ForgeVars = {
   readonly ACTIONS_SECRETS?: string
   readonly MIRROR_DEEP_CHECK_DAYS?: string
   readonly MIRROR_UNIT_BYTES?: string
+  readonly ALLOW_INSECURE_WEBHOOKS?: string
+  readonly EMAIL_PROVIDER?: string
+  readonly EMAIL_FROM?: string
+  readonly SES_REGION?: string
+  readonly SES_ACCESS_KEY_ID?: string
+  readonly SES_SECRET_ACCESS_KEY?: string
+  readonly SES_ENDPOINT?: string
+  readonly SES_CONFIGURATION_SET?: string
 }
 
 export type ForgeSettings = {
@@ -29,7 +37,20 @@ export type ForgeSettings = {
   readonly allowInsecureFederation: boolean
   readonly deepCheckDays: number
   readonly mirrorUnitBytes: number
+  readonly allowInsecureWebhooks?: boolean
 }
+
+export type EmailSettings =
+  | { readonly provider: 'console'; readonly from: string }
+  | {
+      readonly provider: 'ses'
+      readonly from: string
+      readonly region: string
+      readonly accessKeyId: string
+      readonly secretAccessKey: string
+      readonly endpoint?: string
+      readonly configurationSet?: string
+    }
 
 export type ActionsSettings = {
   readonly instanceId: string
@@ -103,7 +124,24 @@ export const parseSettings = async (vars: ForgeVars): Promise<ForgeSettings> => 
     allowInsecureFederation: vars.ALLOW_INSECURE_FEDERATION === 'true',
     deepCheckDays: positiveInteger(vars.MIRROR_DEEP_CHECK_DAYS, DEFAULT_DEEP_CHECK_DAYS, true),
     mirrorUnitBytes: positiveInteger(vars.MIRROR_UNIT_BYTES, 0, true),
+    allowInsecureWebhooks: vars.ALLOW_INSECURE_WEBHOOKS === 'true',
   }
+}
+
+export const parseEmailSettings = (vars: ForgeVars): EmailSettings | undefined => {
+  const provider = present(vars.EMAIL_PROVIDER)
+  if (provider === undefined || provider === 'none') return undefined
+  const from = present(vars.EMAIL_FROM)
+  if (!from) throw new ConfigurationError('EMAIL_FROM is required when EMAIL_PROVIDER is set')
+  if (provider === 'console') return { provider, from }
+  if (provider !== 'ses') throw new ConfigurationError('EMAIL_PROVIDER must be none, console or ses')
+  const region = present(vars.SES_REGION)
+  const accessKeyId = present(vars.SES_ACCESS_KEY_ID)
+  const secretAccessKey = present(vars.SES_SECRET_ACCESS_KEY)
+  if (!region || !accessKeyId || !secretAccessKey) throw new ConfigurationError('EMAIL_PROVIDER=ses needs SES_REGION, SES_ACCESS_KEY_ID and SES_SECRET_ACCESS_KEY')
+  const endpoint = present(vars.SES_ENDPOINT)
+  const configurationSet = present(vars.SES_CONFIGURATION_SET)
+  return { provider, from, region, accessKeyId, secretAccessKey, ...(endpoint ? { endpoint } : {}), ...(configurationSet ? { configurationSet } : {}) }
 }
 
 export const parseActionsSettings = (vars: ForgeVars): ActionsSettings | undefined => {

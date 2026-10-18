@@ -103,13 +103,11 @@ Design: [design.md §15](design.md#ci).
 - [x] Per-repository and per-environment secrets (AES-GCM in SQLite under an instance key), environments with required reviewers (`pending_deployments`), no secrets for untrusted runs
 - [x] `workflow_dispatch` (typed inputs), `schedule` (cron table + Worker cron), `pull_request` trigger function (`queueRunsForPullRequest`, wired to collaboration's events); check runs per job through a `CheckRunSink`
 - [x] `pull_request` runs from the collaboration package's pull request events; check runs written with its store
-- [ ] `paths` filters; job-level `concurrency`; configuration variables (`vars`)
-- [x] Results service without a broker (legacy flow, endpoint data): `actions/cache@v4` over the v1 protocol (GHES hosts) and v2 twirp, scoped per repository and ref like GitHub, eviction by record (unused, max age, LRU quota) on append-only storage
-- [x] Artifacts v4 (twirp `ArtifactService`, Azure block blob uploads, signed downloads), retention, REST (`artifacts`, `runs/{id}/artifacts`, `caches`, `cache/usage`)
-- [x] OIDC ID tokens for jobs with `id-token: write` (`permissions` parsed), GitHub-shaped claims, ES256 (`ACTIONS_OIDC_KEY`) or EdDSA, issuer `/_services/token` with discovery and JWKS
-- [ ] Official `upload-artifact@v4`/`download-artifact@v4` on non-`*.localhost` hosts (blocked by a client-side GHES check in `@actions/artifact`; forks work), artifacts v3
-- [ ] Broker and run service (v2 flow), message encryption (not needed for the features above)
+- [x] `paths`/`paths-ignore` filters; job-level `concurrency`; repository and environment variables (`vars`)
+- [x] Results service without a broker: `actions/cache@v4` (v1 and v2), artifacts v4, OIDC ID tokens (ES256 or EdDSA)
+- [ ] Official artifact actions v4 on non-`*.localhost` hosts (client-side GHES check in `@actions/artifact`), artifacts v3
 - [ ] Verify ID token trust against real AWS / Google Cloud accounts
+- [ ] Broker and run service (v2 flow), message encryption (not needed so far)
 - [ ] External providers: signed `workflow_job` webhook delivery, GitHub App auth (JWT → installation token, manifest flow) and PATs on `/api/v3`, org-level runners; try WarpBuild Enterprise, AWS CodeBuild, RunsOn
 - [ ] `container:` and `services:` (Docker-in-Docker in the runner container)
 - [x] Web UI for runs and live logs (runs per workflow, jobs, log polling, cancel, re-run all, failed or one job)
@@ -179,5 +177,5 @@ Design: [design.md §17](design.md#17-collaboration).
 - [ ] Partial visibility
 - [x] External mirror verification: ref checksums, signed attestations, byte-range spot checks of packs and LFS objects, signed overview (design §10)
 - [x] Pages (design §20): branch source (`/` or `/docs`, redeploy on push), tar upload deployments, GitHub's Pages REST API, `PAGES_HOST` pattern and `PAGES_DOMAINS` from config, immutable content-addressed deployments with atomic switch, LFS files via media URLs, content types, `404.html`, CDN cache headers, private sites via a session handoff to a host-only cookie
-- [ ] Pages: deployments from workflow artifacts (`ArtifactSource` once CI stores artifacts), so `actions/deploy-pages` works unchanged
+- [x] Pages: deployments from stored workflow artifacts, so `actions/deploy-pages` works unchanged
 - [ ] Pages: settings in the web UI, preview deployments, `pages/health`

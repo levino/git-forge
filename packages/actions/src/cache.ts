@@ -1,6 +1,6 @@
 import { type Database, first, sql } from '@git-forge/accounts'
 import { repositoryPrefix } from '@git-forge/core'
-import { type BlobRow, createBlob, getBlob } from './blobs.ts'
+import { type BlobRow, createBlob } from './blobs.ts'
 
 export type CacheEntryRow = {
   readonly id: number
@@ -195,8 +195,6 @@ export const findCache = async (db: Database, lookup: CacheLookup, now: number):
   if (match) await db.run(sql('UPDATE actions_caches SET last_accessed_at = ? WHERE id = ?', now, match.id))
   return match
 }
-
-export const cacheBlob = async (db: Database, entry: CacheEntryRow): Promise<BlobRow | null> => getBlob(db, entry.blob_id)
 
 export const listCaches = async (db: Database, owner: string, repo: string, filter: { readonly key?: string; readonly ref?: string } = {}, limit = 100): Promise<CacheEntryRow[]> =>
   db.all<CacheEntryRow>(

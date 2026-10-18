@@ -3,7 +3,6 @@ import { advertisedRefs, readRefs, type Storage } from '@git-forge/core'
 import { artifactByName, artifactExpiry, artifactFilename, type ArtifactRow, createArtifact, DEFAULT_ARTIFACT_RETENTION_DAYS, deleteArtifact, finalizeArtifact, listArtifacts, validArtifactName } from './artifacts.ts'
 import { BlobError, blobUrl, commitRanges, getBlob, handleBlobRequest, issueBlobGrant, rangeBlockId, stageBlock } from './blobs.ts'
 import {
-  cacheBlob,
   type CacheEntryRow,
   type CacheLimits,
   cacheScopes,
@@ -156,7 +155,7 @@ const downloadUrl = async (context: Context, entry: CacheEntryRow, jobId: string
   blobUrl(context.serverUrl, await issueBlobGrant(context.options.db, { blobId: entry.blob_id, access: 'read', jobId, ttlMs: DOWNLOAD_GRANT_MS }, context.now))
 
 const finalizeUploadedCache = async (context: Context, entry: CacheEntryRow, size: number): Promise<string | null> => {
-  const blob = await cacheBlob(context.options.db, entry)
+  const blob = await getBlob(context.options.db, entry.blob_id)
   if (!blob || blob.committed_at === null) return 'the cache archive was not uploaded'
   if (blob.size !== size) return `the uploaded archive has ${blob.size} bytes, not ${size}`
   if (size > limitsOf(context).entryBytes) {
@@ -334,7 +333,7 @@ const cacheV1Route = async (context: Context): Promise<Response> => {
   if (method === 'PATCH') {
     const range = parseContentRange(context.request.headers.get('Content-Range'))
     if (!range || range.end >= limitsOf(context).entryBytes) return v1Error(400, 'expected a Content-Range of bytes start-end/*')
-    const blob = await cacheBlob(db, entry)
+    const blob = await getBlob(db, entry.blob_id)
     if (!blob) return v1Error(404, 'cache entry not found')
     await stageBlock(db, storage, blob, rangeBlockId(range.start, range.end), context.request.body, range.end - range.start + 1, context.now)
     return new Response(null, { status: 204 })
@@ -342,7 +341,7 @@ const cacheV1Route = async (context: Context): Promise<Response> => {
   if (method === 'POST') {
     const body = await readBody(context.request)
     const size = typeof body?.['size'] === 'number' ? body['size'] : null
-    const blob = await cacheBlob(db, entry)
+    const blob = await getBlob(db, entry.blob_id)
     if (size === null || !blob) return v1Error(400, 'expected { size }')
     await commitRanges(db, blob, size, context.now)
     const problem = await finalizeUploadedCache(context, entry, size)

@@ -1282,6 +1282,17 @@ inserts one placeholder job per workflow job (`expanded = 0`, `pending`).
   `cancel-in-progress` older runs of the group are cancelled; without it,
   older runs that have not started are cancelled. A run waits (its
   placeholders stay) while an older run of its group is not complete.
+- `concurrency` (job level): evaluated per leg and stored in its
+  definition. A grouped leg starts `pending`; it is promoted only while no
+  job of the repository in that group is queued or running (one atomic
+  `UPDATE`). A new leg cancels the pending ones of its group, with
+  `cancel-in-progress` also the running ones. A completed job advances the
+  run with the oldest waiting job of its group.
+- `vars`: repository variables, overridden by those of the approved
+  environment in the job message (`actions_variables`, `GET/POST
+  …/actions/variables`, `GET/PATCH/DELETE …/actions/variables/{name}`, same
+  under `…/environments/{name}/`; names as for secrets). Untrusted runs get
+  none.
 
 Cancellation (`cancelRun`, API `…/cancel`): `pending` and `queued` jobs are
 completed as `cancelled` at once (and their ephemeral runner is removed,
@@ -1322,7 +1333,10 @@ Reaper (`reapActions`, from `actionsTick` on the `*/5 * * * *` cron):
 | `schedule` | `syncSchedules` (on push to the default branch) and `runDueSchedules` (cron) | `actions_schedules` holds `(repo, workflow, cron, next_run_at)`; a due row is claimed with a compare-and-swap on `next_run_at`, the workflow is read again from the current default branch. Cron in UTC, five fields with names, ranges, steps, lists. |
 | `pull_request` | `queueRunsForPullRequest(event)`, called by the Worker for the collaboration package's `pull_request` activities | Base branch filters and `types` (default `opened`, `synchronize`, `reopened`); the workflow is read from the merge commit if given, else the head; `github.ref` is `refs/pull/{n}/merge` or `…/head`. The caller decides `trusted`; pull requests on this forge come from branches of the same repository, so they are trusted. |
 
-`paths` filters are rejected as unsupported until they are implemented.
+`paths` and `paths-ignore` (`push`, `pull_request`) match the changed files:
+`before..after` of a push (none for new branches, so they run; ignored for
+tags), base..merge commit (or head) of a pull request. `paths-ignore` skips
+only when every file matches, `paths` needs one match (`!` negates).
 
 #### Actions (`uses:`)
 
@@ -1360,154 +1374,68 @@ the Worker implements the sink with its `recordCheckRun` /
 
 #### Results service: cache, artifacts, ID tokens
 
-No broker or run service is needed for these features. In the legacy flow
-the runner reads everything from the data of the `SystemVssConnection`
-endpoint in the job message and exports it to steps (checked against the
-runner source, `NodeScriptActionHandler.cs`, `ScriptHandler.cs`):
+No broker or v2 flow: in the legacy flow the runner takes the URLs from the
+`SystemVssConnection` endpoint data (`CacheServerUrl` → `ACTIONS_CACHE_URL`
+= `/_services/cache/`, `ResultsServiceUrl` → `ACTIONS_RESULTS_URL` = `/`,
+`GenerateIdTokenUrl` → `ACTIONS_ID_TOKEN_REQUEST_URL`) and the variable
+`actions_uses_cache_service_v2`. `ACTIONS_RUNTIME_TOKEN` is opaque (checked
+by hash) but JWT-shaped with `scp: "Actions.Results:{runId}:{jobId}"`,
+because `@actions/artifact` reads the IDs from it; the forge derives job,
+run and repository from the token and rejects IDs that differ.
 
-| Endpoint data | Step environment | Forge URL |
-|---|---|---|
-| `CacheServerUrl` | `ACTIONS_CACHE_URL` | `{PUBLIC_URL}/_services/cache/` |
-| `ResultsServiceUrl` | `ACTIONS_RESULTS_URL` | `{PUBLIC_URL}/` (the toolkit calls `/twirp/…` on its origin) |
-| `GenerateIdTokenUrl` | `ACTIONS_ID_TOKEN_REQUEST_URL` (token: `ACTIONS_ID_TOKEN_REQUEST_TOKEN`) | `{PUBLIC_URL}/_services/token/idtoken?api-version=2.0`, only for jobs that may have ID tokens |
-| variable `actions_uses_cache_service_v2` | `ACTIONS_CACHE_SERVICE_V2` | always `true` |
+The toolkit treats every host except `github.com`, `*.ghe.com` and
+`*.localhost` as GHES. There `actions/cache@v4` uses the **v1** REST protocol
+(`_apis/artifactcache/…`, `PATCH` chunks of 32 MiB with `Content-Range`);
+elsewhere the **v2** twirp `CacheService`. `@actions/artifact` 2.x
+(`upload-artifact@v4`, `download-artifact@v4`) refuses
+GHES hosts on the client, so the twirp `ArtifactService` only works with the
+official actions on `*.localhost`, or with forks that drop the check (e.g.
+`christopherhx/gitea-upload-artifact@v4`, mapped with
+`ACTIONS_REPOSITORIES`; `upload-pages-artifact` follows the mapping).
+`deploy-pages@v4` itself only uses REST (`runs/{id}/artifacts?name=`,
+`pages/deployments`) and an ID token. Artifacts v3 are not implemented.
 
-The runtime token (`ACTIONS_RUNTIME_TOKEN`) stays an opaque token checked by
-hash, but it is shaped like a JWT whose payload carries
-`scp: "Actions.Results:{runId}:{jobId}"`, because `@actions/artifact` reads
-the run and job backend IDs from it without verifying it. The forge never
-trusts those IDs: every call derives job, run and repository from the token
-and refuses IDs that do not match.
+**Blobs.** Uploads and downloads use capability URLs
+`/_services/results/blobs/{token}[/{filename}]` (`actions_blob_grants`:
+SHA-256 of a random token, read or write, bound to the job). The handler
+speaks the Azure block blob subset the Azure SDK uses (`PUT`,
+`?comp=block`, `?comp=blocklist`, `GET`/`HEAD` with `Range`). Every block or
+v1 chunk is written once to a new key; the commit records the ordered parts
+in `actions_blob_parts` and freezes the blob. Uploads always pass through
+the Worker: the Azure SDK appends `comp`/`blockid` to the signed URL and the
+v1 client builds its own URLs, so presigned R2 URLs (which sign the query
+and need size and SHA-256 up front) cannot be handed out. Blocks (8 MiB for
+artifacts, 32 MiB v1 chunks) stay below the Worker body limit; only v2
+single-shot uploads of 100–128 MiB, which occur on `*.localhost` only, exceed it.
 
-**Which protocol a client uses is decided by the client.** `@actions/cache`
-and `@actions/artifact` call a server "GHES" unless `GITHUB_SERVER_URL` is
-`github.com`, `*.ghe.com` or `*.localhost`:
+**Cache.** Entries are scoped per repository and ref; a restore searches
+the run's ref, the pull request base, then the default branch, each by
+exact primary key, then restore keys exactly and as prefix, newest first.
+Entries are immutable; a run only writes its own ref. The reaper evicts by
+setting `evicted_at`: unused for `ACTIONS_CACHE_UNUSED_DAYS` (7), older than
+`ACTIONS_CACHE_MAX_DAYS` (30), unfinished reservations after six hours, and
+least recently used beyond `ACTIONS_CACHE_LIMIT_BYTES` (10 GiB). Bytes stay;
+a lifecycle rule may expire `…/actions/caches/` after the max age plus one
+day, and `…/actions/artifacts/` after `ACTIONS_ARTIFACT_RETENTION_DAYS`
+(90) plus one.
 
-- `actions/cache@v4` on a GHES host uses the **v1** REST protocol
-  (`ACTIONS_CACHE_URL` + `_apis/artifactcache/…`: `GET cache?keys=&version=`,
-  `POST caches` to reserve, parallel `PATCH caches/{id}` chunks with
-  `Content-Range`, `POST caches/{id}` to commit, plain `GET` of
-  `archiveLocation`). This is what real instances get, and it is
-  implemented. On `*.localhost` (and on github.com-like hosts) it uses the
-  **v2** twirp service `github.actions.results.api.v1.CacheService`
-  (`CreateCacheEntry`, `FinalizeCacheEntryUpload`,
-  `GetCacheEntryDownloadURL`) with Azure block blob uploads to a signed URL;
-  also implemented, on the same storage.
-- `@actions/artifact` 2.x (used by `actions/upload-artifact@v4` and
-  `actions/download-artifact@v4`) **refuses GHES hosts on the client**
-  (`GHESNotSupportedError`) before it sends a request. The v4 protocol
-  (twirp `ArtifactService`: `CreateArtifact`, `FinalizeArtifact`,
-  `ListArtifacts`, `GetSignedArtifactURL`, `DeleteArtifact`, Azure
-  `uploadStream` to a signed URL, plain `GET` of the signed download URL) is
-  implemented and tested with the official actions on a `forge.localhost`
-  host. On a real domain the official v4 actions stop at that check; forks
-  that drop it and speak the same protocol work (for example
-  `christopherhx/gitea-upload-artifact@v4` /
-  `christopherhx/gitea-download-artifact@v4`, mapped with
-  `ACTIONS_REPOSITORIES` like `{"actions/upload-artifact":
-  "mirrors/gitea-upload-artifact"}`). Making the official actions work on
-  any host needs a change in `@actions/artifact`; v3 of the artifact
-  actions (the old `_apis/pipelines/workflows/…/artifacts` protocol) is not
-  implemented.
+**Artifacts.** One per name and run; retention capped by
+`ACTIONS_ARTIFACT_RETENTION_DAYS`; deleting sets `deleted_at`. REST:
+`artifacts[/{id}[/zip]]`, `runs/{id}/artifacts`, `caches`, `cache/usage`.
+Pages deployments with `artifact_id` read the artifact through
+`openArtifactFile`: `artifact.tar` (or the only entry) of the stored zip,
+located by its central directory and inflated while streaming.
 
-**Blob URLs.** Uploads and downloads go to
-`/_services/results/blobs/{token}[/{filename}]`, a capability URL backed by
-`actions_blob_grants` (SHA-256 of a random token, read or write, bound to the
-job, expiring with it; REST downloads get one minute). The handler speaks the
-subset of the Azure Blob REST API the Azure SDK uses for block blobs:
-`PUT` (single shot), `PUT ?comp=block&blockid=…` and `PUT ?comp=blocklist`
-with the XML block list; `GET`/`HEAD` with `Range`. Every block (and every v1
-chunk) is streamed to its own new key (`If-None-Match: *`) and recorded in
-`actions_blob_blocks`; committing writes the ordered part list to
-`actions_blob_parts` and makes the blob immutable. Downloads stream the parts
-in order, ranges included. A v1 commit checks that the chunks cover
-`0…size-1` without gaps. Parts are never rewritten: a retried block gets a new
-key and the newest one wins at commit.
-
-**Cache semantics (like GitHub).** An entry belongs to a repository and a
-scope, the ref of the run that saved it (`refs/heads/x`,
-`refs/pull/n/merge`, …), and is identified by key and version (the version
-hashes paths and compression; it must match exactly). Restoring searches the
-scopes in order — the run's ref, the pull request's base branch, the default
-branch — and in each scope the primary key exactly, then every restore key
-exactly and as a prefix, newest first (`matchCacheEntry`, pure). Entries are
-immutable: a second save of the same key, version and scope is refused
-(`409`, or `ok: false` in v2) unless the first reservation is stale (its job
-ended or it is older than six hours). Runs only write their own scope, so a
-pull request cannot poison the default branch's caches.
-
-**Eviction is a record, not a delete.** The bucket is append-only, so the
-reaper (`evictCaches`, from `reapActions`) only sets `evicted_at`:
-
-- entries not restored for `ACTIONS_CACHE_UNUSED_DAYS` (7);
-- entries older than `ACTIONS_CACHE_MAX_DAYS` (30), however often used;
-- reservations never finalized within six hours;
-- beyond `ACTIONS_CACHE_LIMIT_BYTES` per repository (10 GiB), the least
-  recently used entries.
-
-Evicted entries are never found again; their parts stay in the bucket,
-referenced by nothing. Because no live entry is older than
-`ACTIONS_CACHE_MAX_DAYS`, an operator may reclaim the bytes with a bucket
-lifecycle rule that expires `…/actions/caches/` objects after that many days
-plus one, the same way `tmp/` is expired. Likewise artifacts never outlive
-`ACTIONS_ARTIFACT_RETENTION_DAYS` (default 90), so `…/actions/artifacts/`
-can expire after that plus one day. The forge itself never deletes.
-
-**Artifacts.** One artifact per name and run (`actions_artifacts`, unique
-`(run_id, name)` among undeleted ones; `overwrite: true` deletes the old one
-first through `DeleteArtifact`). `expires_at` is the requested
-`retention-days`, capped by `ACTIONS_ARTIFACT_RETENTION_DAYS`, which is also
-`github.retention_days`; expired artifacts are no longer listed by the
-service and are `expired: true` (download `410`) in the REST API. The digest
-reported by the client at finalize (`sha256:…`) is stored and returned.
-Deleting only sets `deleted_at`. REST under `/api/v3/repos/{o}/{r}/actions/`:
-`artifacts[/{id}[/zip]]` (the zip `302`s to a one-minute blob URL),
-`runs/{id}/artifacts`, `caches` (list, `DELETE ?key=&ref=`,
-`DELETE caches/{id}`), `cache/usage`. Reading needs read access (the
-`GITHUB_TOKEN` of a job qualifies, so `download-artifact` with `run-id`
-works), deleting write access.
-
-**ID tokens (OIDC).** A job gets `GenerateIdTokenUrl` only if its run is
-trusted and the job's `permissions` (or the workflow's) grant
-`id-token: write` (`write-all` included, `read-all` not; `permissions` is now
-parsed and validated, scopes and levels as on GitHub). The endpoint checks the
-same again, so the runtime token alone is not enough. `GET
-…/_services/token/idtoken?api-version=2.0&audience=…` with the runtime token
-answers `{ "value": "<jwt>" }`; the default audience is
-`{PUBLIC_URL}/{owner}` (GitHub: `https://github.com/{owner}`). Tokens live
-five minutes (`nbf` five minutes back). Claims follow GitHub's: `sub`
-(`repo:o/r:environment:e`, `repo:o/r:pull_request` or `repo:o/r:ref:…`),
-`aud`, `iss`, `jti`, `ref`, `sha`, `repository`, `repository_owner`,
-`repository_id`, `repository_owner_id`, `repository_visibility`, `run_id`,
-`run_number`, `run_attempt`, `actor`, `triggering_actor`, `workflow`,
-`head_ref`, `base_ref`, `event_name`, `ref_type`, `ref_protected` (always
-`false` for now), `environment`, `job_workflow_ref`, `job_workflow_sha`,
-`workflow_ref`, `workflow_sha`, `runner_environment: self-hosted`,
-`check_run_id`. IDs are the forge's string IDs, not GitHub's integers.
-
-The issuer is `{PUBLIC_URL}/_services/token` (GHES uses the same path), with
-discovery at `…/.well-known/openid-configuration` and keys at
-`…/.well-known/jwks`, separate from the instance's federation issuer. Tokens
-are signed **ES256** with `ACTIONS_OIDC_KEY` (a P-256 private JWK, a Worker
-secret; `git-forge-node oidc-key` makes one). Without it they are signed
-**EdDSA** with `INSTANCE_KEY`; both keys are published when both exist.
-ES256 is what cloud providers accept; EdDSA is not accepted by AWS STS.
-
-Trusting the forge from a cloud (not verified against real accounts):
-
-- **AWS**: create an IAM OIDC identity provider with URL
-  `{PUBLIC_URL}/_services/token` and audience `sts.amazonaws.com`, a role
-  whose trust policy conditions on `{host}/_services/token:sub` (e.g.
-  `repo:acme/site:ref:refs/heads/main`) and `…:aud`,
-  then `aws-actions/configure-aws-credentials` with `role-to-assume`
-  (it requests the token through `ACTIONS_ID_TOKEN_REQUEST_URL`). The issuer
-  must be reachable over HTTPS from AWS.
-- **Google Cloud**: a workload identity pool provider with that issuer and an
-  attribute mapping on `assertion.sub` / `assertion.repository`.
-- **Cloudflare**: no generally available OIDC token exchange for the
-  Cloudflare API is known to us; deploys keep using an API token secret
-  until one exists. Services that accept arbitrary OIDC issuers (Vault's JWT
-  auth, many SaaS deploy targets) can trust the issuer directly.
+**ID tokens.** Only for trusted runs whose job or workflow `permissions`
+grant `id-token: write`, checked when the URL is handed out and again on
+`GET /_services/token/idtoken?audience=…`. Claims follow GitHub's (`sub`
+`repo:o/r:ref:…`, `…:environment:e` or `…:pull_request`; IDs are the forge's
+strings; `ref_protected` is always `false`); default audience
+`{PUBLIC_URL}/{owner}`; five minutes. Issuer `{PUBLIC_URL}/_services/token`
+with discovery and JWKS. Signed ES256 with `ACTIONS_OIDC_KEY` (P-256 JWK,
+`git-forge-node oidc-key`), else EdDSA with `INSTANCE_KEY` (not accepted by
+AWS STS). Trust from AWS or Google Cloud is configured as for GitHub with
+this issuer; not verified against real accounts.
 
 #### GHES API (`/api/v3`)
 
@@ -1633,7 +1561,8 @@ same functions (`reviewDeployment`).
   attempt, `expanded`, matrix, outputs, environment, approval,
   cancellation, launches, check run), `actions_timeline_records`,
   `actions_logs`, `actions_secrets`, `actions_environments`,
-  `actions_schedules`. `0009` only adds columns and tables,
+  `actions_schedules`; `0013`: blobs, blocks, parts, grants, caches,
+  artifacts, variables. `0009` only adds columns and tables,
   so the previous release keeps working on the new schema.
 - Bucket, append-only, written with `If-None-Match: *`:
   `repos/<owner>/<repo>/actions/jobs/<jobId>/logs/<logId>/<chunk>`,
@@ -1655,16 +1584,13 @@ same functions (`reviewDeployment`).
   built by Workers Builds, `basic` instances, `ACTIONS_GITHUB_FALLBACK` for
   `actions/checkout`).
 - Not supported yet: `container:`, `services:`, reusable workflows,
-  job-level `concurrency`, `paths` filters, `vars` (configuration
-  variables, the context is empty), `hashFiles` server-side, wait timers and
-  branch policies of environments, re-running single matrix legs.
+  organization variables, `hashFiles` server-side, wait timers and branch
+  policies of environments, re-running single matrix legs.
 - Broker / run service (v2 flow) and message encryption with the session
   key: not needed for cache, artifacts or ID tokens (see "Results service");
   only needed if a future runner drops the legacy flow for GHES.
-- The official artifact actions v4 refuse non-github.com hosts on the client
-  (see "Results service"); artifacts v3 are not implemented. Cache v2 single
-  uploads up to 128 MiB exceed the 100 MB request body limit of the Workers
-  Free and Pro plans (v1, used on real hosts, uploads 32 MiB chunks).
+- Official artifact actions v4 (and so `upload-pages-artifact`) only on
+  `*.localhost` hosts; artifacts v3 not implemented (see "Results service").
 - Web UI for runs, logs and reviews.
 
 ### Deployment
@@ -2336,12 +2262,11 @@ Package `@git-forge/pages`, tables from migration `0012_pages.sql`
 - **Workflow** (`build_type: workflow`): `POST
   /api/v3/repos/{owner}/{repo}/pages/deployments`. With `artifact_id` or
   `artifact_url` (what `actions/deploy-pages` sends) the deployment reads the
-  artifact through the `ArtifactSource` adapter, which returns the tar of
-  the `github-pages` artifact (`actions/upload-pages-artifact`). The forge
-  does not store workflow artifacts yet (§15), so without an adapter these
-  requests answer `422`; until then any CI uploads the same tar (or tar.gz)
-  as the request body (`Content-Type: application/x-tar`), deployed while it
-  streams. The `GITHUB_TOKEN` of a trusted, non-`pull_request` run of the
+  artifact through the `ArtifactSource` adapter; the Worker's reads the
+  stored CI artifact (§15) and streams its `artifact.tar`
+  (`actions/upload-pages-artifact`). `artifact_url` alone is not resolved.
+  Any CI may instead upload the same tar (or tar.gz) as the request body
+  (`Content-Type: application/x-tar`), deployed while it streams. The `GITHUB_TOKEN` of a trusted, non-`pull_request` run of the
   same repository may create deployments, like `pages: write` on GitHub; so
   may users with write access. `GET …/deployments/{id}` reports GitHub's
   status strings (`deployment_queued`, `deployment_in_progress`, `succeed`,
@@ -2439,8 +2364,6 @@ that site scripts cannot set cookies for the forge.
 
 ### Not yet
 
-- Reading workflow artifacts (`ArtifactSource` on top of the CI artifact
-  storage, §15), so `actions/deploy-pages` works unchanged.
 - Repository settings page in the UI; custom domains set per repository
   (today: instance configuration), HTTPS certificates for them beyond
   Workers custom domains.

@@ -61,12 +61,11 @@ The tables are part of the D1 schema in `packages/accounts/migrations`
   runner; none for untrusted runs (pull requests from other repositories).
 - Check runs per job through the `CheckRunSink` adapter (the Worker writes
   them with the collaboration package's check-run store).
-- Results service (`handleResultsService`): `actions/cache` (v1 REST on GHES
-  hosts, v2 twirp otherwise) with GitHub's ref scoping and eviction by
-  record, artifacts v4 with retention (the official v4 artifact actions
-  refuse non-github.com hosts on the client unless the host ends in
-  `.localhost`; see design §15), OIDC ID tokens for jobs with
-  `id-token: write`, signed ES256 or EdDSA, issuer `/_services/token`.
+- `paths`/`paths-ignore`, job-level `concurrency`, `vars` (repository and
+  environment variables).
+- Results service (`handleResultsService`): `actions/cache` v1 and v2,
+  artifacts v4, OIDC ID tokens (design §15). `openArtifactFile` streams a
+  stored artifact's `artifact.tar` for Pages.
 
 ## REST (`/api/v3`, GitHub paths)
 
@@ -78,6 +77,7 @@ The tables are part of the D1 schema in `packages/accounts/migrations`
 | `GET/POST …/actions/runs/{id}/pending_deployments` (`{ environment_ids, state }`) | reviewer of the environment |
 | `GET/PUT/DELETE …/actions/secrets[/{name}]` (`{ value }`, no sealed boxes) | admin |
 | `GET/PUT/DELETE …/environments[/{name}]` (`{ reviewers: [{ type: "User", login }] }`), `…/environments/{name}/secrets[/{secret}]` | admin |
+| `GET/POST …/actions/variables`, `GET/PATCH/DELETE …/actions/variables/{name}`, same under `…/environments/{name}/variables` | admin |
 | `GET …/tarball/{ref}` | read (or the action token handed to the runner) |
 | `GET …/actions/artifacts[/{id}[/zip]]`, `GET …/actions/runs/{id}/artifacts`, `GET …/actions/caches`, `GET …/actions/cache/usage` | read |
 | `DELETE …/actions/artifacts/{id}`, `DELETE …/actions/caches?key=&ref=`, `DELETE …/actions/caches/{id}` | write |
@@ -109,19 +109,15 @@ The runner then picks up queued jobs whose `runs-on` labels it has.
   concurrency, encrypted secrets, environments with reviewers, untrusted
   pull requests, `workflow_dispatch`, schedules, check runs, action
   download info and tarballs.
-- `test/results.test.ts` covers cache v1 (chunks out of order, restore
-  keys, ranges), cache v2 with Azure block blobs and ref scopes, eviction,
-  artifacts (blocks, block list, list, signed URL, REST zip), ID tokens
-  (claims, JWKS signature, permission check) and the pure functions.
+- `test/results.test.ts` covers cache v1 and v2, eviction, artifacts
+  (including the Pages zip reader) and ID tokens.
 - `test/runner.integration.test.ts` downloads the latest official runner
   (or uses `ACTIONS_RUNNER_DIR`), mirrors `github.com/actions/checkout`, `cache`, `upload-artifact` and `download-artifact` into
   the forge and runs real workflows: `actions/checkout@v4` from the mirror
   plus `wrangler deploy --dry-run` (or a real deploy if
   `CLOUDFLARE_API_TOKEN` is set), a matrix with job outputs and a masked
-  secret, the cancellation of a running job, `actions/cache@v4` (miss,
-  save, exact and restore-key hit) with an ES256 ID token checked against
-  the JWKS, and `upload-artifact@v4` / `download-artifact@v4` plus cache v2
-  against `forge.localhost` (skipped if that name does not resolve to
-  127.0.0.1; CI adds it to `/etc/hosts`). It skips with the reason
+  secret, the cancellation of a running job, `actions/cache@v4`, an ES256 ID
+  token, and on `forge.localhost` (CI adds it to `/etc/hosts`, otherwise
+  skipped) the artifact actions and cache v2. It skips with the reason
   in its name when the runner cannot be downloaded or the platform is not
   Linux x64/arm64.

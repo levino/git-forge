@@ -129,41 +129,6 @@ export const signIdToken = async (key: IdTokenKey, claims: Record<string, unknow
   return `${signingInput}.${base64UrlEncode(signature)}`
 }
 
-export const ID_TOKEN_CLAIMS = [
-  'jti',
-  'sub',
-  'aud',
-  'ref',
-  'sha',
-  'repository',
-  'repository_owner',
-  'repository_id',
-  'repository_owner_id',
-  'repository_visibility',
-  'run_id',
-  'run_number',
-  'run_attempt',
-  'actor',
-  'triggering_actor',
-  'workflow',
-  'head_ref',
-  'base_ref',
-  'event_name',
-  'ref_type',
-  'ref_protected',
-  'environment',
-  'job_workflow_ref',
-  'job_workflow_sha',
-  'workflow_ref',
-  'workflow_sha',
-  'runner_environment',
-  'check_run_id',
-  'iss',
-  'nbf',
-  'iat',
-  'exp',
-] as const
-
 export const idTokenDiscovery = (serverUrl: string, keys: readonly IdTokenKey[]) => {
   const issuer = tokenIssuer(serverUrl)
   return {
@@ -171,7 +136,6 @@ export const idTokenDiscovery = (serverUrl: string, keys: readonly IdTokenKey[])
     jwks_uri: `${issuer}/.well-known/jwks`,
     subject_types_supported: ['public', 'pairwise'],
     response_types_supported: ['id_token'],
-    claims_supported: [...ID_TOKEN_CLAIMS],
     id_token_signing_alg_values_supported: [...new Set(keys.map((key) => key.publicJwk.alg))],
     scopes_supported: ['openid'],
   }

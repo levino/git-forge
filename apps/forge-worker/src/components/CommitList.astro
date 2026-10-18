@@ -2,6 +2,8 @@
 import type { CommitInfo, RepositoryName } from '@git-forge/core'
 import { isoTime, relativeTime, shortId } from '../ui/format.ts'
 import { commitUrl, treeUrl } from '../ui/repository.ts'
+import Avatar from './Avatar.astro'
+import Icon from './Icon.astro'
 
 type Props = { repo: RepositoryName; commits: readonly CommitInfo[] }
 
@@ -16,28 +18,29 @@ for (const commit of commits) {
 }
 ---
 
-<div class="flex flex-col gap-6">
+<div class="flex flex-col gap-5">
   {
     groups.map((group) => (
       <section aria-label={`Commits on ${group.day}`}>
-        <h2 class="text-sm text-base-content/70 mb-2">Commits on {group.day}</h2>
+        <h2 class="text-xs font-medium text-base-content/60 mb-2 flex items-center gap-2"><Icon name="commit" class="size-4" />Commits on {group.day}</h2>
         <ul class="border border-base-300 rounded-box divide-y divide-base-300">
           {group.commits.map((commit) => (
-            <li class="flex flex-wrap items-center gap-x-4 gap-y-1 px-4 py-3">
+            <li class="flex flex-wrap items-center gap-x-4 gap-y-1 px-4 py-2.5 hover:bg-base-200/50">
               <div class="min-w-0 flex-1">
-                <a href={commitUrl(repo, commit.id)} class="font-semibold link link-hover break-words">
+                <a href={commitUrl(repo, commit.id)} class="font-semibold hover:text-primary hover:underline break-words">
                   {commit.summary || '(no message)'}
                 </a>
-                <p class="text-sm text-base-content/70">
-                  {commit.author.name} committed <time datetime={isoTime(commit.committer.timestamp)}>{relativeTime(commit.committer.timestamp, now)}</time>
+                <p class="text-xs text-base-content/60 mt-0.5 flex flex-wrap items-center gap-1.5">
+                  <Avatar name={commit.author.name || '?'} size={16} />
+                  <span class="font-medium text-base-content/80">{commit.author.name}</span> committed <time datetime={isoTime(commit.committer.timestamp)}>{relativeTime(commit.committer.timestamp, now)}</time>
                 </p>
               </div>
               <div class="join">
-                <a href={commitUrl(repo, commit.id)} class="btn btn-sm join-item font-mono">
+                <a href={commitUrl(repo, commit.id)} class="btn btn-xs join-item font-mono">
                   {shortId(commit.id)}
                 </a>
-                <a href={treeUrl(repo, commit.id)} class="btn btn-sm join-item" aria-label={`Browse files at ${shortId(commit.id)}`}>
-                  Browse
+                <a href={treeUrl(repo, commit.id)} class="btn btn-xs join-item" aria-label={`Browse files at ${shortId(commit.id)}`}>
+                  <Icon name="code" class="size-3.5" />
                 </a>
               </div>
             </li>

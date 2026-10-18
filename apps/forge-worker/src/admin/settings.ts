@@ -30,7 +30,7 @@ export const createInstanceSettings = (db: Database, key: () => Promise<SecretsK
   }
   const seal = async (name: string, value: string): Promise<string> => {
     const sealing = await key()
-    if (!sealing) throw new Error('no key to encrypt secrets: set BOOTSTRAP_TOKEN or ACTIONS_SECRETS_KEY')
+    if (!sealing) throw new Error('no key to encrypt secrets: set ACTIONS_SECRETS_KEY or BOOTSTRAP_TOKEN')
     return JSON.stringify(await sealSecret(sealing, SCOPE, name, value))
   }
   const open = async (name: string, sealed: string): Promise<string | null> => {

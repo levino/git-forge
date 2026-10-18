@@ -4,6 +4,7 @@ import remarkGfm from 'remark-gfm'
 import remarkParse from 'remark-parse'
 import remarkRehype from 'remark-rehype'
 import { unified } from 'unified'
+import { highlightText, languageOfFence } from './highlight.ts'
 
 export type LinkBase = {
   readonly blob: string
@@ -16,6 +17,7 @@ type HastNode = {
   tagName?: string
   properties?: Record<string, unknown>
   children?: HastNode[]
+  value?: string
 }
 
 const isRelative = (url: string): boolean => url !== '' && !url.startsWith('#') && !url.startsWith('/') && !/^[a-z][a-z0-9+.-]*:/i.test(url)
@@ -47,6 +49,29 @@ const rewriteLinks = (base: LinkBase) => () => (tree: HastNode) => {
   visit(tree)
 }
 
+const textOf = (node: HastNode): string => node.value ?? (node.children ?? []).map(textOf).join('')
+
+const codeBlocks = (node: HastNode): HastNode[] =>
+  node.tagName === 'pre' && node.children?.[0]?.tagName === 'code' ? [node] : (node.children ?? []).flatMap(codeBlocks)
+
+const highlightCodeBlocks = () => async (tree: HastNode) => {
+  await Promise.all(
+    codeBlocks(tree).map(async (pre) => {
+      const code = pre.children![0]!
+      const classes = Array.isArray(code.properties?.className) ? (code.properties.className as unknown[]) : []
+      const fence = classes.find((name): name is string => typeof name === 'string' && name.startsWith('language-'))
+      const language = fence ? languageOfFence(fence.slice(9)) : null
+      if (!language) return
+      const lines = await highlightText(textOf(code), language)
+      code.children = lines.flatMap((line, index) => [
+        ...(index > 0 ? [{ type: 'text', value: '\n' }] : []),
+        ...line.map((token) => (token.style ? { type: 'element', tagName: 'span', properties: { style: token.style }, children: [{ type: 'text', value: token.content }] } : { type: 'text', value: token.content })),
+      ])
+      pre.properties = { ...pre.properties, className: ['hl'] }
+    }),
+  )
+}
+
 export const renderMarkdown = async (source: string, base: LinkBase): Promise<string> =>
   String(
     await unified()
@@ -55,6 +80,7 @@ export const renderMarkdown = async (source: string, base: LinkBase): Promise<st
       .use(remarkRehype)
       .use(rewriteLinks(base))
       .use(rehypeSanitize)
+      .use(highlightCodeBlocks)
       .use(rehypeStringify)
       .process(source),
   )

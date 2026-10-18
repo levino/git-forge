@@ -18,6 +18,7 @@ export type JobDefinition = {
   readonly strategy?: StrategyContext | null
   readonly needs?: Readonly<Record<string, NeedResult>>
   readonly continueOnError?: boolean
+  readonly concurrency?: { readonly group: string; readonly cancelInProgress: boolean }
   readonly error?: string
 }
 

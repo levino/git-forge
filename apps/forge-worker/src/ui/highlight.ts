@@ -1,5 +1,6 @@
 import { createHighlighterCore, type HighlighterCore, type ThemedToken } from 'shiki/core'
 import { createJavaScriptRegexEngine } from 'shiki/engine/javascript'
+import type { Hunk } from '@git-forge/core'
 import githubDark from 'shiki/dist/themes/github-dark.mjs'
 import githubLight from 'shiki/dist/themes/github-light.mjs'
 import typescript from 'shiki/dist/langs/typescript.mjs'
@@ -122,9 +123,17 @@ const styleOf = (token: ThemedToken): string =>
 
 const plain = (text: string): HighlightedLine[] => text.split('\n').map((line) => (line === '' ? [] : [{ content: line, style: '' }]))
 
-export const highlightLines = async (text: string, filename: string): Promise<HighlightedLine[]> => {
+const LANGUAGE_IDS: ReadonlySet<string> = new Set(LANGUAGES.flat().map((language) => language.name))
+
+export const languageOfFence = (info: string): string | null => {
+  const name = info.toLowerCase()
+  return LANGUAGE_IDS.has(name) ? name : (EXTENSIONS[name] ?? null)
+}
+
+export const highlightLines = (text: string, filename: string): Promise<HighlightedLine[]> => highlightText(text, languageFor(filename))
+
+export const highlightText = async (text: string, lang: string | null): Promise<HighlightedLine[]> => {
   const body = text.endsWith('\n') ? text.slice(0, -1) : text
-  const lang = languageFor(filename)
   if (!lang || body.length > MAX_HIGHLIGHT_BYTES) return plain(body)
   try {
     const result = (await getHighlighter()).codeToTokens(body, { lang, themes: { light: 'github-light', dark: 'github-dark' }, defaultColor: false })
@@ -133,3 +142,18 @@ export const highlightLines = async (text: string, filename: string): Promise<Hi
     return plain(body)
   }
 }
+
+export const highlightHunks = async (hunks: readonly Hunk[], filename: string): Promise<HighlightedLine[][]> =>
+  Promise.all(
+    hunks.map(async (hunk) => {
+      const side = (skip: '+' | '-') => highlightLines(`${hunk.lines.filter((line) => line.kind !== skip).map((line) => line.text).join('\n')}\n`, filename)
+      const [before, after] = await Promise.all([side('+'), side('-')])
+      let i = 0
+      let j = 0
+      return hunk.lines.map((line) => {
+        if (line.kind === '-') return before[i++] ?? []
+        if (line.kind === ' ') i++
+        return after[j++] ?? []
+      })
+    }),
+  )

@@ -181,8 +181,8 @@ command line uses `git forge auth login https://<your-instance>`, after which
 plain `git clone` and `git push` work without tokens in URLs. Only the OIDC
 client secret is a secret, and only for a confidential client:
 `npx wrangler@4 secret put OIDC_CLIENT_SECRET`. Instead of vars, OIDC can be
-set on `/-/setup`; the client secret is then stored encrypted in D1 with a key
-derived from `BOOTSTRAP_TOKEN` (or `ACTIONS_SECRETS_KEY` without one), so
+set on `/-/setup`; the client secret is then stored encrypted in D1 with
+`ACTIONS_SECRETS_KEY`, or without it a key derived from `BOOTSTRAP_TOKEN`, so
 changing that secret means entering it again. Vars win when set.
 
 For ZITADEL create a **Web** application in a project with response type
@@ -369,3 +369,7 @@ Instance-wide workflow secrets go into the `ACTIONS_SECRETS` secret, a JSON
 object such as `{"CLOUDFLARE_API_TOKEN": "…"}`. For repository and
 environment secrets set the `ACTIONS_SECRETS_KEY` secret to 32 random bytes
 (`openssl rand -base64 32`); they are stored encrypted with it in D1.
+`actions/cache` and `actions/upload-artifact`/`download-artifact` store their
+data in the bucket. For OIDC ID tokens (`permissions: id-token: write`) set the
+`ACTIONS_OIDC_KEY` secret to a P-256 private JWK (`git-forge-node oidc-key`);
+the issuer is `https://<your domain>/_services/token`.

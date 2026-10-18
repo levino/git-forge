@@ -209,7 +209,7 @@ export const createAdminOperations = (options: AdminOperationsOptions) => {
       }
       const secret = input.clientSecret?.trim()
       if (secret) {
-        if (!(await settings.canSeal())) throw new AdminError(422, 'a client secret needs BOOTSTRAP_TOKEN or ACTIONS_SECRETS_KEY to be encrypted')
+        if (!(await settings.canSeal())) throw new AdminError(422, 'a client secret needs ACTIONS_SECRETS_KEY or BOOTSTRAP_TOKEN to be encrypted')
         await settings.setSecret(OIDC_SECRET, secret)
       }
       await settings.set(OIDC, { issuer, clientId, name: input.name?.trim() ?? '' } satisfies OidcSettings)
@@ -248,7 +248,7 @@ export const createAdminOperations = (options: AdminOperationsOptions) => {
       if (!INSTANCE_REPOSITORY.test(repository)) throw new AdminError(422, 'repository must look like owner/name')
       const token = input.token.trim()
       if (!token) throw new AdminError(422, 'token is required')
-      if (!(await settings.canSeal())) throw new AdminError(422, 'storing a token needs BOOTSTRAP_TOKEN or ACTIONS_SECRETS_KEY to encrypt it')
+      if (!(await settings.canSeal())) throw new AdminError(422, 'storing a token needs ACTIONS_SECRETS_KEY or BOOTSTRAP_TOKEN to encrypt it')
       const response = await options.fetch(`https://api.github.com/repos/${repository}/contents/${INSTANCE_CONFIG_PATH}`, {
         headers: { Accept: 'application/vnd.github.raw+json', Authorization: `Bearer ${token}`, 'User-Agent': 'git-forge' },
       })

@@ -15,6 +15,7 @@ import {
   type SyncResult,
   type UnitOptions,
 } from '@git-forge/core'
+import type { MirrorSecrets } from './mirror-secrets.ts'
 
 export type MirrorContext = {
   readonly storage: Storage
@@ -23,6 +24,7 @@ export type MirrorContext = {
   readonly instanceKey: SigningKey | undefined
   readonly fetch?: FetchFunction
   readonly digests?: DigestFactory
+  readonly secrets?: MirrorSecrets
   readonly onSynced?: (repo: RepositoryName, config: MirrorConfig, result: SyncResult) => Promise<void>
 }
 
@@ -37,7 +39,24 @@ export const upstreamRepository = (url: string): string | null => {
 
 export class MirrorAuthError extends Error {}
 
-export const mirrorAuthorization = (context: MirrorContext, config: MirrorConfig): AuthorizationSupplier | undefined => {
+export const tokenAuthorization = (token: string): string => {
+  let binary = ''
+  for (const byte of new TextEncoder().encode(`x-access-token:${token}`)) binary += String.fromCharCode(byte)
+  return `Basic ${btoa(binary)}`
+}
+
+const storedToken = (context: MirrorContext, repo: RepositoryName, config: MirrorConfig): AuthorizationSupplier => {
+  let cached: Promise<string> | undefined
+  return () =>
+    (cached ??= (async () => {
+      const token = await context.secrets?.get(repo, config.remote, 'token')
+      if (!token) throw new MirrorAuthError(`no stored token for mirror ${config.remote} of ${repo.owner}/${repo.name}`)
+      return tokenAuthorization(token)
+    })())
+}
+
+export const mirrorAuthorization = (context: MirrorContext, config: MirrorConfig, repo?: RepositoryName): AuthorizationSupplier | undefined => {
+  if (config.auth === 'token' && repo) return storedToken(context, repo, config)
   if (config.auth !== 'instance') return undefined
   const { issuer, instanceKey } = context
   if (!issuer || !instanceKey) throw new MirrorAuthError('instance federation needs PUBLIC_URL and INSTANCE_KEY')
@@ -48,7 +67,7 @@ export const mirrorAuthorization = (context: MirrorContext, config: MirrorConfig
 }
 
 export const mirrorUnitOptions = (context: MirrorContext, repo: RepositoryName, config: MirrorConfig, maxUnitBytes?: number): UnitOptions => {
-  const getAuthorization = mirrorAuthorization(context, config)
+  const getAuthorization = mirrorAuthorization(context, config, repo)
   return {
     storage: context.storage,
     repo,
@@ -64,7 +83,7 @@ export const runMirrorSync = async (
   context: MirrorContext,
   repo: RepositoryName,
   config: MirrorConfig,
-  extra: Pick<SyncOptions, 'deferLfs'> = {},
+  extra: Pick<SyncOptions, 'deferLfs' | 'maxSteps'> = {},
 ): Promise<SyncResult> => {
   const result = await syncMirror({ ...mirrorUnitOptions(context, repo, config), strategy: 'auto', ...extra })
   if (context.onSynced) await context.onSynced(repo, config, result)

@@ -2,12 +2,11 @@
 import Icon from '../components/Icon.astro'
 import RepoList from '../components/RepoList.astro'
 import Layout from '../layouts/Layout.astro'
-import { visibleRepositories } from '../ui/listing.ts'
+import { repositoryPage } from '../ui/listing.ts'
 
 const { forge, principal } = Astro.locals
 const login = principal.kind === 'user' ? principal.login : null
-const repositories = await visibleRepositories(forge, principal, login ?? undefined)
-const explore = login ? [] : repositories.slice(0, 20)
+const repositories = await repositoryPage(forge, principal, Astro.url, login ?? undefined, login ? undefined : 20)
 const claimable = !login && (await forge.instance.claimable())
 ---
 
@@ -32,7 +31,7 @@ const claimable = !login && (await forge.instance.claimable())
             )}
           </div>
         </div>
-        <RepoList repositories={repositories} showOwner={false} empty="You have no repositories yet." />
+        <RepoList listing={repositories} showOwner={false} empty="You have no repositories yet." />
       </section>
     ) : (
       <div class="max-w-4xl mx-auto">
@@ -59,7 +58,7 @@ const claimable = !login && (await forge.instance.claimable())
           <h1 id="recent" class="text-lg font-semibold mb-3">
             Public repositories
           </h1>
-          <RepoList repositories={explore} empty="There are no public repositories yet." />
+          <RepoList listing={repositories} controls={false} empty="There are no public repositories yet." />
         </section>
       </div>
     )

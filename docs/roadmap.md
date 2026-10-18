@@ -60,6 +60,8 @@ discussions.
 - [x] Native streaming hashes (`crypto.DigestStream` behind a `DigestFactory` seam) and one job per pack / LFS object with a byte budget (`MIRROR_UNIT_BYTES`), oversized units stay pending (design §12)
 - [x] Plain clones of a mirror check out the upstream default branch: read-side `refs/heads/*` view of one remote, own refs win, detach materializes it
 - [x] Mirror overview API: signed attestations from mirrors, ref checksum history, state/lag/alarms, spot checks (design §10); UI in M6
+- [x] Non-forge upstreams: stepped fetch shared with imports (commit ranges, split commits, across queued jobs, refs move when complete), `.lfsconfig` endpoint
+- [x] GitHub backups: push webhooks per mirror (HMAC-SHA256, optional registration via the GitHub API), sealed upstream tokens, bulk "mirror all repositories of a user/org" API and form
 
 ## M5 — Deployment and adapters
 
@@ -101,8 +103,11 @@ Design: [design.md §15](design.md#ci).
 - [x] Per-repository and per-environment secrets (AES-GCM in SQLite under an instance key), environments with required reviewers (`pending_deployments`), no secrets for untrusted runs
 - [x] `workflow_dispatch` (typed inputs), `schedule` (cron table + Worker cron), `pull_request` trigger function (`queueRunsForPullRequest`, wired to collaboration's events); check runs per job through a `CheckRunSink`
 - [x] `pull_request` runs from the collaboration package's pull request events; check runs written with its store
-- [ ] `paths` filters; job-level `concurrency`; configuration variables (`vars`)
-- [ ] Broker and run service (v2 flow), results service, message encryption; then cache, artifacts, OIDC id tokens
+- [x] `paths`/`paths-ignore` filters; job-level `concurrency`; repository and environment variables (`vars`)
+- [x] Results service without a broker: `actions/cache@v4` (v1 and v2), artifacts v4, OIDC ID tokens (ES256 or EdDSA)
+- [ ] Official artifact actions v4 on non-`*.localhost` hosts (client-side GHES check in `@actions/artifact`), artifacts v3
+- [ ] Verify ID token trust against real AWS / Google Cloud accounts
+- [ ] Broker and run service (v2 flow), message encryption (not needed so far)
 - [ ] External providers: signed `workflow_job` webhook delivery, GitHub App auth (JWT → installation token, manifest flow) and PATs on `/api/v3`, org-level runners; try WarpBuild Enterprise, AWS CodeBuild, RunsOn
 - [ ] `container:` and `services:` (Docker-in-Docker in the runner container)
 - [x] Web UI for runs and live logs (runs per workflow, jobs, log polling, cancel, re-run all, failed or one job)
@@ -133,8 +138,9 @@ Design: [design.md §18](design.md#18-web-ui).
 - [x] Admin overview: running version and latest release, one-click update through the instance repository's GitHub contents API, template workflow that opens the pin as a pull request; imports, failed jobs with retry; storage per repository counted on write; rough Cloudflare cost estimate
 - [x] Repository settings (visibility, collaborators, branch protection, federation trust)
 - [x] Mirror settings, status and alarms (add, sync, deep check, detach)
-- [ ] Blame, syntax highlighting in diffs and Markdown code blocks
-- [ ] Explore and profile listings without one access check per repository
+- [x] Blame, syntax highlighting in diffs and Markdown code blocks
+- [x] Explore and profile listings without one access check per repository (one SQL query, stored default branch and last commit time, sort and paging)
+- [x] Search box and results page (repositories, issues and pull requests, discussions, users)
 - [ ] Issue/PR UI: labels, assignees, milestones, reviewer requests, suggested changes, `#N` autolinks in rendered Markdown
 
 ## M7 — Collaboration
@@ -155,7 +161,8 @@ Design: [design.md §17](design.md#17-collaboration).
 - [ ] CODEOWNERS parsing for `require_code_owner_reviews`
 - [ ] Rename detection in merges (renames are reported as conflicts today)
 - [ ] In-browser conflict resolution
-- [ ] Reactions, search (FTS5), notifications
+- [x] Search (FTS5): repositories, issues, pull requests, discussions with comments, users; access-filtered; `/api/search`, `/api/v3/search/*`
+- [ ] Reactions, notifications
 - [ ] Web UI for issues, pull requests and discussions (separate work package)
 - [ ] Submit via form
 
@@ -174,5 +181,5 @@ Design: [design.md §17](design.md#17-collaboration).
 - [ ] Partial visibility
 - [x] External mirror verification: ref checksums, signed attestations, byte-range spot checks of packs and LFS objects, signed overview (design §10)
 - [x] Pages (design §20): branch source (`/` or `/docs`, redeploy on push), tar upload deployments, GitHub's Pages REST API, `PAGES_HOST` pattern and `PAGES_DOMAINS` from config, immutable content-addressed deployments with atomic switch, LFS files via media URLs, content types, `404.html`, CDN cache headers, private sites via a session handoff to a host-only cookie
-- [ ] Pages: deployments from workflow artifacts (`ArtifactSource` once CI stores artifacts), so `actions/deploy-pages` works unchanged
+- [x] Pages: deployments from stored workflow artifacts, so `actions/deploy-pages` works unchanged
 - [ ] Pages: settings in the web UI, preview deployments, `pages/health`

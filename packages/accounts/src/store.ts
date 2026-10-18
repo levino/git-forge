@@ -63,7 +63,7 @@ export const LOGIN_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/
 
 export const TEAM_SLUG_PATTERN = LOGIN_PATTERN
 
-export const RESERVED_LOGINS: ReadonlySet<string> = new Set(['api', 'explore', 'login', 'logout', 'settings', 'notifications', 'organizations', 'orgs', 'new'])
+export const RESERVED_LOGINS: ReadonlySet<string> = new Set(['api', 'explore', 'login', 'logout', 'settings', 'notifications', 'organizations', 'orgs', 'new', 'search'])
 
 export const isReservedLogin = (login: string): boolean => RESERVED_LOGINS.has(login.toLowerCase())
 
@@ -548,7 +548,7 @@ export const createAccountsStore = (db: Database, options: AccountsStoreOptions 
       const id = randomId()
       const at = now()
       const entry = auditStatement(SYSTEM, { action: 'instance.bootstrap', subjectKind: 'user', subjectId: id, data: { login: input.login } }, at)
-      const results = await db.batch([
+      await db.batch([
         sql(
           `INSERT INTO accounts (id, kind, login, email, created_at) SELECT ?, 'user', ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM instance_admins)`,
           id,
@@ -564,7 +564,7 @@ export const createAccountsStore = (db: Database, options: AccountsStoreOptions 
         ),
         sql(`${entry.sql.replace('VALUES (?, ?, ?, ?, ?, ?, ?, ?)', 'SELECT ?, ?, ?, ?, ?, ?, ?, ?')} WHERE EXISTS (SELECT 1 FROM instance_admins WHERE user_id = ?)`, ...entry.params, id),
       ])
-      return results[1]!.changes === 1 ? { id } : null
+      return (await first(db, sql('SELECT 1 AS ok FROM instance_admins WHERE user_id = ?', id))) ? { id } : null
     },
 
     setInstanceAdmin: async (userId: string, admin: boolean, actor: AuditActor = SYSTEM): Promise<void> => {

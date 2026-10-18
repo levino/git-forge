@@ -52,6 +52,10 @@ export type Concurrency = {
   readonly cancelInProgress: YamlValue
 }
 
+export type PermissionLevel = 'read' | 'write' | 'none'
+
+export type Permissions = 'read-all' | 'write-all' | Readonly<Record<string, PermissionLevel>>
+
 export type WorkflowJob = {
   readonly id: string
   readonly name: string
@@ -66,6 +70,8 @@ export type WorkflowJob = {
   readonly environment?: JobEnvironment
   readonly continueOnError: boolean | string
   readonly timeoutMinutes: number
+  readonly permissions?: Permissions
+  readonly concurrency?: Concurrency
   readonly steps: readonly WorkflowStep[]
 }
 
@@ -74,6 +80,8 @@ export type BranchFilter = {
   readonly branchesIgnore?: readonly string[]
   readonly tags?: readonly string[]
   readonly tagsIgnore?: readonly string[]
+  readonly paths?: readonly string[]
+  readonly pathsIgnore?: readonly string[]
 }
 
 export type DispatchInputType = 'string' | 'boolean' | 'number' | 'choice' | 'environment'
@@ -99,6 +107,7 @@ export type Workflow = {
   readonly env: WorkflowEnv
   readonly defaults: RunDefaults
   readonly concurrency?: Concurrency
+  readonly permissions?: Permissions
   readonly jobs: readonly WorkflowJob[]
 }
 
@@ -121,17 +130,35 @@ const DEFAULT_TIMEOUT_MINUTES = 360
 
 const WORKFLOW_KEYS = new Set(['name', 'on', 'env', 'defaults', 'concurrency', 'jobs', 'permissions'])
 
-const JOB_KEYS = new Set(['name', 'if', 'runs-on', 'needs', 'env', 'defaults', 'outputs', 'strategy', 'environment', 'continue-on-error', 'timeout-minutes', 'steps', 'permissions'])
+const JOB_KEYS = new Set(['name', 'if', 'runs-on', 'needs', 'env', 'defaults', 'outputs', 'strategy', 'environment', 'continue-on-error', 'timeout-minutes', 'steps', 'permissions', 'concurrency'])
 
 const STRATEGY_KEYS = new Set(['matrix', 'fail-fast', 'max-parallel'])
 
 const INPUT_TYPES: ReadonlySet<string> = new Set(['string', 'boolean', 'number', 'choice', 'environment'])
 
 const TRIGGER_FILTER_KEYS: Readonly<Record<string, ReadonlySet<string>>> = {
-  push: new Set(['branches', 'branches-ignore', 'tags', 'tags-ignore']),
-  pull_request: new Set(['branches', 'branches-ignore', 'types']),
+  push: new Set(['branches', 'branches-ignore', 'tags', 'tags-ignore', 'paths', 'paths-ignore']),
+  pull_request: new Set(['branches', 'branches-ignore', 'types', 'paths', 'paths-ignore']),
   workflow_dispatch: new Set(['inputs']),
 }
+
+const PERMISSION_SCOPES: ReadonlySet<string> = new Set([
+  'actions',
+  'attestations',
+  'checks',
+  'contents',
+  'deployments',
+  'discussions',
+  'id-token',
+  'issues',
+  'models',
+  'packages',
+  'pages',
+  'pull-requests',
+  'repository-projects',
+  'security-events',
+  'statuses',
+])
 
 const STEP_KEYS = new Set(['id', 'name', 'if', 'env', 'continue-on-error', 'timeout-minutes', 'run', 'shell', 'working-directory', 'uses', 'with'])
 
@@ -247,6 +274,8 @@ const parseTriggers = (value: YamlValue | undefined, c: Collector): WorkflowTrig
       ...optional('branchesIgnore', c.stringList(filter['branches-ignore'], `${path}.branches-ignore`)),
       ...optional('tags', c.stringList(filter['tags'], `${path}.tags`)),
       ...optional('tagsIgnore', c.stringList(filter['tags-ignore'], `${path}.tags-ignore`)),
+      ...optional('paths', c.stringList(filter['paths'], `${path}.paths`)),
+      ...optional('pathsIgnore', c.stringList(filter['paths-ignore'], `${path}.paths-ignore`)),
       ...optional('types', c.stringList(filter['types'], `${path}.types`)),
       ...optional('inputs', event === 'workflow_dispatch' ? parseInputs(filter['inputs'], `${path}.inputs`, c) : undefined),
     }
@@ -367,6 +396,8 @@ const parseJob = (id: string, value: YamlValue, c: Collector): WorkflowJob | nul
     ...optional('environment', parseEnvironment(value['environment'], `${path}.environment`, c)),
     continueOnError: c.booleanish(value['continue-on-error'], `${path}.continue-on-error`),
     timeoutMinutes: c.positiveNumber(value['timeout-minutes'], `${path}.timeout-minutes`) ?? DEFAULT_TIMEOUT_MINUTES,
+    ...optional('permissions', parsePermissions(value['permissions'], `${path}.permissions`, c)),
+    ...optional('concurrency', parseConcurrency(value['concurrency'], `${path}.concurrency`, c)),
     steps: steps.flatMap((step, index) => parseStep(step, `${path}.steps[${index}]`, c) ?? []),
   }
 }
@@ -406,6 +437,34 @@ const parseEnvironment = (value: YamlValue | undefined, path: string, c: Collect
   }
   const name = c.scalarString(value, path)
   return name === undefined ? undefined : { name }
+}
+
+const parsePermissions = (value: YamlValue | undefined, path: string, c: Collector): Permissions | undefined => {
+  if (value === undefined || value === null) return undefined
+  if (value === 'read-all' || value === 'write-all') return value
+  if (!isMapping(value)) {
+    c.fail(path, 'expected read-all, write-all or a mapping of scopes')
+    return undefined
+  }
+  const permissions: Record<string, PermissionLevel> = {}
+  for (const [scope, level] of Object.entries(value)) {
+    if (!PERMISSION_SCOPES.has(scope)) c.fail(`${path}.${scope}`, 'is not a known permission scope')
+    else if (level !== 'read' && level !== 'write' && level !== 'none') c.fail(`${path}.${scope}`, 'expected read, write or none')
+    else if (scope === 'id-token' && level === 'read') c.fail(`${path}.${scope}`, 'expected write or none')
+    else permissions[scope] = level
+  }
+  return permissions
+}
+
+export const effectivePermissions = (workflow: Pick<Workflow, 'permissions'> | null | undefined, job: Pick<WorkflowJob, 'permissions'>): Permissions | undefined =>
+  job.permissions ?? workflow?.permissions
+
+export const grantsPermission = (permissions: Permissions | undefined, scope: string, level: 'read' | 'write'): boolean => {
+  if (permissions === undefined) return false
+  if (permissions === 'write-all') return true
+  if (permissions === 'read-all') return level === 'read' && scope !== 'id-token'
+  const granted = permissions[scope]
+  return granted === 'write' || (granted === 'read' && level === 'read')
 }
 
 const parseConcurrency = (value: YamlValue | undefined, path: string, c: Collector): Concurrency | undefined => {
@@ -456,6 +515,7 @@ export const parseWorkflow = (source: string): Workflow => {
     env: c.env(document['env'], 'env'),
     defaults: c.defaults(document['defaults'], 'defaults'),
     ...optional('concurrency', parseConcurrency(document['concurrency'], 'concurrency', c)),
+    ...optional('permissions', parsePermissions(document['permissions'], 'permissions', c)),
     jobs,
   }
   if (c.problems.length > 0) throw new WorkflowError(c.problems)
@@ -491,9 +551,18 @@ export const matchesFilters = (name: string, include: readonly string[] | undefi
   return matched
 }
 
-export const triggeredByPush = (workflow: Workflow, ref: string): boolean =>
+export const hasPathFilter = (trigger: WorkflowTrigger): boolean => trigger.paths !== undefined || trigger.pathsIgnore !== undefined
+
+export const matchesPaths = (trigger: WorkflowTrigger, changed: readonly string[] | null): boolean => {
+  if (changed === null || !hasPathFilter(trigger)) return true
+  if (trigger.pathsIgnore && !changed.some((path) => matchesFilters(path, undefined, trigger.pathsIgnore))) return false
+  return !trigger.paths || changed.some((path) => matchesFilters(path, trigger.paths, undefined))
+}
+
+export const triggeredByPush = (workflow: Workflow, ref: string, changed: readonly string[] | null = null): boolean =>
   workflow.triggers.some((trigger) => {
     if (trigger.event !== 'push') return false
+    if (!ref.startsWith('refs/tags/') && !matchesPaths(trigger, changed)) return false
     if (ref.startsWith('refs/heads/')) {
       if (!trigger.branches && !trigger.branchesIgnore && (trigger.tags || trigger.tagsIgnore)) return false
       return matchesFilters(ref.slice('refs/heads/'.length), trigger.branches, trigger.branchesIgnore)
@@ -507,12 +576,13 @@ export const triggeredByPush = (workflow: Workflow, ref: string): boolean =>
 
 export const DEFAULT_PULL_REQUEST_TYPES = ['opened', 'synchronize', 'reopened']
 
-export const triggeredByPullRequest = (workflow: Workflow, baseBranch: string, action: string): boolean =>
+export const triggeredByPullRequest = (workflow: Workflow, baseBranch: string, action: string, changed: readonly string[] | null = null): boolean =>
   workflow.triggers.some(
     (trigger) =>
       trigger.event === 'pull_request' &&
       (trigger.types ?? DEFAULT_PULL_REQUEST_TYPES).includes(action) &&
-      matchesFilters(baseBranch, trigger.branches, trigger.branchesIgnore),
+      matchesFilters(baseBranch, trigger.branches, trigger.branchesIgnore) &&
+      matchesPaths(trigger, changed),
   )
 
 export const dispatchTrigger = (workflow: Workflow): WorkflowTrigger | undefined => workflow.triggers.find((trigger) => trigger.event === 'workflow_dispatch')

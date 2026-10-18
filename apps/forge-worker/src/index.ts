@@ -5,6 +5,7 @@ export type Env = {
   readonly BUCKET: R2Bucket
   readonly DB: D1Database
   readonly ADMIN_TOKEN?: string
+  readonly READ_TOKEN?: string
   readonly PUBLIC_READ?: string
   readonly MAX_PUSH_BYTES?: string
 }
@@ -21,6 +22,7 @@ export default {
     return handleRequest(request, {
       storage: new R2Storage(env.BUCKET),
       adminToken: env.ADMIN_TOKEN,
+      readToken: env.READ_TOKEN,
       publicRead: env.PUBLIC_READ !== 'false',
       maxPushBytes: maxPushBytes(env.MAX_PUSH_BYTES),
     })

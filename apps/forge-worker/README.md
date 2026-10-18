@@ -13,7 +13,8 @@ protocol v0 clients) straight from an R2 bucket, using `handleGitRequest` from
 | `DB` (D1) | Placeholder for the accounts package. Not used yet. |
 | Cron Trigger `*/30 * * * *` | Stub for mirror sync; currently only logs. |
 | `ADMIN_TOKEN` (secret) | Protects `POST /api/admin/repos` and, until accounts exist, every push. |
-| `PUBLIC_READ` (var) | `true` (default): anyone may clone. `false`: clones need the admin token too. |
+| `READ_TOKEN` (secret, optional) | Read-only token: clones, LFS downloads, media and raw URLs, but no pushes. Meant for a CDN pulling a private instance. |
+| `PUBLIC_READ` (var) | `true` (default): anyone may read. `false`: reads need the read or admin token. |
 | `MAX_PUSH_BYTES` (var) | Largest accepted push request, default 16 MiB. Larger files belong in Git LFS. |
 
 ### Routes
@@ -23,9 +24,40 @@ protocol v0 clients) straight from an R2 bucket, using `handleGitRequest` from
   repository. Answers `201` with the clone URL, `409` if it exists, `400` for
   invalid names, `401` for a wrong token and `503` if no token is configured.
 - `GET /api/health` answers `{"ok": true}`.
-- `/<owner>/<name>.git/…` is Git. Push with the admin token as the HTTP Basic
-  password (any user name), e.g. `https://git:<token>@forge.example/acme/site.git`
-  or via a credential helper.
+- `/<owner>/<name>.git/…` is Git and Git LFS. Push with the admin token as the
+  HTTP Basic password (any user name), e.g.
+  `https://git:<token>@forge.example/acme/site.git` or via a credential helper.
+- `GET|HEAD /<owner>/<name>/media/<oid>[/<filename>]` serves an LFS object by
+  its SHA-256 oid, immutable and with Range support.
+- `GET|HEAD /<owner>/<name>/raw/<ref>/<path>` serves a file from a branch, tag,
+  `HEAD` or full commit id; LFS pointers redirect to the media URL. Details in
+  `docs/design.md` §7.
+
+### Putting a CDN in front (e.g. Bunny)
+
+The media and raw URLs are made for a pull-zone CDN; it fetches from the
+Worker on a cache miss, nothing is uploaded.
+
+1. Create a pull zone with the Worker URL (or its custom domain) as origin.
+2. Leave caching to the origin headers: media URLs and raw URLs with a full
+   commit id are `immutable` for a year, raw URLs on branches and tags are
+   cached for 60 seconds. Query strings are not used, so the cache may ignore
+   them.
+3. For a private instance (`PUBLIC_READ=false`), create a read token and let
+   the pull zone send it with every origin request:
+
+   ```sh
+   openssl rand -base64 32 | npx wrangler secret put READ_TOKEN
+   ```
+
+   In Bunny add an Edge Rule with the action "Set Request Header" (applied to
+   origin requests) `Authorization: Bearer <READ_TOKEN>`. The token can read
+   every repository but cannot push. Whatever the CDN has cached is readable
+   by anyone who can reach the pull zone, so protect the pull zone itself
+   (Bunny token authentication) unless the content is meant to be public.
+
+Then `https://<zone>.b-cdn.net/acme/site/raw/main/photos/a.jpg` redirects to
+`https://<zone>.b-cdn.net/acme/site/media/<oid>/a.jpg`, which the CDN keeps.
 
 ## Deploying to Cloudflare
 
@@ -83,8 +115,11 @@ database (Miniflare), persisted under `.wrangler/`. `.dev.vars` is gitignored.
   commits with the real `git` client, clones it with protocol v2 and with
   `git -c protocol.version=0` (dumb HTTP), pushes incrementally, force-pushes
   and checks that the previous tip is kept under `refs/archive/`, and fires the
-  Cron Trigger through `/__scheduled`. It takes about 8 seconds and is part of
-  the root `pnpm test`.
+  Cron Trigger through `/__scheduled`. A second suite starts a private
+  instance (`PUBLIC_READ=false` with a `READ_TOKEN`), uploads a JPEG with the
+  real `git lfs push` and reads it back through the media and raw URLs
+  (headers, Range, HEAD, `304`, redirect). Together they take about 20 seconds
+  and are part of the root `pnpm test`.
 - `pnpm --filter forge-worker bench` measures CPU time and memory per
   operation (below).
 

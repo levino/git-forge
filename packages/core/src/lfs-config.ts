@@ -1,6 +1,7 @@
 import { fromUtf8 } from './bytes.ts'
 import type { ObjectId } from './hash.ts'
 import { resolvePath } from './content.ts'
+import { lfsEndpointFor } from './lfs-mirror.ts'
 import type { ObjectDatabase } from './repository.ts'
 
 export type GitConfig = ReadonlyMap<string, string>
@@ -88,3 +89,22 @@ export const findLfsConfig = async (odb: ObjectDatabase, refs: readonly (readonl
   }
   return null
 }
+
+export type LfsEndpoint = {
+  readonly url: string
+  readonly source: 'setting' | 'lfsconfig' | 'default'
+  readonly ref?: string
+}
+
+export const lfsRefOrder = (refs: Readonly<Record<string, ObjectId>>, head?: string): [string, ObjectId][] => {
+  const rank = (name: string) => `${name === head ? 0 : name.startsWith('refs/heads/') ? 1 : 2}${name}`
+  return Object.entries(refs).sort(([a], [b]) => (rank(a) < rank(b) ? -1 : 1))
+}
+
+export const resolveLfsEndpoint = async (odb: ObjectDatabase, url: string, lfsUrl: string | undefined, refs: Readonly<Record<string, ObjectId>>, head?: string): Promise<LfsEndpoint> => {
+  if (lfsUrl) return { url: normalizeLfsUrl(lfsUrl) ?? lfsUrl, source: 'setting' }
+  const found = await findLfsConfig(odb, lfsRefOrder(refs, head))
+  return found ? { url: found.url, source: 'lfsconfig', ref: found.ref } : { url: lfsEndpointFor(url), source: 'default' }
+}
+
+export const mayAuthorizeLfs = (url: string, endpoint: LfsEndpoint): boolean => endpoint.source !== 'lfsconfig' || new URL(endpoint.url).origin === new URL(url).origin

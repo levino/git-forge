@@ -178,6 +178,34 @@ storage. Mirrors therefore do not poll; the upstream tells them.
   a duplicate that slips through runs a sync that changes nothing.
 - **Chains:** a sync that moved refs notifies the mirror's own subscribers,
   so a mirror of a mirror (gamma ← beta ← alpha) follows without any cron.
+- **GitHub upstreams** notify through a repository webhook (`push` event) at
+  `POST /api/repos/{owner}/{repo}/mirrors/{remote}/webhook`. The body is
+  verified with HMAC-SHA256 (`X-Hub-Signature-256`, WebCrypto `verify`)
+  against a per-mirror secret; `ping` answers `200`, `push` enqueues a sync
+  (`202`), other events are ignored. `PUT` on the same path (repository
+  admin) creates or rotates the secret and returns URL and secret; with
+  `githubToken` (classic `admin:repo_hook`, fine-grained "Webhooks: write")
+  it also creates or updates the hook through the GitHub REST API. Without
+  a job queue the endpoint answers `503`.
+- **Mirror credentials** (an upstream token for `auth: token`, the webhook
+  secret) live in `mirror_secrets` (migration `0023`), sealed with AES-GCM
+  under `ACTIONS_SECRETS_KEY` like Actions secrets, with the repository,
+  remote and kind as additional data. They are never written to the bucket,
+  returned by an API or logged. A token goes to the upstream as
+  `Basic x-access-token:<token>`.
+- **Bulk GitHub mirrors:** `POST /api/mirrors/github` (and the form on
+  `/new`) with `account` (GitHub user or organization), `owner` (forge
+  account the caller may create repositories in), optional `token`,
+  `forks` (default false), `archived` (default true), `visibility`
+  (`private` default, `public`, `upstream`), `mode`, `lfs` and `webhook`
+  lists the account's repositories (`/user/repos?affiliation=owner` when the
+  token belongs to `account`, else `/orgs/{org}/repos` or
+  `/users/{user}/repos`, following `Link` pagination) and enqueues one
+  `mirror-github` job per repository whose name is free on the forge.
+  Private repositories need the token; it travels sealed in the job and is
+  stored per mirror. The job creates the repository (permission checked
+  again), configures `origin` and enqueues the first sync; existing
+  repositories are skipped, so the call is idempotent.
 - **Safety net:** the scheduled handler runs once a day (cron `17 3 * * *`,
   `MIRROR_INTERVAL_MINUTES` = 1440 in `wrangler.jsonc`) and enqueues a sync
   and a subscription renewal for every auto mirror whose last run is older
@@ -389,7 +417,9 @@ adapter works. Finalize indexes in one request, bounded by `cpu_ms`.
 **Import** — create or update a repository by pulling from any Git URL
 (smart HTTP v2 or dumb HTTP, optional token). It reuses the mirror client
 (`connectRemote`, `fetchPackV2`, the dumb walker, `commitClosure`,
-`scanNewObjects`, `mirrorLfsObjects`). Unlike a mirror, refs land directly in
+`scanNewObjects`, `mirrorLfsObjects`); the *graph* and *fetch* phases are the
+stepped fetch in `packages/core/src/stepped-fetch.ts`, shared with mirror
+sync. Unlike a mirror, refs land directly in
 `refs/heads/*` and `refs/tags/*`, it runs once and keeps no upstream config.
 Rewritten refs are archived as on a force push; local refs missing upstream
 are kept. To stay within the CPU and memory limits of one invocation it runs
@@ -530,10 +560,23 @@ objects via the Batch API and verify their hashes. Two strategies:
   object is re-hashed and no index is recomputed, so the mirror's packs are
   byte-identical to the upstream's, down the whole chain. Copy-only trusts
   the upstream for connectivity; integrity of the bytes is verified.
-- **Fetch** (any Git server, `strategy: 'fetch'`): negotiate with protocol v2
-  `upload-pack` (or walk dumb HTTP), parse and index the received pack, check
-  connectivity from the new tips. Used for non-forge upstreams such as
-  GitHub.
+- **Fetch** (any Git server, `strategy: 'fetch'`): used for non-forge
+  upstreams such as GitHub. If the server supports `filter` and objects are
+  missing, the sync runs the import's stepped fetch (graph with
+  `filter tree:0`, commit ranges, split of oversized commits into blob
+  batches) with its progress in `mirrors/{remote}/fetch.json` (plus
+  `commits.txt`, `blobs.txt`), written with compare-and-swap. The target
+  refs are fixed at the first step; `syncMirror` with `maxSteps` returns
+  `pending` until the last step, and refs move only after it. A queued sync
+  runs `MIRROR_STEPS_PER_JOB` (4) steps and enqueues a `continue` sync; LFS
+  objects then get one `mirror-lfs` job each. After five failures in a row
+  the state is dropped (`failed`) and the next sync starts over from new
+  upstream refs. Without `filter`, or for dumb servers, one fetch as before
+  (v2 negotiation or dumb walk), then a connectivity scan from the new tips.
+  LFS endpoint for both strategies as for imports (`lfsUrl`, `.lfsconfig` of
+  the upstream default branch first, `<url>/info/lfs`; the token only for the
+  upstream origin), stored as `lfsEndpoint` in the mirror status for the
+  `mirror-lfs` jobs.
 - **Deep check** (`deepCheckRepository`, on demand via
   `POST /api/repos/{owner}/{repo}/mirrors/{remote}/verify` or scheduled
   rarely): inflate and hash every object of every pack, recompute every
@@ -2034,8 +2077,11 @@ progress answers 409.
 
 ### Rendering
 
-- Tailwind CSS with daisyUI, themes `light` (default) and `dark`
-  (`prefers-color-scheme`). The stylesheet is compiled at build time
+- Tailwind CSS with daisyUI, own themes `forge` (default) and `forge-dark`
+  (`prefers-color-scheme`) in `src/styles/global.css`: neutral base, one blue
+  accent, flat buttons, system font stack. Icons are inline Lucide paths
+  (MIT) in `src/components/Icon.astro`; avatars are initials coloured from a
+  hash of the name. The stylesheet is compiled at build time
   (`?inline`) and served by the Worker at `/-/style.css?v=<hash>` with an
   immutable cache header, so pages stay small and the release needs no asset
   directory.
@@ -2048,9 +2094,12 @@ progress answers 409.
   relative images to the raw endpoint.
 - LFS files are previewed through the media URL (images, video, audio, PDF),
   binary files through the raw URL at the commit id.
+- Repository lists read each repository's `refs.json` and head commit for
+  the default branch and the last update time. Tree views mark LFS files by
+  the `filter=lfs` patterns of the `.gitattributes` files on the path.
 - No client-side framework. Interactive bits use native elements
   (`<details>` dropdowns); islands are added only where a page needs them
-  (passkey ceremonies, diff line comments).
+  (passkey ceremonies, diff line comments, copy buttons).
 
 ### Tests
 

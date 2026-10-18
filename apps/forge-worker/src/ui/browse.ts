@@ -20,6 +20,7 @@ export type TreeView = {
   readonly entries: readonly DirectoryEntry[]
   readonly latest: CommitInfo | null
   readonly readme: Readme | null
+  readonly lfs: ReadonlySet<string>
 }
 
 export type BlobView = {
@@ -57,6 +58,39 @@ const readmeFor = async (repo: OpenRepository, target: RefTarget, entries: reado
   return { name: entry.name, html, text: content.text }
 }
 
+const globPattern = (glob: string): RegExp =>
+  new RegExp(`^${glob.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*\*\/?|\*|\?/g, (token) => (token === '?' ? '[^/]' : token === '*' ? '[^/]*' : '.*'))}$`)
+
+const lfsPatterns = async (repo: OpenRepository, commit: string, directory: readonly string[]): Promise<{ readonly base: string; readonly pattern: RegExp; readonly anchored: boolean }[]> => {
+  const target = await resolveTarget(repo.odb, commit, [...directory, '.gitattributes'])
+  const content = target?.kind === 'blob' ? await readBlobContent(repo.odb, target.entry) : null
+  if (content?.kind !== 'text') return []
+  return content.text
+    .split('\n')
+    .map((line) => line.trim().split(/\s+/))
+    .filter(([glob, ...attributes]) => glob && !glob.startsWith('#') && attributes.includes('filter=lfs'))
+    .map(([glob]) => ({ base: directory.join('/'), pattern: globPattern(glob!.replace(/^\//, '')), anchored: glob!.includes('/') }))
+}
+
+const lfsEntries = async (repo: OpenRepository, target: RefTarget, entries: readonly DirectoryEntry[]): Promise<Set<string>> => {
+  const directories = target.path.map((_, index) => target.path.slice(0, index + 1))
+  const patterns = (await Promise.all([[], ...directories].map((directory) => lfsPatterns(repo, target.commit, directory)))).flat()
+  if (patterns.length === 0) return new Set()
+  const path = target.path.join('/')
+  return new Set(
+    entries
+      .filter((entry) => entry.kind === 'blob')
+      .filter((entry) =>
+        patterns.some(({ base, pattern, anchored }) => {
+          const full = [path, entry.name].filter(Boolean).join('/')
+          const relative = base === '' ? full : full.slice(base.length + 1)
+          return anchored ? pattern.test(relative) : pattern.test(entry.name)
+        }),
+      )
+      .map((entry) => entry.name),
+  )
+}
+
 export const browse = async (repo: OpenRepository, segments: readonly string[], expect: 'tree' | 'blob' | 'any' = 'any'): Promise<BrowseView> => {
   if (segments.length === 0) {
     if (!repo.defaultBranch) return { kind: 'empty' }
@@ -69,7 +103,8 @@ export const browse = async (repo: OpenRepository, segments: readonly string[], 
   const latest = await lastCommitFor(repo.odb, target.commit, target.path)
   if (resolved.kind === 'tree') {
     if (expect === 'blob') return { kind: 'not-found' }
-    return { kind: 'tree', target, entries: resolved.entries, latest, readme: await readmeFor(repo, target, resolved.entries) }
+    const [readme, lfs] = await Promise.all([readmeFor(repo, target, resolved.entries), lfsEntries(repo, target, resolved.entries)])
+    return { kind: 'tree', target, entries: resolved.entries, latest, readme, lfs }
   }
   if (expect === 'tree') return { kind: 'not-found' }
   const content = await readBlobContent(repo.odb, resolved.entry)

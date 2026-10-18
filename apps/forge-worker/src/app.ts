@@ -100,8 +100,11 @@ import {
 import {
   type BranchUpdate,
   type CheckRunInput,
+  CollaborationError,
   type CollaborationOptions,
+  type Scope as CollaborationScope,
   getPullSummary,
+  openRepository as openCollaborationRepository,
   handleCollaborationApi,
   handlePushedRefs,
   loadUsers,
@@ -185,6 +188,7 @@ export type ForgeServices = {
   readonly account: AccountOperations
   readonly inbox: InboxOperations
   readonly releases: ReleaseReads
+  readonly collaboration: (request: Request, principal: Principal, owner: string, name: string) => Promise<CollaborationScope | null>
 }
 
 export type InboxOperations = {
@@ -1111,6 +1115,14 @@ export const createForge = (options: ForgeOptions): Forge => {
         markRead: (user, id) => notifications.store.markThreadRead(user.id, id),
         markDone: (user, id) => notifications.store.markThreadDone(user.id, id),
         markAllRead: (user) => notifications.store.markAllRead(user.id, now().getTime()),
+      },
+      collaboration: async (request, principal, owner, name) => {
+        try {
+          return await openCollaborationRepository(collaborationOptions(request), principal, owner, name)
+        } catch (error) {
+          if (error instanceof CollaborationError && error.status === 404) return null
+          throw error
+        }
       },
       releases: {
         list: (repository, includeDrafts, limit, offset) => releaseStore.list(repository.id, includeDrafts, limit, offset),

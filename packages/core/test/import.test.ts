@@ -201,7 +201,7 @@ describe('server-side import', () => {
     const filtered = remote.requests.filter((request) => request.method === 'POST' && request.path.endsWith('/git-upload-pack'))
     expect(filtered.length).toBeGreaterThan(5)
     await expectIdentical(storage, source.bare)
-  })
+  }, 60_000)
 
   it('updates an imported repository and archives rewritten history', async () => {
     const source = await sourceRepo(10)

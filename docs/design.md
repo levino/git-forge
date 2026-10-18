@@ -685,6 +685,11 @@ existing user or creates a new account (fixed login or chosen), and with
 the login is refused with a hint to ask for an invite. Logins are derived from
 `preferred_username`, the email's local part or the name, with `-2`, `-3`, …
 when taken.
+With an identity provider the first admin comes from a one-time claim instead
+of the bootstrap token: `claim-admin.sh` inserts a verified email address or
+OIDC subject into `instance_admin_claims` (migration 0010) with
+`wrangler d1 execute`; the first matching OIDC sign-in creates the account
+(even without self-signup), makes it an instance admin and deletes the claim.
 
 **Passkeys.** Registration asks for a discoverable credential, user
 verification and attestation `none`; attestation statements are never
@@ -1391,9 +1396,10 @@ update themselves.
   `wrangler.jsonc` and created by Wrangler, never by hand. D1 and R2 have a
   name and no id, so the first `wrangler deploy` provisions them (automatic
   resource provisioning) and later commands find them by name. Cron, vars,
-  routes (custom domains) and the required `BOOTSTRAP_TOKEN` secret
-  (`secrets.required`) are declared there as well; only the secret's value is
-  set outside the repository.
+  routes (custom domains) are declared there as well. The `BOOTSTRAP_TOKEN`
+  secret is deliberately not `secrets.required`: a secret can only be set on an
+  existing Worker, so requiring it would block the very first deploy. It is set
+  after the first deploy; until then `/api/bootstrap` answers `503`.
 - **Build on Cloudflare (Workers Builds):** build command `sh build.sh`,
   deploy command `sh deploy.sh`. `deploy.sh` applies the D1 migrations before
   the upload so new code never sees an old schema; migrations are therefore
@@ -1746,6 +1752,23 @@ xdiff, §17), the same code pull requests use.
 They read through `ObjectDatabase` like the Git endpoints. The UI layer
 (`src/ui/*.ts`) only composes them into view models; `.astro` files only
 render.
+
+### Collaboration pages
+
+Issues, pull requests and discussions call the service functions of
+`@git-forge/collaboration` directly with a scope from `services.collaboration`
+(its `openRepository` with the same options as the `/api/v3` handler, so
+activity reaches notifications, webhooks and CI the same way). Buttons and
+forms are shown with the package's `can(scope, permission)`; every write
+goes through the service function, which checks the permission again, after
+`verifySessionWrite`. Collaboration errors are shown on the page with their
+status. Links that come from the API (check run `details_url`, status
+`target_url`) are rendered only for `http(s)` URLs.
+
+Inline review comments on the *Files changed* tab use the only client script
+of these pages: a click on a line's `+` clones a `<template>` form below the
+row with path, line and side filled in; the form posts to the page like every
+other form.
 
 ### Rendering
 

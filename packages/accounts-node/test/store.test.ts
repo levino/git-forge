@@ -313,7 +313,10 @@ class FakeD1Statement implements D1PreparedStatementLike {
     return { results: this.handle.prepare(this.query).all(...(this.values as never[])) as T[] }
   }
   async run() {
-    return { meta: { changes: Number(this.handle.prepare(this.query).run(...(this.values as never[])).changes) } }
+    const total = () => Number((this.handle.prepare('SELECT total_changes() AS n').get() as { n: number }).n)
+    const before = total()
+    this.handle.prepare(this.query).run(...(this.values as never[]))
+    return { meta: { changes: total() - before } }
   }
 }
 
@@ -334,6 +337,18 @@ const fakeD1 = (handle: DatabaseSync): D1DatabaseLike => ({
 })
 
 describe('D1 adapter', () => {
+  it('bootstraps the first admin although search triggers inflate D1 change counts', async () => {
+    for (const db of [openSqliteDatabase().db, d1Database(fakeD1(new DatabaseSync(':memory:')))]) {
+      await applyMigrations(db, MIGRATIONS)
+      const store = createAccountsStore(db)
+      const admin = await store.bootstrapInstanceAdmin({ login: 'root' })
+      expect(admin).not.toBeNull()
+      expect(await store.isInstanceAdmin(admin!.id)).toBe(true)
+      expect(await store.bootstrapInstanceAdmin({ login: 'second' })).toBeNull()
+      expect(await store.findAccount('second')).toBeNull()
+    }
+  })
+
   it('runs migrations and the store through the D1 interface', async () => {
     const handle = new DatabaseSync(':memory:')
     handle.exec('PRAGMA foreign_keys = ON')

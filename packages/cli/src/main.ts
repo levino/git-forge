@@ -52,7 +52,8 @@ approve in the browser and paste the one-time code it shows. The token
 (default repo:write: Git and Git LFS; repo:admin also creates repositories) is
 stored in ~/.config/git-forge/hosts.json and git uses it for that host through
 the credential helper git forge auth git-credential. --browser-redirect sends
-the code back to a local port instead, --device uses the RFC 8628 device flow.
+the code back to a local port instead, --device (the default without a
+terminal) uses the RFC 8628 device flow.
 Without <url> it uses the host of the remote origin.
 
 git forge repo create creates a repository with the stored token (needs

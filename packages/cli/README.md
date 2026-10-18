@@ -36,7 +36,8 @@ git forge auth logout https://forge.example
 ```
 
 `auth login` prints a short link (opened when a local browser is available),
-you approve in the browser and paste the one-time code shown there. Options:
+you approve in the browser and paste the one-time code shown there; without a
+terminal on stdin it uses the device flow. Options:
 `--scopes repo:read|repo:write|repo:admin` (default `repo:write`),
 `--browser-redirect` (code via `http://127.0.0.1:<port>`), `--device`
 (RFC 8628), `--no-browser`, `--no-setup-git`. The token (90 days) is stored in

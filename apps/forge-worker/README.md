@@ -11,7 +11,9 @@ core `Storage` and an accounts `Database` and returns `{ fetch, scheduled, runJo
 `src/index.ts` only wires the Cloudflare bindings (`R2Storage`, `d1Database`,
 `QueueJobs` and the queue consumer)
 and parses the vars (`src/config.ts`). The same app runs in Node for the unit
-tests and the benchmark.
+tests and the benchmark, and as a deployment of its own without Cloudflare in
+[apps/forge-node](../forge-node) (which imports `forge-worker/app` and
+`forge-worker/config`).
 
 ## Configuration
 
@@ -78,7 +80,7 @@ There is no global "public read" switch any more.
 | `POST\|DELETE /api/federation/subscriptions` `{repository, callback}` | trusted instance (instance JWT) | Subscribes to push notifications for a repository it may read; the callback must be below its own issuer URL. |
 | `POST /api/federation/notify/{owner}/{name}/{remote}` | trusted upstream (signed body, `application/jwt`) | Push notification. `401` for an untrusted issuer, unknown key, bad signature, wrong audience or expired token; `403` if this mirror does not follow that repository; `200 up-to-date` for a duplicate; `202 queued` otherwise. |
 | `POST /api/repos/{owner}/{name}/mirrors/{remote}/detach` | repository admin | Stops syncing. |
-| `POST /api/repos/{owner}/{name}/import` `{url, token?, username?, lfs?, lfsUrl?, commitsPerStep?, visibility?, defaultBranch?}` | repository admin or instance admin; for a new repository the owner or an instance admin | Imports from a Git URL (smart HTTP v2 or dumb HTTP) without a request body limit, creating the repository first if needed (as `POST /api/repos`). `token` is sent as HTTP Basic password with `username` (default `git`), travels only in the queue messages and is never stored. Refs land in `refs/heads/*` and `refs/tags/*`; rewritten refs are archived, local refs missing upstream are kept. `202` with the state and a `Location`, `409` while an import runs. |
+| `POST /api/repos/{owner}/{name}/import` `{url, token?, username?, lfs?, lfsUrl?, commitsPerStep?, visibility?, defaultBranch?}` | repository admin or instance admin; for a new repository the owner or an instance admin | Imports from a Git URL (smart HTTP v2 or dumb HTTP) without a request body limit, creating the repository first if needed (as `POST /api/repos`). `token` is sent as HTTP Basic password with `username` (default `git`), travels only in the queue messages and is never stored. Refs land in `refs/heads/*` and `refs/tags/*`; rewritten refs are archived, local refs missing upstream are kept. `202` with the state and a `Location`, `409` while an import runs; an import without progress for 30 minutes (its worker or process died) is taken over and continues from its last step. |
 | `GET /api/repos/{owner}/{name}/import` | repository admin | Import state: `phase` (`discover`, `graph`, `fetch`, `lfs`, `refs`, `done`, `failed`), progress, ref updates, missing LFS objects, last error. Starting a failed import again with the same URL resumes it. |
 | `GET /api/health` | anyone | `{"ok": true}` |
 

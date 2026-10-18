@@ -182,9 +182,11 @@ storage. Mirrors therefore do not poll; the upstream tells them.
 - **Safety net:** the scheduled handler runs once a day (cron `17 3 * * *`,
   `MIRROR_INTERVAL_MINUTES` = 1440 in `wrangler.jsonc`) and enqueues a sync
   and a subscription renewal for every auto mirror whose last run is older
-  than the interval. Without a job queue (e.g. a Node deployment without
-  one) there are no notifications and the scheduled handler syncs inline, so
-  a shorter interval is the right choice there. The rare deep check (§7) is enqueued every
+  than the interval. `apps/forge-node` does the same from its own cron
+  schedule (`SCHEDULE`, default the same `17 3 * * *`) with an in-process job
+  queue. Without a job queue, `PUBLIC_URL` or `INSTANCE_KEY` there are no
+  notifications and the scheduled handler syncs inline, so a shorter interval
+  is the right choice there. The rare deep check (§7) is enqueued every
   `MIRROR_DEEP_CHECK_DAYS` (default 30, 0 = off).
 
 ### Instance-to-instance access (federation)
@@ -392,11 +394,15 @@ the indexer's object visitor without storing the pack.
 
 A failing step is retried with exponential backoff (15 s … 10 min); after
 five failures in a row the import is `failed`, and starting it again with the
-same URL resumes at the failed phase. Credentials are never written to the
+same URL resumes at the failed phase. An import whose state has not changed
+for 30 minutes (`STALE_IMPORT_MS`; a live import writes its state at least
+every 10 minutes) counts as abandoned, for example because the process that
+drove it restarted and lost its in-memory job: starting it again with the same
+URL takes it over at its current phase. Credentials are never written to the
 bucket: the token travels with each scheduled step. Steps are driven by the
 scheduling adapter (`ImportScheduler`): a Cloudflare Queue in the Worker
-(each message is one step in its own invocation), a simple loop (`runImport`)
-elsewhere.
+(each message is one step in its own invocation), the in-process job queue in
+`apps/forge-node`, a simple loop (`runImport`) elsewhere.
 
 **Fetch** — public: dumb HTTP directly from the bucket/CDN. Private or
 protocol v2 clients: `upload-pack` (smart HTTP protocol v2), streamed:
@@ -622,9 +628,37 @@ database.
 `jobRetryDelaySeconds` (10 s doubling, capped at 1 h) and `PermanentJobError`.
 `@git-forge/cloudflare` implements it on Queues (`QueueJobs`, `consumeJobs`
 with `max_batch_size: 1`, so every job is its own invocation with its own
-CPU budget); `createMemoryJobQueue` runs jobs in process (Node, tests). Jobs
-are plain JSON (repository, remote, callback), so a retry re-reads current
-state instead of replaying old data.
+CPU budget); `createMemoryJobQueue` runs jobs in process (Node, tests), with
+an optional `concurrency` limit, `keepHistory: false` for long-running
+processes and an `onOutcome` callback for logging. Jobs are plain JSON
+(repository, remote, callback), so a retry re-reads current state instead of
+replaying old data. In-process jobs are not durable: whatever is queued when
+the process stops is lost. Every job kind tolerates that: mirror state is
+re-derived by the next notification or scheduled run, and an abandoned import
+is taken over after 30 minutes (§7).
+
+**Node deployment (`apps/forge-node`).** The same router as the Worker
+(`createForge` from `apps/forge-worker/src/app.ts`, imported as
+`forge-worker/app`; it contains no Cloudflare types) in one process: `serve`
+from `@git-forge/node` adapts it to `node:http` with streaming request and
+response bodies; `FsStorage` or `S3Storage` hold repository data; the SQLite
+file is opened with `@git-forge/accounts-node` (`node:sqlite`, WAL);
+`nodeDigests` hashes with `node:crypto`; background jobs and import steps run
+in two `createMemoryJobQueue`s with the Worker's job handler and retry policy;
+a cron scheduler (five-field expressions in UTC) calls the same `scheduled`
+as the Worker's Cron Trigger. Configuration uses the Worker's variable names
+plus `PORT`, `HOST`, `TRUST_PROXY`, `DATA_DIR`, `DATABASE_PATH`, `STORAGE`,
+`STORAGE_DIR`, `S3_*`, `SCHEDULE` and `JOB_CONCURRENCY`. Like the Worker it
+never migrates implicitly: `git-forge-node migrate` applies the bundled
+`MIGRATIONS` (the same SQL files as `migrations_dir`, kept in sync by a test
+in `@git-forge/accounts`), and `serve` refuses to start while
+`pendingMigrations` is not empty. It runs on Node 22 and, compiled with
+`bun build --compile`, as a single executable for `linux-x64` and
+`linux-arm64` (Bun implements `node:http`, `node:sqlite` and `node:crypto`);
+a Dockerfile builds a distroless image and `deploy/` has systemd units. The
+E2E suite runs a Worker under `wrangler dev` and the Node instance (from
+source or the executable) side by side and mirrors in both directions with
+notifications.
 
 **SQLite as the common dialect:** the database layer writes SQLite SQL only,
 so it runs on D1, Durable Objects, libSQL and a file on a Pi.
@@ -1093,6 +1127,12 @@ update themselves.
   smoke test against `wrangler dev` running the template.
 - The same bundle may additionally be published to npm later; the template
   never depends on it.
+- **Without Cloudflare:** every release also carries
+  `git-forge-node-linux-x64` and `git-forge-node-linux-arm64` (single
+  executables of `apps/forge-node`, built with Bun, version from
+  `release/VERSION`) and `NODE-SHA256SUMS`. They need no template: install the
+  executable, run `migrate`, start `serve` (systemd units and a Dockerfile in
+  `apps/forge-node`).
 
 ### Test instances
 

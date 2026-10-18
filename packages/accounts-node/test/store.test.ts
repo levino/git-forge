@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import {
   type AccountsStore,
   applyMigrations,
+  pendingMigrations,
   createAccountsStore,
   d1Database,
   type D1DatabaseLike,
@@ -68,6 +69,17 @@ describe('migrations on node:sqlite', () => {
     const edited = MIGRATIONS.map((migration) => ({ ...migration, sql: `${migration.sql}\n` }))
     await expect(applyMigrations(db, edited)).rejects.toThrow(/was modified/)
     await expect(applyMigrations(db, [])).rejects.toThrow(/unknown migration 0001_initial/)
+  })
+
+  it('lists pending migrations without touching the database', async () => {
+    const { db } = openSqliteDatabase()
+    expect(await pendingMigrations(db, MIGRATIONS)).toEqual(MIGRATIONS.map((migration) => migration.name))
+    expect(await tables(db)).toEqual([])
+    await applyMigrations(db, MIGRATIONS.slice(0, 2))
+    expect(await pendingMigrations(db, MIGRATIONS)).toEqual(MIGRATIONS.slice(2).map((migration) => migration.name))
+    await applyMigrations(db, MIGRATIONS)
+    expect(await pendingMigrations(db, MIGRATIONS)).toEqual([])
+    await expect(pendingMigrations(db, MIGRATIONS.slice(1))).rejects.toThrow(/unknown migration 0001_initial/)
   })
 
   it('applies new migrations in order and rolls back a failing one completely', async () => {

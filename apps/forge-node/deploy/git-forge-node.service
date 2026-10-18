@@ -1,0 +1,33 @@
+[Unit]
+Description=git-forge instance (git-forge-node)
+Documentation=https://github.com/levino/git-forge/tree/main/apps/forge-node
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=git-forge
+Group=git-forge
+EnvironmentFile=/etc/git-forge/git-forge.env
+WorkingDirectory=/var/lib/git-forge
+StateDirectory=git-forge
+StateDirectoryMode=0750
+ExecStart=/usr/local/bin/git-forge-node serve
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+KillSignal=SIGTERM
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+ReadWritePaths=/var/lib/git-forge
+
+[Install]
+WantedBy=multi-user.target

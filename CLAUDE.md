@@ -1,32 +1,31 @@
 # git-forge
 
-Serverlose Git-Forge mit föderierten Sicherungskopien. Konzept und
-Entscheidungen in `KONZEPT.md` — vor Änderungen an Architektur oder Formaten
-dort nachlesen und es mitpflegen.
+Serverless Git forge with federated mirrors. Design and decisions in
+`docs/design.md`, status in `docs/roadmap.md` — read them before changing
+architecture or formats, and keep them up to date.
 
-## Regeln
+## Rules
 
-- **Eine Sprache:** TypeScript. Nur Web-Standard-APIs (`fetch`, Streams,
-  WebCrypto, `DecompressionStream`); kein WebAssembly, keine `node:*`-Importe im
-  Kern.
-- **Kern-Logik als pure Funktionen**; HTTP-, UI- und Sync-Schichten rufen
-  dieselben Funktionen, keine doppelte Rechte-Logik.
-- **Anbieter nur über Adapter** (Speicher, Datenbank, Zeitsteuerung, E-Mail).
-  Der Kern kennt keine Cloudflare-Typen.
-- **Datenbank: nur SQLite-SQL**, damit D1, Durable Objects, libSQL und eine
-  SQLite-Datei gleichermaßen funktionieren.
-- **Nichts ganz im Speicher:** Packs und LFS-Objekte werden gestreamt.
-- **Rechte immer aus dem geprüften Token bzw. der Sitzung**, nie aus Angaben des
-  Clients.
-- **Formate sind dauerhaft:** Bucket-Layout und Protokoll-Einträge nur
-  rückwärtskompatibel ändern.
-- **Kompatibilität mit echtem `git` und `git-lfs`** wird mit den echten Clients
-  getestet, nicht nur mit eigenen Mocks.
-- **Keine Secrets committen.**
-- Dokumentation auf Deutsch.
-- **Keine Code-Kommentare.** Erläuterungen gehören in `KONZEPT.md` bzw. die
-  README des Pakets.
-- **Alles direkt auf `main`.** Vor jedem Push grün: `pnpm run typecheck` und
-  `pnpm test` im Root.
-- **Speicher ist nur fortschreibend:** Das `Storage`-Interface kennt kein
-  Löschen.
+- **One language:** TypeScript. Web-standard APIs only (`fetch`, Streams,
+  WebCrypto, `DecompressionStream`); no WebAssembly, no `node:*` imports in
+  the core.
+- **Core logic as pure functions;** HTTP, UI and sync layers call the same
+  functions, no duplicated permission logic.
+- **Providers only via adapters** (storage, database, scheduling, email).
+  The core knows no Cloudflare types.
+- **Database: SQLite SQL only**, so that D1, Durable Objects, libSQL and an
+  SQLite file all work.
+- **Nothing entirely in memory:** packs and LFS objects are streamed.
+- **Permissions always from the verified token or session**, never from
+  client-supplied data.
+- **Formats are durable:** change the bucket layout and log entries only
+  backwards-compatibly.
+- **Compatibility with real `git` and `git-lfs`** is tested with the real
+  clients, not only with our own mocks.
+- **Never commit secrets.**
+- Everything in English.
+- **No code comments.** Explanations belong in `docs/design.md` or the
+  package README.
+- Work on feature branches and open PRs; the coordinator merges. Before every
+  push: `pnpm run typecheck` and `pnpm test` green.
+- **Storage is append-only:** the `Storage` interface has no delete.

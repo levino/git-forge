@@ -37,7 +37,8 @@ discussions.
 - [x] Short-lived instance JWTs, trust table "issuer X may read repo Y", optional pinned thumbprint
 - [x] Device flow (`git forge auth login`, RFC 8628) and git credential helper (`git forge auth git-credential`)
 - [x] Break-glass key (offline Ed25519, one-hour admin session)
-- [ ] Login follow-ups: OIDC groups → teams, session list and revocation in the UI, rate limits on login and device endpoints, purging expired challenges and device codes, device-flow scope choice
+- [x] Session list and revocation, list and unlink linked OIDC identities (account page)
+- [ ] Login follow-ups: OIDC groups → teams, rate limits on login and device endpoints, purging expired challenges and device codes, device-flow scope choice
 - [ ] SAML, SCIM
 - [x] Branch protection rules (patterns, force push, deletion, push restrictions, admin bypass) enforced in `receive-pack`, API under `/api/repos/{owner}/{repo}/branches/{branch}/protection`
 - [x] Branch protection API and push policy wired into the Worker app (accounts on D1), API with browser sessions and CSRF
@@ -96,7 +97,7 @@ Design: [design.md §15](design.md#ci).
 - [ ] Broker and run service (v2 flow), results service, message encryption; then cache, artifacts, OIDC id tokens
 - [ ] External providers: signed `workflow_job` webhook delivery, GitHub App auth (JWT → installation token, manifest flow) and PATs on `/api/v3`, org-level runners; try WarpBuild Enterprise, AWS CodeBuild, RunsOn
 - [ ] `container:` and `services:` (Docker-in-Docker in the runner container)
-- [ ] Web UI for runs and live logs
+- [x] Web UI for runs and live logs (runs per workflow, jobs, log polling, cancel, re-run all, failed or one job)
 - [x] "Deploy to Cloudflare" button in the README pointing at the instance template; template wired to accounts (`BOOTSTRAP_TOKEN`)
 - [x] Release artifact (bundled worker + migrations + checksums) and instance template with pinned version
 - [x] Minimal instance template: one `wrangler.toml` whose `[build]` command downloads and verifies the pinned bundle, resources provisioned from it, self-migrating Worker, first admin via a one-time `instance_admin_claims` row; Deploy button on the monorepo subdirectory; release notes print the `V`/`S` pin and the release workflow pins it in the template
@@ -115,10 +116,13 @@ Design: [design.md §18](design.md#18-web-ui).
 - [x] Account settings: personal access tokens (create, revoke), passkeys (add, remove), linking an OIDC identity
 - [x] Notifications inbox (unread/all, mark read, done, all read) and repository releases (list, tag page, notes, asset downloads)
 - [x] New repository page (owner, name, visibility, default branch) and repository import with a status page; "New" in the navbar and on the dashboard
-- [ ] List and unlink linked OIDC identities, list and end sessions
-- [ ] Organizations and teams
-- [ ] Repository settings (visibility, collaborators, branch protection, federation trust)
-- [ ] Mirror settings, status and alarms
+- [x] List and unlink linked OIDC identities, list and end sessions
+- [x] Organizations and teams (create, members and owners, teams, team members, team repository roles)
+- [x] JSON API for organizations and teams on the same operations (`/api/orgs/…`)
+- [x] Instance admin page and API (admins, trusted instances, list of this instance's mirrors with their sync state and alarms, `GET /api/admin/mirrors`)
+- [ ] Mirror overview UI on top of the attestation API of design §10 (lag, ref checksum history, spot checks)
+- [x] Repository settings (visibility, collaborators, branch protection, federation trust)
+- [x] Mirror settings, status and alarms (add, sync, deep check, detach)
 - [ ] Blame, syntax highlighting in diffs and Markdown code blocks
 - [ ] Explore and profile listings without one access check per repository
 - [ ] Issue/PR UI: labels, assignees, milestones, reviewer requests, suggested changes, `#N` autolinks in rendered Markdown

@@ -193,6 +193,17 @@ export const createLoginStore = (db: Database, options: { readonly now?: () => n
       ])
     },
 
+    revokeUserSession: async (userId: string, id: string): Promise<boolean> => {
+      const active = await first(db, sql('SELECT 1 AS ok FROM sessions WHERE id = ? AND user_id = ? AND revoked_at IS NULL', id, userId))
+      if (!active) return false
+      const at = now()
+      await db.batch([
+        sql('UPDATE sessions SET revoked_at = ? WHERE id = ? AND user_id = ? AND revoked_at IS NULL', at, id, userId),
+        auditStatement(userActor(userId), { action: 'session.revoke', subjectKind: 'session', subjectId: id }, at),
+      ])
+      return true
+    },
+
     revokeUserSessions: async (userId: string, actor: AuditActor = SYSTEM): Promise<void> => {
       const at = now()
       await db.batch([

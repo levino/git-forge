@@ -92,7 +92,19 @@ There is no global "public read" switch any more.
 | `POST /api/bootstrap` `{login, email?}` | `Bearer <BOOTSTRAP_TOKEN>` | Creates the first instance admin and returns `{login, token}` (a `repo:admin` token without expiry). `409` once an admin exists. |
 | `POST /api/admin/users` `{login, email?, admin?}` | instance admin | Creates a user. |
 | `POST /api/admin/users/{login}/tokens` `{name?, scopes?, expiresAt?}` | instance admin | Issues a personal access token (shown once). |
-| `POST /api/admin/instances` `{issuer, pinnedThumbprint?}` | instance admin | Trusts another instance. |
+| `GET /api/admin/instances` | instance admin | Trusted instances: `[{issuer, pinnedThumbprint, createdAt}]`. |
+| `POST /api/admin/instances` `{issuer, pinnedThumbprint?}` | instance admin | Trusts another instance (`422` for an issuer that is not an http(s) URL). |
+| `DELETE /api/admin/instances/{issuer}` | instance admin | Stops trusting an instance (issuer URL-encoded). `204`. |
+| `GET /api/admin/admins` | instance admin | Instance admins: `[{id, login}]`. |
+| `PUT\|DELETE /api/admin/admins/{login}` | instance admin | Makes a user an instance admin or removes them; the last admin cannot be removed (`422`). `204`. |
+| `GET /api/admin/mirrors` | instance admin | Every mirror of the instance: `[{repository, config, status}]`. |
+| `POST /api/orgs` `{login}` | signed-in user (session or `repo:admin` token) | Creates an organization; the caller becomes its first owner. Reserved names (`api`, `explore`, `settings`, `orgs`, …) answer `422`. |
+| `GET /api/orgs/{org}` | members, instance admins | `{organization, membership, canAdminister, members, teams}`; `404` for everyone else. |
+| `PUT\|DELETE /api/orgs/{org}/members/{login}` `{role}` | organization owner, instance admin | Adds a member, changes the role (`member`, `owner`) or removes them; the last owner stays (`422`). `204`. |
+| `POST /api/orgs/{org}/teams` `{slug, name?}` | organization owner, instance admin | Creates a team. |
+| `GET /api/orgs/{org}/teams/{slug}` | members, instance admins | Team with members and repository roles. |
+| `PUT\|DELETE /api/orgs/{org}/teams/{slug}/members/{login}` `{role}` | organization owner, instance admin | Team membership (`member`, `maintainer`); only organization members can join. `204`. |
+| `PUT\|DELETE /api/orgs/{org}/teams/{slug}/repos/{name}` `{role}` | organization owner, instance admin | Role of the team on a repository of the organization. `204`. |
 | `POST /api/repos` `{owner, name, visibility?, defaultBranch?}` | the owner, or an instance admin | Creates a repository in R2 and D1 (`visibility` defaults to `private`). |
 | `PATCH /api/repos/{owner}/{name}` `{visibility}` | repository admin | Changes visibility. |
 | `PUT /api/repos/{owner}/{name}/collaborators/{login}` `{role}` | repository admin | Sets a collaborator role. |
@@ -484,8 +496,26 @@ argument.
 - `test/pages/collaboration.test.ts`: issue, pull request and discussion pages
   against the real collaboration backend (create, comment, close, permission
   refusals, review, line comment, merge, answers).
+- `test/pages/settings.test.ts`: repository settings as admin and non-admin
+  (visibility, collaborators, branch protection read back through the API,
+  mirrors, federation grants).
+- `test/pages/organizations.test.ts`: creating an organization, people,
+  teams and team members as owner, member and outsider; sessions on the
+  account page.
+- `test/pages/actions.test.ts`: workflow runs and jobs from a real push, the
+  live job log (escape codes removed, polling URL), runs of other
+  repositories hidden, the workflow filter, cancel and re-run (refused to
+  readers and visitors, refused while the run is still in progress).
+- `test/pages/admin.test.ts`: the instance admin page (404 for others, the
+  last admin stays, trusting and distrusting instances, mirror overview).
+- `test/unit/admin-api.test.ts`: the organization and team JSON API and the
+  instance admin API (admins, trusted instances, mirrors, reserved names).
 - `test/browser/collaboration.spec.ts`: a passkey user comments on a diff line
   through the inline form and opens an issue.
+- `test/browser/settings.spec.ts`: creating an organization and a team, the
+  session list, repository settings (visibility, collaborator, branch
+  protection), cancelling and re-running a workflow run, and the instance
+  admin page (trust an instance, mirror overview).
 - `test/browser/login.spec.ts`: an invited user signs up with a passkey
   (Chromium's virtual authenticator), creates and revokes a token at
   `/settings`, signs out and signs in with the passkey again; a cross-site

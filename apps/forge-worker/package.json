@@ -10,7 +10,9 @@
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.node.json",
     "test": "vitest run && vitest run --config vitest.e2e.config.ts",
     "test:e2e": "vitest run --config vitest.e2e.config.ts",
-    "bench": "node --experimental-transform-types --no-warnings --expose-gc scripts/bench.ts"
+    "bench": "node --experimental-transform-types --no-warnings --expose-gc scripts/bench.ts",
+    "bench:mirror": "node --experimental-transform-types --no-warnings scripts/bench-mirror.ts",
+    "instance-key": "node --experimental-transform-types --no-warnings scripts/instance-key.ts"
   },
   "dependencies": {
     "@git-forge/accounts": "workspace:*",

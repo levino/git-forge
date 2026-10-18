@@ -7,7 +7,9 @@ import {
   createAccountsStore,
   createJwksCache,
   generateSigningKey,
+  importSigningKey,
   MIGRATIONS,
+  type PrivateJwk,
   type SigningKey,
 } from '@git-forge/accounts'
 import { openSqliteDatabase } from '@git-forge/accounts-node'
@@ -72,7 +74,7 @@ export type Instance = {
   readonly name: string
   readonly url: string
   readonly key: SigningKey
-  readonly storage: MemoryStorage
+  readonly storage: Storage
   readonly store: AccountsStore
   readonly jobs: MemoryJobQueue<ForgeJob>
   readonly federation: MirrorFederation
@@ -86,6 +88,8 @@ export type Instance = {
 export type InstanceOptions = {
   readonly retryDelayMs?: (seconds: number) => number
   readonly safetySyncHours?: number
+  readonly storage?: Storage
+  readonly privateJwk?: PrivateJwk
 }
 
 const cpuNow = () => {
@@ -104,12 +108,12 @@ const measured = async <T>(record: (sample: { cpuMs: number; wallMs: number }) =
 }
 
 export const startInstance = async (name: string, options: InstanceOptions = {}): Promise<Instance> => {
-  const storage = new MemoryStorage()
+  const storage = options.storage ?? new MemoryStorage()
   const counting = new CountingStorage(storage)
   const { db } = openSqliteDatabase()
   await applyMigrations(db, MIGRATIONS)
   const store = createAccountsStore(db)
-  const { key } = await generateSigningKey()
+  const key = options.privateJwk ? await importSigningKey(options.privateJwk) : (await generateSigningKey()).key
   const invocations: Invocation[] = []
   const requests: { method: string; path: string }[] = []
   let failures: { predicate: (request: Request) => boolean; remaining: number } | null = null

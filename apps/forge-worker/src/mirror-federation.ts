@@ -96,7 +96,12 @@ export const enqueueNotifications = async (federation: MirrorFederation, repo: R
 export const notifyAfterPush =
   (federation: MirrorFederation) =>
   async (repo: RepositoryName, outcome: PushOutcome): Promise<void> => {
-    if (outcome.results.some((result) => result.ok)) await enqueueNotifications(federation, repo)
+    if (!outcome.results.some((result) => result.ok)) return
+    try {
+      await enqueueNotifications(federation, repo)
+    } catch (error) {
+      console.log(JSON.stringify({ event: 'mirror-notify-enqueue-failed', repository: nameOf(repo), error: (error as Error).message }))
+    }
   }
 
 const deliverNotification = async (federation: MirrorFederation, job: Extract<ForgeJob, { kind: 'mirror-notify' }>): Promise<void> => {

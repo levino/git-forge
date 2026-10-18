@@ -148,7 +148,7 @@ export const copyPack = async (options: CopyPackOptions): Promise<CopiedPack> =>
   const idxResponse = await expectOk(await remoteRequest(remote, remoteUrl(remote.url, `objects/pack/${idxName}`)), `index of ${name}`)
   const idx = idxResponse.body ? await readAll(idxResponse.body, Math.min(limit, 2 ** 31)) : new Uint8Array(0)
   const packResponse = await expectOk(await remoteRequest(remote, remoteUrl(remote.url, `objects/pack/${name}`)), name)
-  const declared = packResponse.headers.get('Content-Length')
+  const declared = packResponse.headers.has('Content-Encoding') ? null : packResponse.headers.get('Content-Length')
   const body = packResponse.body
   if (!body) throw new RemoteError(`pack ${name} has no body`)
   let size = declared === null ? Number.NaN : Number(declared)

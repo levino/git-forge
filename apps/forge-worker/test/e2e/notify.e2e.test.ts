@@ -207,3 +207,27 @@ describe('push-notified mirror sync across three instances', () => {
     expect(await sync.json()).toEqual(expect.objectContaining({ status: 'ok', strategy: 'copy', updates: [] }))
   })
 })
+
+describe('push notifications when the job queue is down', () => {
+  it('still accepts the push', async () => {
+    const solo = await startInstance('solo')
+    try {
+      await expectStatus(solo.api('POST', '/api/admin/repos', { owner: repo.owner, name: repo.name }), 201)
+      await solo.store.trustInstance({ issuer: beta.url })
+      await solo.store.subscribeMirror({ issuer: beta.url, repository, callback: `${beta.url}/api/federation/notify/${repository}/solo` })
+      const enqueue = solo.jobs.enqueue
+      ;(solo.jobs as { enqueue: typeof enqueue }).enqueue = async () => {
+        throw new Error('queue unavailable')
+      }
+      const work = tempDir()
+      await git(work, ['init', '-q', '-b', 'main'])
+      writeFileSync(join(work, 'a.txt'), 'a\n')
+      await git(work, ['add', '-A'])
+      await git(work, ['commit', '-q', '-m', 'a'])
+      await git(work, ['push', '-q', pushUrl(solo), 'main'])
+      expect((await refs(solo))['refs/heads/main']).toBe((await git(work, ['rev-parse', 'main'])).trim())
+    } finally {
+      await solo.close()
+    }
+  })
+})

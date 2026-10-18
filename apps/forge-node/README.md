@@ -20,6 +20,9 @@ release, checksums in `NODE-SHA256SUMS`).
 | `git-forge-node serve` (default) | HTTP server, job runner and mirror schedule. Refuses to start while the database has pending migrations. Stops on `SIGTERM`/`SIGINT`: closes the listener, lets running jobs finish (up to 10 s) and closes the database; queued jobs stay in the database for the next start. |
 | `git-forge-node migrate` | Applies pending migrations to the database and exits. These are the SQL files from `packages/accounts/migrations` that `wrangler d1 migrations apply` uses for the Worker, bundled into the executable. Migrations are never applied implicitly. |
 | `git-forge-node instance-key` | Prints a new Ed25519 private JWK for `INSTANCE_KEY` (key id on stderr). |
+| `git-forge-node restore [id]` | Restores the latest (or the given) complete backup from `BACKUP_STORAGE` into an empty `DATABASE_PATH` and `STORAGE`, verifying every object, then applies newer migrations. |
+| `git-forge-node restore-sql [id]` | Prints the database dump of a backup as SQL, e.g. for `wrangler d1 execute --file`. |
+| `git-forge-node backup-verify [n]` | Re-hashes `n` (default 20) random backed-up objects in `BACKUP_STORAGE`; exit code 1 on a mismatch. |
 | `git-forge-node version` | Prints the version. |
 
 Logs are JSON lines on stdout (`listening`, `job`, `import-step`,
@@ -64,6 +67,7 @@ Only for this app:
 | `SCHEDULE` | `17 3 * * *` | Cron expression (five fields, UTC; `@hourly`, `@daily` also work) for the safety-net run: enqueues a sync for every auto mirror whose last run is older than `MIRROR_INTERVAL_MINUTES`, plus the periodic deep checks. Same as the Worker's Cron Trigger. |
 | `JOB_CONCURRENCY` | `2` | Background jobs (mirror syncs, notifications, deep checks, Pages deployments, LFS publish) running at once. Imports run one step at a time. |
 | `LFS_PUBLISH_DIR` | none | Directory that receives the LFS objects of public repositories on push, one file per oid (`LFS_PUBLISH_PREFIX` prepends a path), for a web server or CDN to serve. The Worker's `CDN_BUCKET` counterpart. |
+| `BACKUP_STORAGE` | none | `fs` or `s3`: target of the daily [backup](#backup). `BACKUP_STORAGE_DIR` and `BACKUP_S3_*` like `STORAGE_DIR` and `S3_*`. |
 | `SMTP_HOST` | none | SMTP server, required with `EMAIL_PROVIDER=smtp`. |
 | `SMTP_SECURITY` | `starttls` | `starttls` (STARTTLS required), `tls` (implicit TLS, "SMTPS") or `none` (plain, only for a relay on the same host or network, without credentials). |
 | `SMTP_PORT` | `587`, `465` or `25` | Port; the default follows `SMTP_SECURITY`. |
@@ -72,6 +76,18 @@ Only for this app:
 
 Invalid values stop the process with exit code 2 and a message instead of
 falling back to a default.
+
+## Backup
+
+With `BACKUP_STORAGE` every `SCHEDULE` run backs up the database and every
+object into that target (design §19); status, "run now" and verify are on
+`/-/admin` and under `/api/admin/backup`. Use a bucket with Object Lock
+(compliance mode) as the target; the backup never overwrites a key. Restore
+on a new machine:
+
+```sh
+BACKUP_STORAGE=s3 BACKUP_S3_ENDPOINT=… BACKUP_S3_BUCKET=forge-backup … DATA_DIR=/data git-forge-node restore
+```
 
 ## Jobs and restarts
 

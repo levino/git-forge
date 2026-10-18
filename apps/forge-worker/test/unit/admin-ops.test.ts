@@ -149,6 +149,11 @@ describe('admin operations', () => {
     expect(await json(await call(forge, BASE, 'POST', '/api/admin/usage/recount', ada))).toEqual({ repositories: 1 })
     for (const job of queued.splice(0).filter((entry) => entry.kind === 'usage-scan')) await forge.runJob(job)
     expect(await usage()).toEqual([expect.objectContaining({ repository: 'ada/site', lfsBytes: content.length, objects: 1 })])
+    expect((await call(forge, BASE, 'PATCH', '/api/repos/ada/site', ada, { name: 'web' })).status).toBe(200)
+    const more = new TextEncoder().encode('more\n')
+    const renamed = await forge.fetch(new Request(`${BASE}/ada/web.git/info/lfs/objects/${await sha256Hex(more)}`, { method: 'PUT', headers: { Authorization: `Bearer ${ada}`, 'Content-Length': String(more.length) }, body: more }))
+    expect(renamed.status).toBe(200)
+    expect(await usage()).toEqual([expect.objectContaining({ repository: 'ada/web', path: 'ada/site', lfsBytes: content.length + more.length, objects: 2 })])
   })
 
   it('runs the setup checks for admins only', async () => {

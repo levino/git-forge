@@ -55,6 +55,12 @@ describe('instance administration page', () => {
     expect(page.html).toContain('Instance administration')
   })
 
+  it('shows the backup panel', async () => {
+    const page = await render(ada)
+    expect(page.html).toContain('No backup target.')
+    expect((await render(ada, { action: 'backup-run' })).html).toContain('no backup target is configured')
+  })
+
   it('shows every mirror of the instance with its state', async () => {
     const page = await render(ada)
     expect(page.html).toContain('href="/ada/copy/settings#mirrors"')

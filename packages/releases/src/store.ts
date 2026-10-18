@@ -66,8 +66,8 @@ export const createReleaseStore = (db: Database, now: () => number = Date.now) =
   latest: (repositoryId: string): Promise<ReleaseRow | null> =>
     first<ReleaseRow>(db, sql('SELECT * FROM releases WHERE repository_id = ? AND draft = 0 AND prerelease = 0 ORDER BY published_at DESC, id DESC LIMIT 1', repositoryId)),
 
-  create: async (repositoryId: string, input: ReleaseInput, author: Author): Promise<ReleaseRow> => {
-    const at = now()
+  create: async (repositoryId: string, input: ReleaseInput, author: Author, times?: { readonly createdAt: number; readonly publishedAt: number | null }): Promise<ReleaseRow> => {
+    const at = times?.createdAt ?? now()
     try {
       const rows = await db.all<ReleaseRow>(
         sql(
@@ -85,7 +85,7 @@ export const createReleaseStore = (db: Database, now: () => number = Date.now) =
           author.login,
           at,
           at,
-          input.draft ? null : at,
+          input.draft ? null : (times?.publishedAt ?? at),
         ),
       )
       return rows[0]!
@@ -140,8 +140,9 @@ export const createReleaseStore = (db: Database, now: () => number = Date.now) =
     releaseId: number,
     input: { readonly name: string; readonly label: string | null; readonly contentType: string; readonly size: number; readonly oid: string },
     uploader: Author,
+    createdAt?: number,
   ): Promise<AssetRow> => {
-    const at = now()
+    const at = createdAt ?? now()
     try {
       const rows = await db.all<AssetRow>(
         sql(

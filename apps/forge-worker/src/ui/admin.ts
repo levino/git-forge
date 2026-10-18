@@ -1,8 +1,8 @@
 import { InstanceAdministrationError } from '@git-forge/accounts'
 import type { ImportState, MirrorStatus } from '@git-forge/core'
-import { formatBytes } from './format.ts'
 import { AdminError } from '../admin/operations.ts'
-import type { ForgeServices, UiSession } from '../app.ts'
+import { ForgeError, type ForgeServices, type UiSession } from '../app.ts'
+import { formatBytes } from './format.ts'
 
 export type AdminOutcome = { readonly kind: 'ok'; readonly message: string } | { readonly kind: 'error'; readonly status: number; readonly message: string }
 
@@ -22,6 +22,10 @@ export const adminAction = async (forge: ForgeServices, session: UiSession, form
       case 'trust': {
         const trusted = await instance.trust(principal, text(form, 'issuer'), text(form, 'thumbprint') || null)
         return { kind: 'ok', message: `${trusted.issuer} is now trusted.` }
+      }
+      case 'rename-account': {
+        const renamed = await forge.renameAccount(principal, text(form, 'from'), text(form, 'login'))
+        return { kind: 'ok', message: `${text(form, 'from')} is now ${renamed.login}.` }
       }
       case 'distrust':
         await instance.distrust(principal, text(form, 'issuer'))
@@ -51,11 +55,20 @@ export const adminAction = async (forge: ForgeServices, session: UiSession, form
       case 'clear-oidc':
         await instance.clearOidc(principal)
         return { kind: 'ok', message: 'OIDC sign-in was removed.' }
+      case 'backup-run':
+        await instance.backup.run(principal)
+        return { kind: 'ok', message: 'Backup started.' }
+      case 'backup-verify': {
+        const result = await instance.backup.verify(principal, 20)
+        return result.failures.length === 0
+          ? { kind: 'ok', message: `Verified ${result.checked} backed-up objects.` }
+          : { kind: 'error', status: 409, message: `Backup verification failed: ${result.failures.join('; ')}` }
+      }
       default:
         return { kind: 'error', status: 400, message: 'Unknown action.' }
     }
   } catch (error) {
-    if (error instanceof InstanceAdministrationError || error instanceof AdminError) return { kind: 'error', status: error.status, message: error.message }
+    if (error instanceof InstanceAdministrationError || error instanceof ForgeError || error instanceof AdminError) return { kind: 'error', status: error.status, message: error.message }
     throw error
   }
 }

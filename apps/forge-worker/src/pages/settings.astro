@@ -46,6 +46,7 @@ const configJson = JSON.stringify({ returnTo: '/settings', csrf: session.csrf })
   {result?.kind === 'passkey-removed' && <div role="status" class="alert alert-success mb-6">Passkey removed.</div>}
   {result?.kind === 'identity-unlinked' && <div role="status" class="alert alert-success mb-6">Account unlinked.</div>}
   {result?.kind === 'session-revoked' && <div role="status" class="alert alert-success mb-6">Session ended.</div>}
+  {result?.kind === 'renamed' && <div role="status" class="alert alert-success mb-6">Your account is now {result.login}.</div>}
   {result?.kind === 'error' && <div role="alert" class="alert alert-error mb-6">{result.message}</div>}
 
   <section class="panel" aria-labelledby="tokens">
@@ -204,6 +205,17 @@ const configJson = JSON.stringify({ returnTo: '/settings', csrf: session.csrf })
         </li>
       ))}
     </ul>
+  </section>
+
+  <section class="mb-10" aria-labelledby="rename">
+    <h2 id="rename" class="text-xl font-semibold mb-2">Rename account</h2>
+    <form method="post" class="flex flex-wrap items-end gap-2">
+      <input type="hidden" name="csrf" value={session.csrf} />
+      <input type="hidden" name="action" value="rename" />
+      <label class="flex flex-col gap-1 text-sm">New login<input name="login" class="input input-sm font-mono" required value={user.login} /></label>
+      <button class="btn btn-sm btn-warning btn-outline">Rename</button>
+    </form>
+    <p class="text-sm text-base-content/70 mt-2">Old URLs of your profile and repositories redirect to the new name.</p>
   </section>
 
   {passkeysEnabled && <script type="application/json" id="login-config" set:html={configJson} />}

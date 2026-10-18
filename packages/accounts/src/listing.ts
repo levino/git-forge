@@ -72,11 +72,11 @@ export const readableRepositories = (principal: Principal): Statement => {
   if (limits?.ceiling === 'none') parts.push(fragment('0'))
   if (limits?.repositoryIds) parts.push(inList('r.id', limits.repositoryIds))
   const granted = and(...parts)
-  return fragment(`a.disabled_at IS NULL AND (r.visibility = 'public' OR (${granted.sql}))`, ...granted.params)
+  return fragment(`r.deleted_at IS NULL AND a.disabled_at IS NULL AND (r.visibility = 'public' OR (${granted.sql}))`, ...granted.params)
 }
 
 export const REPOSITORY_COLUMNS = `r.id, r.name, r.visibility, r.owner_id, a.login AS owner_login, a.kind AS owner_kind, a.default_repository_role,
-  r.default_branch, r.last_commit_at, r.stats_at`
+  r.description, r.homepage, r.topics, r.archived_at, r.default_branch, r.last_commit_at, r.stats_at`
 
 export type ListingRow = {
   id: string
@@ -86,6 +86,10 @@ export type ListingRow = {
   owner_login: string
   owner_kind: OwnerKind
   default_repository_role: Role | null
+  description: string | null
+  homepage: string | null
+  topics: string
+  archived_at: number | null
   default_branch: string | null
   last_commit_at: number | null
   stats_at: number | null
@@ -100,6 +104,10 @@ export const toListing = (row: ListingRow): RepositoryListing => ({
   ownerKind: row.owner_kind,
   visibility: row.visibility,
   defaultRole: row.default_repository_role,
+  description: row.description,
+  homepage: row.homepage,
+  topics: JSON.parse(row.topics) as string[],
+  archived: row.archived_at !== null,
   defaultBranch: row.default_branch,
   lastCommitAt: row.last_commit_at,
   statsAt: row.stats_at,

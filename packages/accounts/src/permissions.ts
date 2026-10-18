@@ -12,7 +12,13 @@ export type RepositorySubject = {
   readonly ownerKind: OwnerKind
   readonly visibility: Visibility
   readonly defaultRole: Role | null
+  readonly description: string | null
+  readonly homepage: string | null
+  readonly topics: readonly string[]
+  readonly archived: boolean
 }
+
+export const archivedBlocks = (repository: Pick<RepositorySubject, 'archived'>, required: Role): boolean => repository.archived && required !== 'read' && required !== 'admin'
 
 export type OrganizationRole = 'member' | 'owner'
 

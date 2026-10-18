@@ -4,10 +4,12 @@ import AdminJobs from '../../components/AdminJobs.astro'
 import AdminStorage from '../../components/AdminStorage.astro'
 import AdminUpdates from '../../components/AdminUpdates.astro'
 import Icon from '../../components/Icon.astro'
+import BackupPanel from '../../components/BackupPanel.astro'
 import NotFound from '../../components/NotFound.astro'
 import Layout from '../../layouts/Layout.astro'
 import type { AdminOverview } from '../../admin/operations.ts'
 import type { MirrorOverviewEntry } from '../../app.ts'
+import type { BackupStatus } from '../../backup.ts'
 import { type AdminOutcome, handleAdminPost, mirrorHealth } from '../../ui/admin.ts'
 import { relativeTime } from '../../ui/format.ts'
 import { repoUrl } from '../../ui/repository.ts'
@@ -22,10 +24,12 @@ if (Astro.request.method === 'POST') {
 let view: InstanceView | null = null
 let mirrors: MirrorOverviewEntry[] = []
 let overview: AdminOverview | null = null
+let backup: BackupStatus | null = null
 try {
   view = await forge.instance.view(session.principal)
   mirrors = await forge.instance.mirrors(session.principal)
   overview = await forge.instance.overview(session.principal)
+  backup = await forge.instance.backup.status(session.principal)
 } catch (error) {
   if (!(error instanceof InstanceAdministrationError)) throw error
 }
@@ -100,6 +104,16 @@ const ago = (iso: string | undefined) => (iso ? relativeTime(Math.floor(Date.par
             <button class="btn btn-sm">Trust</button>
           </form>
         </section>
+        <section aria-labelledby="rename-account">
+          <h2 id="rename-account" class="text-xl font-semibold mb-2">Rename an account</h2>
+          <form method="post" class="flex flex-wrap items-end gap-2">
+            <input type="hidden" name="csrf" value={session.csrf} />
+            <input type="hidden" name="action" value="rename-account" />
+            <label class="flex flex-col gap-1 text-sm">Account<input name="from" class="input input-sm font-mono" required /></label>
+            <label class="flex flex-col gap-1 text-sm">New name<input name="login" class="input input-sm font-mono" required /></label>
+            <button class="btn btn-sm">Rename</button>
+          </form>
+        </section>
       </div>
       <section class="panel" aria-labelledby="mirrors">
         <h2 id="mirrors" class="panel-title">Mirrors</h2>
@@ -129,6 +143,7 @@ const ago = (iso: string | undefined) => (iso ? relativeTime(Math.floor(Date.par
           </div>
         )}
       </section>
+      {backup && <BackupPanel status={backup} csrf={session.csrf} />}
     </Layout>
   )
 }

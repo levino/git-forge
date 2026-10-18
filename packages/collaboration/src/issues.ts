@@ -1,5 +1,5 @@
 import { type Database, first, type Principal, resolveAccess, sql, type Statement, atLeast } from '@git-forge/accounts'
-import { actorColumns, loadUsers, type UserDirectory, type UserSummary } from './actors.ts'
+import { actorColumns, externalUser, loadUsers, type UserDirectory, type UserSummary } from './actors.ts'
 import {
   type ActorRef,
   can,
@@ -243,6 +243,11 @@ export const hydrateIssues = async (db: Database, rows: readonly IssueRow[]): Pr
     (marks) => `SELECT issue_id, user_id FROM issue_assignees WHERE issue_id IN (${marks}) ORDER BY created_at, rowid`,
     ids,
   )
+  const external = await allIn<{ node_id: string; assignees: string }>(
+    db,
+    (marks) => `SELECT node_id, assignees FROM imported_items WHERE node_id IN (${marks}) AND assignees != '[]'`,
+    rows.map((row) => row.node_id),
+  )
   const milestoneIds = rows.map((row) => row.milestone_id).filter((id): id is number => id !== null)
   const milestoneRows = await allIn<MilestoneRow>(db, (marks) => `SELECT * FROM milestones WHERE id IN (${marks})`, milestoneIds)
   const users = await loadUsers(db, [
@@ -268,7 +273,10 @@ export const hydrateIssues = async (db: Database, rows: readonly IssueRow[]): Pr
     locked: row.locked === 1,
     lockReason: row.lock_reason,
     labels: labels.filter((label) => label.issue_id === row.id).map(toLabel),
-    assignees: assignees.filter((entry) => entry.issue_id === row.id).map((entry) => users({ kind: 'user', id: entry.user_id })),
+    assignees: [
+      ...assignees.filter((entry) => entry.issue_id === row.id).map((entry) => users({ kind: 'user', id: entry.user_id })),
+      ...(JSON.parse(external.find((entry) => entry.node_id === row.node_id)?.assignees ?? '[]') as string[]).map(externalUser),
+    ],
     milestone: milestones.find((milestone) => milestone.id === row.milestone_id) ?? null,
     comments: row.comment_count,
     createdAt: row.created_at,

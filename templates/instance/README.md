@@ -114,6 +114,31 @@ binding = "CDN_BUCKET"
 bucket_name = "git-forge-cdn"
 ```
 
+### Backups
+
+Add a second bucket to `wrangler.toml`; the next deploy creates it:
+
+```toml
+[[r2_buckets]]
+binding = "BACKUP"
+bucket_name = "git-forge-backup"
+```
+
+Every cron run then copies a database dump and every repository object into
+it, verified by SHA-256, in small queued steps. Status, lag, size, errors,
+"Run now" and "Verify a sample" are under **Backup** on `/-/admin`
+(`GET|POST /api/admin/backup`, `POST /api/admin/backup/verify`).
+
+Lock it so nothing can delete or overwrite a backup, not even this Worker:
+in the dashboard, **R2 → git-forge-backup → Settings → Bucket lock rules →
+Add rule**, all objects, retention e.g. 90 days. The backup only writes new
+keys, so it works with the lock.
+
+Restore into a new instance: see
+[design §19](https://github.com/levino/git-forge/blob/main/docs/design.md#19-backups)
+(`git-forge-node restore` and `restore-sql` with R2's S3 API, then
+`npx wrangler@4 d1 execute DB --remote --file restore.sql`).
+
 ## First admin
 
 Open `https://<your-instance>/-/setup` (the home page links to it while the

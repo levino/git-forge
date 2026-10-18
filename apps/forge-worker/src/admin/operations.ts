@@ -291,9 +291,9 @@ export const createAdminOperations = (options: AdminOperationsOptions) => {
 
     recountUsage: async (principal: Principal): Promise<number> => {
       await administrator(principal)
-      const repositories = await store.listRepositories()
-      for (const subject of repositories) await options.enqueue({ kind: 'usage-scan', repository: `${subject.owner}/${subject.name}` } satisfies UsageScanJob)
-      return repositories.length
+      const paths = await options.meter.paths()
+      for (const repository of paths) await options.enqueue({ kind: 'usage-scan', repository } satisfies UsageScanJob)
+      return paths.length
     },
   }
 }

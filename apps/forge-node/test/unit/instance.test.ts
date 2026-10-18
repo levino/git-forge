@@ -58,6 +58,37 @@ describe('node instance', () => {
     }
   })
 
+  it('backs up to BACKUP_STORAGE on the schedule and restores a fresh instance with the restore command', async () => {
+    const backup = { BACKUP_STORAGE: 'fs', BACKUP_STORAGE_DIR: fresh() }
+    const DATA_DIR = fresh()
+    await migrate({ DATA_DIR })
+    const instance = await createInstance({ DATA_DIR, BOOTSTRAP_TOKEN: 'secret', ...backup }, { log: () => undefined })
+    let token = ''
+    try {
+      const response = await instance.forge.fetch(new Request('http://forge.test/api/bootstrap', { method: 'POST', headers: { Authorization: 'Bearer secret' }, body: JSON.stringify({ login: 'pi' }) }))
+      token = ((await response.json()) as { token: string }).token
+      await instance.forge.fetch(new Request('http://forge.test/api/repos', { method: 'POST', headers: { Authorization: `Bearer ${token}` }, body: JSON.stringify({ owner: 'pi', name: 'saved' }) }))
+      await instance.forge.scheduled()
+      await instance.jobs.idle()
+      expect(await main(['backup-verify', '50'], { DATA_DIR, ...backup }, () => undefined)).toBe(0)
+    } finally {
+      await instance.close()
+    }
+    const RESTORED = fresh()
+    const events: Record<string, unknown>[] = []
+    expect(await main(['restore'], { DATA_DIR: RESTORED, ...backup }, (event) => void events.push(event))).toBe(0)
+    expect(events[0]).toMatchObject({ event: 'restored', migrated: [] })
+    const restored = await createInstance({ DATA_DIR: RESTORED }, { log: () => undefined })
+    try {
+      expect(await restored.storage.head('repos/pi/saved/git/HEAD')).not.toBeNull()
+      const user = await restored.forge.fetch(new Request('http://forge.test/api/user', { headers: { Authorization: `Bearer ${token}` } }))
+      expect(await user.json()).toMatchObject({ login: 'pi', admin: true })
+    } finally {
+      await restored.close()
+    }
+    await expect(main(['restore'], { DATA_DIR: RESTORED, ...backup }, () => undefined)).rejects.toThrow('empty database')
+  })
+
   it('sends email through SMTP when EMAIL_PROVIDER=smtp', () => {
     expect(emailSender(parseNodeConfig({ EMAIL_PROVIDER: 'smtp', EMAIL_FROM: 'forge@example.org', SMTP_HOST: 'mail.example.org' }).email)).toBeDefined()
     expect(emailSender(parseNodeConfig({ EMAIL_PROVIDER: 'console', EMAIL_FROM: 'forge@example.org' }).email)).toBeDefined()

@@ -13,6 +13,10 @@ export const GHOST: UserSummary = { kind: 'user', id: null, login: 'ghost', name
 
 export const SYSTEM_USER: UserSummary = { kind: 'system', id: null, login: 'git-forge', name: 'git-forge', email: null }
 
+export const EXTERNAL_PREFIX = 'github:'
+
+export const externalUser = (login: string): UserSummary => ({ kind: 'user', id: null, login, name: null, email: null })
+
 export type ActorKey = { readonly kind: string | null; readonly id: string | null }
 
 const key = (actor: ActorKey): string => `${actor.kind}:${actor.id}`
@@ -37,6 +41,7 @@ export const loadUsers = async (db: Database, actors: readonly (ActorKey | null 
   }
   return (actor) => {
     if (!actor || actor.id === null) return actor?.kind === 'system' ? SYSTEM_USER : GHOST
+    if (actor.id.startsWith(EXTERNAL_PREFIX)) return externalUser(actor.id.slice(EXTERNAL_PREFIX.length))
     return found.get(key(actor)) ?? GHOST
   }
 }

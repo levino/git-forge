@@ -9,7 +9,7 @@ import { settingsAction, type SettingsOutcome } from '../../../ui/settings.ts'
 
 const { forge, principal } = Astro.locals
 let session = Astro.locals.session
-const repo = await openRepository(forge, principal, Astro.params.owner!, Astro.params.repo!)
+let repo = await openRepository(forge, principal, Astro.params.owner!, Astro.params.repo!)
 if (repo.kind === 'ok' && !session) return Astro.redirect(`/login?return_to=${encodeURIComponent(Astro.url.pathname)}`)
 let outcome: SettingsOutcome | null = null
 if (repo.kind === 'ok' && Astro.request.method === 'POST') {
@@ -19,14 +19,18 @@ if (repo.kind === 'ok' && Astro.request.method === 'POST') {
     session = verified
     outcome = await settingsAction(forge, verified, repo.name, await Astro.request.formData(), forge.issuer(Astro.request))
   }
+  if (outcome.kind === 'moved') return Astro.redirect(outcome.location, 303)
   if (outcome.kind === 'error') Astro.response.status = outcome.status
+  else repo = await openRepository(forge, principal, Astro.params.owner!, Astro.params.repo!)
 }
 let data: RepositorySettings | null = null
 let rules: Awaited<ReturnType<typeof forge.settings.branchProtection>> = []
+let owners: string[] = []
 if (repo.kind === 'ok' && session) {
   try {
     data = await forge.settings.read(session.principal, repo.name)
     rules = await forge.settings.branchProtection(session.principal, repo.name)
+    owners = await forge.repositories.owners(session.principal)
   } catch (error) {
     if (!(error instanceof ForgeError)) throw error
   }
@@ -42,6 +46,19 @@ Astro.response.headers.set('Cache-Control', 'no-store')
       <RepoHeader repo={repo} tab="settings" />
       <div class="max-w-4xl">
       {outcome && <div role={outcome.kind === 'error' ? 'alert' : 'status'} class:list={['alert mb-6', outcome.kind === 'error' ? 'alert-error' : 'alert-success']}>{outcome.message}</div>}
+
+      <section class="panel" aria-labelledby="general">
+        <h2 id="general" class="panel-title">General</h2>
+        <form method="post" class="flex flex-col gap-2 max-w-xl" aria-label="Repository details">
+          <input type="hidden" name="csrf" value={session.csrf} />
+          <input type="hidden" name="action" value="general" />
+          <label class="field">Name<input name="name" class="input input-sm font-mono" required value={data.repository.name} /></label>
+          <label class="field">Description<input name="description" class="input input-sm" maxlength="350" value={data.repository.description ?? ''} /></label>
+          <label class="field">Website<input name="homepage" type="url" class="input input-sm" value={data.repository.homepage ?? ''} /></label>
+          <label class="field">Topics<input name="topics" class="input input-sm" placeholder="git, forge" value={data.repository.topics.join(', ')} /></label>
+          <button class="btn btn-sm self-start">Save</button>
+        </form>
+      </section>
 
       <section class="panel" aria-labelledby="visibility">
         <h2 id="visibility" class="panel-title">Visibility</h2>
@@ -230,6 +247,27 @@ Astro.response.headers.set('Cache-Control', 'no-store')
             <input name="issuer" type="url" class="input input-sm font-mono" required placeholder="https://mirror.example" />
           </label>
           <button class="btn btn-sm">Grant read access</button>
+        </form>
+      </section>
+
+      <section class="panel border-error" aria-labelledby="danger">
+        <h2 id="danger" class="panel-title">Danger zone</h2>
+        <form method="post" class="flex flex-wrap items-end gap-2 mb-4" aria-label="Transfer">
+          <input type="hidden" name="csrf" value={session.csrf} />
+          <input type="hidden" name="action" value="transfer" />
+          <label class="field">New owner<select name="owner" class="select select-sm">{owners.filter((login) => login.toLowerCase() !== data!.repository.owner.toLowerCase()).map((login) => <option>{login}</option>)}</select></label>
+          <label class="field">Type {data.repository.name} to confirm<input name="confirm" class="input input-sm font-mono" required autocomplete="off" /></label>
+          <button class="btn btn-sm btn-warning btn-outline">Transfer</button>
+        </form>
+        <form method="post" class="mb-4">
+          <input type="hidden" name="csrf" value={session.csrf} />
+          {data.repository.archived ? <button class="btn btn-sm" name="action" value="unarchive">Unarchive</button> : <button class="btn btn-sm btn-warning btn-outline" name="action" value="archive">Archive (read-only)</button>}
+        </form>
+        <form method="post" class="flex flex-wrap items-end gap-2" aria-label="Delete">
+          <input type="hidden" name="csrf" value={session.csrf} />
+          <input type="hidden" name="action" value="delete" />
+          <label class="field">Type {data.repository.owner}/{data.repository.name} to confirm<input name="confirm" class="input input-sm font-mono" required autocomplete="off" /></label>
+          <button class="btn btn-sm btn-error">Delete repository</button>
         </form>
       </section>
       </div>

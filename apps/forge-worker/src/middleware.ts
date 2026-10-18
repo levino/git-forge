@@ -27,5 +27,7 @@ export const onRequest = defineMiddleware(async (context, next) => {
   const response = await next()
   const execution = context.locals.cfContext
   await forge.services.observe(execution ? (promise) => execution.waitUntil(promise) : undefined)
-  return response
+  if (response.status !== 404) return response
+  const location = await forge.services.redirect(context.request, context.locals.principal)
+  return location ? new Response(null, { status: context.request.method === 'GET' ? 301 : 307, headers: { Location: location } }) : response
 })

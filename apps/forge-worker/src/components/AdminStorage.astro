@@ -31,7 +31,7 @@ const lfs = usage.reduce((sum, entry) => sum + entry.lfsBytes, 0)
           <tbody>
             {usage.map((entry) => (
               <tr>
-                <td><a class="link link-hover" href={`/${entry.repository}`}>{entry.repository}</a></td>
+                <td>{entry.repository ? <a class="link link-hover" href={`/${entry.repository}`}>{entry.repository}</a> : <span class="text-base-content/60">{entry.path} (deleted)</span>}</td>
                 <td class="text-right whitespace-nowrap">{formatBytes(entry.gitBytes)}</td>
                 <td class="text-right whitespace-nowrap">{formatBytes(entry.lfsBytes)}</td>
                 <td class="text-right whitespace-nowrap">{formatBytes(entry.gitBytes + entry.lfsBytes)}</td>

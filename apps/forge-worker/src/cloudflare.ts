@@ -11,6 +11,7 @@ import { captureLoginPage } from './ui/login-pages.ts'
 export type Env = ForgeVars & {
   readonly BUCKET: R2Bucket
   readonly CDN_BUCKET?: R2Bucket
+  readonly BACKUP?: R2Bucket
   readonly DB: D1Database
   readonly RUNNER?: DurableObjectNamespace
   readonly IMPORTS?: Queue<ImportJob>
@@ -59,6 +60,7 @@ export const forgeFor = (env: Env): Promise<Forge> => {
         ...(env.JOBS ? { jobs: new QueueJobs(env.JOBS) } : {}),
         ...(email ? { email } : {}),
         ...(signing ? { presigner: new S3Storage({ ...signing, region: 'auto', forcePathStyle: true }) } : {}),
+        ...(env.BACKUP ? { backup: new R2Storage(env.BACKUP) } : {}),
         ...(env.CDN_BUCKET ? { lfsPublisher: storagePublisher(new R2Storage(env.CDN_BUCKET), env.LFS_PUBLISH_PREFIX?.trim() ?? '') } : {}),
         ...(actions
           ? {
@@ -105,12 +107,14 @@ export const backgroundHandlers = {
     }
     const queue = env.IMPORTS
     if (!queue) throw new Error('IMPORTS queue binding is missing')
+    const instance = await forgeFor(env)
     for (const message of (batch as MessageBatch<ImportJob>).messages) {
       const jobs = env.JOBS ? new QueueJobs(env.JOBS) : null
       const state = await continueImport(message.body, {
-        storage: new R2Storage(env.BUCKET),
+        storage: instance.services.storage,
         digests: digestStreams,
         schedule: importScheduler(queue),
+        metadata: async (job, state) => (await forgeFor(env)).importMetadata(job, state),
         ...(jobs ? { scheduleLfs: (job) => jobs.enqueue(job) } : {}),
       })
       await (await forgeFor(env)).refreshRepository(message.body)

@@ -19,7 +19,7 @@ test('signs up with a passkey from an invite, manages tokens and signs out', asy
   await expect(page.getByRole('heading', { name: `Settings for ${login}` })).toBeVisible()
   await expect(page.getByRole('region', { name: 'Passkeys' }).getByRole('button', { name: /Remove passkey/ })).toHaveCount(1)
 
-  await page.getByLabel('Name').fill('laptop')
+  await page.getByLabel('Name', { exact: true }).fill('laptop')
   await page.getByRole('button', { name: 'Create token' }).click()
   const token = await page.getByLabel('Your new token').inputValue()
   expect(token).toMatch(/^gfp_/)

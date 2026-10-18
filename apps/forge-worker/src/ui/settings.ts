@@ -1,8 +1,14 @@
 import type { ForgeServices, UiSession } from '../app.ts'
 import { ForgeError } from '../app.ts'
 import type { RepositoryName } from '@git-forge/core'
+import { repoUrl } from './repository.ts'
 
-export type SettingsOutcome = { readonly kind: 'ok'; readonly message: string } | { readonly kind: 'error'; readonly status: number; readonly message: string }
+export type SettingsOutcome =
+  | { readonly kind: 'ok'; readonly message: string }
+  | { readonly kind: 'error'; readonly status: number; readonly message: string }
+  | { readonly kind: 'moved'; readonly location: string }
+
+export const topicList = (value: string): string[] => list(value.toLowerCase())
 
 const text = (form: FormData, name: string): string => String(form.get(name) ?? '').trim()
 
@@ -32,6 +38,24 @@ export const settingsAction = async (forge: ForgeServices, session: UiSession, r
   const settings = forge.settings
   try {
     switch (text(form, 'action')) {
+      case 'general': {
+        await settings.setMetadata(principal, repo, { description: text(form, 'description'), homepage: text(form, 'homepage'), topics: topicList(text(form, 'topics')) })
+        const name = text(form, 'name')
+        if (name === repo.name) return { kind: 'ok', message: 'Repository details saved.' }
+        return { kind: 'moved', location: repoUrl(await settings.move(principal, repo, { name }), 'settings') }
+      }
+      case 'transfer': {
+        if (text(form, 'confirm') !== repo.name) return { kind: 'error', status: 422, message: `Type ${repo.name} to confirm the transfer.` }
+        return { kind: 'moved', location: repoUrl(await settings.move(principal, repo, { owner: text(form, 'owner') }), 'settings') }
+      }
+      case 'archive':
+      case 'unarchive':
+        await settings.setArchived(principal, repo, text(form, 'action') === 'archive')
+        return { kind: 'ok', message: text(form, 'action') === 'archive' ? 'Repository archived; it is now read-only.' : 'Repository unarchived.' }
+      case 'delete':
+        if (text(form, 'confirm') !== `${repo.owner}/${repo.name}`) return { kind: 'error', status: 422, message: `Type ${repo.owner}/${repo.name} to confirm the deletion.` }
+        await settings.remove(principal, repo)
+        return { kind: 'moved', location: `/${encodeURIComponent(repo.owner)}` }
       case 'visibility':
         await settings.setVisibility(principal, repo, text(form, 'visibility'))
         return { kind: 'ok', message: 'Visibility changed.' }

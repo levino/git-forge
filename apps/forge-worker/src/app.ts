@@ -80,6 +80,9 @@ import {
   type InstanceAdministration,
   InstanceAdministrationError,
   isReservedLogin,
+  archivedBlocks,
+  LOGIN_PATTERN,
+  parseRepositoryMetadata,
   type LoginStore,
   type OidcProvider,
   sql,
@@ -107,6 +110,7 @@ import {
   createRepository,
   deepCheckMirror,
   detachMirror,
+  type CopyBudget,
   type DigestFactory,
   type EmailSender,
   type FetchFunction,
@@ -115,7 +119,10 @@ import {
   handleGitRequest,
   type JobQueue,
   importLfsObject,
+  type ImportJob,
   type ImportLfsJob,
+  type ImportMetadataResult,
+  javascriptDigests,
   type ImportScheduler,
   type ImportState,
   ImportRunningError,
@@ -152,6 +159,7 @@ import {
   type Storage,
   type SyncResult,
   withPresigner,
+  locatedStorage,
   ZERO_ID,
 } from '@git-forge/core'
 import {
@@ -197,6 +205,7 @@ import type { Location } from './admin/setup.ts'
 import { createUsageMeter, type UsageScanJob } from './admin/usage.ts'
 import { activityEvent } from './collaboration-events.ts'
 import { parseSearchRequest, repositoryJson, runSearch, type SearchRequest, searchResponseJson } from './search.ts'
+import { type GithubProgress, githubImportStep, githubRepository } from './github-import.ts'
 import { mirrorOverview, recordChecksums, signOverview } from './mirror-verification.ts'
 import type { ForgeSettings } from './config.ts'
 import {
@@ -209,6 +218,7 @@ import {
   runJob,
   syncAndNotify,
 } from './mirror-federation.ts'
+import { type BackupJob, type BackupStatus, backupStatus, backupStep, startBackup, verifyBackup } from './backup.ts'
 import { MirrorAuthError, type MirrorContext, runMirrorSync, type ScheduledMirrorRun, syncDueMirrors } from './mirrors.ts'
 import { receiveGitHubWebhook, setUpGitHubWebhook } from './github-mirrors.ts'
 import { createMirrorSecrets, MirrorSecretsUnavailableError } from './mirror-secrets.ts'
@@ -243,6 +253,8 @@ export type ForgeOptions = ForgeSettings & {
   readonly lfsPublisher?: LfsPublisher
   readonly version?: string
   readonly location?: (request: Request) => Promise<Location>
+  readonly backup?: Storage
+  readonly backupBudget?: CopyBudget
 }
 
 export type LfsPublishJob = { readonly kind: 'lfs-publish'; readonly owner: string; readonly name: string; readonly oids: readonly string[] | null }
@@ -262,7 +274,7 @@ export type GitHubMirrorJob = {
   readonly sealedToken?: SealedSecret
 }
 
-export type AppJob = ForgeJob | NotificationJob | PagesJob | LfsPublishJob | ImportLfsJob | GitHubMirrorJob | UsageScanJob
+export type AppJob = ForgeJob | NotificationJob | PagesJob | LfsPublishJob | ImportLfsJob | GitHubMirrorJob | BackupJob | UsageScanJob
 
 export const LFS_PUBLISH_BATCH = 100
 
@@ -297,15 +309,24 @@ export type ForgeServices = {
   readonly settings: RepositorySettingsOperations
   readonly organizations: OrganizationOperations
   readonly instance: InstanceOperations
+  readonly renameAccount: (principal: Principal, login: string, newLogin: string) => Promise<{ readonly id: string; readonly login: string }>
+  readonly redirect: (request: Request, principal: Principal) => Promise<string | null>
   readonly listRepositories: (principal: Principal, options: RepositoryListOptions) => Promise<Page<RepositoryListing>>
   readonly search: (principal: Principal, request: SearchRequest) => Promise<SearchResults>
 }
 
 export type MirrorOverviewEntry = { readonly repository: RepositoryName; readonly config: MirrorConfig; readonly status: MirrorStatus | null }
 
+export type BackupOperations = {
+  readonly status: (principal: Principal) => Promise<BackupStatus>
+  readonly run: (principal: Principal) => Promise<BackupStatus>
+  readonly verify: (principal: Principal, sample: number) => Promise<{ readonly checked: number; readonly failures: string[] }>
+}
+
 export type InstanceOperations = InstanceAdministration &
   AdminOperations & {
     readonly mirrors: (principal: Principal) => Promise<MirrorOverviewEntry[]>
+    readonly backup: BackupOperations
   }
 
 export type InboxOperations = {
@@ -336,6 +357,10 @@ export type RepositorySettingsOperations = {
   readonly branchProtection: (principal: Principal, repo: RepositoryName) => Promise<readonly { readonly rule: BranchProtectionRule; readonly names: NamedAllowances }[]>
   readonly setBranchProtection: (principal: Principal, repo: RepositoryName, pattern: string, body: Record<string, unknown>) => Promise<BranchProtectionRule>
   readonly deleteBranchProtection: (principal: Principal, repo: RepositoryName, pattern: string) => Promise<boolean>
+  readonly setMetadata: (principal: Principal, repo: RepositoryName, input: Record<string, unknown>) => Promise<void>
+  readonly setArchived: (principal: Principal, repo: RepositoryName, archived: boolean) => Promise<void>
+  readonly move: (principal: Principal, repo: RepositoryName, target: { readonly owner?: string; readonly name?: string }) => Promise<RepositoryName>
+  readonly remove: (principal: Principal, repo: RepositoryName) => Promise<void>
 }
 
 export class ForgeError extends Error {
@@ -377,6 +402,7 @@ export type NewImport = NewRepository & {
   readonly lfs?: boolean
   readonly lfsUrl?: string
   readonly commitsPerStep?: number
+  readonly metadata?: boolean
 }
 
 export type StartedImport = RepositoryName & { readonly state: ImportState }
@@ -437,6 +463,7 @@ export type Forge = {
   readonly actionsTick: () => Promise<ActionsTick | null>
   readonly runJob: (job: AppJob, attempt?: number) => Promise<void>
   readonly refreshRepository: (repo: RepositoryName) => Promise<void>
+  readonly importMetadata: (job: ImportJob, state: ImportState) => Promise<ImportMetadataResult>
   readonly notifications: Notifications
 }
 
@@ -490,6 +517,17 @@ const DECISION_STATUS: Record<Exclude<Decision, 'allow'>, [number, string]> = {
 
 const BRANCH = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$/
 
+const REPOSITORY_URL = /^(\/api(?:\/v3|\/uploads)?\/repos)?\/([^/]+)\/([^/]+?)(\.git)?(\/.*)?$/
+
+const unprocessable = <T>(parse: () => T): T => {
+  try {
+    return parse()
+  } catch (error) {
+    if (error instanceof AccountsError) throw new HttpError(422, error.message)
+    throw error
+  }
+}
+
 export const basicAuthorization = (username: string, password: string): string => {
   const bytes = new TextEncoder().encode(`${username}:${password}`)
   let binary = ''
@@ -503,10 +541,17 @@ export const createForge = (options: ForgeOptions): Forge => {
   const now = options.now ?? (() => new Date())
   const nowMs = () => now().getTime()
   const meter = createUsageMeter(options.db, nowMs)
-  const storage = meter.storage(options.storage)
+  const metered = meter.storage(options.storage)
   const db = meter.database(options.db)
-  const presigningStorage = options.presigner ? withPresigner(storage, options.presigner) : storage
   const store: AccountsStore = createAccountsStore(db, { now: () => now().getTime() })
+  const located = (raw: Storage): Storage => locatedStorage(raw, store.locateRepository, () => now().getTime())
+  const storage = located(metered)
+  const presigningStorage = options.presigner ? located(withPresigner(metered, options.presigner)) : storage
+  const storedObject = async (key: string, size: number): Promise<void> => {
+    const [, owner, name] = /^repos\/([^/]+)\/([^/]+)\//.exec(key) ?? []
+    const path = owner && name ? (await store.locateRepository(owner, name))?.path : null
+    await meter.record([{ key: path ? `repos/${path}/${key.split('/').slice(3).join('/')}` : key, size }])
+  }
   const verification = createMirrorVerificationStore(db, { now: () => now().getTime() })
   const mirrorSecrets = createMirrorSecrets(db, options.secretsKey ?? options.actions?.secretsKey, () => now().getTime())
   const logins = createLoginStore(db, { now: () => now().getTime() })
@@ -600,7 +645,7 @@ export const createForge = (options: ForgeOptions): Forge => {
       const ceiling = principal.limits?.ceiling ?? 'admin'
       const scoped = principal.limits?.repositoryIds ?? null
       if (scoped === null || scoped.includes(check.repository.id)) {
-        return { decision: atLeast(ceiling, required) ? 'allow' : 'forbidden', access: ceiling, repository: check.repository }
+        return { decision: atLeast(ceiling, required) && !archivedBlocks(check.repository, required) ? 'allow' : 'forbidden', access: ceiling, repository: check.repository }
       }
     }
     return { decision: check.decision, access: check.access, repository: check.repository }
@@ -906,6 +951,36 @@ export const createForge = (options: ForgeOptions): Forge => {
       }
       return overview
     },
+    backup: {
+      status: async (principal) => {
+        await instanceAdministration.view(principal)
+        return backupStatus(db, options.backup !== undefined, now())
+      },
+      run: async (principal) => {
+        await instanceAdministration.view(principal)
+        if (!options.backup) throw new HttpError(409, 'no backup target is configured (BACKUP bucket binding or BACKUP_STORAGE)')
+        await startBackup(db, now())
+        await scheduleBackup()
+        return backupStatus(db, true, now())
+      },
+      verify: async (principal, sample) => {
+        await instanceAdministration.view(principal)
+        if (!options.backup) throw new HttpError(409, 'no backup target is configured (BACKUP bucket binding or BACKUP_STORAGE)')
+        return verifyBackup(db, options.backup, options.digests ?? javascriptDigests, sample)
+      },
+    },
+  }
+
+  const backupContext = (target: Storage) => ({ db, source: storage, target, digests: options.digests ?? javascriptDigests, now, ...(options.backupBudget ? { budget: options.backupBudget } : {}) })
+
+  const scheduleBackup = async (): Promise<void> => {
+    if (!options.backup) return
+    if (options.jobs) return options.jobs.enqueue({ kind: 'backup' })
+    while (await backupStep(backupContext(options.backup))) {}
+  }
+
+  const runBackupJob = async (): Promise<void> => {
+    if (options.backup && (await backupStep(backupContext(options.backup)))) await scheduleBackup()
   }
 
   const trustInstance = async (request: Request): Promise<Response> => {
@@ -968,6 +1043,18 @@ export const createForge = (options: ForgeOptions): Forge => {
   }
 
   const adminRecountRoute = async (request: Request): Promise<Response> => json(202, { repositories: await instance.recountUsage(await principalOf(request)) })
+
+  const adminBackupRoute = async (request: Request): Promise<Response> => json(200, await instance.backup.status(await principalOf(request)))
+
+  const runBackupRoute = async (request: Request): Promise<Response> => json(202, await instance.backup.run(await principalOf(request)))
+
+  const verifyBackupRoute = async (request: Request): Promise<Response> => {
+    const principal = await principalOf(request)
+    const sample = (await readBody(request)).sample ?? 20
+    if (typeof sample !== 'number' || !Number.isSafeInteger(sample) || sample < 1 || sample > 1000) throw new HttpError(400, 'sample must be an integer between 1 and 1000')
+    const result = await instance.backup.verify(principal, sample)
+    return json(result.failures.length === 0 ? 200 : 409, result)
+  }
 
   const organizations = createOrganizationOperations(store)
 
@@ -1060,14 +1147,17 @@ export const createForge = (options: ForgeOptions): Forge => {
     if (visibility !== 'private' && visibility !== 'public') throw new HttpError(400, 'visibility must be private or public')
     if (!BRANCH.test(defaultBranch) || defaultBranch.includes('..')) throw new HttpError(400, 'invalid defaultBranch')
     const account = await creatableOwner(actor, owner)
-    if (await store.findRepository(owner, name)) throw new HttpError(409, `${owner}/${name} already exists`)
+    const block = await store.repositoryNameBlock(account.id, name)
+    if (block) throw new HttpError(409, block)
+    const fresh = await store.storagePathClaimed(`${account.login}/${name}`)
+    const path = { owner: account.login, name: fresh ? `${name.slice(0, 90)}.${crypto.randomUUID().slice(0, 8)}` : name }
     try {
-      await createRepository(storage, { owner: account.login, name }, defaultBranch)
+      await createRepository(options.storage, path, defaultBranch)
     } catch (error) {
-      if (!(error instanceof RepositoryExistsError)) throw error
+      if (!(error instanceof RepositoryExistsError) || fresh) throw error
     }
     try {
-      await store.createRepository({ ownerId: account.id, name, visibility }, { kind: 'user', id: actor.id })
+      await store.createRepository({ ownerId: account.id, name, visibility, storagePath: `${path.owner}/${path.name}` }, { kind: 'user', id: actor.id })
     } catch (error) {
       if (await store.findRepository(owner, name)) throw new HttpError(409, `${owner}/${name} already exists`)
       throw error
@@ -1086,6 +1176,7 @@ export const createForge = (options: ForgeOptions): Forge => {
     if (!options.scheduleImport) throw new HttpError(503, 'imports need a queue (IMPORTS binding)')
     const { url, lfsUrl, token, commitsPerStep } = input
     if (!isValidImportUrl(url) || (lfsUrl !== undefined && !isValidImportUrl(lfsUrl))) throw new HttpError(400, 'url and lfsUrl must be http(s) URLs without credentials; pass a token instead')
+    if (input.metadata && !githubRepository(url)) throw new HttpError(400, 'importing issues, pull requests and releases needs a GitHub repository URL (https://github.com/owner/repo)')
     let target: RepositoryName
     if (await store.findRepository(input.owner, input.name)) {
       const repository = await repositoryAdmin(actor, input)
@@ -1101,12 +1192,13 @@ export const createForge = (options: ForgeOptions): Forge => {
         ...(input.lfs !== undefined ? { lfs: input.lfs } : {}),
         ...(lfsUrl ? { lfsUrl } : {}),
         ...(commitsPerStep ? { commitsPerStep } : {}),
+        ...(input.metadata ? { metadata: true } : {}),
       })
     } catch (error) {
       if (error instanceof ImportRunningError) throw new HttpError(409, error.message)
       throw new HttpError(400, (error as Error).message)
     }
-    await options.scheduleImport({ ...target, ...(token ? { authorization: basicAuthorization(input.username ?? 'git', token) } : {}) }, 0)
+    await options.scheduleImport({ ...target, ...(token ? { authorization: basicAuthorization(input.username ?? 'git', token) } : {}), ...(input.metadata ? { actor: actor.id } : {}) }, 0)
     return { ...target, state }
   }
 
@@ -1126,6 +1218,7 @@ export const createForge = (options: ForgeOptions): Forge => {
     const commitsPerStep = optionalCount(body, 'commitsPerStep')
     if (body.lfs !== undefined && typeof body.lfs !== 'boolean') throw new HttpError(400, 'lfs must be a boolean')
     const actor = await requireManager(request)
+    if (body.metadata !== undefined && typeof body.metadata !== 'boolean') throw new HttpError(400, 'metadata must be a boolean')
     const started = await importRepositoryFor(actor, {
       ...newRepository(body, repo.owner, repo.name),
       url,
@@ -1134,6 +1227,7 @@ export const createForge = (options: ForgeOptions): Forge => {
       ...(lfsUrl !== undefined ? { lfsUrl } : {}),
       ...(commitsPerStep !== undefined ? { commitsPerStep } : {}),
       ...(body.lfs !== undefined ? { lfs: body.lfs as boolean } : {}),
+      ...(body.metadata === true ? { metadata: true } : {}),
     })
     const statusUrl = new URL(`/api/repos/${started.owner}/${started.name}/import`, request.url).toString()
     const cloneUrl = new URL(`/${started.owner}/${started.name}.git`, request.url).toString()
@@ -1144,6 +1238,25 @@ export const createForge = (options: ForgeOptions): Forge => {
     const state = await importStatusFor(await requireManager(request), repoName(params))
     if (!state) throw new HttpError(404, 'no import for this repository')
     return json(200, state)
+  }
+
+  const importMetadata = async (job: ImportJob, state: ImportState): Promise<ImportMetadataResult> => {
+    const user = job.actor ? await store.findUserById(job.actor) : null
+    if (!user) throw new Error('the user who started the import no longer exists')
+    const principal: UserPrincipal = { kind: 'user', id: user.id, login: user.login, limits: null, tokenId: null }
+    const scope = await openCollaborationRepository({ db, storage, accounts: store, now: () => now().getTime() }, principal, job.owner, job.name)
+    const basic = job.authorization?.startsWith('Basic ') ? atob(job.authorization.slice(6)) : ''
+    return githubImportStep(
+      {
+        scope,
+        releases: releaseStore,
+        url: state.url,
+        token: basic.slice(basic.indexOf(':') + 1) || null,
+        ...(options.fetch ? { fetch: options.fetch } : {}),
+        ...(options.digests ? { digests: options.digests } : {}),
+      },
+      (state.metadata?.progress as GithubProgress | null | undefined) ?? null,
+    )
   }
 
   const settings: RepositorySettingsOperations = {
@@ -1249,16 +1362,125 @@ export const createForge = (options: ForgeOptions): Forge => {
       const { repository } = await adminOf(principal, repo)
       return store.deleteBranchProtection(repository.id, pattern, protectionAuditActor(principal))
     },
+    setMetadata: async (principal, repo, input) => {
+      const admin = await adminOf(principal, repo)
+      await store.setRepositoryMetadata(admin.repository.id, unprocessable(() => parseRepositoryMetadata(input)), { kind: 'user', id: admin.principal.id })
+    },
+    setArchived: async (principal, repo, archived) => {
+      const admin = await adminOf(principal, repo)
+      await store.setRepositoryArchived(admin.repository.id, archived, { kind: 'user', id: admin.principal.id })
+    },
+    move: async (principal, repo, target) => {
+      const { principal: actor, repository } = await adminOf(principal, repo)
+      const name = target.name ?? repository.name
+      if (!isValidName(name)) throw new HttpError(422, 'name must match [A-Za-z0-9][A-Za-z0-9._-]* and must not end in .git')
+      const account = await store.findAccount(target.owner ?? repository.owner)
+      if (!account) throw new HttpError(404, `no account ${target.owner}`)
+      if (account.id !== repository.ownerId && !(await repositoryOwners(actor)).some((login) => login.toLowerCase() === account.login.toLowerCase())) {
+        throw new HttpError(403, `you cannot move repositories to ${account.login}`)
+      }
+      const block = await store.repositoryNameBlock(account.id, name, repository.id)
+      if (block) throw new HttpError(409, block)
+      await store.moveRepository(repository, { ownerId: account.id, owner: account.login, name }, { kind: 'user', id: actor.id })
+      return { owner: account.login, name }
+    },
+    remove: async (principal, repo) => {
+      const admin = await adminOf(principal, repo)
+      await store.deleteRepository(admin.repository.id, { kind: 'user', id: admin.principal.id })
+    },
   }
 
-  const updateRepository = async (request: Request, params: string[]): Promise<Response> => {
+  const updateRepositoryWith = async (principal: Principal, repo: RepositoryName, body: Body): Promise<RepositoryName> => {
+    await adminOf(principal, repo)
+    const metadata = Object.fromEntries(['description', 'homepage', 'topics'].filter((key) => key in body).map((key) => [key, body[key]]))
+    if (Object.keys(metadata).length > 0) await settings.setMetadata(principal, repo, metadata)
+    if (body.archived !== undefined) {
+      if (typeof body.archived !== 'boolean') throw new HttpError(400, 'archived must be a boolean')
+      await settings.setArchived(principal, repo, body.archived)
+    }
+    const visibility = typeof body.private === 'boolean' ? (body.private ? 'private' : 'public') : optionalString(body, 'visibility')
+    if (visibility !== undefined) await settings.setVisibility(principal, repo, visibility)
+    const name = optionalString(body, 'name')
+    return name !== undefined && name !== repo.name ? settings.move(principal, repo, { name }) : repo
+  }
+
+  const repositoryState = async (repo: RepositoryName) => {
+    const repository = await store.findRepository(repo.owner, repo.name)
+    if (!repository) throw new HttpError(404, 'repository not found')
+    const { owner, name, visibility, description, homepage, topics, archived } = repository
+    return { owner, name, visibility, description, homepage, topics, archived }
+  }
+
+  const renameAccount = async (principal: Principal, login: string, newLogin: string): Promise<{ readonly id: string; readonly login: string }> => {
+    if (principal.kind !== 'user') throw new HttpError(401, 'authentication required', { 'WWW-Authenticate': 'Bearer' })
+    if (!canManage(principal)) throw new HttpError(403, 'this needs a personal access token with the repo:admin scope')
+    const account = await store.findAccount(login)
+    if (!account) throw new HttpError(404, 'account not found')
+    const allowed = account.kind === 'user' ? account.id === principal.id : await store.isOrganizationOwner(account.id, principal.id)
+    if (!allowed && !(await store.isInstanceAdmin(principal.id))) throw new HttpError(403, `you cannot rename ${account.login}`)
+    if (!LOGIN_PATTERN.test(newLogin)) throw new HttpError(422, 'a login has letters, digits and single hyphens (at most 39 characters)')
+    if (isReservedLogin(newLogin)) throw new HttpError(422, `${newLogin} is reserved`)
+    const taken = await store.findAccount(newLogin)
+    if (taken && taken.id !== account.id) throw new HttpError(409, `${newLogin} already exists`)
+    if (await store.loginMoveBlock(newLogin)) throw new HttpError(409, `${newLogin} was renamed a moment ago; try again in a few minutes`)
+    await store.renameAccount(account.id, newLogin, { kind: 'user', id: principal.id })
+    return { id: account.id, login: newLogin }
+  }
+
+  const redirect = async (request: Request, principal: Principal): Promise<string | null> => {
+    const url = new URL(request.url)
+    const repo = REPOSITORY_URL.exec(url.pathname)
+    if (repo && isValidName(repo[2]!) && isValidName(repo[3]!)) {
+      const target = await store.repositoryRedirect(repo[2]!, repo[3]!)
+      if (target && (await repositoryAccess(principal, target, 'read')).decision === 'allow') {
+        return new URL(`${repo[1] ?? ''}/${target.owner}/${target.name}${repo[4] ?? ''}${repo[5] ?? ''}${url.search}`, url).toString()
+      }
+    }
+    const account = /^\/([^/]+)$/.exec(url.pathname)
+    const login = account && isValidName(account[1]!) ? await store.accountRedirect(account[1]!) : null
+    return login ? new URL(`/${login}${url.search}`, url).toString() : null
+  }
+
+  const updateRepository = async (request: Request, params: string[]): Promise<Response> =>
+    json(200, await repositoryState(await updateRepositoryWith(await principalOf(request), repoName(params), await readBody(request))))
+
+  const transferRepository = async (request: Request, params: string[]): Promise<Response> => {
     const principal = await principalOf(request)
-    const repo = repoName(params)
     const body = await readBody(request)
-    const visibility = optionalString(body, 'visibility')
-    if (visibility !== undefined) return json(200, await settings.setVisibility(principal, repo, visibility))
-    const { repository } = await adminOf(principal, repo)
-    return json(200, { owner: repository.owner, name: repository.name, visibility: repository.visibility })
+    const name = optionalString(body, 'name')
+    return json(200, await repositoryState(await settings.move(principal, repoName(params), { owner: requiredString(body, 'owner'), ...(name ? { name } : {}) })))
+  }
+
+  const deleteRepository = async (request: Request, params: string[]): Promise<Response> => {
+    await settings.remove(await principalOf(request), repoName(params))
+    return new Response(null, { status: 204 })
+  }
+
+  const renameAccountRoute = async (request: Request, params: string[]): Promise<Response> =>
+    json(200, await renameAccount(await principalOf(request), params[0]!, requiredString(await readBody(request), 'login')))
+
+  const v3Repository = async (request: Request, repo: RepositoryName, status = 200): Promise<Response> => {
+    const headers = Object.fromEntries(['authorization', 'cookie'].flatMap((name) => (request.headers.has(name) ? [[name, request.headers.get(name)!]] : [])))
+    const response = await handle(new Request(new URL(`/api/v3/repos/${repo.owner}/${repo.name}`, request.url), { headers }))
+    return new Response(response.body, { status: response.ok ? status : response.status, headers: response.headers })
+  }
+
+  const v3Update = async (request: Request, params: string[]): Promise<Response> =>
+    v3Repository(request, await updateRepositoryWith(await principalOf(request), repoName(params), await readBody(request)))
+
+  const v3Transfer = async (request: Request, params: string[]): Promise<Response> => {
+    const body = await readBody(request)
+    const name = optionalString(body, 'new_name')
+    return v3Repository(request, await settings.move(await principalOf(request), repoName(params), { owner: requiredString(body, 'new_owner'), ...(name ? { name } : {}) }), 202)
+  }
+
+  const v3Topics = async (request: Request, params: string[]): Promise<Response> => {
+    const repo = repoName(params)
+    const principal = await principalOf(request)
+    if (request.method === 'PUT') await settings.setMetadata(principal, repo, { topics: (await readBody(request)).names })
+    const check = await repositoryAccess(principal, repo, 'read')
+    if (check.decision !== 'allow' || !check.repository) throw new HttpError(404, 'Not Found')
+    return json(200, { names: check.repository.topics })
   }
 
   const setCollaborator = async (request: Request, params: string[]): Promise<Response> => {
@@ -1814,6 +2036,9 @@ export const createForge = (options: ForgeOptions): Forge => {
     { method: 'DELETE', pattern: /^\/api\/admin\/update\/repository$/, handler: adminClearUpdateRepositoryRoute },
     { method: 'POST', pattern: new RegExp(`^/api/admin/jobs/${SEGMENT}/retry$`), handler: adminRetryJobRoute },
     { method: 'POST', pattern: /^\/api\/admin\/usage\/recount$/, handler: adminRecountRoute },
+    { method: 'GET', pattern: /^\/api\/admin\/backup$/, handler: adminBackupRoute },
+    { method: 'POST', pattern: /^\/api\/admin\/backup$/, handler: runBackupRoute },
+    { method: 'POST', pattern: /^\/api\/admin\/backup\/verify$/, handler: verifyBackupRoute },
     { method: 'POST', pattern: /^\/api\/admin\/invites$/, handler: createInvite },
     { method: 'GET', pattern: /^\/api\/user$/, handler: currentUser },
     { method: 'POST', pattern: /^\/api\/orgs$/, handler: createOrganizationRoute },
@@ -1832,6 +2057,9 @@ export const createForge = (options: ForgeOptions): Forge => {
     { method: 'GET', pattern: /^\/api\/v3\/search\/(repositories|issues|users)$/, handler: searchRoute },
     { method: 'POST', pattern: /^\/api\/admin\/search\/rebuild$/, handler: rebuildSearchRoute },
     { method: 'PATCH', pattern: new RegExp(`^${REPO}$`), handler: updateRepository },
+    { method: 'DELETE', pattern: new RegExp(`^${REPO}$`), handler: deleteRepository },
+    { method: 'POST', pattern: new RegExp(`^${REPO}/transfer$`), handler: transferRepository },
+    { method: 'PATCH', pattern: new RegExp(`^/api/accounts/${SEGMENT}$`), handler: renameAccountRoute },
     { method: 'PUT', pattern: new RegExp(`^${REPO}/collaborators/${SEGMENT}$`), handler: setCollaborator },
     { method: 'POST', pattern: new RegExp(`^${REPO}/instances$`), handler: grantInstance },
     { method: 'POST', pattern: new RegExp(`^${REPO}/import$`), handler: importRepository },
@@ -1847,6 +2075,28 @@ export const createForge = (options: ForgeOptions): Forge => {
     { method: 'POST', pattern: /^\/api\/mirrors\/github$/, handler: mirrorGitHubRoute },
     { method: 'POST', pattern: new RegExp(`^${REPO}/lfs/publish$`), handler: publishRepositoryLfs },
   ]
+
+  const V3 = `/api/v3/repos/${SEGMENT}/${SEGMENT}`
+  const v3Routes: Route[] = [
+    { method: 'PATCH', pattern: new RegExp(`^${V3}$`), handler: v3Update },
+    { method: 'DELETE', pattern: new RegExp(`^${V3}$`), handler: deleteRepository },
+    { method: 'POST', pattern: new RegExp(`^${V3}/transfer$`), handler: v3Transfer },
+    { method: 'GET', pattern: new RegExp(`^${V3}/topics$`), handler: v3Topics },
+    { method: 'PUT', pattern: new RegExp(`^${V3}/topics$`), handler: v3Topics },
+  ]
+
+  const v3Route = async (request: Request): Promise<Response | null> => {
+    const { pathname } = new URL(request.url)
+    const match = v3Routes.find((candidate) => candidate.method === request.method && candidate.pattern.test(pathname))
+    if (!match) return null
+    try {
+      return await match.handler(request, match.pattern.exec(pathname)!.slice(1).map(decodeURIComponent))
+    } catch (error) {
+      if (error instanceof HttpError) return json(error.status, { message: error.message }, error.headers)
+      if (error instanceof AccountsError) return json(422, { message: error.message })
+      throw error
+    }
+  }
 
   const route = async (request: Request): Promise<Response | null> => {
     const { pathname } = new URL(request.url)
@@ -1909,6 +2159,8 @@ export const createForge = (options: ForgeOptions): Forge => {
     if (releases) return releases
     const pagesApi = await pages.api(request)
     if (pagesApi) return pagesApi
+    const lifecycle = await v3Route(request)
+    if (lifecycle) return lifecycle
     const collaboration = await handleCollaborationApi(request, {
       ...collaborationOptions(request, waitUntil),
       authenticate: apiPrincipal,
@@ -1939,7 +2191,7 @@ export const createForge = (options: ForgeOptions): Forge => {
       lfs: {
         maxObjectBytes: options.maxLfsObjectBytes,
         oversizeHint: options.presigner ? RAISE_LIMIT_HINT : PRESIGN_HINT,
-        onVerified: (key, size) => meter.record([{ key, size }]),
+        onVerified: storedObject,
         ...(options.digests ? { digests: options.digests } : {}),
       },
       ...(options.presigner ? { uploads: { presignPut: options.presigner.presignPut.bind(options.presigner) } } : {}),
@@ -1965,6 +2217,7 @@ export const createForge = (options: ForgeOptions): Forge => {
     if (isNotificationJob(job)) return notifications.runJob(job)
     if (isPagesJob(job)) return pages.runJob(job)
     if (job.kind === 'lfs-publish') return publishLfs(job)
+    if (job.kind === 'backup') return runBackupJob()
     if (job.kind === 'mirror-github') return adoptGitHubRepository(job)
     if (job.kind === 'usage-scan') return void (await meter.scan(options.storage, job))
     if (job.kind === 'import-lfs') return void (await importLfsObject(job, { storage, ...(options.fetch ? { fetch: options.fetch } : {}), ...(options.digests ? { digests: options.digests } : {}) }))
@@ -1972,10 +2225,21 @@ export const createForge = (options: ForgeOptions): Forge => {
     await runJob(federation, job)
   }
 
+  const authenticate = async (request: Request): Promise<Principal | null> => {
+    if (!request.headers.has('Authorization')) {
+      const active = await readActiveSession(request, (await loginOptions(request)))
+      if (active) return sessionUserPrincipal(active.session)
+    }
+    return authenticateRequest(request, authenticateOptions(request))
+  }
+
   return {
     fetch: async (request, waitUntil) => {
       try {
-        return await handle(request, waitUntil)
+        const response = await handle(request, waitUntil)
+        if (![401, 403, 404].includes(response.status) || pages.isPagesRequest(request)) return response
+        const location = await redirect(request, (await authenticate(request)) ?? { kind: 'anonymous' })
+        return location ? new Response(null, { status: request.method === 'GET' || request.method === 'HEAD' ? 301 : 307, headers: { Location: location } }) : response
       } finally {
         await observe(waitUntil)
       }
@@ -1984,13 +2248,9 @@ export const createForge = (options: ForgeOptions): Forge => {
     services: {
       storage,
       store,
-      authenticate: async (request) => {
-        if (!request.headers.has('Authorization')) {
-          const active = await readActiveSession(request, (await loginOptions(request)))
-          if (active) return sessionUserPrincipal(active.session)
-        }
-        return authenticateRequest(request, authenticateOptions(request))
-      },
+      authenticate,
+      renameAccount,
+      redirect,
       issuer: issuerFor,
       repositoryAccess,
       isInstanceAdmin: async (principal) => principal.kind === 'user' && (await store.isInstanceAdmin(principal.id)),
@@ -2066,6 +2326,12 @@ export const createForge = (options: ForgeOptions): Forge => {
       console.log(JSON.stringify({ event: 'notification-sweep', ...sweep }))
       const purged = await logins.purgeExpired().catch((error: unknown) => ({ error: String(error) }))
       console.log(JSON.stringify({ event: 'login-purge', ...purged }))
+      if (options.backup) {
+        const backup = await startBackup(db, at)
+          .then(async (state) => (await scheduleBackup(), { run: state.run?.id }))
+          .catch((error: unknown) => ({ error: String(error) }))
+        console.log(JSON.stringify({ event: 'backup-scheduled', ...backup }))
+      }
       return federation ? enqueueDueMirrors(federation, at, options.mirrorIntervalMinutes) : syncDueMirrors(mirrorContext(options.publicUrl), at, options.mirrorIntervalMinutes)
     },
     actionsTick: async () => {
@@ -2093,6 +2359,7 @@ export const createForge = (options: ForgeOptions): Forge => {
       await failures.succeeded(job).catch(() => undefined)
     },
     refreshRepository,
+    importMetadata,
     notifications,
   }
 }

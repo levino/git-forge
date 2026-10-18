@@ -4,7 +4,7 @@ import { monthKey, type UsageMetric } from './costs.ts'
 
 export type StoredKind = 'git' | 'lfs'
 
-export type RepositoryUsage = { readonly repository: string; readonly gitBytes: number; readonly lfsBytes: number; readonly objects: number }
+export type RepositoryUsage = { readonly repository: string | null; readonly path: string; readonly gitBytes: number; readonly lfsBytes: number; readonly objects: number }
 
 export type UsageScanJob = { readonly kind: 'usage-scan'; readonly repository: string }
 
@@ -22,6 +22,7 @@ export type UsageMeter = {
   readonly count: (metric: UsageMetric, amount?: number) => void
   readonly flush: (force?: boolean) => Promise<void>
   readonly repositories: () => Promise<RepositoryUsage[]>
+  readonly paths: () => Promise<string[]>
   readonly counters: (at: number) => Promise<Partial<Record<UsageMetric, number>>>
   readonly scan: (storage: Storage, job: UsageScanJob) => Promise<number>
 }
@@ -81,10 +82,13 @@ export const createUsageMeter = (db: Database, now: () => number): UsageMeter =>
     },
     repositories: async () =>
       (
-        await db.all<{ repository: string; git_bytes: number; lfs_bytes: number; objects: number }>(
-          sql('SELECT repository, git_bytes, lfs_bytes, objects FROM repository_usage ORDER BY git_bytes + lfs_bytes DESC, repository'),
+        await db.all<{ name: string | null; path: string; git_bytes: number; lfs_bytes: number; objects: number }>(
+          sql(
+            "SELECT a.login || '/' || r.name AS name, u.repository AS path, u.git_bytes, u.lfs_bytes, u.objects FROM repository_usage u LEFT JOIN repositories r ON r.storage_path = u.repository AND r.deleted_at IS NULL LEFT JOIN accounts a ON a.id = r.owner_id ORDER BY u.git_bytes + u.lfs_bytes DESC, u.repository",
+          ),
         )
-      ).map((row) => ({ repository: row.repository, gitBytes: Number(row.git_bytes), lfsBytes: Number(row.lfs_bytes), objects: Number(row.objects) })),
+      ).map((row) => ({ repository: row.name, path: row.path, gitBytes: Number(row.git_bytes), lfsBytes: Number(row.lfs_bytes), objects: Number(row.objects) })),
+    paths: async () => (await db.all<{ path: string }>(sql('SELECT storage_path AS path FROM repositories WHERE deleted_at IS NULL AND storage_path IS NOT NULL ORDER BY storage_path'))).map((row) => row.path),
     counters: async (at) =>
       Object.fromEntries((await db.all<{ metric: string; value: number }>(sql('SELECT metric, value FROM usage_counters WHERE month = ?', monthKey(at)))).map((row) => [row.metric, Number(row.value)])),
     scan: async (storage, job) => {

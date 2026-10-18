@@ -34,6 +34,8 @@ discussions.
 - [ ] Device flow (`gh auth login`-style)
 - [ ] Break-glass key
 - [ ] SAML, SCIM
+- [x] Branch protection rules (patterns, force push, deletion, push restrictions, admin bypass) enforced in `receive-pack`, API under `/api/repos/{owner}/{repo}/branches/{branch}/protection`
+- [ ] Branch protection API and push policy wired into the Worker app (needs accounts on D1 there)
 
 ## M4 — Mirrors
 
@@ -61,12 +63,12 @@ discussions.
 
 - [ ] Issues
 - [ ] Pull requests, reviews, conflict-free merge
+- [ ] Enforce required reviews and status checks on merge via `evaluateBranchUpdate(..., { via: 'pull-request' })`
 - [ ] Discussions
 - [ ] Submit via form
 
 ## Later
 
-- [ ] Branch protection
 - [ ] Notifications, email, webhooks
 - [ ] Releases
 - [ ] Encrypted full backups, partial visibility

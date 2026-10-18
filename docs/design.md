@@ -42,7 +42,8 @@ or pull requests between instances.
 2. **Data outlives the software.** Without the code, cloneable Git
    repositories and an LFS directory remain.
 3. **Append only.** Nothing is deleted automatically. Force pushes and
-   deletions are allowed, but the previous state is archived (§5).
+   deletions are allowed unless branch protection forbids them, and the
+   previous state is archived (§5).
 4. **Trust through signatures and recomputation, not claims.**
 5. **One language:** TypeScript, Web-standard APIs only (`fetch`, Streams,
    `DecompressionStream`, WebCrypto). No WebAssembly.
@@ -74,11 +75,11 @@ issues, pull requests and discussions.
 - **Pull requests:** from a branch, diff view, comments (general and inline),
   reviews (approve / request changes), merge (merge, squash or rebase —
   conflict-free only), close.
+- **Branch protection:** GitHub-style rules per repository (§5).
 - **Discussions:** separate from issues; categories, threads, mark answer.
 
 **Should (soon after)**
 
-- Branch protection (no force push, required reviews).
 - Notifications, email, webhooks.
 - Reactions, search in issues and discussions.
 - Edit and upload files in the browser (commit via form).
@@ -141,13 +142,51 @@ OIDC-style, modelled on GitHub Actions OIDC:
 ## 5. Refs, force pushes and archive
 
 - Refs are updated with compare-and-swap (conditional writes).
-- Force pushes and ref deletions are allowed (branch protection comes later).
-  The previous value is always kept under
+- Force pushes and ref deletions are allowed unless a branch protection rule
+  forbids them (below). The previous value is always kept under
   `refs/archive/{timestamp}/heads/...` resp. `refs/archive/{timestamp}/tags/...`,
   so no commit becomes unreachable.
 - `refs/archive/*` and `refs/upstream/*` cannot be pushed to by clients.
 - Git object format stays SHA-1 (compatibility). Signatures and LFS use
   SHA-256.
+
+### Branch protection
+
+Modelled on GitHub's classic branch protection rules; details and API in
+the [accounts README](../packages/accounts/README.md#branch-protection).
+
+- **Rules per repository**, each with a branch name pattern (`fnmatch` with
+  `FNM_PATHNAME` like GitHub: `*` stops at `/`, `**/` spans directories).
+  Exactly one rule applies to a branch: an exact name beats wildcards, among
+  wildcards the oldest wins. Rules never combine. Only `refs/heads/*` is
+  protected.
+- **Settings:** allow force pushes (default no), allow deletions (default
+  no), restrict who may push (users, teams, apps, minimum roles), require a
+  pull request with 0–6 approving reviews (plus stale-review dismissal,
+  code-owner review, last-push approval), require named status checks
+  (optionally strict = up to date). `enforce_admins` off means repository
+  admins bypass the rule, as on GitHub.
+- **One pure check:** `evaluateBranchUpdate(rule, actor, update, evidence)`
+  returns all unmet requirements. The actor (principal, resolved access,
+  teams) comes from the verified token only. Direct pushes pass
+  `via: 'push'`; the pull request merge will pass `via: 'pull-request'` with
+  approvals and statuses and call the same function. Required reviews
+  therefore already block direct pushes; required status checks block pushes
+  whose commit has no passing statuses (no CI exists yet, so in practice all
+  direct pushes).
+- **Pre-receive policy:** receive-pack asks the `pushPolicy` hook once per
+  request, which loads the rules and the actor before the ref transaction and
+  returns a synchronous per-ref check. A violation rejects only that ref with
+  `ng <ref> protected branch: <reason>`, shown by `git push` as
+  `[remote rejected]`; with `--atomic` the whole push fails. A rejected force
+  push archives nothing.
+- **Mirrors:** `refs/upstream/*` and `refs/archive/*` are not client-writable
+  at all and are never matched by branch protection; mirror sync writes
+  `refs/upstream/*` itself. Branch protection applies only to the
+  repository's own branches.
+- **Storage:** rules live in the accounts database (migration
+  `0002_branch_protection`), not in the bucket, so a plain clone of a bucket
+  carries no rules. Changes are audited.
 
 ## 6. Bucket layout
 
@@ -172,8 +211,9 @@ OIDC-style, modelled on GitHub Actions OIDC:
 ## 7. Flows
 
 **Push** — `receive-pack` over smart HTTP. Parse and index the pack
-(completing thin packs), check fast-forward or archive the old value, update
-refs via CAS, `report-status`. Push size limit for Git packs: 64 MB by default;
+(completing thin packs), check branch protection per ref (§5), check
+fast-forward or archive the old value, update refs via CAS, `report-status`.
+Push size limit for Git packs: 64 MB by default;
 large files belong in LFS. In v1 packs are processed in memory; streaming pack
 indexing is a later optimization.
 

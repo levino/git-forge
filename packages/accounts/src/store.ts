@@ -4,6 +4,13 @@ import { randomId } from './encoding.ts'
 import { normalizeIssuer, type TrustedIssuer } from './federation.ts'
 import type { Grants, OrganizationRole, OwnerKind, Principal, RepositorySubject, Visibility } from './permissions.ts'
 import { NO_GRANTS } from './permissions.ts'
+import {
+  type BranchProtectionRule,
+  type BranchProtectionSettings,
+  BranchPatternError,
+  MAX_REQUIRED_APPROVALS,
+  validateBranchPattern,
+} from './protection.ts'
 import { isRole, type Role } from './roles.ts'
 import {
   formatScopes,
@@ -115,6 +122,68 @@ type AuditRow = {
   repository_id: string | null
   data: string
 }
+
+type ProtectionRow = {
+  id: string
+  repository_id: string
+  pattern: string
+  allow_force_pushes: number
+  allow_deletions: number
+  enforce_admins: number
+  restrict_pushes: number
+  require_pull_request: number
+  required_approving_review_count: number
+  dismiss_stale_reviews: number
+  require_code_owner_reviews: number
+  require_last_push_approval: number
+  require_status_checks: number
+  strict_status_checks: number
+  created_at: number
+  updated_at: number
+}
+
+type AllowanceRow = { rule_id: string; kind: 'user' | 'team' | 'app' | 'role'; subject: string }
+
+type StatusCheckRow = { rule_id: string; context: string }
+
+export type NamedAllowances = {
+  readonly users: readonly { readonly id: string; readonly login: string }[]
+  readonly teams: readonly { readonly id: string; readonly slug: string; readonly name: string }[]
+  readonly apps: readonly { readonly id: string; readonly slug: string; readonly name: string }[]
+}
+
+const toRule = (row: ProtectionRow, allowances: readonly AllowanceRow[], checks: readonly StatusCheckRow[]): BranchProtectionRule => {
+  const mine = allowances.filter((allowance) => allowance.rule_id === row.id)
+  const of = (kind: AllowanceRow['kind']) => mine.filter((allowance) => allowance.kind === kind).map((allowance) => allowance.subject)
+  return {
+    id: row.id,
+    repositoryId: row.repository_id,
+    pattern: row.pattern,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    allowForcePushes: row.allow_force_pushes === 1,
+    allowDeletions: row.allow_deletions === 1,
+    enforceAdmins: row.enforce_admins === 1,
+    restrictions: row.restrict_pushes === 1 ? { users: of('user'), teams: of('team'), apps: of('app'), roles: of('role').filter(isRole) } : null,
+    requiredPullRequestReviews:
+      row.require_pull_request === 1
+        ? {
+            requiredApprovingReviewCount: row.required_approving_review_count,
+            dismissStaleReviews: row.dismiss_stale_reviews === 1,
+            requireCodeOwnerReviews: row.require_code_owner_reviews === 1,
+            requireLastPushApproval: row.require_last_push_approval === 1,
+          }
+        : null,
+    requiredStatusChecks:
+      row.require_status_checks === 1
+        ? { strict: row.strict_status_checks === 1, contexts: checks.filter((check) => check.rule_id === row.id).map((check) => check.context) }
+        : null,
+  }
+}
+
+const flag = (value: boolean): number => (value ? 1 : 0)
+
+const unique = <T>(values: readonly T[]): T[] => [...new Set(values)]
 
 const toSubject = (row: RepositoryRow): RepositorySubject => ({
   id: row.id,
@@ -568,6 +637,164 @@ export const createAccountsStore = (db: Database, options: AccountsStoreOptions 
           return { ...NO_GRANTS, instanceRole: row?.role === 'read' ? 'read' : null }
         }
       }
+    },
+
+    findTeam: async (organizationId: string, slug: string): Promise<{ readonly id: string; readonly slug: string; readonly name: string } | null> =>
+      first<{ id: string; slug: string; name: string }>(db, sql('SELECT id, slug, name FROM teams WHERE organization_id = ? AND slug = ?', organizationId, slug)),
+
+    findApp: async (slug: string): Promise<{ readonly id: string; readonly slug: string; readonly name: string } | null> =>
+      first<{ id: string; slug: string; name: string }>(db, sql('SELECT id, slug, name FROM apps WHERE slug = ?', slug)),
+
+    teamIdsFor: async (userId: string, organizationId: string): Promise<string[]> =>
+      (
+        await db.all<{ id: string }>(
+          sql('SELECT t.id FROM teams t JOIN team_members tm ON tm.team_id = t.id WHERE t.organization_id = ? AND tm.user_id = ? ORDER BY t.id', organizationId, userId),
+        )
+      ).map((row) => row.id),
+
+    branchProtectionRules: async (repositoryId: string): Promise<BranchProtectionRule[]> => {
+      const rows = await db.all<ProtectionRow>(sql('SELECT * FROM branch_protection_rules WHERE repository_id = ? ORDER BY created_at, rowid', repositoryId))
+      if (rows.length === 0) return []
+      const allowances = await db.all<AllowanceRow>(
+        sql(
+          `SELECT a.rule_id, a.kind, a.subject FROM branch_protection_push_allowances a JOIN branch_protection_rules r ON r.id = a.rule_id
+           WHERE r.repository_id = ? ORDER BY a.kind, a.subject`,
+          repositoryId,
+        ),
+      )
+      const checks = await db.all<StatusCheckRow>(
+        sql(
+          `SELECT c.rule_id, c.context FROM branch_protection_status_checks c JOIN branch_protection_rules r ON r.id = c.rule_id
+           WHERE r.repository_id = ? ORDER BY c.context`,
+          repositoryId,
+        ),
+      )
+      return rows.map((row) => toRule(row, allowances, checks))
+    },
+
+    namedAllowances: async (rule: BranchProtectionRule): Promise<NamedAllowances> => {
+      const restrictions = rule.restrictions
+      if (!restrictions) return { users: [], teams: [], apps: [] }
+      const placeholders = (ids: readonly string[]) => ids.map(() => '?').join(', ')
+      const lookup = async <T extends Record<string, string>>(table: string, columns: string, ids: readonly string[]): Promise<T[]> =>
+        ids.length === 0 ? [] : db.all<T>(sql(`SELECT ${columns} FROM ${table} WHERE id IN (${placeholders(ids)}) ORDER BY 2`, ...ids))
+      return {
+        users: await lookup<{ id: string; login: string }>('accounts', 'id, login', restrictions.users),
+        teams: await lookup<{ id: string; slug: string; name: string }>('teams', 'id, slug, name', restrictions.teams),
+        apps: await lookup<{ id: string; slug: string; name: string }>('apps', 'id, slug, name', restrictions.apps),
+      }
+    },
+
+    setBranchProtection: async (
+      repositoryId: string,
+      pattern: string,
+      settings: BranchProtectionSettings,
+      actor: AuditActor = SYSTEM,
+    ): Promise<BranchProtectionRule> => {
+      try {
+        validateBranchPattern(pattern)
+      } catch (error) {
+        if (error instanceof BranchPatternError) throw new AccountsError(error.message)
+        throw error
+      }
+      const repo = await first<{ owner_id: string }>(db, sql('SELECT owner_id FROM repositories WHERE id = ?', repositoryId))
+      if (!repo) throw new AccountsError(`no repository ${repositoryId}`)
+      const reviews = settings.requiredPullRequestReviews
+      if (reviews && (!Number.isInteger(reviews.requiredApprovingReviewCount) || reviews.requiredApprovingReviewCount < 0 || reviews.requiredApprovingReviewCount > MAX_REQUIRED_APPROVALS)) {
+        throw new AccountsError(`required approving review count must be between 0 and ${MAX_REQUIRED_APPROVALS}`)
+      }
+      const contexts = unique(settings.requiredStatusChecks?.contexts ?? [])
+      if (contexts.some((context) => context.trim() === '' || context.length > 255)) throw new AccountsError('status check names must have 1 to 255 characters')
+      const restrictions = settings.restrictions
+      const users = unique(restrictions?.users ?? [])
+      const teams = unique(restrictions?.teams ?? [])
+      const apps = unique(restrictions?.apps ?? [])
+      const roles = unique(restrictions?.roles ?? [])
+      for (const role of roles) requireRole(role)
+      for (const id of users) await requireAccount(id, 'user')
+      for (const id of teams) {
+        const team = await first<{ organization_id: string }>(db, sql('SELECT organization_id FROM teams WHERE id = ?', id))
+        if (!team || team.organization_id !== repo.owner_id) throw new AccountsError(`team ${id} does not belong to the repository's organization`)
+      }
+      for (const id of apps) {
+        if (!(await first(db, sql('SELECT 1 AS ok FROM apps WHERE id = ?', id)))) throw new AccountsError(`no app ${id}`)
+      }
+      const existing = await first<{ id: string; created_at: number }>(
+        db,
+        sql('SELECT id, created_at FROM branch_protection_rules WHERE repository_id = ? AND pattern = ?', repositoryId, pattern),
+      )
+      const at = now()
+      const id = existing?.id ?? randomId()
+      const values = [
+        flag(settings.allowForcePushes),
+        flag(settings.allowDeletions),
+        flag(settings.enforceAdmins),
+        flag(restrictions !== null),
+        flag(reviews !== null),
+        reviews?.requiredApprovingReviewCount ?? 0,
+        flag(reviews?.dismissStaleReviews ?? false),
+        flag(reviews?.requireCodeOwnerReviews ?? false),
+        flag(reviews?.requireLastPushApproval ?? false),
+        flag(settings.requiredStatusChecks !== null),
+        flag(settings.requiredStatusChecks?.strict ?? false),
+      ]
+      const upsert = existing
+        ? sql(
+            `UPDATE branch_protection_rules SET allow_force_pushes = ?, allow_deletions = ?, enforce_admins = ?, restrict_pushes = ?, require_pull_request = ?,
+             required_approving_review_count = ?, dismiss_stale_reviews = ?, require_code_owner_reviews = ?, require_last_push_approval = ?,
+             require_status_checks = ?, strict_status_checks = ?, updated_at = ? WHERE id = ?`,
+            ...values,
+            at,
+            id,
+          )
+        : sql(
+            `INSERT INTO branch_protection_rules (id, repository_id, pattern, allow_force_pushes, allow_deletions, enforce_admins, restrict_pushes,
+             require_pull_request, required_approving_review_count, dismiss_stale_reviews, require_code_owner_reviews, require_last_push_approval,
+             require_status_checks, strict_status_checks, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            id,
+            repositoryId,
+            pattern,
+            ...values,
+            at,
+            at,
+          )
+      const allowanceRows = [
+        ...users.map((subject) => ['user', subject] as const),
+        ...teams.map((subject) => ['team', subject] as const),
+        ...apps.map((subject) => ['app', subject] as const),
+        ...roles.map((subject) => ['role', subject] as const),
+      ]
+      await write(
+        actor,
+        {
+          action: existing ? 'branch_protection.update' : 'branch_protection.create',
+          subjectKind: 'branch_protection',
+          subjectId: id,
+          repositoryId,
+          data: { pattern, ...settings },
+        },
+        [
+          sql('DELETE FROM branch_protection_push_allowances WHERE rule_id = ?', id),
+          sql('DELETE FROM branch_protection_status_checks WHERE rule_id = ?', id),
+          upsert,
+          ...(restrictions ? allowanceRows.map(([kind, subject]) => sql('INSERT INTO branch_protection_push_allowances (rule_id, kind, subject) VALUES (?, ?, ?)', id, kind, subject)) : []),
+          ...(settings.requiredStatusChecks ? contexts.map((context) => sql('INSERT INTO branch_protection_status_checks (rule_id, context) VALUES (?, ?)', id, context)) : []),
+        ],
+      )
+      const stored = (await store.branchProtectionRules(repositoryId)).find((rule) => rule.id === id)
+      if (!stored) throw new AccountsError(`branch protection ${pattern} vanished`)
+      return stored
+    },
+
+    deleteBranchProtection: async (repositoryId: string, pattern: string, actor: AuditActor = SYSTEM): Promise<boolean> => {
+      const existing = await first<{ id: string }>(db, sql('SELECT id FROM branch_protection_rules WHERE repository_id = ? AND pattern = ?', repositoryId, pattern))
+      if (!existing) return false
+      await write(actor, { action: 'branch_protection.delete', subjectKind: 'branch_protection', subjectId: existing.id, repositoryId, data: { pattern } }, [
+        sql('DELETE FROM branch_protection_push_allowances WHERE rule_id = ?', existing.id),
+        sql('DELETE FROM branch_protection_status_checks WHERE rule_id = ?', existing.id),
+        sql('DELETE FROM branch_protection_rules WHERE id = ?', existing.id),
+      ])
+      return true
     },
 
     recordAudit: async (actor: AuditActor, entry: AuditInput): Promise<void> => {

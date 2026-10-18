@@ -1,11 +1,12 @@
 import { fromUtf8, readAll, SizeLimitError, utf8 } from './bytes.ts'
 import { type ObjectId } from './hash.ts'
-import { connectRemote, type Protocol, type RemoteConnection, storeFetchedPack } from './fetch-client.ts'
-import { LFS_POINTER_MAX_SIZE, parseLfsPointer } from './lfs.ts'
+import { ByteCursor } from './cursor.ts'
+import { connectRemote, type Protocol, type RemoteConnection } from './fetch-client.ts'
+import type { LfsObjectSpec } from './lfs.ts'
 import { type LfsMissing, type LfsPointer, mirrorLfsObjects } from './lfs-mirror.ts'
 import { commitClosure, type RefUpdate, scanNewObjects, selectUpstreamRefs } from './mirror.ts'
 import { type GitObject, parseCommit, parseTag } from './objects.ts'
-import { parsePack } from './pack.ts'
+import { indexPack } from './pack-indexer.ts'
 import { archiveName } from './receive-pack.ts'
 import type { AuthorizationSupplier, FetchFunction, Remote } from './remote.ts'
 import {
@@ -17,12 +18,13 @@ import {
   type RepositoryName,
   repositoryPrefix,
   RepositoryExistsError,
+  stagingPrefix,
   writeRefs,
   writeServerInfo,
 } from './repository.ts'
 import { fetchFeatures, fetchPackV2, fixedHaves } from './smart-client.ts'
 import type { Storage } from './storage.ts'
-import { checkConnectivity, isAncestor, type ObjectSource } from './walk.ts'
+import { isAncestor } from './walk.ts'
 
 export type ImportPhase = 'discover' | 'graph' | 'fetch' | 'lfs' | 'refs' | 'done' | 'failed'
 
@@ -162,14 +164,17 @@ export const startImport = async (storage: Storage, repo: RepositoryName, settin
 
 export type IngestedPack = {
   readonly name: string | null
-  readonly objects: readonly GitObjectWithId[]
+  readonly objects: number
+  readonly bytes: number
+  readonly lfsPointers: readonly LfsObjectSpec[]
 }
 
-export type GitObjectWithId = GitObject & { readonly id: ObjectId }
+export type PackIngester = (odb: ObjectDatabase, pack: ReadableStream<Uint8Array>) => Promise<IngestedPack>
 
-export type PackIngester = (odb: ObjectDatabase, pack: Uint8Array) => Promise<IngestedPack>
-
-export const ingestInMemory: PackIngester = (odb, pack) => storeFetchedPack(odb, pack)
+export const ingestStreamed: PackIngester = async (odb, stream) => {
+  const { name, pack } = await odb.ingest(stream)
+  return { name, objects: pack.objectCount, bytes: pack.byteLength, lfsPointers: pack.lfsPointers }
+}
 
 export type ImportStepOptions = {
   readonly storage: Storage
@@ -257,16 +262,6 @@ export const planImportRefUpdates = async (
   return { refs, updates }
 }
 
-const lfsPointers = (objects: Iterable<GitObject>): LfsPointer[] => {
-  const found: LfsPointer[] = []
-  for (const object of objects) {
-    if (object.type !== 'blob' || object.data.length > LFS_POINTER_MAX_SIZE) continue
-    const pointer = parseLfsPointer(object.data)
-    if (pointer) found.push({ oid: pointer.oid, size: pointer.size })
-  }
-  return found
-}
-
 const mergeLfs = (queue: readonly LfsPointer[], found: readonly LfsPointer[]): LfsPointer[] => {
   const byOid = new Map(queue.map((pointer) => [pointer.oid, pointer]))
   for (const pointer of found) if (!byOid.has(pointer.oid)) byOid.set(pointer.oid, pointer)
@@ -313,10 +308,19 @@ const graph = async (context: StepContext, state: ImportState): Promise<ImportSt
     filter: 'tree:0',
     maxPackBytes: options.maxGraphBytes ?? DEFAULT_MAX_GRAPH_BYTES,
   })
-  const parsed = await parsePack(fetched.pack, (id) => odb.read(id))
-  const objects = new Map<ObjectId, GitObject>(parsed.objects.map((object) => [object.id, object]))
+  const objects = new Map<ObjectId, GitObject>()
   const commits = new Map<ObjectId, readonly ObjectId[]>()
-  for (const object of parsed.objects) if (object.type === 'commit') commits.set(object.id, parseCommit(object.data).parents)
+  await indexPack(new ByteCursor(fetched.pack), {
+    storage: options.storage,
+    stagingPrefix: stagingPrefix(options.repo),
+    objects: odb,
+    checkReferences: false,
+    onObject: (id, type, data) => {
+      if (type === 'commit') commits.set(id, parseCommit(data).parents)
+      else if (type === 'tag') objects.set(id, { type, data })
+    },
+  })
+  for (const id of commits.keys()) objects.set(id, { type: 'commit', data: new Uint8Array(0) })
   const tips = state.wants.map((id) => peel(objects, id)).filter((id): id is ObjectId => id !== null)
   const order = commitOrder(commits, tips)
   const text = utf8(order.length > 0 ? `${order.join('\n')}\n` : '')
@@ -330,12 +334,9 @@ const readCommitOrder = async (storage: Storage, repo: RepositoryName): Promise<
   return fromUtf8(await readAll(stored.body)).split('\n').filter(Boolean)
 }
 
-const verifyFetched = async (odb: ObjectDatabase, fresh: ReadonlyMap<ObjectId, GitObject>, wants: readonly ObjectId[]): Promise<void> => {
-  const source: ObjectSource = { read: async (id) => fresh.get(id) ?? (await odb.read(id)) }
-  for (const want of wants) {
-    const missing = await checkConnectivity(source, want, (id) => fresh.has(id), (id) => odb.has(id))
-    if (missing) throw new Error(`the remote did not send object ${missing}`)
-  }
+const verifyFetched = async (odb: ObjectDatabase, wants: readonly ObjectId[]): Promise<void> => {
+  odb.invalidate()
+  for (const want of wants) if (!(await odb.has(want))) throw new Error(`the remote did not send object ${want}`)
 }
 
 const fetchStepped = async (context: StepContext, state: ImportState): Promise<ImportState> => {
@@ -352,27 +353,24 @@ const fetchStepped = async (context: StepContext, state: ImportState): Promise<I
   let commitsPerStep = state.commitsPerStep
   if (missing.length > 0) {
     const connection = await connectRemote(remote, 'v2')
-    let pack: Uint8Array
+    let stored: IngestedPack
     try {
-      pack = (
-        await fetchPackV2(remote, v2Capabilities(connection), {
-          wants: missing,
-          haves: fixedHaves([...state.localTips, ...state.cuts]),
-          maxPackBytes: maxStepBytes,
-        })
-      ).pack
+      const { pack } = await fetchPackV2(remote, v2Capabilities(connection), {
+        wants: missing,
+        haves: fixedHaves([...state.localTips, ...state.cuts]),
+        maxPackBytes: maxStepBytes,
+      })
+      stored = await (options.ingestPack ?? ingestStreamed)(odb, pack)
     } catch (error) {
       if (error instanceof SizeLimitError && !final && state.commitsPerStep > 1) {
         return { ...state, commitsPerStep: Math.max(1, Math.floor(state.commitsPerStep / 4)) }
       }
       throw error
     }
-    const stored = await (options.ingestPack ?? ingestInMemory)(odb, pack)
-    const fresh = new Map<ObjectId, GitObject>(stored.objects.map((object) => [object.id, object]))
-    await verifyFetched(odb, fresh, missing)
-    fetched = { objects: fetched.objects + stored.objects.length, packs: fetched.packs + (stored.name ? 1 : 0), bytes: fetched.bytes + pack.length }
-    if (state.lfs) lfsQueue = mergeLfs(lfsQueue, lfsPointers(stored.objects))
-    if (pack.length < maxStepBytes / 8) commitsPerStep = Math.min(commitsPerStep * 2, MAX_COMMITS_PER_STEP)
+    await verifyFetched(odb, missing)
+    fetched = { objects: fetched.objects + stored.objects, packs: fetched.packs + (stored.name ? 1 : 0), bytes: fetched.bytes + stored.bytes }
+    if (state.lfs) lfsQueue = mergeLfs(lfsQueue, stored.lfsPointers.map(({ oid, size }) => ({ oid, size })))
+    if (stored.bytes < maxStepBytes / 8) commitsPerStep = Math.min(commitsPerStep * 2, MAX_COMMITS_PER_STEP)
   }
   const next: ImportState = { ...state, fetched, lfsQueue, commitsPerStep }
   if (final) return { ...next, phase: afterFetch(next) }

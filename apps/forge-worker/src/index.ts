@@ -56,8 +56,8 @@ const forgeFor = (env: Env): Promise<Forge> => {
 const isJobQueue = (name: string): boolean => name === 'git-forge-jobs' || /^git-forge-[a-z0-9-]+-jobs$/.test(name)
 
 export default {
-  async fetch(request, env): Promise<Response> {
-    return (await forgeFor(env)).fetch(request)
+  async fetch(request, env, ctx): Promise<Response> {
+    return (await forgeFor(env)).fetch(request, (promise) => ctx.waitUntil(promise))
   },
   async scheduled(controller, env): Promise<void> {
     const runs = await (await forgeFor(env)).scheduled(new Date(controller.scheduledTime))

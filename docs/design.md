@@ -270,7 +270,7 @@ the [accounts README](../packages/accounts/README.md#branch-protection).
   git/                              # cloneable via dumb HTTP
     HEAD
     info/refs
-    objects/info/packs
+    objects/info/packs              # the current pack set
     objects/pack/pack-<sha>.pack
     objects/pack/pack-<sha>.idx
   lfs/
@@ -278,24 +278,66 @@ the [accounts README](../packages/accounts/README.md#branch-protection).
   import/status.json                # progress of the last import
   import/commits.txt                # commit order of the last import
   README.txt                        # plain text: what this is, how to read it
+tmp/<repo>/<timestamp>-<uuid>/<n>   # staging chunks of a push or fetch, expired by the bucket
 ```
 
-- Packs are never deleted. Compaction writes a new, larger pack and removes
-  old ones from `objects/info/packs` only after a grace period.
+- `<sha>` is the pack's trailing SHA-1 checksum, as with `git index-pack`.
+  Every stored pack is self-contained: thin packs are completed by appending
+  their delta bases before they are stored.
+- **Current pack set:** readers (dumb HTTP clients, the object database,
+  `upload-pack`, compaction) only consider the packs listed in
+  `objects/info/packs`, in that order; the first pack that contains an object
+  wins. Pack files that are not listed are ignored (for example the pack of a
+  push whose refs update was rejected). The list is changed only by
+  compare-and-swap.
+- **Packs are never deleted.** Compaction writes a new pack with the objects
+  of the merged packs and then swaps their names for the new one in
+  `objects/info/packs`. The old files stay valid, so a reader holding the old
+  list keeps working and no grace period is needed.
+- **Staging:** a push larger than one chunk (4 MiB) is written to `tmp/` in
+  chunks while it is parsed, because the final key contains the checksum,
+  which is only known at the end, and `put` needs a key and a size. The chunks
+  are read back once to write the final pack and never again. The `Storage`
+  interface has no delete; operators expire `tmp/` with a bucket lifecycle
+  rule (e.g. one day). Pushes up to one chunk never touch `tmp/`.
 - The bucket layout is a durable format and may only change
   backwards-compatibly.
 
+
 ## 7. Flows
 
-**Push** — `receive-pack` over smart HTTP. Parse and index the pack
-(completing thin packs), check branch protection per ref (§5), check
-fast-forward or archive the old value, update refs via CAS, `report-status`.
-Push size limit for Git packs: 64 MB by default;
-large files belong in LFS. In v1 packs are processed in memory; streaming pack
-indexing is a later optimization.
+**Push** — `receive-pack` over smart HTTP, streamed end to end
+(`packages/core/src/pack-indexer.ts`):
+
+1. Read the ref commands from the request stream, then parse the pack while it
+   arrives. Every byte goes to the pack checksum, the entry's CRC32 and the
+   staging writer (§6).
+2. Inflate each entry incrementally. Non-delta objects are hashed as they are
+   inflated; small ones (and every commit, tree and tag) are kept in a
+   byte-budgeted LRU cache. A delta whose base is in the cache is resolved on
+   the spot; the rest are deferred.
+3. Resolve deferred deltas in pack order: bases are re-materialized from the
+   staged pack with range reads (block cache) and the LRU cache, ref-deltas
+   whose base is not in the pack are looked up in the repository (thin pack).
+4. While resolving, check that every object a new commit, tree or tag refers
+   to is in the pack or in the repository, collect LFS pointers, and check the
+   ref commands (object exists, branches point at commits, branch protection
+   (§5), fast-forward or archive).
+5. Write the final pack (the staged bytes, or for thin packs a new header, the
+   staged entries, the appended bases and a new trailer) and an idx v2 built
+   from compact column arrays, register the pack in `objects/info/packs`,
+   update refs via CAS, `report-status`.
+
+Memory is the cache budget (16 MiB), one staging chunk (4 MiB) and about
+60–100 bytes per object, independent of the pack's size in bytes. Plain
+blobs of any size are only streamed, but objects that must be materialized
+(commits, trees, tags, delta bases and delta results) are limited to 64 MiB;
+large files belong in LFS. The Worker sets no push size limit of its own
+(`MAX_PUSH_BYTES` is optional); the platform's request body limit applies
+(`apps/forge-worker/README.md`).
 
 **Large pushes** — a push is one HTTP request, and Cloudflare caps request
-bodies at 100 MB (Free/Pro). Three ways around it, none of which changes git:
+bodies at 100 MB (Free/Pro), 200 MB (Business) and 500 MB (Enterprise). Three ways around it, none of which changes git:
 
 - *Chunked push helper* `git forge push` (`packages/cli`, a single executable
   built with `bun build --compile`): splits the history not yet on the remote
@@ -308,8 +350,8 @@ bodies at 100 MB (Free/Pro). Three ways around it, none of which changes git:
   a rerun: what landed is on the remote. Details in `packages/cli/README.md`.
 - *Server-side import* (below): the forge pulls from a URL, so no request
   body is involved at all.
-- Later: streaming receive-pack and a remote helper uploading packs directly
-  to object storage (roadmap M5a).
+- Later: a remote helper uploading packs directly to object storage
+  (roadmap M5a).
 
 **Import** — create or update a repository by pulling from any Git URL
 (smart HTTP v2 or dumb HTTP, optional token). It reuses the mirror client
@@ -340,10 +382,9 @@ as a sequence of stateless steps, each persisting its progress in
    empty repository adopts the upstream `HEAD`.
 
 Fetched packs are handed to a `PackIngester` (`ingestPack`); the default
-parses and indexes the pack in memory like the mirror does. Once streaming
-pack indexing (a resumable job behind a job adapter, roadmap M5a) is on
-`main`, the import streams each fetched pack into storage and hands it to
-that job instead, so a step no longer holds the pack in memory.
+streams each fetched pack into the same indexer as a push, so a step never
+holds its pack in memory. The commit graph of the *graph* phase is read with
+the indexer's object visitor without storing the pack.
 
 A failing step is retried with exponential backoff (15 s … 10 min); after
 five failures in a row the import is `failed`, and starting it again with the
@@ -353,9 +394,31 @@ scheduling adapter (`ImportScheduler`): a Cloudflare Queue in the Worker
 (each message is one step in its own invocation), a simple loop (`runImport`)
 elsewhere.
 
-**Fetch** — public: dumb HTTP directly from the bucket/CDN. Private:
-`upload-pack` (smart HTTP protocol v2) or dumb HTTP behind an authorizing
-function.
+**Fetch** — public: dumb HTTP directly from the bucket/CDN. Private or
+protocol v2 clients: `upload-pack` (smart HTTP protocol v2), streamed:
+
+- **Full clones** (no common `have`) are covered by the stored packs. One pack
+  is streamed verbatim; several are concatenated into one pack stream with a
+  recomputed header and trailer, dropping objects that an earlier pack already
+  contains and rewriting ofs-delta distances where that changes them. Objects
+  not reachable from the wanted refs (e.g. archived history) may be included.
+- **`packfile-uris`** (protocol v2): if the client asks for it and the forge
+  can name a URL per pack (the dumb HTTP URL, a CDN base, or a presigned URL),
+  the response lists every stored pack as `<checksum> <uri>` and the in-band
+  pack is empty; the client downloads and indexes the packs itself.
+- **Incremental fetches** walk the commits reachable from the common `have`s,
+  the new commits and the trees of the boundary commits, then generate a pack
+  entry by entry: stored non-delta entries are copied verbatim, stored deltas
+  are reused as ref-deltas when the base is sent too or the client has it and
+  asked for `thin-pack`, everything else is re-deflated.
+
+**Compaction** (`packages/core/src/compaction.ts`) — geometric, like
+`git repack --geometric=2`: packs are sorted by size, and the smallest packs
+are merged until every remaining pack is at least twice as large as all
+smaller packs together. The Worker runs it after each push through
+`waitUntil`, up to a size limit; larger merges can run from a scheduled job.
+The merged pack is the same concatenation as for full clones, written to
+storage, and swapped into `objects/info/packs` (§6).
 
 **LFS** — Batch API; responses carry presigned URLs, the client uploads
 directly to the bucket. Verify step before an object counts as present (size
@@ -491,7 +554,8 @@ tokens that carry the scope `repo:admin`.
 per-repository setting in the database. There is no instance-wide public read
 switch.
 
-**Size limits.** Git pushes are limited by `MAX_PUSH_BYTES`; single LFS
+**Size limits.** Git pushes are only limited by the platform's request body
+limit unless `MAX_PUSH_BYTES` is set; single LFS
 objects by `MAX_LFS_OBJECT_BYTES` (default 100 MiB, the request body limit of
 Cloudflare's Free and Pro plans), enforced in the batch API and on `PUT`.
 
@@ -570,6 +634,8 @@ Contract every adapter must meet, checked by the shared conformance suite
 `packages/core/test/storage-conformance.ts` (run against `MemoryStorage`,
 `FsStorage`, `R2Storage` and `S3Storage`):
 
+- `get` with a range returns exactly the requested bytes (clamped at the end);
+  the object database and the indexer read packs only through ranges.
 - `put` is atomic: if the body is shorter or longer than the declared size or
   the stream errors, the call throws and the key keeps its previous state.
   Streaming adapters achieve this by withholding the last byte until the
@@ -701,7 +767,6 @@ What was done about it:
 
 - Conditional writes on B2, Hetzner, Bunny — supported? (Run the S3 conformance
   suite against them; see `packages/s3/README.md`.)
-- Compaction for dumb HTTP: frequency, grace period for old packs.
 - Signed append-only log of ref/pack/LFS changes (e.g. C2SP tlog-tiles with
   cosigning instances as witnesses): still useful as audit trail, format open.
 - Ref checksum à la GitHub Spokes (XOR over `hash(refname, value)`) for cheap

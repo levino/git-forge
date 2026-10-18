@@ -1,11 +1,15 @@
-import { readAll, toHex, utf8, fromUtf8 } from './bytes.ts'
+import { fromHex, fromUtf8, readAll, toHex, utf8 } from './bytes.ts'
+import { ByteCursor } from './cursor.ts'
+import { applyDelta, deltaResultSize } from './delta.ts'
 import { type ObjectId, ZERO_ID } from './hash.ts'
-import { applyDelta } from './delta.ts'
+import { ByteLru } from './lru.ts'
 import { type GitObject, OFS_DELTA, parseTag, REF_DELTA, typeFromCode } from './objects.ts'
-import { readEntryHeader, readOfsDeltaOffset, type ResolvedObject } from './pack.ts'
-import { PackIndex, writeIndex } from './pack-index.ts'
+import { readEntryHeader, readOfsDeltaOffset } from './pack.ts'
+import { PackIndex } from './pack-index.ts'
+import { type IndexedPack, indexPack } from './pack-indexer.ts'
+import { BlockCache, readStorageRange } from './pack-source.ts'
 import type { Storage } from './storage.ts'
-import { inflateAt } from './zlib.ts'
+import { inflateExact } from './zlib.ts'
 
 export type RepositoryName = {
   readonly owner: string
@@ -119,64 +123,103 @@ export const writeServerInfo = async (storage: Storage, repo: RepositoryName, st
   await putText(storage, headKey(repo), `ref: ${state.head}\n`)
 }
 
-type LoadedPack = { readonly name: string; readonly index: PackIndex; bytes?: Uint8Array }
+const BLOB_CODE = 3
+
+export type LoadedPack = {
+  readonly name: string
+  readonly key: string
+  readonly index: PackIndex
+  size?: number
+  blocks?: BlockCache
+}
+
+export type ObjectDatabaseOptions = {
+  readonly cacheBytes?: number
+  readonly blockSize?: number
+  readonly blockCacheBytes?: number
+}
+
+export type IngestOptions = {
+  readonly checkReferences?: boolean
+  readonly memoryBudget?: number
+  readonly chunkSize?: number
+  readonly maxObjectBytes?: number
+}
+
+export const stagingPrefix = (repo: RepositoryName, at = new Date()): string =>
+  `tmp/${repositoryPrefix(repo)}${at.toISOString().replace(/[:.]/g, '-')}-${crypto.randomUUID()}/`
+
+const parseInfoPacks = (text: string): string[] =>
+  text
+    .split('\n')
+    .filter((line) => line.startsWith('P '))
+    .map((line) => line.slice(2).trim())
 
 export class ObjectDatabase {
   readonly #storage: Storage
   readonly #repo: RepositoryName
+  readonly #options: ObjectDatabaseOptions
   #packs: LoadedPack[] | undefined
-  readonly #cache = new Map<ObjectId, GitObject>()
+  readonly #indexes = new Map<string, PackIndex>()
+  readonly #cache: ByteLru<string, GitObject>
+  readonly #blocks: ByteLru<string, Uint8Array>
 
-  constructor(storage: Storage, repo: RepositoryName) {
+  constructor(storage: Storage, repo: RepositoryName, options: ObjectDatabaseOptions = {}) {
     this.#storage = storage
     this.#repo = repo
+    this.#options = options
+    this.#cache = new ByteLru(options.cacheBytes ?? 8 * 1024 * 1024)
+    this.#blocks = new ByteLru(options.blockCacheBytes ?? 4 * 1024 * 1024)
+  }
+
+  get storage(): Storage {
+    return this.#storage
+  }
+
+  get repo(): RepositoryName {
+    return this.#repo
   }
 
   async packNames(): Promise<string[]> {
     const stored = await getText(this.#storage, packsKey(this.#repo))
-    return (stored?.text ?? '')
-      .split('\n')
-      .filter((line) => line.startsWith('P '))
-      .map((line) => line.slice(2).trim())
+    return parseInfoPacks(stored?.text ?? '')
   }
 
-  async #loadPacks(): Promise<LoadedPack[]> {
+  async #loadIndex(name: string): Promise<PackIndex> {
+    const known = this.#indexes.get(name)
+    if (known) return known
+    const stored = await this.#storage.get(packKey(this.#repo, name.replace(/\.pack$/, '.idx')))
+    if (!stored) throw new Error(`missing index for ${name}`)
+    const index = new PackIndex(await readAll(stored.body))
+    this.#indexes.set(name, index)
+    return index
+  }
+
+  async packs(): Promise<readonly LoadedPack[]> {
     if (this.#packs) return this.#packs
-    const names = await this.packNames()
     const packs: LoadedPack[] = []
-    for (const name of names) {
-      const stored = await this.#storage.get(packKey(this.#repo, name.replace(/\.pack$/, '.idx')))
-      if (!stored) throw new Error(`missing index for ${name}`)
-      packs.push({ name, index: new PackIndex(await readAll(stored.body)) })
-    }
+    for (const name of await this.packNames()) packs.push({ name, key: packKey(this.#repo, name), index: await this.#loadIndex(name) })
     this.#packs = packs
     return packs
   }
 
-  async packFiles(name: string): Promise<{ readonly bytes: Uint8Array; readonly index: Uint8Array }> {
-    const index = await this.#storage.get(packKey(this.#repo, name.replace(/\.pack$/, '.idx')))
-    if (!index) throw new Error(`missing index for ${name}`)
-    const pack = (await this.#loadPacks()).find((candidate) => candidate.name === name)
-    if (!pack) throw new Error(`pack ${name} is not registered`)
-    return { bytes: await this.#packBytes(pack), index: await readAll(index.body) }
-  }
-
   async smallBlobs(name: string, maxSize: number): Promise<{ readonly id: ObjectId; readonly data: Uint8Array }[]> {
-    const pack = (await this.#loadPacks()).find((candidate) => candidate.name === name)
+    const pack = (await this.packs()).find((candidate) => candidate.name === name)
     if (!pack) throw new Error(`pack ${name} is not registered`)
-    const bytes = await this.#packBytes(pack)
     const blobs: { id: ObjectId; data: Uint8Array }[] = []
-    for (const { id, offset } of pack.index.entries()) {
-      const header = readEntryHeader(bytes, offset)
+    for (const position of pack.index.positionsByOffset) {
+      const offset = pack.index.offsetAt(position)
+      const head = await this.#range(pack, offset, 32)
+      const header = readEntryHeader(head, 0)
       let candidate = header.typeCode === BLOB_CODE && header.size <= maxSize
-      if (header.typeCode === OFS_DELTA || header.typeCode === REF_DELTA) {
-        const start = offset + header.headerLength
-        const position = header.typeCode === OFS_DELTA ? start + readOfsDeltaOffset(bytes, start).length : start + 20
-        candidate = deltaResultSize(inflateAt(bytes, position).data) <= maxSize
+      if ((header.typeCode === OFS_DELTA || header.typeCode === REF_DELTA) && header.size <= 2 * maxSize + 64) {
+        const raw = await this.readRaw(pack, offset)
+        const start = header.headerLength + (header.typeCode === OFS_DELTA ? readOfsDeltaOffset(raw, header.headerLength).length : 20)
+        candidate = deltaResultSize(inflateExact(raw.subarray(start), header.size)) <= maxSize
       }
       if (!candidate) continue
-      const object = await this.read(id)
-      if (object?.type === 'blob') blobs.push({ id, data: object.data })
+      const object = await this.#readAt(pack, offset)
+      if (object.type === 'blob') blobs.push({ id: pack.index.idAt(position), data: object.data })
     }
     return blobs
   }
@@ -185,52 +228,79 @@ export class ObjectDatabase {
     this.#packs = undefined
   }
 
-  async #packBytes(pack: LoadedPack): Promise<Uint8Array> {
-    if (!pack.bytes) {
-      const stored = await this.#storage.get(packKey(this.#repo, pack.name))
-      if (!stored) throw new Error(`missing pack ${pack.name}`)
-      pack.bytes = await readAll(stored.body)
+  async packSize(pack: LoadedPack): Promise<number> {
+    if (pack.size === undefined) {
+      const info = await this.#storage.head(pack.key)
+      if (!info) throw new Error(`missing pack ${pack.name}`)
+      pack.size = info.size
     }
-    return pack.bytes
+    return pack.size
+  }
+
+  async #range(pack: LoadedPack, offset: number, length: number): Promise<Uint8Array> {
+    if (!pack.blocks) {
+      const size = await this.packSize(pack)
+      pack.blocks = new BlockCache(
+        (from, count) => readStorageRange(this.#storage, pack.key, from, count),
+        size,
+        this.#options.blockSize ?? 64 * 1024,
+        this.#blocks,
+        `${pack.name}:`,
+      )
+    }
+    return pack.blocks.read(offset, length)
+  }
+
+  async entryEnd(pack: LoadedPack, offset: number): Promise<number> {
+    return pack.index.nextOffset(offset) ?? (await this.packSize(pack)) - 20
+  }
+
+  async readRaw(pack: LoadedPack, offset: number): Promise<Uint8Array> {
+    return this.#range(pack, offset, (await this.entryEnd(pack, offset)) - offset)
   }
 
   async #readAt(pack: LoadedPack, offset: number): Promise<GitObject> {
-    const bytes = await this.#packBytes(pack)
-    const header = readEntryHeader(bytes, offset)
-    let position = offset + header.headerLength
+    const key = `${pack.name}:${offset}`
+    const cached = this.#cache.get(key)
+    if (cached) return cached
+    const raw = await this.readRaw(pack, offset)
+    const header = readEntryHeader(raw, 0)
+    let position = header.headerLength
+    let object: GitObject
     if (header.typeCode === OFS_DELTA) {
-      const ofs = readOfsDeltaOffset(bytes, position)
+      const ofs = readOfsDeltaOffset(raw, position)
       position += ofs.length
       const base = await this.#readAt(pack, offset - ofs.distance)
-      return { type: base.type, data: applyDelta(base.data, inflateAt(bytes, position).data) }
-    }
-    if (header.typeCode === REF_DELTA) {
-      const baseId = toHex(bytes.subarray(position, position + 20))
+      object = { type: base.type, data: applyDelta(base.data, inflateExact(raw.subarray(position), header.size)) }
+    } else if (header.typeCode === REF_DELTA) {
+      const baseId = toHex(raw.subarray(position, position + 20))
       position += 20
       const base = await this.read(baseId)
       if (!base) throw new Error(`missing delta base ${baseId}`)
-      return { type: base.type, data: applyDelta(base.data, inflateAt(bytes, position).data) }
+      object = { type: base.type, data: applyDelta(base.data, inflateExact(raw.subarray(position), header.size)) }
+    } else {
+      object = { type: typeFromCode(header.typeCode), data: inflateExact(raw.subarray(position), header.size) }
     }
-    return { type: typeFromCode(header.typeCode), data: inflateAt(bytes, position).data }
+    this.#cache.set(key, object, object.data.length)
+    return object
   }
 
-  async read(id: ObjectId): Promise<GitObject | null> {
-    const cached = this.#cache.get(id)
-    if (cached) return cached
-    for (const pack of await this.#loadPacks()) {
-      const offset = pack.index.find(id)
-      if (offset === null) continue
-      const object = await this.#readAt(pack, offset)
-      this.#cache.set(id, object)
-      return object
+  async locate(id: ObjectId): Promise<{ readonly pack: LoadedPack; readonly offset: number } | null> {
+    const raw = fromHex(id)
+    for (const pack of await this.packs()) {
+      const position = pack.index.positionOfBytes(raw)
+      if (position !== -1) return { pack, offset: pack.index.offsetAt(position) }
     }
     return null
   }
 
+  async read(id: ObjectId): Promise<GitObject | null> {
+    const location = await this.locate(id)
+    return location ? this.#readAt(location.pack, location.offset) : null
+  }
+
   async has(id: ObjectId): Promise<boolean> {
-    if (this.#cache.has(id)) return true
-    for (const pack of await this.#loadPacks()) if (pack.index.find(id) !== null) return true
-    return false
+    return (await this.locate(id)) !== null
   }
 
   async peel(id: ObjectId): Promise<ObjectId> {
@@ -243,52 +313,53 @@ export class ObjectDatabase {
     return current
   }
 
-  async addPack(bytes: Uint8Array, objects: readonly ResolvedObject[], checksum: Uint8Array): Promise<string> {
-    const name = `pack-${toHex(checksum)}.pack`
-    const index = writeIndex(objects, checksum)
-    await this.#storage.put(packKey(this.#repo, name), bytes, bytes.length, { contentType: 'application/x-git-packed-objects' })
-    await this.#storage.put(packKey(this.#repo, name.replace(/\.pack$/, '.idx')), index, index.length, {
-      contentType: 'application/x-git-packed-objects-toc',
+  async updatePackList(change: (names: readonly string[]) => readonly string[] | null): Promise<boolean> {
+    for (let attempt = 0; attempt < 20; attempt++) {
+      const stored = await getText(this.#storage, packsKey(this.#repo))
+      const names = parseInfoPacks(stored?.text ?? '')
+      const next = change(names)
+      if (next === null) return false
+      if (next.length === names.length && next.every((name, i) => name === names[i])) return true
+      const bytes = utf8(`${next.map((name) => `P ${name}`).join('\n')}\n\n`)
+      const result = await this.#storage.put(packsKey(this.#repo), bytes, bytes.length, {
+        contentType: 'text/plain',
+        ...(stored ? { ifMatch: stored.etag } : { ifNoneMatch: '*' as const }),
+      })
+      if (result.ok) {
+        this.invalidate()
+        return true
+      }
+    }
+    throw new Error('could not update the pack list')
+  }
+
+  async registerPack(name: string): Promise<void> {
+    await this.updatePackList((names) => (names.includes(name) ? names : [...names, name]))
+  }
+
+  async index(cursor: ByteCursor, options: IngestOptions = {}): Promise<IndexedPack> {
+    return indexPack(cursor, {
+      storage: this.#storage,
+      stagingPrefix: stagingPrefix(this.#repo),
+      objects: this,
+      ...options,
     })
-    await registerPacks(this.#storage, this.#repo, [name])
-    for (const object of objects) this.#cache.set(object.id, { type: object.type, data: object.data })
-    this.invalidate()
+  }
+
+  async storePack(pack: IndexedPack): Promise<string | null> {
+    const name = await pack.finalize(this.#storage, (file) => packKey(this.#repo, file))
+    if (name) await this.registerPack(name)
     return name
   }
-}
 
-const BLOB_CODE = 3
-
-const deltaResultSize = (delta: Uint8Array): number => {
-  let position = 0
-  for (let skip = 0; skip < 2; skip++) {
-    let size = 0
-    let shift = 0
-    let byte: number
-    do {
-      byte = delta[position++] ?? 0
-      size += (byte & 0x7f) * 2 ** shift
-      shift += 7
-    } while (byte & 0x80 && position < delta.length)
-    if (skip === 1) return size
+  async ingest(stream: ReadableStream<Uint8Array>, options: IngestOptions = {}): Promise<{ readonly name: string | null; readonly pack: IndexedPack }> {
+    const pack = await this.index(new ByteCursor(stream), options)
+    return { name: await this.storePack(pack), pack }
   }
-  return Number.POSITIVE_INFINITY
 }
 
 export const registerPacks = async (storage: Storage, repo: RepositoryName, added: readonly string[]): Promise<void> => {
-  for (let attempt = 0; attempt < 20; attempt++) {
-    const stored = await getText(storage, packsKey(repo))
-    const names = (stored?.text ?? '').split('\n').filter((line) => line.startsWith('P '))
-    const missing = added.filter((name) => !names.includes(`P ${name}`))
-    if (missing.length === 0) return
-    const next = utf8(`${[...names, ...missing.map((name) => `P ${name}`)].join('\n')}\n\n`)
-    const result = await storage.put(packsKey(repo), next, next.length, {
-      contentType: 'text/plain',
-      ...(stored ? { ifMatch: stored.etag } : { ifNoneMatch: '*' as const }),
-    })
-    if (result.ok) return
-  }
-  throw new Error('could not register pack')
+  await new ObjectDatabase(storage, repo).updatePackList((names) => [...names, ...added.filter((name) => !names.includes(name))])
 }
 
 export const isZero = (id: ObjectId): boolean => id === ZERO_ID

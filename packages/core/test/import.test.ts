@@ -6,7 +6,7 @@ import { handleGitRequest } from '../src/http.ts'
 import {
   commitOrder,
   continueImport,
-  ingestInMemory,
+  ingestStreamed,
   type ImportJob,
   ImportRunningError,
   importStep,
@@ -170,8 +170,9 @@ describe('server-side import', () => {
       repo: target,
       maxStepBytes: 400_000,
       ingestPack: async (odb, pack) => {
-        ingested.push(pack.length)
-        return ingestInMemory(odb, pack)
+        const stored = await ingestStreamed(odb, pack)
+        ingested.push(stored.bytes)
+        return stored
       },
     })
     expect(ingested.length).toBe(state.fetched.packs)

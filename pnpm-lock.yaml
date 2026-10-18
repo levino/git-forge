@@ -187,6 +187,9 @@ importers:
       '@git-forge/accounts-node':
         specifier: workspace:*
         version: link:../../packages/accounts-node
+      '@git-forge/node':
+        specifier: workspace:*
+        version: link:../../packages/node
       '@types/node':
         specifier: 22.20.5
         version: 22.20.5

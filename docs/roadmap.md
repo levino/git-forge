@@ -113,6 +113,7 @@ Design: [design.md §18](design.md#18-web-ui).
 - [x] Login pages (sign-in, invite, device code entry, break-glass) rendered by the UI from the login package's page models; sessions in the middleware; account menu with sign-out
 - [x] Account settings: personal access tokens (create, revoke), passkeys (add, remove), linking an OIDC identity
 - [x] Notifications inbox (unread/all, mark read, done, all read) and repository releases (list, tag page, notes, asset downloads)
+- [x] New repository page (owner, name, visibility, default branch) and repository import with a status page; "New" in the navbar and on the dashboard
 - [ ] List and unlink linked OIDC identities, list and end sessions
 - [ ] Organizations and teams
 - [ ] Repository settings (visibility, collaborators, branch protection, federation trust)

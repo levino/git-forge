@@ -13,9 +13,16 @@ const explore = login ? [] : repositories.slice(0, 20)
   {
     login ? (
       <section aria-labelledby="your-repositories">
-        <h1 id="your-repositories" class="text-2xl font-semibold mb-4">
-          Your repositories
-        </h1>
+        <div class="flex flex-wrap items-center justify-between gap-2 mb-4">
+          <h1 id="your-repositories" class="text-2xl font-semibold">
+            Your repositories
+          </h1>
+          {Astro.locals.session && (
+            <a href="/new" class="btn btn-primary btn-sm">
+              New repository
+            </a>
+          )}
+        </div>
         <RepoList repositories={repositories} showOwner={false} />
       </section>
     ) : (

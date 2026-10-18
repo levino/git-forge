@@ -3,9 +3,17 @@ name: Release
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag to create on the selected commit, e.g. v0.1.0
+        required: true
 
 permissions:
   contents: write
+
+env:
+  TAG: ${{ inputs.tag || github.ref_name }}
 
 concurrency:
   group: release-${{ github.ref }}
@@ -31,7 +39,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           SHA256: ${{ steps.build.outputs.sha256 }}
         run: |
-          version=${GITHUB_REF_NAME#v}
+          version=${TAG#v}
           {
             echo "Pin this release in your instance's \`git-forge.json\`:"
             echo
@@ -43,15 +51,17 @@ jobs:
           } > "$RUNNER_TEMP/notes.md"
           prerelease=""
           case "$version" in *-*) prerelease="--prerelease" ;; esac
-          gh release create "$GITHUB_REF_NAME" \
+          verify="--verify-tag"
+          [ "$GITHUB_EVENT_NAME" = workflow_dispatch ] && verify="--target $GITHUB_SHA"
+          gh release create "$TAG" \
             "$RUNNER_TEMP/release/git-forge-worker.mjs" \
             "$RUNNER_TEMP/release/migrations.tar.gz" \
             "$RUNNER_TEMP/release/SHA256SUMS" \
-            --verify-tag --title "$GITHUB_REF_NAME" --notes-file "$RUNNER_TEMP/notes.md" $prerelease
+            $verify --title "$TAG" --notes-file "$RUNNER_TEMP/notes.md" $prerelease
 
   sync-template:
     needs: release
     uses: ./.github/workflows/sync-instance-template.yml
     with:
-      tag: ${{ github.ref_name }}
+      tag: ${{ inputs.tag || github.ref_name }}
     secrets: inherit

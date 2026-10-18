@@ -13,6 +13,9 @@
     "bench": "node --experimental-transform-types --no-warnings --expose-gc scripts/bench.ts"
   },
   "dependencies": {
+    "@cloudflare/containers": "0.3.7",
+    "@git-forge/accounts": "workspace:*",
+    "@git-forge/actions": "workspace:*",
     "@git-forge/cloudflare": "workspace:*",
     "@git-forge/core": "workspace:*"
   },

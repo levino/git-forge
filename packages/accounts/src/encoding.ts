@@ -1,7 +1,7 @@
 const encoder = new TextEncoder()
-const decoder = new TextDecoder('utf-8', { fatal: true })
+const decoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: false })
 
-export const utf8 = (text: string): Uint8Array<ArrayBuffer> => encoder.encode(text)
+export const utf8 = (text: string): Uint8Array<ArrayBuffer> => encoder.encode(text) as Uint8Array<ArrayBuffer>
 
 export const fromUtf8 = (bytes: Uint8Array): string => decoder.decode(bytes)
 

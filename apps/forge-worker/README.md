@@ -10,11 +10,15 @@ protocol v0 clients) straight from an R2 bucket, using `handleGitRequest` from
 | Piece | Purpose |
 |---|---|
 | `BUCKET` (R2) | All repository data, in the bucket layout described in `docs/design.md` (`repos/<owner>/<name>/…`). |
-| `DB` (D1) | Placeholder for the accounts package. Not used yet. |
+| `DB` (D1) | CI state (`actions_*` tables, migrated on first use); later accounts. |
+| `RUNNER` (Durable Object + Container) | `RunnerContainer`: one container per CI job running the official `actions/runner` with a JIT config (`runner/Dockerfile`). |
 | Cron Trigger `*/30 * * * *` | Stub for mirror sync; currently only logs. |
 | `ADMIN_TOKEN` (secret) | Protects `POST /api/admin/repos` and, until accounts exist, every push. |
 | `PUBLIC_READ` (var) | `true` (default): anyone may clone. `false`: clones need the admin token too. |
 | `MAX_PUSH_BYTES` (var) | Largest accepted push request, default 16 MiB. Larger files belong in Git LFS. |
+| `ACTIONS` (var) | `true` (default): CI is on — workflows run on push, `/_services/actions` and `/api/v3` are served. |
+| `ACTIONS_SECRETS` (secret) | JSON object of instance secrets for workflows, e.g. `{"CLOUDFLARE_API_TOKEN":"…"}`. |
+| `PUBLIC_URL`, `INSTANCE_ID` (vars, optional) | Public base URL handed to runners (default: the request origin) and a stable GUID for the Actions location service. |
 
 ### Routes
 
@@ -23,6 +27,9 @@ protocol v0 clients) straight from an R2 bucket, using `handleGitRequest` from
   repository. Answers `201` with the clone URL, `409` if it exists, `400` for
   invalid names, `401` for a wrong token and `503` if no token is configured.
 - `GET /api/health` answers `{"ok": true}`.
+- `/_services/actions/…` is the Actions service for `actions/runner`, and
+  `/api/v3/repos/<owner>/<name>/actions/…` the GHES-style runner, run and job
+  API (admin token). See [`@git-forge/actions`](../../packages/actions).
 - `/<owner>/<name>.git/…` is Git. Push with the admin token as the HTTP Basic
   password (any user name), e.g. `https://git:<token>@forge.example/acme/site.git`
   or via a credential helper.
@@ -60,6 +67,23 @@ git push https://git:$ADMIN_TOKEN@git-forge.<account>.workers.dev/acme/site.git 
 git clone https://git-forge.<account>.workers.dev/acme/site.git
 ```
 
+### CI runners on Cloudflare Containers
+
+`wrangler deploy` builds `runner/Dockerfile` (official
+`ghcr.io/actions/actions-runner` image plus Git and Node.js) and pushes it to
+the Cloudflare registry, so Docker must be available where you deploy.
+Containers need the Workers Paid plan. Each queued job starts one
+`RunnerContainer` instance (`max_instances` in `wrangler.jsonc`), whose
+entrypoint runs `run.sh --jitconfig "$ACTIONS_RUNNER_JITCONFIG"`; the runner
+is ephemeral and the container stops after the job. Pin `RUNNER_VERSION` in
+the Dockerfile to the runner release you have tested. This path has not been
+deployed yet. `wrangler dev` runs with `dev.enable_containers: false`;
+locally, start a runner by hand (see the actions package README).
+
+```sh
+echo '{"CLOUDFLARE_API_TOKEN":"…"}' | npx wrangler secret put ACTIONS_SECRETS
+```
+
 To use your own domain, add a `routes` entry with `custom_domain: true` to
 `wrangler.jsonc` or attach the domain in the dashboard.
 
@@ -82,8 +106,9 @@ database (Miniflare), persisted under `.wrangler/`. `.dev.vars` is gitignored.
   repository through the admin endpoint, pushes a generated history of 120
   commits with the real `git` client, clones it with protocol v2 and with
   `git -c protocol.version=0` (dumb HTTP), pushes incrementally, force-pushes
-  and checks that the previous tip is kept under `refs/archive/`, and fires the
-  Cron Trigger through `/__scheduled`. It takes about 8 seconds and is part of
+  and checks that the previous tip is kept under `refs/archive/`, fires the
+  Cron Trigger through `/__scheduled`, and pushes a workflow to check that a
+  run is queued in D1 and handed to a JIT runner over the Actions protocol. It takes about 8 seconds and is part of
   the root `pnpm test`.
 - `pnpm --filter forge-worker bench` measures CPU time and memory per
   operation (below).

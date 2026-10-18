@@ -168,6 +168,15 @@ importers:
 
   apps/forge-worker:
     dependencies:
+      '@cloudflare/containers':
+        specifier: 0.3.7
+        version: 0.3.7
+      '@git-forge/accounts':
+        specifier: workspace:*
+        version: link:../../packages/accounts
+      '@git-forge/actions':
+        specifier: workspace:*
+        version: link:../../packages/actions
       '@git-forge/cloudflare':
         specifier: workspace:*
         version: link:../../packages/cloudflare
@@ -226,6 +235,28 @@ importers:
         specifier: 4.1.11
         version: 4.1.11(@types/node@22.20.5)(vite@8.3.4(@types/node@22.20.5))
 
+  packages/actions:
+    dependencies:
+      '@git-forge/accounts':
+        specifier: workspace:*
+        version: link:../accounts
+      '@git-forge/core':
+        specifier: workspace:*
+        version: link:../core
+    devDependencies:
+      '@git-forge/accounts-node':
+        specifier: workspace:*
+        version: link:../accounts-node
+      '@types/node':
+        specifier: 22.20.5
+        version: 22.20.5
+      typescript:
+        specifier: 6.0.3
+        version: 6.0.3
+      vitest:
+        specifier: 4.1.11
+        version: 4.1.11(@types/node@22.20.5)(vite@8.3.4(@types/node@22.20.5))
+
   packages/cloudflare:
     dependencies:
       '@git-forge/core':
@@ -268,6 +299,9 @@ importers:
         version: 4.1.11(@types/node@22.20.5)(vite@8.3.4(@types/node@22.20.5))
 
 packages:
+
+  '@cloudflare/containers@0.3.7':
+    resolution: {integrity: sha512-DM9dm3FnIBSyiSJ1FLavKwl/lk3oAmTaynCzZQ9pZR0ncRPquSxkxd8Nu2MFILxmDDsPkxKsSNEh9mHHMty4Fw==}
 
   '@cloudflare/kv-asset-handler@0.5.0':
     resolution: {integrity: sha512-jxQYkj8dSIzc0cD6cMMNdOc1UVjqSqu8BZdor5s8cGjW2I8BjODt/kWPVdY+u9zj3ms75Q5qaZgnxUad83+eAg==}
@@ -1190,6 +1224,8 @@ packages:
     resolution: {integrity: sha512-v5l/aFXZQeai4awLbOpSoHecE9UiMrnfx75tEXLjNonXVARxQ5mOeipTjROUchszUNCqnE+hqAMujRsRHsut2Q==}
 
 snapshots:
+
+  '@cloudflare/containers@0.3.7': {}
 
   '@cloudflare/kv-asset-handler@0.5.0': {}
 

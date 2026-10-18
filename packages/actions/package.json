@@ -1,0 +1,27 @@
+{
+  "name": "@git-forge/actions",
+  "version": "0.0.0",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./migrations/*": "./migrations/*",
+    "./test/*": "./test/*"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "migrations:bundle": "node --experimental-strip-types scripts/bundle-migrations.ts"
+  },
+  "dependencies": {
+    "@git-forge/accounts": "workspace:*",
+    "@git-forge/core": "workspace:*"
+  },
+  "devDependencies": {
+    "@git-forge/accounts-node": "workspace:*",
+    "@types/node": "22.20.5",
+    "typescript": "6.0.3",
+    "vitest": "4.1.11"
+  }
+}

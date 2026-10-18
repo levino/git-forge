@@ -1,3 +1,15 @@
+import { applyMigrations, type Database } from '@git-forge/accounts'
+import {
+  ACTIONS_MIGRATIONS,
+  advanceRun,
+  type DispatchOptions,
+  handleActionsService,
+  handleGhesApi,
+  queueRunsForPush,
+  type RunnerLauncher,
+  type SecretsProvider,
+  verifyToken,
+} from '@git-forge/actions'
 import {
   type Authorize,
   createRepository,
@@ -7,11 +19,38 @@ import {
   type Storage,
 } from '@git-forge/core'
 
+export type ActionsConfig = {
+  readonly db: Database
+  readonly instanceId: string
+  readonly launcher?: RunnerLauncher
+  readonly secrets?: SecretsProvider
+  readonly publicUrl?: string
+}
+
 export type ForgeConfig = {
   readonly storage: Storage
   readonly adminToken: string | undefined
   readonly publicRead: boolean
   readonly maxPushBytes: number
+  readonly actions?: ActionsConfig
+}
+
+export const ACTIONS_SERVICE_PATH = '/_services/actions'
+
+export const ACTIONS_MIGRATIONS_TABLE = 'actions_migrations'
+
+const migrated = new WeakMap<Database, Promise<unknown>>()
+
+const ensureMigrated = (db: Database): Promise<unknown> => {
+  let pending = migrated.get(db)
+  if (!pending) {
+    pending = applyMigrations(db, ACTIONS_MIGRATIONS, Date.now(), ACTIONS_MIGRATIONS_TABLE).catch((error: unknown) => {
+      migrated.delete(db)
+      throw error
+    })
+    migrated.set(db, pending)
+  }
+  return pending
 }
 
 const json = (status: number, body: unknown, headers: Record<string, string> = {}) =>
@@ -54,10 +93,55 @@ const isAdmin = async (request: Request, config: ForgeConfig): Promise<boolean> 
   return token !== null && (await tokenMatches(token, config.adminToken))
 }
 
+const jobTokenGrantsRead = async (request: Request, config: ForgeConfig, owner: string, name: string): Promise<boolean> => {
+  const token = presentedToken(request)
+  if (!config.actions || !token) return false
+  await ensureMigrated(config.actions.db)
+  const grant = await verifyToken(config.actions.db, token, 'github', Date.now())
+  return grant !== null && grant.owner === owner && grant.repo === name
+}
+
 const authorizer =
   (config: ForgeConfig): Authorize =>
-  async (request, _repo, access) =>
-    (access === 'read' && config.publicRead) || (await isAdmin(request, config)) ? null : unauthorized()
+  async (request, repo, access) =>
+    (access === 'read' && config.publicRead) ||
+    (await isAdmin(request, config)) ||
+    (access === 'read' && (await jobTokenGrantsRead(request, config, repo.owner, repo.name)))
+      ? null
+      : unauthorized()
+
+const dispatchOptions = (request: Request, config: ForgeConfig, actions: ActionsConfig): DispatchOptions => {
+  const serverUrl = actions.publicUrl ?? new URL(request.url).origin
+  return {
+    db: actions.db,
+    storage: config.storage,
+    urls: { serverUrl, serviceUrl: `${serverUrl}${ACTIONS_SERVICE_PATH}` },
+    ...(actions.launcher ? { launcher: actions.launcher } : {}),
+    log: (event) => console.log(JSON.stringify(event)),
+  }
+}
+
+const actionsRoute = async (request: Request, config: ForgeConfig): Promise<Response | null> => {
+  const { actions } = config
+  const { pathname } = new URL(request.url)
+  if (!actions || !(pathname.startsWith(`${ACTIONS_SERVICE_PATH}/`) || pathname === '/api/v3' || pathname.startsWith('/api/v3/'))) return null
+  await ensureMigrated(actions.db)
+  const dispatch = dispatchOptions(request, config, actions)
+  return (
+    (await handleActionsService(request, {
+      db: actions.db,
+      storage: config.storage,
+      basePath: ACTIONS_SERVICE_PATH,
+      instanceId: actions.instanceId,
+      serverUrl: dispatch.urls.serverUrl,
+      ...(actions.secrets ? { secrets: actions.secrets } : {}),
+      onJobCompleted: async (job) => {
+        await advanceRun(dispatch, job)
+      },
+    })) ??
+    (await handleGhesApi(request, { db: actions.db, storage: config.storage, urls: dispatch.urls, authorize: (incoming) => isAdmin(incoming, config) }))
+  )
+}
 
 type CreateRepositoryBody = { owner?: unknown; name?: unknown; defaultBranch?: unknown }
 
@@ -95,10 +179,22 @@ export const handleRequest = async (request: Request, config: ForgeConfig): Prom
     return createRepositoryRoute(request, config)
   }
   if (url.pathname === '/' || url.pathname === '/api/health') return json(200, { ok: true, service: 'git-forge' })
+  const actions = await actionsRoute(request, config)
+  if (actions) return actions
   const git = await handleGitRequest(request, {
     storage: config.storage,
     authorize: authorizer(config),
     maxRequestBytes: config.maxPushBytes,
+    ...(config.actions
+      ? {
+          onPush: async (repo, outcome) => {
+            const { actions: actionsConfig } = config
+            if (!actionsConfig) return
+            await ensureMigrated(actionsConfig.db)
+            await queueRunsForPush(dispatchOptions(request, config, actionsConfig), { repo, outcome, actor: 'admin' })
+          },
+        }
+      : {}),
   })
   return git ?? json(404, { error: 'not found' })
 }

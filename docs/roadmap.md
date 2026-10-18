@@ -64,6 +64,30 @@ discussions.
 - [ ] Discussions
 - [ ] Submit via form
 
+## M8 — CI (GitHub Actions compatible)
+
+Design: [design.md §12](design.md#12-ci). Spike: real `actions/runner` via JIT
+config, run steps, logs, `needs`, Cloudflare Container definition.
+
+- [x] YAML subset parser and workflow/job model in core (pure), push filters
+- [x] Actions service, legacy flow: connectionData, OAuth client assertion, sessions, message long-poll, job renew/finish, timeline, logs, console lines, attachments
+- [x] GHES REST subset: `generate-jitconfig`, `registration-token`, `runner-registration`, list/get/delete runners, runs, jobs, job logs
+- [x] Dispatch on push: one ephemeral JIT runner per job via `RunnerLauncher`, `needs` with skip on failure
+- [x] Job tokens (`GITHUB_TOKEN` read access over Git HTTP, runtime token per job), instance secrets
+- [x] Cloudflare Container definition for the runner (Dockerfile, `wrangler.jsonc`), deployment untested
+- [ ] Run the end-to-end test with the real runner where GitHub downloads are allowed; fix protocol gaps it finds
+- [ ] Deploy the runner container on Cloudflare and run a `wrangler deploy` job from our own CI
+- [ ] `uses:` actions: `ActionDownloadInfo` with tarballs from mirrored action repositories (`actions/checkout`, `actions/setup-node`, …)
+- [ ] Expressions server-side: job-level `if`, `runs-on` expressions, `strategy`/`matrix`, job outputs across `needs`
+- [ ] Cancellation, job timeouts, reaper for expired locks and dead runners, re-runs
+- [ ] Per-repository and per-environment secrets (encrypted in SQLite), environments with required reviewers, no secrets for fork runs
+- [ ] `workflow_dispatch`, `pull_request`, `schedule` triggers
+- [ ] Commit statuses / check runs, web UI for runs and live logs
+- [ ] Broker and run service (v2 flow), results service, message encryption
+- [ ] Cache, artifacts, OIDC id tokens (`id-token: write`) for cloud deployments without long-lived secrets
+- [ ] External providers: signed `workflow_job` webhooks, GitHub App auth (JWT → installation token, manifest flow), org-level runners; try WarpBuild Enterprise, AWS CodeBuild, RunsOn
+- [ ] `container:` and `services:` (needs Docker inside the runner container)
+
 ## Later
 
 - [ ] Branch protection
@@ -72,4 +96,4 @@ discussions.
 - [ ] Encrypted full backups, partial visibility
 - [ ] External mirror verification
 - [ ] SSH-to-HTTPS gateway
-- [ ] Actions, Pages
+- [ ] Pages

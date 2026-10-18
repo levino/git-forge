@@ -94,5 +94,4 @@ discussions.
 - [ ] Releases
 - [ ] Encrypted full backups, partial visibility
 - [ ] External mirror verification
-- [ ] SSH-to-HTTPS gateway
 - [ ] Pages

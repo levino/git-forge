@@ -312,9 +312,10 @@ automations use app tokens; mirrors use instance federation (§4).
 
 ## 9. Git over SSH
 
-Not supported: serverless functions accept only HTTP. Git uses HTTPS with
-tokens, later also a device flow. An optional SSH-to-HTTPS gateway could run
-on a Pi or VPS later.
+Not supported, by decision. Serverless functions accept only HTTP; SSH would
+need an always-on host or a TCP-capable container platform, and SSH over
+WebSocket needs client-side configuration. Git uses HTTPS with tokens, made
+convenient by `git forge auth login` (credential helper, device flow).
 
 ## 10. Mirror overview and verification
 

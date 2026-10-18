@@ -28,6 +28,7 @@ import {
   checkRepositoryAccess,
   checkSession,
   createAccountsStore,
+  createMirrorVerificationStore,
   createLoginHandler,
   createLoginStore,
   createOidcProvider,
@@ -129,6 +130,7 @@ import {
 } from '@git-forge/notifications'
 import { type AssetRow, createReleaseStore, handleReleasesRequest, type ReleaseRow } from '@git-forge/releases'
 import { activityEvent } from './collaboration-events.ts'
+import { mirrorOverview, recordChecksums, signOverview } from './mirror-verification.ts'
 import type { ForgeSettings } from './config.ts'
 import {
   enqueueDueMirrors,
@@ -304,6 +306,7 @@ export const createForge = (options: ForgeOptions): Forge => {
   const { storage, db } = options
   const now = options.now ?? (() => new Date())
   const store: AccountsStore = createAccountsStore(db, { now: () => now().getTime() })
+  const verification = createMirrorVerificationStore(db, { now: () => now().getTime() })
   const logins = createLoginStore(db, { now: () => now().getTime() })
   const outbound = (input: string, init?: RequestInit) => (options.fetch ? options.fetch(new Request(input, init)) : fetch(input, init))
   const oidc = options.login?.oidc ? createOidcProvider(options.login.oidc, outbound, () => now().getTime()) : null
@@ -453,6 +456,7 @@ export const createForge = (options: ForgeOptions): Forge => {
           instanceKey: options.instanceKey,
           jwks,
           jobs: options.jobs,
+          verification,
           canRead: async (principal, repo) => (await checkRepositoryAccess(store, principal, repo, 'read')).decision === 'allow',
           deepCheckDays: options.deepCheckDays,
           unitBytes: options.mirrorUnitBytes,
@@ -659,6 +663,21 @@ export const createForge = (options: ForgeOptions): Forge => {
     await requireRepositoryAdmin(request, repo)
     const mirrors = await listMirrors(storage, repo)
     return json(200, await Promise.all(mirrors.map(async (config) => ({ config, status: await readMirrorStatus(storage, repo, config.remote) }))))
+  }
+
+  const mirrorOverviewRoute = async (request: Request, params: string[]): Promise<Response> => {
+    const repo = repoName(params)
+    const check = await repositoryAccess(await principalOf(request), repo, 'read')
+    if (!check.repository || check.decision !== 'allow') {
+      const [status, message] = DECISION_STATUS[check.decision === 'allow' ? 'not-found' : check.decision]
+      throw new HttpError(status, message)
+    }
+    const subject = { owner: check.repository.owner, name: check.repository.name }
+    const at = now()
+    const overview = await mirrorOverview({ storage, verification, subscribers: store.mirrorSubscriptions, now: at }, subject)
+    if (!overview) throw new HttpError(404, 'repository not found')
+    const signed = options.instanceKey && options.publicUrl ? await signOverview(options.instanceKey, options.publicUrl, overview, at) : null
+    return json(200, { ...overview, ...(signed ? { signed } : {}) })
   }
 
   const addMirror = async (request: Request, params: string[]): Promise<Response> => {
@@ -892,6 +911,11 @@ export const createForge = (options: ForgeOptions): Forge => {
 
   const afterPush = async (request: Request, repo: RepositoryName, outcome: PushOutcome, waitUntil: WaitUntil | undefined, principal: Principal | null): Promise<void> => {
     if (federation) await notifyAfterPush(federation)(repo, outcome)
+    if (outcome.results.some((result) => result.ok)) {
+      await recordChecksums(verification, storage, repo).catch((error: unknown) =>
+        console.error(JSON.stringify({ event: 'ref-checksum-failed', repository: `${repo.owner}/${repo.name}`, error: String(error) })),
+      )
+    }
     if (options.actions) await queueRunsForPush(dispatchOptions(request), { repo, outcome, actor: principal?.kind === 'user' ? principal.login : (principal?.kind ?? 'unknown') })
     if (!outcome.results.some((result) => result.ok)) return
     const events = emitPushEvents(request, repo, outcome, principal).catch((error: unknown) =>
@@ -967,6 +991,7 @@ export const createForge = (options: ForgeOptions): Forge => {
     { method: 'POST', pattern: new RegExp(`^${REPO}/import$`), handler: importRepository },
     { method: 'GET', pattern: new RegExp(`^${REPO}/import$`), handler: importStatus },
     { method: 'GET', pattern: new RegExp(`^${REPO}/mirrors$`), handler: listMirrorsRoute },
+    { method: 'GET', pattern: new RegExp(`^${REPO}/mirrors/overview$`), handler: mirrorOverviewRoute },
     { method: 'POST', pattern: new RegExp(`^${REPO}/mirrors$`), handler: addMirror },
     { method: 'POST', pattern: new RegExp(`^${REPO}/mirrors/${SEGMENT}/sync$`), handler: syncMirrorRoute },
     { method: 'POST', pattern: new RegExp(`^${REPO}/mirrors/${SEGMENT}/detach$`), handler: detachMirrorRoute },

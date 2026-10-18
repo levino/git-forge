@@ -103,6 +103,8 @@ There is no global "public read" switch any more.
 | `POST\|DELETE /api/federation/subscriptions` `{repository, callback}` | trusted instance (instance JWT) | Subscribes to push notifications for a repository it may read; the callback must be below its own issuer URL. |
 | `POST /api/federation/notify/{owner}/{name}/{remote}` | trusted upstream (signed body, `application/jwt`) | Push notification. `401` for an untrusted issuer, unknown key, bad signature, wrong audience or expired token; `403` if this mirror does not follow that repository; `200 up-to-date` for a duplicate; `202 queued` otherwise. |
 | `POST /api/repos/{owner}/{name}/mirrors/{remote}/detach` | repository admin | Stops syncing. |
+| `GET /api/repos/{owner}/{name}/mirrors/overview` | read access | Mirror overview for the UI (`docs/design.md` §10): this repository's ref checksum, every mirror known from subscriptions or attestations with `state` (`current`, `behind`, `diverged`, `unknown`, `stale`, `unattested`), `lagSeconds`, `alarms`, the last signed attestation and spot check, and the repository's own upstreams. With an instance key, `signed` is the same summary as a JWT signed by this instance. |
+| `POST /api/federation/attestations` | trusted mirror (signed body, `application/jwt`) | A mirror's signed ref checksum after a sync. `401` for an untrusted issuer or invalid token, `404` if the issuer may not read the repository, `202` when recorded (and a spot check is enqueued at most once a day). |
 | `POST /api/repos/{owner}/{name}/import` `{url, token?, username?, lfs?, lfsUrl?, commitsPerStep?, visibility?, defaultBranch?}` | repository admin or instance admin; for a new repository the owner or an instance admin | Imports from a Git URL (smart HTTP v2 or dumb HTTP) without a request body limit, creating the repository first if needed (as `POST /api/repos`). `token` is sent as HTTP Basic password with `username` (default `git`), travels only in the queue messages and is never stored. Refs land in `refs/heads/*` and `refs/tags/*`; rewritten refs are archived, local refs missing upstream are kept. `202` with the state and a `Location`, `409` while an import runs; an import without progress for 30 minutes (its worker or process died) is taken over and continues from its last step. |
 | `GET /api/repos/{owner}/{name}/import` | repository admin | Import state: `phase` (`discover`, `graph`, `fetch`, `lfs`, `refs`, `done`, `failed`), progress, ref updates, missing LFS objects, last error. Starting a failed import again with the same URL resumes it. |
 | `POST /api/admin/invites` `{login?, user?, email?, expiresInDays?}` | instance admin | Invite for a new account (`login` fixed or chosen by the invitee) or for an existing `user` (to add a passkey or link OIDC). Returns `{code, url, expiresAt}`; the URL is `/login/invite/{code}`, valid once, 7 days by default. |
@@ -323,6 +325,11 @@ mirror when the mirror is configured and renewed by the daily cron. After a
 push the upstream enqueues one notification per subscriber, the mirror
 enqueues a copy-only sync (`docs/design.md` §4, §7), and a mirror whose refs
 moved notifies its own subscribers, so chains propagate without cron.
+After every successful sync a mirror with `auth: "instance"` sends a signed
+attestation of the ref state it holds to the upstream, which checks it
+against its own ref checksum history and spot-checks random byte ranges of
+packs and LFS objects on the mirror (`GET …/mirrors/overview`). Spot checks
+of a private mirror need the mirror to grant the upstream read access too.
 
 To use your own domain, add a `routes` entry with `custom_domain: true` to
 `wrangler.jsonc` or attach the domain in the dashboard.

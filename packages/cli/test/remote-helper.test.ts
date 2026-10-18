@@ -110,11 +110,13 @@ const startForge = async (setup: ForgeSetup = {}): Promise<TestForge> => {
     })
   }
   const forge: TestForge = { origin: '', url: '', storage, server: undefined as unknown as RunningServer, failPartsAfter: null, partPuts: 0, bucketPuts: 0, receivePacks: 0 }
+  let admitted = 0
   const isPartUpload = (request: Request, path: string) => request.method === 'PUT' && (/\/forge\/uploads\/[^/]+\/parts\/\d+$/.test(path) || path.startsWith('/__bucket/'))
   const server = await startServer(async (request) => {
     const path = new URL(request.url).pathname
     if (isPartUpload(request, path)) {
-      if (forge.failPartsAfter !== null && forge.partPuts + forge.bucketPuts >= forge.failPartsAfter) {
+      admitted++
+      if (forge.failPartsAfter !== null && admitted > forge.failPartsAfter) {
         await request.arrayBuffer()
         return new Response('simulated outage\n', { status: 503 })
       }

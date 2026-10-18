@@ -14,6 +14,8 @@ import { ConfigurationError, loadIdTokenKeys, loadSecretsKey, parseActionsSettin
 import { type NodeConfig, type NodeEmailSettings, type NodeVars, parseNodeConfig, type StorageConfig } from './config.ts'
 import { createSqliteJobQueue, type SqliteJobQueue } from './jobs.ts'
 
+declare const GIT_FORGE_VERSION: string | undefined
+
 export type Log = (event: Record<string, unknown>) => void
 
 export type NodeInstance = {
@@ -136,7 +138,7 @@ export const createInstance = async (vars: NodeVars, overrides: InstanceOverride
   const jobs = createSqliteJobQueue<AppJob>({
     ...queueOptions,
     queue: 'jobs',
-    handler: (job) => forge!.runJob(job),
+    handler: (job, attempt) => forge!.runJob(job, attempt),
     concurrency: config.jobConcurrency,
     onOutcome: outcomeLog<AppJob>(log, 'job', (job) => ({ ...job, ...('authorization' in job ? { authorization: 'redacted' } : {}) })),
   })
@@ -165,6 +167,7 @@ export const createInstance = async (vars: NodeVars, overrides: InstanceOverride
     storage,
     db,
     digests: nodeDigests,
+    version: typeof GIT_FORGE_VERSION === 'string' ? GIT_FORGE_VERSION : 'dev',
     ...(secretsKey ? { secretsKey } : {}),
     clientAddress: (request) => request.headers.get(CLIENT_ADDRESS_HEADER),
     jobs,

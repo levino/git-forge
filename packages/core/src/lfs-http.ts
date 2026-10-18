@@ -25,6 +25,7 @@ export type LfsHttpOptions = {
   readonly maxObjectBytes?: number
   readonly digests?: DigestFactory
   readonly oversizeHint?: string
+  readonly onVerified?: (key: string, size: number) => Promise<void>
 }
 
 export type LfsContext = {
@@ -115,7 +116,9 @@ export const handleLfsRequest = async (request: Request, repo: RepositoryName, p
         checkHash: storage.presignPut !== undefined,
         ...(context.lfs?.digests ? { digests: context.lfs.digests } : {}),
       })
-      return result.ok ? json(200, { message: 'ok' }) : failure(result.status, result.message)
+      if (!result.ok) return failure(result.status, result.message)
+      await context.lfs?.onVerified?.(lfsObjectKey(repo, spec.oid), spec.size)
+      return json(200, { message: 'ok' })
     }
     const oid = OBJECT_PATH.exec(path)?.[1]
     if (oid === undefined) return failure(404, 'not found')

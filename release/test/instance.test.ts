@@ -150,7 +150,7 @@ describe('instance template', () => {
   const toml = readFileSync(join(templateRoot, 'wrangler.toml'), 'utf8')
 
   it('consists of one wrangler.toml that pins a published release', () => {
-    expect(readdirSync(templateRoot).sort()).toEqual(['.dev.vars.example', '.gitignore', 'README.md', 'runner', 'wrangler.toml'])
+    expect(readdirSync(templateRoot).sort()).toEqual(['.dev.vars.example', '.github', '.gitignore', 'README.md', 'runner', 'wrangler.toml'])
     const pins = toml.match(new RegExp(PIN, 'g')) ?? []
     expect(pins).toHaveLength(1)
     expect(pins[0]).toMatch(/^V=\d+\.\d+\.\d+ S=(?!0{64})[0-9a-f]{64}$/)

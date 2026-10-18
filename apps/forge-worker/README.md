@@ -32,7 +32,7 @@ read functions of `@git-forge/core` and check access with the same
 | `JOBS` | Queue binding, optional | Queue `git-forge-jobs` (`git-forge-<env>-jobs` per environment) for background jobs: mirror syncs, mirror notification deliveries, subscription renewals, deep checks (`src/mirror-federation.ts`), event fan-out, webhook deliveries and email digests (`@git-forge/notifications`). Without it, fan-out and deliveries run inline in the request. One message per invocation (`max_batch_size: 1`), retried with exponential backoff. With `JOBS`, `INSTANCE_KEY` and `PUBLIC_URL` set, push notifications are on. |
 | `IMPORTS` | Queue binding, optional | Queue `git-forge-imports` (`git-forge-<env>-imports` per environment), produced and consumed by this Worker. Each message is one step of a server-side import in its own invocation. Without it the import endpoint answers `503`. |
 | Cron `17 3 * * *` | trigger | Daily safety net: with `JOBS`, enqueues a sync (and a subscription renewal) for every due auto mirror and the periodic deep checks; without `JOBS`, syncs due mirrors inline. It also re-dispatches stuck webhook deliveries and due email digests. |
-| `BOOTSTRAP_TOKEN` | secret | Allows exactly one successful `POST /api/bootstrap`, which creates the first instance admin. |
+| `BOOTSTRAP_TOKEN` | secret | Allows exactly one claim of the first instance admin, on `/-/setup` or with `POST /api/bootstrap`. Without `ACTIONS_SECRETS_KEY`, also the key (via HKDF) for secrets stored in the admin area. |
 | `INSTANCE_KEY` | secret, optional | Ed25519 private JWK of this instance. Needed to mirror private repositories from other instances; also publishes `/.well-known/openid-configuration` and `/.well-known/jwks.json`. Generate with `pnpm --filter forge-worker instance-key`. |
 | `PUBLIC_URL` | var, optional | Base URL of the instance, used as its issuer (when minting) and audience (when verifying instance tokens). Defaults to the origin of the request; scheduled sync with instance tokens needs it set. |
 | `MAX_PUSH_BYTES` | var, optional | Largest accepted push request. Unset by default: pushes are streamed, so only Cloudflare's request body limit applies (see Large pushes). |
@@ -112,6 +112,13 @@ There is no global "public read" switch any more.
 | `GET /api/admin/admins` | instance admin | Instance admins: `[{id, login}]`. |
 | `PUT\|DELETE /api/admin/admins/{login}` | instance admin | Makes a user an instance admin or removes them; the last admin cannot be removed (`422`). `204`. |
 | `GET /api/admin/mirrors` | instance admin | Every mirror of the instance: `[{repository, config, status}]`. |
+| `GET /api/admin/overview` | instance admin | `{update, imports, failures, usage, cost}`: version and latest release, recent imports, failed jobs, bytes per repository, monthly cost estimate. |
+| `GET /api/admin/setup` | instance admin | `{checks, oidc, canSeal}`: deployment checks and the OIDC source. |
+| `PUT\|DELETE /api/admin/oidc` `{issuer, clientId, clientSecret?, name?}` | instance admin | OIDC in the database (secret sealed); `409` while the `OIDC_*` vars are set. |
+| `GET\|POST /api/admin/update` | instance admin | Checks for a release; `POST` commits its pin to the connected instance repository. |
+| `PUT\|DELETE /api/admin/update/repository` `{repository, token}` | instance admin | Connects the GitHub instance repository with a token that can write `wrangler.toml`. |
+| `POST /api/admin/jobs/{id}/retry` | instance admin | Queues a failed job again. `202`. |
+| `POST /api/admin/usage/recount` | instance admin | Recounts the stored bytes of every repository in background jobs. `202`. |
 | `GET /api/admin/backup` | instance admin | Backup status: `{enabled, run, last, error, lagSeconds, stored: {objects, bytes}}`. |
 | `POST /api/admin/backup` | instance admin | Starts a backup run now (or continues the active one). `202`; `409` without a `BACKUP` target. |
 | `POST /api/admin/backup/verify` `{sample?}` | instance admin | Re-hashes `sample` (default 20) random backed-up objects: `{checked, failures}`, `409` on a mismatch. |

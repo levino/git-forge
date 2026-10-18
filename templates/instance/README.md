@@ -10,6 +10,7 @@ configures one instance.
 | `wrangler.toml` | The whole instance: Worker name, the pinned release in the `[build]` command, R2 bucket, D1 database, queues, cron, vars, domain. |
 | `.dev.vars.example` | The secret the Deploy button asks for (`BOOTSTRAP_TOKEN`), and the template for `.dev.vars` in local development. |
 | `runner/Dockerfile` | Image for CI jobs, used only when [CI is enabled](#ci-opt-in): the official `ghcr.io/actions/actions-runner` image plus Git and Node.js. |
+| `.github/workflows/update-git-forge.yml` | Optional: opens a pull request with the new pin when a release comes out (see [Update](#update)). Delete it if you do not want it. |
 
 There is no `package.json`, no lockfile and no script. Nothing from npm ends
 up in the Worker: it runs the bundled `git-forge-worker.mjs` from the release,
@@ -166,29 +167,16 @@ Restore into a new instance: see
 
 ## First admin
 
-**With OIDC** (see [Login](#login)): open the instance once (any page, so the
-Worker creates its tables), then store a one-time claim for your verified
-email address or OIDC subject in D1, from the repository directory:
+Open `https://<your-instance>/-/setup` (the home page links to it while the
+instance has no admin), enter `BOOTSTRAP_TOKEN` and your login, then open
+the invite it shows to register a passkey or link your OIDC account. The same
+page then configures OIDC and checks the deployment (database and bucket
+location, presigned LFS, queues, Actions).
 
-```sh
-npx wrangler@4 d1 execute DB --remote --command "INSERT INTO instance_admin_claims (identity, created_at) VALUES ('you@example.org', unixepoch() * 1000)"
-```
-
-The first OIDC sign-in with that identity creates the account (even without
-self-signup), makes it an instance admin and deletes the claim. Nothing stays
-in the config.
-
-**With or without OIDC:** the secret `BOOTSTRAP_TOKEN` allows exactly one call that
-creates the first instance admin; without it `/api/bootstrap` answers `503`.
-The Deploy button asks for it. Otherwise set it after the first deploy (a
-secret can only be set on an existing Worker):
-
-```sh
-openssl rand -base64 32 | npx wrangler@4 secret put BOOTSTRAP_TOKEN
-```
-
-or in the dashboard under the Worker's **Settings → Variables and Secrets**.
-Then create the admin, a repository, and push:
+`BOOTSTRAP_TOKEN` works once. The Deploy button asks for it; otherwise add it
+as a secret under the Worker's **Settings → Variables and Secrets** (or
+`openssl rand -base64 32 | npx wrangler@4 secret put BOOTSTRAP_TOKEN`).
+Without a browser, `POST /api/bootstrap` does the same and returns a token:
 
 ```sh
 curl -X POST https://<your-instance>/api/bootstrap \
@@ -267,7 +255,10 @@ with an OIDC provider, or, as last resort, with the break-glass key. The
 command line uses `git forge auth login https://<your-instance>`, after which
 plain `git clone` and `git push` work without tokens in URLs. Only the OIDC
 client secret is a secret, and only for a confidential client:
-`npx wrangler@4 secret put OIDC_CLIENT_SECRET`.
+`npx wrangler@4 secret put OIDC_CLIENT_SECRET`. Instead of vars, OIDC can be
+set on `/-/setup`; the client secret is then stored encrypted in D1 with
+`ACTIONS_SECRETS_KEY`, or without it a key derived from `BOOTSTRAP_TOKEN`, so
+changing that secret means entering it again. Vars win when set.
 
 For ZITADEL create a **Web** application in a project with response type
 `code`, grant type authorization code, authentication method `PKCE` (or
@@ -374,15 +365,22 @@ which is handy for a first test. Users choose `instant`, `hourly`, `daily` or
 
 ## Update
 
-Set `V` and `S` at the start of the `[build]` command to a newer release and
-push; Workers Builds deploys it. Each
-[release](https://github.com/levino/git-forge/releases) states both values in
-its notes, together with the complete `[build]` command line. To compute `S`
-yourself:
+`/-/admin` shows the running version and the latest release. Three ways to
+move the pin (`V` and `S` at the start of the `[build]` command):
 
-```sh
-curl -fsSL https://github.com/levino/git-forge/releases/download/v0.9.0/SHA256SUMS | sha256sum
-```
+- **One click:** connect the instance repository on `/-/admin` with a
+  fine-grained GitHub token (this repository only, *Contents: Read and
+  write*; stored encrypted like the OIDC secret). **Update** commits the new
+  pin to `wrangler.toml`; Workers Builds deploys it.
+- **GitHub Action:** `.github/workflows/update-git-forge.yml` checks daily
+  and opens a pull request with the new pin; merging deploys it. It needs
+  *Settings → Actions → General → Allow GitHub Actions to create and approve
+  pull requests*; no stored token.
+- **By hand:** copy the pin from `/-/admin` or the
+  [release notes](https://github.com/levino/git-forge/releases), or compute
+  `S` with
+  `curl -fsSL https://github.com/levino/git-forge/releases/download/v0.9.0/SHA256SUMS | sha256sum`,
+  then commit.
 
 To roll back, revert the commit. Migrations are only ever added, never rolled
 back, and stay compatible with the previous release.

@@ -95,6 +95,7 @@ export const httpBackendHandler =
       child.stdout.on('data', (chunk: Buffer) => chunks.push(chunk))
       child.on('error', reject)
       child.on('close', () => resolve(Buffer.concat(chunks)))
+      child.stdin.on('error', () => undefined)
       child.stdin.end(body)
     })
     const split = output.indexOf('\r\n\r\n')

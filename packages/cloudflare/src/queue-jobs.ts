@@ -1,4 +1,4 @@
-import { DEFAULT_MAX_ATTEMPTS, type EnqueueOptions, type JobHandler, type JobQueue, PermanentJobError, retryDelaySeconds } from '@git-forge/core'
+import { DEFAULT_MAX_ATTEMPTS, type EnqueueOptions, type JobHandler, type JobQueue, PermanentJobError, jobRetryDelaySeconds } from '@git-forge/core'
 
 export class QueueJobs<J> implements JobQueue<J> {
   readonly #queue: Queue<J>
@@ -32,7 +32,7 @@ export const consumeJobs = async <J>(batch: MessageBatch<J>, handler: JobHandler
         message.ack()
         outcomes.push({ id: message.id, attempts: message.attempts, outcome: 'failed', error: text })
       } else {
-        message.retry({ delaySeconds: retryDelaySeconds(message.attempts) })
+        message.retry({ delaySeconds: jobRetryDelaySeconds(message.attempts) })
         outcomes.push({ id: message.id, attempts: message.attempts, outcome: 'retry', error: text })
       }
     }

@@ -12,7 +12,7 @@ export class PermanentJobError extends Error {}
 
 export const DEFAULT_MAX_ATTEMPTS = 8
 
-export const retryDelaySeconds = (attempt: number, baseSeconds = 10, maxSeconds = 3600): number =>
+export const jobRetryDelaySeconds = (attempt: number, baseSeconds = 10, maxSeconds = 3600): number =>
   Math.min(maxSeconds, baseSeconds * 2 ** Math.max(0, attempt - 1))
 
 export type JobFailure<J> = {
@@ -52,7 +52,7 @@ export const createMemoryJobQueue = <J>(handler: JobHandler<J>, options: MemoryJ
           failed.push({ job, attempts: attempt, error: message })
           return
         }
-        await sleep(delayMs(retryDelaySeconds(attempt)))
+        await sleep(delayMs(jobRetryDelaySeconds(attempt)))
       }
     }
   }

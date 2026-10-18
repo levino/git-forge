@@ -14,6 +14,32 @@
       "17 3 * * *"
     ]
   },
+  "queues": {
+    "producers": [
+      {
+        "binding": "IMPORTS",
+        "queue": "git-forge-imports"
+      },
+      {
+        "binding": "JOBS",
+        "queue": "git-forge-jobs"
+      }
+    ],
+    "consumers": [
+      {
+        "queue": "git-forge-imports",
+        "max_batch_size": 1,
+        "max_batch_timeout": 1,
+        "max_retries": 3
+      },
+      {
+        "queue": "git-forge-jobs",
+        "max_batch_size": 1,
+        "max_batch_timeout": 1,
+        "max_retries": 10
+      }
+    ]
+  },
   "r2_buckets": [
     {
       "binding": "BUCKET",
@@ -41,6 +67,32 @@
   "env": {
     "alpha": {
       "name": "git-forge-alpha",
+      "queues": {
+        "producers": [
+          {
+            "binding": "IMPORTS",
+            "queue": "git-forge-alpha-imports"
+          },
+          {
+            "binding": "JOBS",
+            "queue": "git-forge-alpha-jobs"
+          }
+        ],
+        "consumers": [
+          {
+            "queue": "git-forge-alpha-imports",
+            "max_batch_size": 1,
+            "max_batch_timeout": 1,
+            "max_retries": 3
+          },
+          {
+            "queue": "git-forge-alpha-jobs",
+            "max_batch_size": 1,
+            "max_batch_timeout": 1,
+            "max_retries": 10
+          }
+        ]
+      },
       "r2_buckets": [
         {
           "binding": "BUCKET",
@@ -64,26 +116,36 @@
         "required": [
           "BOOTSTRAP_TOKEN"
         ]
-      },
+      }
+    },
+    "beta": {
+      "name": "git-forge-beta",
       "queues": {
         "producers": [
           {
+            "binding": "IMPORTS",
+            "queue": "git-forge-beta-imports"
+          },
+          {
             "binding": "JOBS",
-            "queue": "git-forge-alpha-jobs"
+            "queue": "git-forge-beta-jobs"
           }
         ],
         "consumers": [
           {
-            "queue": "git-forge-alpha-jobs",
+            "queue": "git-forge-beta-imports",
+            "max_batch_size": 1,
+            "max_batch_timeout": 1,
+            "max_retries": 3
+          },
+          {
+            "queue": "git-forge-beta-jobs",
             "max_batch_size": 1,
             "max_batch_timeout": 1,
             "max_retries": 10
           }
         ]
-      }
-    },
-    "beta": {
-      "name": "git-forge-beta",
+      },
       "r2_buckets": [
         {
           "binding": "BUCKET",
@@ -107,26 +169,36 @@
         "required": [
           "BOOTSTRAP_TOKEN"
         ]
-      },
+      }
+    },
+    "gamma": {
+      "name": "git-forge-gamma",
       "queues": {
         "producers": [
           {
+            "binding": "IMPORTS",
+            "queue": "git-forge-gamma-imports"
+          },
+          {
             "binding": "JOBS",
-            "queue": "git-forge-beta-jobs"
+            "queue": "git-forge-gamma-jobs"
           }
         ],
         "consumers": [
           {
-            "queue": "git-forge-beta-jobs",
+            "queue": "git-forge-gamma-imports",
+            "max_batch_size": 1,
+            "max_batch_timeout": 1,
+            "max_retries": 3
+          },
+          {
+            "queue": "git-forge-gamma-jobs",
             "max_batch_size": 1,
             "max_batch_timeout": 1,
             "max_retries": 10
           }
         ]
-      }
-    },
-    "gamma": {
-      "name": "git-forge-gamma",
+      },
       "r2_buckets": [
         {
           "binding": "BUCKET",
@@ -150,39 +222,7 @@
         "required": [
           "BOOTSTRAP_TOKEN"
         ]
-      },
-      "queues": {
-        "producers": [
-          {
-            "binding": "JOBS",
-            "queue": "git-forge-gamma-jobs"
-          }
-        ],
-        "consumers": [
-          {
-            "queue": "git-forge-gamma-jobs",
-            "max_batch_size": 1,
-            "max_batch_timeout": 1,
-            "max_retries": 10
-          }
-        ]
       }
     }
-  },
-  "queues": {
-    "producers": [
-      {
-        "binding": "JOBS",
-        "queue": "git-forge-jobs"
-      }
-    ],
-    "consumers": [
-      {
-        "queue": "git-forge-jobs",
-        "max_batch_size": 1,
-        "max_batch_timeout": 1,
-        "max_retries": 10
-      }
-    ]
   }
 }

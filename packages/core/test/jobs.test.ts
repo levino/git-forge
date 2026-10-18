@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest'
-import { createMemoryJobQueue, PermanentJobError, retryDelaySeconds } from '../src/jobs.ts'
+import { createMemoryJobQueue, PermanentJobError, jobRetryDelaySeconds } from '../src/jobs.ts'
 
 describe('job queue', () => {
   it('backs off exponentially up to an hour', () => {
-    expect([1, 2, 3, 4, 10, 20].map((attempt) => retryDelaySeconds(attempt))).toEqual([10, 20, 40, 80, 3600, 3600])
+    expect([1, 2, 3, 4, 10, 20].map((attempt) => jobRetryDelaySeconds(attempt))).toEqual([10, 20, 40, 80, 3600, 3600])
   })
 
   it('retries failing jobs with backoff until they succeed', async () => {

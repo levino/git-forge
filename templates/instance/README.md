@@ -106,6 +106,14 @@ collaborators, instance federation and mirrors are described in the
 To mirror private repositories of other instances, also set the secret
 `INSTANCE_KEY` and the var `PUBLIC_URL` (see there).
 
+## Imports
+
+`POST /api/repos/<owner>/<name>/import` creates or updates a repository by
+pulling it from another Git server, without the request body limit of a push.
+Its steps run on the Cloudflare Queue `git-forge-imports`, declared in
+`wrangler.jsonc` and created by the first `wrangler deploy` like the bucket
+and the database.
+
 ## Update
 
 An update is a change of `git-forge.json`:

@@ -46,11 +46,11 @@ const UPLOAD_ID = /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z-[0-9a-f]{8}-[0-9a
 
 export const isUploadId = (id: string): boolean => UPLOAD_ID.test(id)
 
-export const newUploadId = (at: Date): string => `${at.toISOString().replace(/[:.]/g, '-')}-${crypto.randomUUID()}`
+const newUploadId = (at: Date): string => `${at.toISOString().replace(/[:.]/g, '-')}-${crypto.randomUUID()}`
 
-export const uploadPrefix = (repo: RepositoryName, id: string): string => `tmp/${repositoryPrefix(repo)}${id}/`
+const uploadPrefix = (repo: RepositoryName, id: string): string => `tmp/${repositoryPrefix(repo)}${id}/`
 
-export const uploadSessionKey = (repo: RepositoryName, id: string): string => `${uploadPrefix(repo, id)}upload.json`
+const uploadSessionKey = (repo: RepositoryName, id: string): string => `${uploadPrefix(repo, id)}upload.json`
 
 export const uploadPartKey = (repo: RepositoryName, id: string, number: number): string =>
   `${uploadPrefix(repo, id)}part/${String(number).padStart(5, '0')}`
@@ -157,7 +157,7 @@ export const storeUploadPart = async (
   }
 }
 
-export const uploadedPack = (storage: Storage, repo: RepositoryName, session: UploadSession): ReadableStream<Uint8Array> => {
+const uploadedPack = (storage: Storage, repo: RepositoryName, session: UploadSession): ReadableStream<Uint8Array> => {
   let next = 0
   let reader: ReadableStreamDefaultReader<Uint8Array> | null = null
   let remaining = 0

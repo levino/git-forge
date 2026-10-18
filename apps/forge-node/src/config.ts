@@ -19,6 +19,7 @@ export type NodeVars = ForgeVars & {
   readonly S3_FORCE_PATH_STYLE?: string
   readonly SCHEDULE?: string
   readonly JOB_CONCURRENCY?: string
+  readonly LFS_PUBLISH_DIR?: string
 }
 
 export type StorageConfig = { readonly kind: 'fs'; readonly dir: string } | { readonly kind: 's3'; readonly config: S3StorageConfig }
@@ -31,6 +32,7 @@ export type NodeConfig = {
   readonly storage: StorageConfig
   readonly schedule: CronSchedule
   readonly jobConcurrency: number
+  readonly lfsPublishDir: string | null
 }
 
 export const DEFAULT_PORT = 8080
@@ -112,5 +114,6 @@ export const parseNodeConfig = (vars: NodeVars): NodeConfig => {
     storage: storageConfig(vars, dataDir),
     schedule: schedule(vars.SCHEDULE),
     jobConcurrency: integer('JOB_CONCURRENCY', vars.JOB_CONCURRENCY, DEFAULT_JOB_CONCURRENCY, 1, 64),
+    lfsPublishDir: present(vars.LFS_PUBLISH_DIR) ?? null,
   }
 }

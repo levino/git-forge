@@ -60,70 +60,14 @@ configuration; `git forge auth setup-git [<url>]` writes it later and
 
 ## Remote helper `git-remote-forge`
 
-git runs `git-remote-<scheme>` for URLs `<scheme>::<address>` and
-`<scheme>://…`. Started under the name `git-remote-forge` (a symbolic link or
-copy of `git-forge`; on Windows a copy named `git-remote-forge.exe`), the
-executable speaks git's remote helper protocol on stdin/stdout for
-`forge::https://host/owner/repo` and `forge://host/owner/repo` (= `https://`).
-`git forge remote-helper <remote> <url>` does the same without the link.
-
-**Fetch and clone** go through `git remote-https` for the same URL: the
-helper starts it and relays `stateless-connect`, `list`, `fetch` and
-`option`, so fetching is ordinary smart HTTP with protocol v2 and
-`packfile-uris`, including git's proxy, TLS and credential settings.
-
-**Push** does not use receive-pack:
-
-1. git lists the remote refs (`list for-push`, relayed) and sends the push
-   commands.
-2. The helper asks the forge for its upload limits
-   (`GET <url>/forge/uploads`). A forge without the upload API answers `404`;
-   the push is then handed to `git remote-https` unchanged.
-3. `git pack-objects --revs --thin --delta-base-offset` writes the pack for
-   the new tips, minus the remote tips that exist locally, to
-   `.git/forge-upload/<key>/pack`; the part list (sizes and SHA-256 per part,
-   at most the forge's `maxPartBytes`, 64 MiB by default) goes to
-   `state.json` next to it.
-4. It opens an upload session and `PUT`s every part to the URL the forge
-   names: a presigned object storage URL bound to the part's length and
-   SHA-256 (S3, R2 with signing credentials), or the forge itself, where the
-   storage cannot sign. Three parts at a time, two retries per round.
-5. `finalize` makes the forge index the uploaded pack and apply the ref
-   updates with the same checks as `git-receive-pack` (permissions of the
-   token, branch protection, fast-forward or archive, missing LFS objects).
-   The helper reports each ref as `ok` or `error <reason>`, so git prints
-   `[new branch]`, `->` or `! [remote rejected] main -> main (protected branch: …)`.
-6. When every ref was accepted, `.git/forge-upload/<key>/` is removed.
-
-`--atomic`, `--force-with-lease` (`cas`), `--dry-run`, deletions (`:ref`) and
-`--progress` work as with HTTP. `git config forge.uploadPartBytes 16MiB` (or
-`GIT_FORGE_UPLOAD_PART_BYTES`) makes parts smaller than the forge allows.
-
-**Resuming:** if the upload is interrupted (network loss, `Ctrl-C`, an
-outage), the state stays in `.git/forge-upload/`. Running the same
-`git push` again finds it by the hash of URL, tips and remote tips, asks the
-forge which parts already landed and uploads only the rest; if the session
-expired (after 12 hours by default) a new one is opened for the same local
-pack. If the refs on the remote changed in between, a new pack is built.
-Leftover state directories are removed after seven days.
-
-**Credentials:** requests go out without credentials first; on `401` the
-helper runs `git credential fill` for the URL, exactly like git, so the token
-from `git forge auth login` (credential helper `git forge auth
-git-credential`) or any other configured helper is used, then `approve` or
-`reject`.
-
-**Git LFS** cannot read an endpoint from `forge::` URLs. For a named remote
-whose URL starts with `forge::` or `forge://`, the helper sets
-`remote.<name>.lfsurl` to `<url>/info/lfs` unless that or `lfs.url` is
-already set, so the LFS pre-push hook (which runs before the pack upload) and
-checkouts after `git clone forge::…` find the forge. For pushes to a bare
-`forge::` URL without a remote, set `lfs.url` yourself.
-
-**When to use which:** the remote helper sends each object once and resumes
-inside a pack, but the forge indexes the whole pack in one request (on the
-Worker bounded by its CPU limit, several hundred MiB by default). `git forge
-push` works with any forge and pushes many smaller packs.
+Run as `git-remote-forge` (link or copy of `git-forge`) or
+`git forge remote-helper <remote> <url>`. Fetch is relayed to
+`git remote-https`. Push packs into `.git/forge-upload/<key>/`, uploads parts
+(presigned or through the forge) and finalizes with receive-pack's checks; a
+rerun of the same `git push` uploads only missing parts. Forges without the
+upload API get a plain receive-pack. `forge.uploadPartBytes` (or
+`GIT_FORGE_UPLOAD_PART_BYTES`) caps the part size. Credentials come from
+`git credential`. For named remotes it sets `remote.<name>.lfsurl` when unset.
 
 ## Installation
 
@@ -228,15 +172,8 @@ normal push, an interrupted chunk resumes without resending, merged side
 branches go through temporary refs, rewrites archive once, an oversized commit
 is refused.
 
-`test/remote-helper.test.ts` drives real `git` (and `git lfs`) through
-`git-remote-forge` against in-process forges whose push limit is 200 kB, with
-the token supplied by `git forge auth git-credential`: a push of several
-times the limit lands the same refs and objects as a plain push and clones
-back with `packfile-uris`; parts go to presigned URLs of a simulated bucket
-that checks `x-amz-checksum-sha256`; an upload interrupted by an outage
-resumes without resending a part; branch protection rejects one ref while
-another lands, and `--atomic` rejects both; a missing LFS object is refused;
-deletions work and a server without the upload API gets a normal
-receive-pack. `test/helper-protocol.test.ts` covers the protocol parsing.
+`test/remote-helper.test.ts` drives real `git` and `git lfs` through
+`git-remote-forge`: presigned and proxied parts, resume, policy, atomic,
+LFS check, deletions and the receive-pack fallback.
 The Worker's end-to-end suite pushes 24 MiB through `wrangler dev`
 with `MAX_PUSH_BYTES` set to 16 MiB.

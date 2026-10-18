@@ -503,7 +503,7 @@ describe('deployment configuration', () => {
         migrations: app.migrations,
       })
     }
-    expect(app.containers).toEqual([{ class_name: 'RunnerContainer', image: './runner/Dockerfile', instance_type: 'standard-1', max_instances: 4 }])
+    expect(app.containers).toEqual([{ class_name: 'RunnerContainer', image: './runner/Dockerfile', instance_type: 'basic', max_instances: 4 }])
     expect(app.durable_objects).toEqual({ bindings: [{ name: 'RUNNER', class_name: 'RunnerContainer' }] })
     expect(app.migrations).toEqual([{ tag: 'v1', new_sqlite_classes: ['RunnerContainer'] }])
     expect(app.dev).toEqual({ enable_containers: false })

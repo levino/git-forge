@@ -8,6 +8,7 @@ import {
   isExpired,
   parseFinalizeRequest,
   parseUploadParts,
+  partSpec,
   readUploadSession,
   storeUploadPart,
   UploadError,
@@ -38,7 +39,7 @@ export type UploadContext = {
   readonly now?: () => Date
 }
 
-export const UPLOAD_CONTENT_TYPE = 'application/json; charset=utf-8'
+const UPLOAD_CONTENT_TYPE = 'application/json; charset=utf-8'
 
 const UPLOADS_PATH = /^\/forge\/uploads(?:\/([^/]+)(?:\/(finalize|parts\/(\d+)))?)?$/
 
@@ -134,8 +135,7 @@ export const handleUploadRequest = async (request: Request, repo: RepositoryName
     if (part !== undefined) {
       if (request.method !== 'PUT') return failure(405, 'method not allowed')
       const number = Number(part)
-      const spec = session.parts[number - 1]
-      if (!spec) return failure(404, `upload has no part ${number}`)
+      const spec = partSpec(session, number)
       const size = declaredLength(request)
       if (size === null) return failure(411, 'Content-Length required')
       if (size !== spec.size) {

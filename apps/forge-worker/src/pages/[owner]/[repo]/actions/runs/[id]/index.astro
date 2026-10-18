@@ -1,0 +1,83 @@
+---
+import NotFound from '../../../../../../components/NotFound.astro'
+import RepoHeader from '../../../../../../components/RepoHeader.astro'
+import Layout from '../../../../../../layouts/Layout.astro'
+import { type ActionsOutcome, branchOf, durationText, handleActionsPost, hasFailedJobs, jobState, runState } from '../../../../../../ui/actions.ts'
+import { parseNumber } from '../../../../../../ui/collaboration.ts'
+import { shortId } from '../../../../../../ui/format.ts'
+import { commitUrl, openRepository, repoUrl } from '../../../../../../ui/repository.ts'
+
+const { forge, principal, session } = Astro.locals
+const repo = await openRepository(forge, principal, Astro.params.owner!, Astro.params.repo!)
+const id = parseNumber(Astro.params.id)
+let outcome: ActionsOutcome | null = null
+if (repo.kind === 'ok' && id !== null && Astro.request.method === 'POST') {
+  outcome = await handleActionsPost(forge, Astro.request, repo.name, id)
+  if (outcome.kind === 'redirect') return Astro.redirect(outcome.location, 303)
+  Astro.response.status = outcome.status
+}
+const found = repo.kind === 'ok' && id !== null ? await forge.actions.run(repo.name, id) : null
+const state = found ? runState(found.run) : null
+const canWrite = repo.kind === 'ok' && session !== null && found !== null && (await forge.actions.canWrite(session.principal, repo.name))
+if (state && !state.done && !outcome) Astro.response.headers.set('Refresh', '5')
+---
+
+{
+  repo.kind !== 'ok' || !found || !state ? (
+    <NotFound />
+  ) : (
+    <Layout title={`${found.run.workflow_name} #${found.run.id} · ${repo.name.owner}/${repo.name.name}`}>
+      <RepoHeader repo={repo} tab="actions" />
+      {outcome?.kind === 'error' && <div role="alert" class="alert alert-error mb-6">{outcome.message}</div>}
+      <header class="mb-6 flex flex-wrap items-start gap-4">
+        <div class="min-w-0 flex-1">
+          <h2 class="text-2xl break-words">
+            {found.run.workflow_name} <span class="text-base-content/50">#{found.run.id}</span>
+          </h2>
+          <p class="mt-2 flex flex-wrap items-center gap-2 text-sm">
+            <span class:list={['badge', state.badge]}>{state.label}</span>
+            {found.run.attempt > 1 && <span class="badge badge-outline">Attempt {found.run.attempt}</span>}
+            <span>
+              {found.run.event} on <span class="font-mono">{branchOf(found.run.ref)}</span> ·{' '}
+              <a class="font-mono link" href={commitUrl(repo.name, found.run.sha)}>{shortId(found.run.sha)}</a> by {found.run.actor} ·{' '}
+              <span class="font-mono">{found.run.workflow_path}</span>
+            </span>
+          </p>
+        </div>
+        {
+          canWrite && session && (
+            <form method="post" class="flex flex-wrap gap-2" aria-label="Run controls">
+              <input type="hidden" name="csrf" value={session.csrf} />
+              {state.done ? (
+                <>
+                  <button class="btn btn-sm" name="action" value="rerun">Re-run all jobs</button>
+                  {hasFailedJobs(found.jobs) && <button class="btn btn-sm" name="action" value="rerun-failed">Re-run failed jobs</button>}
+                </>
+              ) : (
+                found.run.cancelled_at === null && <button class="btn btn-sm btn-error btn-outline" name="action" value="cancel">Cancel run</button>
+              )}
+            </form>
+          )
+        }
+      </header>
+      <ul class="border border-base-300 rounded-box divide-y divide-base-300" aria-label="Jobs">
+        {found.jobs.map((job) => (
+          <li class="flex flex-wrap items-center gap-3 px-4 py-3">
+            <span class:list={['badge badge-sm', jobState(job).badge]}>{jobState(job).label}</span>
+            <a href={repoUrl(repo.name, 'actions', 'runs', String(found.run.id), 'jobs', encodeURIComponent(job.id))} class="font-semibold link link-hover break-words flex-1">
+              {job.display_name}
+            </a>
+            <span class="text-sm text-base-content/70">{durationText(job.started_at, job.completed_at)}</span>
+            {canWrite && session && state.done && (
+              <form method="post">
+                <input type="hidden" name="csrf" value={session.csrf} />
+                <input type="hidden" name="job" value={job.id} />
+                <button class="btn btn-xs" name="action" value="rerun-job" aria-label={`Re-run ${job.display_name}`}>Re-run</button>
+              </form>
+            )}
+          </li>
+        ))}
+      </ul>
+    </Layout>
+  )
+}

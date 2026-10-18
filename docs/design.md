@@ -301,7 +301,7 @@ Every building block is an interface; Cloudflare is the first implementation.
 | Building block | Cloudflare | Others |
 |---|---|---|
 | Functions | Workers | Bunny Edge Scripting, Deno Deploy, Lambda, self-hosted Node/Bun |
-| Object storage | R2 | any S3: Hetzner, B2, OVH, IONOS, self-hosted (Garage, SeaweedFS, RustFS, versitygw) |
+| Object storage | R2 | any S3 with conditional writes: Hetzner, B2, OVH, IONOS, self-hosted (versitygw, RustFS); a local directory |
 | Database | D1 / SQLite in Durable Objects | libSQL/Turso, SQLite file (Pi) |
 | Per-repository consistency | Durable Object | conditional writes (S3 CAS), single-writer process |
 | Scheduling, jobs | Cron Triggers, Queues | `Deno.cron`, systemd timers, job table |
@@ -316,8 +316,31 @@ with checksum), `put` with `If-None-Match` / `If-Match`, `list` by prefix. No
 delete. Conditional writes are the only coordination primitive; Durable
 Objects are an optimization, not a requirement.
 
-MinIO is discontinued; Garage, SeaweedFS, RustFS and versitygw are evaluated
-as local S3 test environment.
+Contract every adapter must meet, checked by the shared conformance suite
+`packages/core/test/storage-conformance.ts` (run against `MemoryStorage`,
+`FsStorage`, `R2Storage` and `S3Storage`):
+
+- `put` is atomic: if the body is shorter or longer than the declared size or
+  the stream errors, the call throws and the key keeps its previous state.
+  Streaming adapters achieve this by withholding the last byte until the
+  length is verified (`exactLength` in the core).
+- Exactly one of several concurrent conditional writers wins.
+- ETags are unquoted and change on every write.
+- `list` yields keys in lexicographic order across pages.
+- Ranges past the end are clamped; the reported size is the full size.
+
+Adapters: `MemoryStorage` (core, tests), `FsStorage` (`@git-forge/node`, a
+plain directory per key, lock files for conditional writes), `R2Storage`
+(`@git-forge/cloudflare`, binding, no presigning) and `S3Storage`
+(`@git-forge/s3`, any S3 API including R2's, with presigning). Presigned LFS
+uploads bind `Content-Length` and `x-amz-checksum-sha256` into the signature,
+so the bucket rejects any other content.
+
+**Local S3 test environment:** MinIO is discontinued. versitygw (posix
+backend) is used; it passed the full suite, as did RustFS. SeaweedFS lists in
+directory order instead of lexicographic order, and Garage ignores
+`If-Match`/`If-None-Match` on `PutObject` — both unsuitable for refs. Details
+in `packages/s3/README.md`.
 
 ## 12. Infrastructure and cost (100 GB)
 
@@ -334,13 +357,13 @@ as local S3 test environment.
 
 ## 13. Open questions
 
-- Conditional writes on B2, Hetzner, Bunny — supported?
+- Conditional writes on B2, Hetzner, Bunny — supported? (Run the S3 conformance
+  suite against them; see `packages/s3/README.md`.)
 - Compaction for dumb HTTP: frequency, grace period for old packs.
 - Signed append-only log of ref/pack/LFS changes (e.g. C2SP tlog-tiles with
   cosigning instances as witnesses): still useful as audit trail, format open.
 - Ref checksum à la GitHub Spokes (XOR over `hash(refname, value)`) for cheap
   mirror comparison.
-- Can presigned PUTs be bound to length/checksum?
 - Name.
 
 ## 14. Prior art and references
@@ -373,3 +396,56 @@ as local S3 test environment.
 - git-lfs — Batch API specification and integration tests
 - Radicle — signed refs per participant
 - LOCKSS — many copies, verification, repair
+
+## 15. CI, deployment and updates
+
+### CI
+
+CI emulates the GitHub runner stack so the unmodified official
+`actions/runner` and existing per-minute providers work:
+
+- A GHES-style API under `/api/v3`: runner REST (`generate-jitconfig`,
+  registration tokens), GitHub App auth and PATs, signed `workflow_job`
+  webhooks for external providers.
+- The Actions service the runner talks to: connection data and token
+  exchange, sessions and message long-poll (or broker and run service), job
+  acquire/renew/complete, timeline, logs, later cache, artifacts and OIDC.
+- First compute backend: **Cloudflare Containers / Sandbox SDK**. Per job the
+  forge starts a container with the runner and a JIT config and discards it
+  afterwards (billed per 10 ms, scale to zero, up to 4 vCPU / 12 GiB, rootless
+  Docker-in-Docker).
+- External backends later via the same API: WarpBuild Enterprise, AWS
+  CodeBuild, RunsOn (research in issue #7).
+
+### Deployment
+
+Deployments run in our own CI: a job calls `wrangler deploy` with a Cloudflare
+API token stored as an instance secret. No Cloudflare Workers Builds and no
+GitHub mirror are needed.
+
+### Distribution, new instances and updates
+
+An instance is a stateless deployment; its operators choose the version. The
+deployable unit is a release artifact, not an npm package:
+
+- **Release artifact:** on every release tag, CI builds the worker as a single
+  bundled ES module file plus the D1 migrations and publishes them with
+  SHA-256 checksums as release assets.
+- **Instance template** (`templates/instance`, later its own repository
+  `git-forge-instance`): only `wrangler.jsonc` (own bindings, domain, vars) and
+  `git-forge.json` (`version`, `sha256`). No `package.json`, no lockfile.
+- **Build:** the Cloudflare build step downloads the pinned bundle, verifies the
+  checksum, applies D1 migrations and runs `wrangler deploy`.
+- **First install:** fork/use the template or click "Deploy to Cloudflare",
+  connect the repository to Cloudflare.
+- **Update:** bump `version` and `sha256` in `git-forge.json` and push.
+  Renovate can propose the bump via a regex manager on releases.
+- The same bundle may additionally be published to npm later; the template
+  never depends on it.
+
+### Test instances
+
+`apps/forge-worker` defines three wrangler environments `alpha`, `beta` and
+`gamma`, each with its own D1 and R2. An E2E test runs all three locally and
+checks mirroring and federation across them (beta mirrors alpha, gamma mirrors
+beta).

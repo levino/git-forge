@@ -1,0 +1,17 @@
+name: git-forge-s3
+services:
+  versitygw:
+    image: versity/versitygw:v1.9.0
+    entrypoint: ["sh", "-c", "mkdir -p /data/root/git-forge-test /data/sidecar && exec versitygw --port :7070 posix --sidecar /data/sidecar /data/root"]
+    environment:
+      ROOT_ACCESS_KEY: git-forge
+      ROOT_SECRET_KEY: git-forge-local-secret
+    ports:
+      - "127.0.0.1:7070:7070"
+    tmpfs:
+      - /data
+    healthcheck:
+      test: ["CMD", "nc", "-z", "127.0.0.1", "7070"]
+      interval: 1s
+      timeout: 2s
+      retries: 30

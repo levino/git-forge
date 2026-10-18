@@ -9,7 +9,7 @@ protocol v0 clients) straight from an R2 bucket, using `handleGitRequest` from
 
 | Piece | Purpose |
 |---|---|
-| `BUCKET` (R2) | All repository data, in the bucket layout described in `KONZEPT.md` (`repos/<owner>/<name>/…`). |
+| `BUCKET` (R2) | All repository data, in the bucket layout described in `docs/design.md` (`repos/<owner>/<name>/…`). |
 | `DB` (D1) | Placeholder for the accounts package. Not used yet. |
 | Cron Trigger `*/30 * * * *` | Stub for mirror sync; currently only logs. |
 | `ADMIN_TOKEN` (secret) | Protects `POST /api/admin/repos` and, until accounts exist, every push. |

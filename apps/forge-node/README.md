@@ -47,7 +47,7 @@ Only for this app:
 |---|---|---|
 | `PORT` | `8080` | Listening port. |
 | `HOST` | `0.0.0.0` | Listening address. Use `127.0.0.1` behind a reverse proxy on the same host. |
-| `TRUST_PROXY` | `false` | `true` takes the request origin from `X-Forwarded-Proto` and `X-Forwarded-Host`. Only behind a proxy that sets them. |
+| `TRUST_PROXY` | `false` | `true` takes the request origin from `X-Forwarded-Proto` and `X-Forwarded-Host` and the client address for login rate limits from the last `X-Forwarded-For` hop (otherwise the socket address). Only behind a proxy that sets them. |
 | `DATA_DIR` | `./data` | Base directory for the defaults below. |
 | `DATABASE_PATH` | `$DATA_DIR/git-forge.sqlite` | SQLite file (WAL mode). |
 | `STORAGE` | `fs` | `fs` (local directory, `FsStorage`) or `s3` (`S3Storage`). |

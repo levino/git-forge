@@ -59,8 +59,12 @@ export default async function setup(): Promise<() => Promise<void>> {
   await git(dir, ['commit', '-q', '-m', 'Add the gallery'])
   write(dir, 'src/app.ts', 'export const greet = (name: string) => `Hello, ${name}!`\n')
   await git(dir, ['commit', '-q', '-am', 'Punctuate the greeting'])
+  await git(dir, ['checkout', '-q', '-b', 'polish'])
+  write(dir, 'src/app.ts', 'export const greet = (name: string) => `Hello, ${name}!`\nexport const bye = () => "Bye"\n')
+  await git(dir, ['commit', '-q', '-am', 'Say goodbye'])
   await git(dir, ['lfs', 'push', '--all', 'origin'])
-  await git(dir, ['push', '-q', 'origin', 'main'])
+  await git(dir, ['push', '-q', 'origin', 'main', 'polish'])
+  await post('/api/v3/repos/octo/gallery/pulls', token, { title: 'Say goodbye', head: 'polish', base: 'main' })
   process.env.FORGE_URL = dev.url
   process.env.FORGE_ADMIN_TOKEN = token
   return async () => {

@@ -30,7 +30,7 @@ describe('migrations on node:sqlite', () => {
     await applyMigrations(db, MIGRATIONS.filter((migration) => migration.name < '0024'))
     await db.run(sql("INSERT INTO accounts (id, kind, login, created_at) VALUES ('a1', 'organization', 'Village', 0)"))
     await db.run(sql("INSERT INTO repositories (id, owner_id, name, visibility, created_at) VALUES ('r1', 'a1', 'Archive', 'public', 0)"))
-    expect(await applyMigrations(db, MIGRATIONS)).toEqual(['0024_repository_lifecycle'])
+    expect(await applyMigrations(db, MIGRATIONS)).toEqual(MIGRATIONS.filter((migration) => migration.name >= '0024').map((migration) => migration.name))
     const store = createAccountsStore(db)
     expect(await store.locateRepository('village', 'archive')).toEqual({ path: 'Village/Archive', live: true })
     expect(await store.findRepository('village', 'archive')).toMatchObject({ description: null, homepage: null, topics: [], archived: false })
@@ -38,7 +38,7 @@ describe('migrations on node:sqlite', () => {
 
   it('creates the schema once and is idempotent', async () => {
     const { db } = openSqliteDatabase()
-    expect(await applyMigrations(db, MIGRATIONS)).toEqual(['0001_initial', '0002_branch_protection', '0003_instance_admins', '0004_mirror_subscriptions', '0005_actions', '0006_login', '0007_notifications', '0008_collaboration', '0009_actions_workflows', '0010_instance_admin_claims', '0012_pages', '0014_mirror_verification', '0021_jobs', '0022_cli_login', '0024_repository_lifecycle'])
+    expect(await applyMigrations(db, MIGRATIONS)).toEqual(MIGRATIONS.map((migration) => migration.name))
     expect(await applyMigrations(db, MIGRATIONS)).toEqual([])
     expect((await tables(db)).map((row) => row.name)).toEqual(
       expect.arrayContaining([
@@ -349,7 +349,7 @@ describe('D1 adapter', () => {
     const handle = new DatabaseSync(':memory:')
     handle.exec('PRAGMA foreign_keys = ON')
     const db = d1Database(fakeD1(handle))
-    expect(await applyMigrations(db, MIGRATIONS)).toEqual(['0001_initial', '0002_branch_protection', '0003_instance_admins', '0004_mirror_subscriptions', '0005_actions', '0006_login', '0007_notifications', '0008_collaboration', '0009_actions_workflows', '0010_instance_admin_claims', '0012_pages', '0014_mirror_verification', '0021_jobs', '0022_cli_login', '0024_repository_lifecycle'])
+    expect(await applyMigrations(db, MIGRATIONS)).toEqual(MIGRATIONS.map((migration) => migration.name))
     const store = createAccountsStore(db)
     const { alice } = await seed(store)
     const { token } = await store.createPersonalAccessToken(alice.id, { name: 'd1', scopes: ['repo:admin'], expiresAt: null })

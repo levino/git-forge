@@ -29,7 +29,7 @@ export const VERSION = '0.1.0'
 
 const USAGE = `usage: git forge push [options] <remote> <refspec>...
        git forge auth login [<url>] [--scopes repo:read|repo:write|repo:admin]
-                            [--no-browser] [--browser-redirect | --device] [--no-setup-git]
+                            [--no-browser] [--paste | --browser-redirect | --device] [--no-setup-git]
        git forge auth status | logout [<url>] | setup-git [<url>] | token [<url>]
        git forge auth git-credential <get|store|erase>
        git forge repo create [<owner>/]<name> [--private | --public]

@@ -1,0 +1,16 @@
+---
+import Icon from './Icon.astro'
+
+type Props = { id: string; value: string; label: string }
+
+const { id, value, label } = Astro.props
+---
+
+<label class="text-xs font-semibold text-base-content/70" for={id}>{label}</label>
+<div class="join w-full mt-1">
+  <input id={id} class="input input-sm join-item w-full font-mono text-xs" readonly value={value} />
+  <button type="button" class="btn btn-sm join-item btn-square group" data-clipboard={id} aria-label="Copy to clipboard" title="Copy to clipboard">
+    <Icon name="copy" class="size-4 group-data-copied:hidden" />
+    <Icon name="check" class="size-4 hidden text-success group-data-copied:block" />
+  </button>
+</div>

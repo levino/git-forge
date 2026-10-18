@@ -1,13 +1,16 @@
 import { type Database, sql } from '@git-forge/accounts'
+import { type CacheLimits, evictCaches } from './cache.ts'
 import {
   advertisedRefs,
   cronMatches,
+  diffTrees,
   dispatchTrigger,
   evaluateCondition,
   evaluateTemplate,
   evaluateTemplateString,
   evaluateValue,
   expandMatrix,
+  hasPathFilter,
   type ExpressionContext,
   type ExpressionValue,
   isTruthy,
@@ -17,6 +20,7 @@ import {
   matrixJobName,
   nextCronTime,
   ObjectDatabase,
+  parseCommit,
   parseCron,
   parseWorkflow,
   type PushOutcome,
@@ -41,6 +45,7 @@ import { encodeJitConfig } from './jit.ts'
 import { githubContextValue, type NeedResult, needsContextValue, strategyContextValue, type StrategyContext } from './job-message.ts'
 import { generateRunnerKey } from './keys.ts'
 import { getEnvironment } from './secrets.ts'
+import { readVariables } from './variables.ts'
 import { authorizationUrl, POOL_ID, POOL_NAME } from './service-constants.ts'
 import {
   activeRunsInGroup,
@@ -56,7 +61,9 @@ import {
   getJob,
   getRun,
   getRunnerIncludingRemoved,
+  type JobGroup,
   type JobRow,
+  jobsInGroup,
   listCurrentJobs,
   listJobsByStatus,
   listRunJobs,
@@ -166,6 +173,7 @@ export type DispatchOptions = {
   readonly checks?: CheckRunSink
   readonly now?: () => number
   readonly log?: (event: Record<string, unknown>) => void
+  readonly cacheLimits?: CacheLimits
 }
 
 export const MAX_LAUNCHES = 3
@@ -256,10 +264,10 @@ export type WorkflowRunRequest = {
   readonly trusted?: boolean
 }
 
-const baseContexts = (options: DispatchOptions, run: RunRow, definition: RunDefinition | null, jobKey: string): Record<string, ExpressionValue> => ({
+const baseContexts = async (options: DispatchOptions, run: RunRow, definition: RunDefinition | null, jobKey: string): Promise<Record<string, ExpressionValue>> => ({
   github: githubContextValue(runContextOf(run, definition), options.urls.serverUrl, jobKey),
   inputs: definition?.inputs ?? {},
-  vars: {},
+  vars: run.trusted === 1 ? await readVariables(options.db, run.owner, run.repo) : {},
   env: definition?.workflow.env ?? {},
 })
 
@@ -290,7 +298,7 @@ export const createWorkflowRun = async (options: DispatchOptions, request: Workf
   let cancelInProgress = false
   const { concurrency } = request.workflow
   if (concurrency) {
-    const context: ExpressionContext = { contexts: baseContexts(options, provisional, definition, '') }
+    const context: ExpressionContext = { contexts: await baseContexts(options, provisional, definition, '') }
     try {
       group = evaluateTemplateString(concurrency.group, context)
       cancelInProgress = isTruthy(evaluateValue(concurrency.cancelInProgress as YamlLike, context))
@@ -401,12 +409,16 @@ const planLegs = (job: WorkflowJob, workflow: Workflow, contexts: Record<string,
     if (labels.length === 0) throw new Error('runs-on evaluates to no labels')
     const environment = job.environment ? evaluateTemplateString(job.environment.name, legContext) : null
     const continueOnError = typeof job.continueOnError === 'boolean' ? job.continueOnError : isTruthy(evaluateTemplate(job.continueOnError, legContext))
+    const concurrency = job.concurrency && {
+      group: evaluateTemplateString(job.concurrency.group, legContext),
+      cancelInProgress: isTruthy(evaluateValue(job.concurrency.cancelInProgress as YamlLike, legContext)),
+    }
     return {
       displayName,
       labels,
       environment: environment === '' ? null : environment,
       matrix: combination,
-      definition: { job: { ...job, name: displayName }, workflowEnv: workflow.env, workflowDefaults: workflow.defaults, matrix: combination, strategy, needs, continueOnError },
+      definition: { job: { ...job, name: displayName }, workflowEnv: workflow.env, workflowDefaults: workflow.defaults, matrix: combination, strategy, needs, continueOnError, ...(concurrency ? { concurrency } : {}) },
     }
   })
 }
@@ -424,7 +436,7 @@ const expandJob = async (options: DispatchOptions, run: RunRow, definition: RunD
   const now = clock(options)
   const cancelled = run.cancelled_at !== null
   const results = Object.values(needs).map((need) => need.result)
-  const contexts = { ...baseContexts(options, run, definition, job.id), needs: needsContextValue(needs) }
+  const contexts = { ...(await baseContexts(options, run, definition, job.id)), needs: needsContextValue(needs) }
   const status = {
     success: () => !cancelled && results.every((result) => result === 'success'),
     failure: () => results.some((result) => result === 'failure'),
@@ -449,7 +461,7 @@ const expandJob = async (options: DispatchOptions, run: RunRow, definition: RunD
   for (const [index, leg] of legs.entries()) {
     const environment = leg.environment ? await getEnvironment(db, run.owner, run.repo, leg.environment) : null
     const approval = environment && environment.reviewers.length > 0 ? 'waiting' : null
-    const status = approval === null && index < maxParallel ? 'queued' : 'pending'
+    const status = approval === null && index < maxParallel && !leg.definition.concurrency ? 'queued' : 'pending'
     const values = { displayName: leg.displayName, labels: leg.labels, definition: leg.definition, status, matrix: leg.matrix, environment: environment?.name ?? leg.environment, approval } as const
     if (index === 0) {
       if (!(await expandPlaceholder(db, placeholder.request_id, values))) return
@@ -473,12 +485,35 @@ const expandJob = async (options: DispatchOptions, run: RunRow, definition: RunD
   }
   for (const leg of created) {
     if (leg.status === 'queued') await launchJob(options, leg, run.owner, run.repo)
+    else await claimGroup(options, run, leg)
   }
   await recordChecks(
     options,
     run,
     created.map((leg) => leg.request_id),
   )
+}
+
+const groupOf = (run: RunRow, job: JobRow): JobGroup | null => {
+  const group = jobDefinitionOf(job).concurrency?.group
+  return group === undefined ? null : { owner: run.owner, repo: run.repo, group }
+}
+
+const claimGroup = async (options: DispatchOptions, run: RunRow, job: JobRow): Promise<void> => {
+  const group = groupOf(run, job)
+  if (!group) return
+  const cancelInProgress = jobDefinitionOf(job).concurrency!.cancelInProgress
+  for (const other of await jobsInGroup(options.db, group)) {
+    if (other.request_id === job.request_id || (other.status === 'pending' ? other.expanded !== 1 : !cancelInProgress)) continue
+    const owner = other.run_id === run.id ? run : await getRun(options.db, other.run_id)
+    if (owner && (await cancelJobs(options, owner, [other], 'concurrency')) && owner.id !== run.id) await advance(options, owner.id)
+  }
+}
+
+const wakeGroup = async (options: DispatchOptions, run: RunRow, job: JobRow): Promise<void> => {
+  const group = groupOf(run, job)
+  const next = group && (await jobsInGroup(options.db, group)).find((other) => other.status === 'pending' && other.expanded === 1 && other.run_id !== run.id)
+  if (next) await advance(options, next.run_id)
 }
 
 const cancelJobs = async (options: DispatchOptions, run: RunRow, jobs: readonly JobRow[], reason: string): Promise<boolean> => {
@@ -572,7 +607,7 @@ export const advance = async (options: DispatchOptions, runId: number): Promise<
         if (active >= limit) break
         if (row.status !== 'pending' || row.expanded !== 1 || (row.approval !== null && row.approval !== 'approved')) continue
         if (run.cancelled_at !== null) continue
-        if (await promoteJob(db, row.request_id)) {
+        if (await promoteJob(db, row.request_id, groupOf(run, row))) {
           const promoted = (await getJob(db, row.request_id))!
           await launchJob(options, promoted, run.owner, run.repo)
           await recordChecks(options, run, [row.request_id])
@@ -600,7 +635,9 @@ export const advanceRun = async (options: DispatchOptions, completed: JobRow): P
   if (!run) return []
   const job = await getJob(options.db, completed.request_id)
   if (job) await recordCheck(options.db, options.checks, options.urls.serverUrl, run, job)
-  return advance(options, completed.run_id)
+  const started = await advance(options, completed.run_id)
+  await wakeGroup(options, run, completed)
+  return started
 }
 
 export const cancelRun = async (options: DispatchOptions, runId: number, reason = 'user'): Promise<boolean> => {
@@ -611,6 +648,7 @@ export const cancelRun = async (options: DispatchOptions, runId: number, reason 
   const jobs = (await listCurrentJobs(options.db, runId)).filter((job) => job.expanded === 1)
   await cancelJobs(options, cancelled, jobs, reason)
   await advance(options, runId)
+  for (const job of jobs) if (job.status === 'queued') await wakeGroup(options, cancelled, job)
   return true
 }
 
@@ -709,6 +747,27 @@ const defaultBranchOf = async (storage: Storage, repo: RepositoryName): Promise<
   return { ref: refs.head, sha: refs.refs[refs.head] ?? null }
 }
 
+const changedPaths = async (odb: ObjectDatabase, from: string, to: string): Promise<string[] | null> => {
+  const tree = async (id: string) => {
+    const object = await odb.read(await odb.peel(id))
+    return object?.type === 'commit' ? parseCommit(object.data).tree : null
+  }
+  try {
+    const [before, after] = await Promise.all([tree(from), tree(to)])
+    return before && after ? (await diffTrees(odb, before, after, { renames: false })).map((change) => change.path) : null
+  } catch {
+    return null
+  }
+}
+
+const pathsFor = (workflow: Workflow, changed: () => Promise<string[] | null>): Promise<string[] | null> =>
+  workflow.triggers.some(hasPathFilter) ? changed() : Promise.resolve(null)
+
+const lazy = <T>(load: () => Promise<T>): (() => Promise<T>) => {
+  let value: Promise<T> | undefined
+  return () => (value ??= load())
+}
+
 export const queueRunsForPush = async (options: DispatchOptions, event: PushEvent): Promise<QueuedRun[]> => {
   const odb = new ObjectDatabase(options.storage, event.repo)
   const queued: QueuedRun[] = []
@@ -716,9 +775,10 @@ export const queueRunsForPush = async (options: DispatchOptions, event: PushEven
   for (const result of event.outcome.results) {
     if (!result.ok || isZero(result.newId) || !(result.name.startsWith('refs/heads/') || result.name.startsWith('refs/tags/'))) continue
     if (defaultBranch && result.name === defaultBranch.ref) await syncSchedules(options, event.repo, result.newId)
+    const changed = lazy(async () => (isZero(result.oldId) ? null : changedPaths(odb, result.oldId, result.newId)))
     for (const file of await readWorkflowFiles(odb, result.newId)) {
       const workflow = parseFile(options, file.path, file.source)
-      if (!workflow || !triggeredByPush(workflow, result.name)) continue
+      if (!workflow || !triggeredByPush(workflow, result.name, await pathsFor(workflow, changed))) continue
       queued.push(
         await createWorkflowRun(options, {
           repo: event.repo,
@@ -824,9 +884,11 @@ export const queueRunsForPullRequest = async (options: DispatchOptions, event: P
   const ref = event.mergeSha ? `refs/pull/${event.number}/merge` : `refs/pull/${event.number}/head`
   const baseBranch = event.base.ref.replace(/^refs\/heads\//, '')
   const queued: QueuedRun[] = []
-  for (const file of await readWorkflowFiles(new ObjectDatabase(options.storage, event.repo), sha)) {
+  const odb = new ObjectDatabase(options.storage, event.repo)
+  const changed = lazy(() => changedPaths(odb, event.base.sha, sha))
+  for (const file of await readWorkflowFiles(odb, sha)) {
     const workflow = parseFile(options, file.path, file.source)
-    if (!workflow || !triggeredByPullRequest(workflow, baseBranch, event.action)) continue
+    if (!workflow || !triggeredByPullRequest(workflow, baseBranch, event.action, await pathsFor(workflow, changed))) continue
     const side = (branch: string, commit: string, repo: RepositoryName) => ({ ref: branch.replace(/^refs\/heads\//, ''), sha: commit, repo: repositoryPayload(options, repo) })
     queued.push(
       await createWorkflowRun(options, {
@@ -936,6 +998,7 @@ export type ReapReport = {
   readonly forceCancelled: number
   readonly sessionsClosed: number
   readonly tokensDeleted: number
+  readonly cachesEvicted: number
 }
 
 const abandon = async (options: DispatchOptions, job: JobRow, conclusion: string, reason: string): Promise<boolean> => {
@@ -1007,7 +1070,8 @@ export const reapActions = async (options: DispatchOptions): Promise<ReapReport>
     if (runner?.ephemeral && runner.jobId === job.id && runner.status !== 'online' && runner.createdAt < now - REAPER.launchTimeoutMs && (await relaunch(options, job))) requeued++
   }
   const tokensDeleted = await deleteExpiredTokens(db, now - REAPER.tokenRetentionMs)
-  return { abandoned, requeued, timedOut, forceCancelled, sessionsClosed, tokensDeleted }
+  const cachesEvicted = await evictCaches(db, now, options.cacheLimits)
+  return { abandoned, requeued, timedOut, forceCancelled, sessionsClosed, tokensDeleted, cachesEvicted }
 }
 
 export type ActionsTick = {

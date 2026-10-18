@@ -156,6 +156,7 @@ describe('browser login', () => {
     expect(parseLoginArguments(['--scopes=repo:read', '--device', '--no-browser'])).toMatchObject({ target: undefined, scope: 'repo:read', mode: 'device', openBrowser: false })
     expect(parseLoginArguments(['--browser-redirect']).mode).toBe('redirect')
     expect(parseLoginArguments([], false).mode).toBe('device')
+    expect(parseLoginArguments(['--paste'], false).mode).toBe('paste')
     expect(() => parseLoginArguments(['--scopes', 'repo:root'])).toThrow(/repo:read/)
   })
 

@@ -44,23 +44,24 @@ Astro.response.headers.set('Cache-Control', 'no-store')
   ) : (
     <Layout title={`Settings · ${repo.name.owner}/${repo.name.name}`}>
       <RepoHeader repo={repo} tab="settings" />
+      <div class="max-w-4xl">
       {outcome && <div role={outcome.kind === 'error' ? 'alert' : 'status'} class:list={['alert mb-6', outcome.kind === 'error' ? 'alert-error' : 'alert-success']}>{outcome.message}</div>}
 
-      <section class="mb-10" aria-labelledby="general">
-        <h2 id="general" class="text-xl font-semibold mb-2">General</h2>
+      <section class="panel" aria-labelledby="general">
+        <h2 id="general" class="panel-title">General</h2>
         <form method="post" class="flex flex-col gap-2 max-w-xl" aria-label="Repository details">
           <input type="hidden" name="csrf" value={session.csrf} />
           <input type="hidden" name="action" value="general" />
-          <label class="flex flex-col gap-1 text-sm">Name<input name="name" class="input input-sm font-mono" required value={data.repository.name} /></label>
-          <label class="flex flex-col gap-1 text-sm">Description<input name="description" class="input input-sm" maxlength="350" value={data.repository.description ?? ''} /></label>
-          <label class="flex flex-col gap-1 text-sm">Website<input name="homepage" type="url" class="input input-sm" value={data.repository.homepage ?? ''} /></label>
-          <label class="flex flex-col gap-1 text-sm">Topics<input name="topics" class="input input-sm" placeholder="git, forge" value={data.repository.topics.join(', ')} /></label>
+          <label class="field">Name<input name="name" class="input input-sm font-mono" required value={data.repository.name} /></label>
+          <label class="field">Description<input name="description" class="input input-sm" maxlength="350" value={data.repository.description ?? ''} /></label>
+          <label class="field">Website<input name="homepage" type="url" class="input input-sm" value={data.repository.homepage ?? ''} /></label>
+          <label class="field">Topics<input name="topics" class="input input-sm" placeholder="git, forge" value={data.repository.topics.join(', ')} /></label>
           <button class="btn btn-sm self-start">Save</button>
         </form>
       </section>
 
-      <section class="mb-10" aria-labelledby="visibility">
-        <h2 id="visibility" class="text-xl font-semibold mb-2">Visibility</h2>
+      <section class="panel" aria-labelledby="visibility">
+        <h2 id="visibility" class="panel-title">Visibility</h2>
         <form method="post" class="flex flex-wrap items-center gap-2">
           <input type="hidden" name="csrf" value={session.csrf} />
           <input type="hidden" name="action" value="visibility" />
@@ -72,10 +73,10 @@ Astro.response.headers.set('Cache-Control', 'no-store')
         </form>
       </section>
 
-      <section class="mb-10" aria-labelledby="collaborators">
-        <h2 id="collaborators" class="text-xl font-semibold mb-2">Collaborators</h2>
+      <section class="panel" aria-labelledby="collaborators">
+        <h2 id="collaborators" class="panel-title">Collaborators</h2>
         {data.collaborators.length > 0 && (
-          <ul class="border border-base-300 rounded-box divide-y divide-base-300 mb-4">
+          <ul class="border border-base-300 rounded-box divide-y divide-base-300">
             {data.collaborators.map((collaborator) => (
               <li class="flex flex-wrap items-center gap-2 px-4 py-2">
                 <a href={`/${collaborator.login}`} class="link link-hover font-semibold flex-1">{collaborator.login}</a>
@@ -101,11 +102,11 @@ Astro.response.headers.set('Cache-Control', 'no-store')
         <form method="post" class="flex flex-wrap items-end gap-2" aria-label="Add a collaborator">
           <input type="hidden" name="csrf" value={session.csrf} />
           <input type="hidden" name="action" value="collaborator" />
-          <label class="flex flex-col gap-1 text-sm">
+          <label class="field">
             User
             <input name="login" class="input input-sm" required autocomplete="off" />
           </label>
-          <label class="flex flex-col gap-1 text-sm">
+          <label class="field">
             Role
             <select name="role" class="select select-sm">
               {ROLES.map((role) => <option selected={role === 'write'}>{role}</option>)}
@@ -115,8 +116,8 @@ Astro.response.headers.set('Cache-Control', 'no-store')
         </form>
       </section>
 
-      <section class="mb-10" aria-labelledby="protection">
-        <h2 id="protection" class="text-xl font-semibold mb-2">Branch protection</h2>
+      <section class="panel" aria-labelledby="protection">
+        <h2 id="protection" class="panel-title">Branch protection</h2>
         {rules.map(({ rule, names }) => (
           <details class="border border-base-300 rounded-box mb-2">
             <summary class="px-4 py-2 cursor-pointer flex flex-wrap gap-2 items-center">
@@ -155,10 +156,10 @@ Astro.response.headers.set('Cache-Control', 'no-store')
             </div>
           </details>
         ))}
-        <form method="post" class="flex flex-wrap items-end gap-2 mt-4" aria-label="Protect a branch">
+        <form method="post" class="flex flex-wrap items-end gap-2" aria-label="Protect a branch">
           <input type="hidden" name="csrf" value={session.csrf} />
           <input type="hidden" name="action" value="protection" />
-          <label class="flex flex-col gap-1 text-sm">
+          <label class="field">
             Branch name pattern
             <input name="pattern" class="input input-sm font-mono" required placeholder={repo.defaultBranch ?? 'main'} />
           </label>
@@ -167,8 +168,8 @@ Astro.response.headers.set('Cache-Control', 'no-store')
         </form>
       </section>
 
-      <section class="mb-10" aria-labelledby="mirrors">
-        <h2 id="mirrors" class="text-xl font-semibold mb-2">Mirrors</h2>
+      <section class="panel" aria-labelledby="mirrors">
+        <h2 id="mirrors" class="panel-title">Mirrors</h2>
         {data.mirrors.map(({ config, status }) => (
           <div class="border border-base-300 rounded-box mb-2 p-4">
             <p class="flex flex-wrap items-center gap-2">
@@ -200,18 +201,18 @@ Astro.response.headers.set('Cache-Control', 'no-store')
             )}
           </div>
         ))}
-        <form method="post" class="flex flex-wrap items-end gap-2 mt-4" aria-label="Add a mirror">
+        <form method="post" class="flex flex-wrap items-end gap-2" aria-label="Add a mirror">
           <input type="hidden" name="csrf" value={session.csrf} />
           <input type="hidden" name="action" value="add-mirror" />
-          <label class="flex flex-col gap-1 text-sm flex-1 min-w-60">
+          <label class="field flex-1 min-w-60">
             Upstream URL
             <input name="url" type="url" class="input input-sm font-mono" required placeholder="https://forge.example/owner/repo.git" />
           </label>
-          <label class="flex flex-col gap-1 text-sm">
+          <label class="field">
             Sync
             <select name="mode" class="select select-sm"><option value="auto">automatic</option><option value="manual">manual</option></select>
           </label>
-          <label class="flex flex-col gap-1 text-sm">
+          <label class="field">
             Authentication
             <select name="auth" class="select select-sm"><option value="none">none</option><option value="instance">instance token</option></select>
           </label>
@@ -220,11 +221,11 @@ Astro.response.headers.set('Cache-Control', 'no-store')
         </form>
       </section>
 
-      <section class="mb-10" aria-labelledby="federation">
-        <h2 id="federation" class="text-xl font-semibold mb-2">Federation</h2>
-        <p class="text-sm text-base-content/70 mb-2">Trusted instances listed here may read this repository (Git and Git LFS), for example to mirror it.</p>
+      <section class="panel" aria-labelledby="federation">
+        <h2 id="federation" class="panel-title">Federation</h2>
+        <p class="text-base-content/70">Trusted instances listed here may read this repository (Git and Git LFS), for example to mirror it.</p>
         {data.instances.length > 0 && (
-          <ul class="border border-base-300 rounded-box divide-y divide-base-300 mb-4">
+          <ul class="border border-base-300 rounded-box divide-y divide-base-300">
             {data.instances.map((instance) => (
               <li class="flex flex-wrap items-center gap-2 px-4 py-2">
                 <span class="font-mono flex-1 break-all">{instance.issuer}</span>
@@ -241,7 +242,7 @@ Astro.response.headers.set('Cache-Control', 'no-store')
         <form method="post" class="flex flex-wrap items-end gap-2" aria-label="Grant an instance">
           <input type="hidden" name="csrf" value={session.csrf} />
           <input type="hidden" name="action" value="grant-instance" />
-          <label class="flex flex-col gap-1 text-sm flex-1 min-w-60">
+          <label class="field flex-1 min-w-60">
             Instance URL
             <input name="issuer" type="url" class="input input-sm font-mono" required placeholder="https://mirror.example" />
           </label>
@@ -249,13 +250,13 @@ Astro.response.headers.set('Cache-Control', 'no-store')
         </form>
       </section>
 
-      <section class="mb-10 border border-error rounded-box p-4" aria-labelledby="danger">
-        <h2 id="danger" class="text-xl font-semibold mb-4">Danger zone</h2>
+      <section class="panel border-error" aria-labelledby="danger">
+        <h2 id="danger" class="panel-title">Danger zone</h2>
         <form method="post" class="flex flex-wrap items-end gap-2 mb-4" aria-label="Transfer">
           <input type="hidden" name="csrf" value={session.csrf} />
           <input type="hidden" name="action" value="transfer" />
-          <label class="flex flex-col gap-1 text-sm">New owner<select name="owner" class="select select-sm">{owners.filter((login) => login.toLowerCase() !== data!.repository.owner.toLowerCase()).map((login) => <option>{login}</option>)}</select></label>
-          <label class="flex flex-col gap-1 text-sm">Type {data.repository.name} to confirm<input name="confirm" class="input input-sm font-mono" required autocomplete="off" /></label>
+          <label class="field">New owner<select name="owner" class="select select-sm">{owners.filter((login) => login.toLowerCase() !== data!.repository.owner.toLowerCase()).map((login) => <option>{login}</option>)}</select></label>
+          <label class="field">Type {data.repository.name} to confirm<input name="confirm" class="input input-sm font-mono" required autocomplete="off" /></label>
           <button class="btn btn-sm btn-warning btn-outline">Transfer</button>
         </form>
         <form method="post" class="mb-4">
@@ -265,10 +266,11 @@ Astro.response.headers.set('Cache-Control', 'no-store')
         <form method="post" class="flex flex-wrap items-end gap-2" aria-label="Delete">
           <input type="hidden" name="csrf" value={session.csrf} />
           <input type="hidden" name="action" value="delete" />
-          <label class="flex flex-col gap-1 text-sm">Type {data.repository.owner}/{data.repository.name} to confirm<input name="confirm" class="input input-sm font-mono" required autocomplete="off" /></label>
+          <label class="field">Type {data.repository.owner}/{data.repository.name} to confirm<input name="confirm" class="input input-sm font-mono" required autocomplete="off" /></label>
           <button class="btn btn-sm btn-error">Delete repository</button>
         </form>
       </section>
+      </div>
     </Layout>
   )
 }

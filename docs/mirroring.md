@@ -16,10 +16,11 @@ requests and discussions are not.
 - Per mirror (one per remote name, default `origin`): upstream URL, mode
   `auto` (picked up by a scheduler through `isMirrorDue`) or `manual`, and
   `detachedAt` (detach: stop syncing, keep every ref and object).
-- Credentials are never stored. `syncMirror` takes a
+- The core stores no credentials. `syncMirror` takes a
   `getAuthorization(): Promise<string | undefined>` callback that is asked
   before every request, so a personal access token or a short-lived
-  federation JWT can be supplied.
+  federation JWT can be supplied. The Worker keeps tokens of `auth: token`
+  mirrors sealed in its database (`docs/design.md` §4).
 
 ## Sync algorithm (`syncMirror`)
 
@@ -36,6 +37,10 @@ requests and discussions are not.
    outside it are new. If the new tips are already complete in the object
    database (left over by an interrupted run) nothing is downloaded.
    Otherwise:
+   - **v2 with `filter`:** the stepped fetch of imports (`docs/design.md` §7,
+     state in `mirrors/{remote}/fetch.json`); with `maxSteps` the run returns
+     `pending` and the next run continues; steps 5–7 run after the last step
+     with the refs listed at the first one.
    - **v2:** `fetch` with `ofs-delta` and `no-progress`, the new tips as
      `want`s and `have`s walked from all local ref tips in growing batches
      (32, 64, … 256, at most 2048) until the server says `ready`, then
@@ -73,8 +78,12 @@ are reused, LFS objects already present are skipped.
 
 ## LFS
 
-- Endpoint: `lfsUrl` from the config, otherwise derived like git-lfs does
-  (`<url>.git/info/lfs`, or `<url>/info/lfs` when the URL ends in `.git`).
+- Endpoint as in git-lfs: `lfsUrl` from the config, then `lfs.url` or
+  `remote.origin.lfsurl` of `.lfsconfig` on the upstream default branch
+  (other branches, then tags, if it has none), then `<url>.git/info/lfs`
+  (`<url>/info/lfs` when the URL ends in `.git`). An endpoint from
+  `.lfsconfig` on another origin gets no `Authorization`. The resolved
+  endpoint is kept as `lfsEndpoint` in `status.json`.
 - `POST {endpoint}/objects/batch` with `operation: download`,
   `transfers: ["basic"]`, `hash_algo: sha256`, 100 objects per request.
 - Downloads use the `header` of the `download` action. The `Authorization`
@@ -94,6 +103,9 @@ are reused, LFS objects already present are skipped.
 repos/{owner}/{name}/
   mirrors/{remote}/config.json   # MirrorConfig
   mirrors/{remote}/status.json   # MirrorStatus
+  mirrors/{remote}/fetch.json    # MirrorFetchState of a stepped fetch
+  mirrors/{remote}/commits.txt   # commit order of the stepped fetch
+  mirrors/{remote}/blobs.txt     # blobs of a split commit
   lfs/objects/{oid[0:2]}/{oid[2:4]}/{oid}
 ```
 
@@ -146,6 +158,30 @@ alarms are kept.
 `sha1(refname + value)` over all mirrored upstream refs, with upstream names
 (`refs/heads/main`) and hex object ids. Two copies with the same checksum
 hold the same refs; it can be recomputed from `git ls-remote`.
+
+## Backing up GitHub
+
+Needs `PUBLIC_URL`, `INSTANCE_KEY`, the `JOBS` queue and, for private
+repositories or webhooks, `ACTIONS_SECRETS_KEY` (32 bytes, hex or base64).
+
+Token: classic PAT with `repo` (private repositories) and `admin:repo_hook`
+(webhooks); fine-grained: repository access to all repositories, "Contents:
+read", "Metadata: read", "Webhooks: read and write". Public repositories
+without webhooks need no token.
+
+```sh
+curl -X POST https://forge.example/api/mirrors/github \
+  -H "Authorization: Bearer $FORGE_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"account": "octocat", "owner": "octocat", "token": "'"$GITHUB_TOKEN"'", "webhook": true}'
+```
+
+`FORGE_TOKEN` needs `repo:admin`. The answer lists `queued` and `skipped`
+repositories; rerunning it adds only new ones. Without `webhook`, mirrors
+follow through the daily safety net; `PUT
+/api/repos/{owner}/{repo}/mirrors/origin/webhook` returns URL and secret for
+registering a hook by hand (content type `application/json`, event `push`).
+A single mirror with a token: `POST /api/repos/{owner}/{repo}/mirrors` with
+`auth: "token"` and `token`.
 
 ## Limits and open points
 

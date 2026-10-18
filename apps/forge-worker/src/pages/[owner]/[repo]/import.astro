@@ -18,7 +18,7 @@ const running = state ? importRunning(state) : false
     <NotFound message="There is no import for this repository, or you cannot manage it." />
   ) : (
     <Layout title={`Import · ${repo.owner}/${repo.name}`} {...(running ? { refresh: 5 } : {})}>
-      <h1 class="text-2xl font-semibold mb-2">
+      <h1 class="text-xl font-semibold mb-2">
         Import into <a class="link" href={repoUrl(repo)}>{repo.owner}/{repo.name}</a>
       </h1>
       <p class="text-sm text-base-content/70 mb-6 font-mono break-all">from {state.url}</p>

@@ -1,44 +1,59 @@
 ---
+import { listIssues } from '@git-forge/collaboration'
+import { scopeFor } from '../ui/collaboration.ts'
 import { cloneUrl, repoUrl, type OpenRepository } from '../ui/repository.ts'
+import CopyField from './CopyField.astro'
+import Icon, { type IconName } from './Icon.astro'
 
 type Tab = 'code' | 'issues' | 'pulls' | 'discussions' | 'commits' | 'branches' | 'tags' | 'releases' | 'actions' | 'settings'
 type Props = { repo: OpenRepository; tab: Tab }
 
 const { repo, tab } = Astro.props
 const { name, subject } = repo
+const active = tab === 'commits' || tab === 'branches' || tab === 'tags' ? 'code' : tab
 const mirror = repo.mirrors.find((config) => !config.detachedAt)
-const tabs: { id: Tab; label: string; href: string; count?: number }[] = [
-  { id: 'code', label: 'Code', href: repoUrl(name) },
-  { id: 'issues', label: 'Issues', href: repoUrl(name, 'issues') },
-  { id: 'pulls', label: 'Pull requests', href: repoUrl(name, 'pulls') },
-  { id: 'discussions', label: 'Discussions', href: repoUrl(name, 'discussions') },
-  { id: 'commits', label: 'Commits', href: repoUrl(name, 'commits') },
-  { id: 'branches', label: 'Branches', href: repoUrl(name, 'branches'), count: repo.branches.length },
-  { id: 'tags', label: 'Tags', href: repoUrl(name, 'tags'), count: repo.tags.length },
-  { id: 'releases', label: 'Releases', href: repoUrl(name, 'releases') },
-  { id: 'actions', label: 'Actions', href: repoUrl(name, 'actions') },
-  ...(repo.canAdmin ? [{ id: 'settings' as const, label: 'Settings', href: repoUrl(name, 'settings') }] : []),
+const scope = await scopeFor(Astro.locals.forge, Astro.request, Astro.locals.principal, repo)
+const [issues, pulls] = scope
+  ? await Promise.all((['issue', 'pull'] as const).map((kind) => listIssues(scope, { state: 'open', kind }, { page: 1, perPage: 1 }).then((list) => list.total)))
+  : [undefined, undefined]
+const tabs: { id: Tab; label: string; icon: IconName; href: string; count?: number | undefined }[] = [
+  { id: 'code', label: 'Code', icon: 'code', href: repoUrl(name) },
+  ...(!scope || scope.settings.hasIssues ? [{ id: 'issues' as const, label: 'Issues', icon: 'issue' as const, href: repoUrl(name, 'issues'), count: issues }] : []),
+  { id: 'pulls', label: 'Pull requests', icon: 'pull', href: repoUrl(name, 'pulls'), count: pulls },
+  ...(!scope || scope.settings.hasDiscussions ? [{ id: 'discussions' as const, label: 'Discussions', icon: 'discussion' as const, href: repoUrl(name, 'discussions') }] : []),
+  { id: 'actions', label: 'Actions', icon: 'actions', href: repoUrl(name, 'actions') },
+  { id: 'releases', label: 'Releases', icon: 'release', href: repoUrl(name, 'releases') },
+  ...(repo.canAdmin ? [{ id: 'settings' as const, label: 'Settings', icon: 'settings' as const, href: repoUrl(name, 'settings') }] : []),
 ]
 const clone = cloneUrl(Astro.url.origin, name)
 ---
 
-<div class="mb-6">
-  <div class="flex flex-wrap items-center gap-2 mb-1">
-    <h1 class="text-xl break-all">
-      <a href={`/${name.owner}`} class="link link-hover">{name.owner}</a>
-      <span class="text-base-content/50">/</span>
-      <a href={repoUrl(name)} class="link link-hover font-semibold">{name.name}</a>
+<div class="mb-6 border-b border-base-300">
+  <div class="flex flex-wrap items-center gap-2">
+    <Icon name={subject.visibility === 'public' ? 'repo' : 'lock'} class="size-5 text-base-content/50" />
+    <h1 class="text-lg break-all min-w-0">
+      <a href={`/${name.owner}`} class="text-primary hover:underline">{name.owner}</a>
+      <span class="text-base-content/40 mx-0.5">/</span>
+      <a href={repoUrl(name)} class="text-primary hover:underline font-semibold">{name.name}</a>
     </h1>
-    <span class="badge badge-outline badge-sm">{subject.visibility === 'public' ? 'Public' : 'Private'}</span>
-    {subject.archived && <span class="badge badge-warning badge-outline badge-sm">Archived</span>}
-    {mirror && <span class="badge badge-info badge-outline badge-sm">Mirror</span>}
+    <span class="badge badge-sm">{subject.visibility === 'public' ? 'Public' : 'Private'}</span>
+    {subject.archived && <span class="badge badge-warning badge-sm">Archived</span>}
+    {
+      mirror && (
+        <span class="badge badge-sm gap-1">
+          <Icon name="mirror" class="size-3" />
+          Mirror
+        </span>
+      )
+    }
     <details class="dropdown dropdown-end ml-auto">
-      <summary class="btn btn-sm btn-success">Clone</summary>
-      <div class="dropdown-content card card-sm bg-base-100 border border-base-300 shadow-lg z-10 w-80 max-w-[90vw]">
-        <div class="card-body">
-          <label class="text-sm font-semibold" for="clone-url">Clone over HTTPS</label>
-          <input id="clone-url" class="input input-sm w-full font-mono" readonly value={clone} />
-        </div>
+      <summary class="btn btn-sm btn-primary">
+        <Icon name="code" />
+        Clone
+        <Icon name="chevron" class="size-3.5" />
+      </summary>
+      <div class="dropdown-content bg-base-100 border border-base-300 rounded-box shadow-md z-10 w-80 max-w-[90vw] p-3 mt-1">
+        <CopyField id="clone-url" value={clone} label="Clone over HTTPS" />
       </div>
     </details>
   </div>
@@ -54,17 +69,18 @@ const clone = cloneUrl(Astro.url.origin, name)
   {subject.archived && <div role="alert" class="alert alert-warning my-2">This repository is archived. It is read-only: pushes, issues and pull requests are closed.</div>}
   {
     mirror && (
-      <p class="text-sm text-base-content/70 break-all">
+      <p class="mt-1 text-xs text-base-content/60 break-all">
         Mirror of <span class="font-mono">{mirror.url}</span>
       </p>
     )
   }
-  <nav class="tabs tabs-border mt-4 overflow-x-auto flex-nowrap" aria-label="Repository">
+  <nav class="tabs tabs-border mt-3 -mb-px overflow-x-auto flex-nowrap" aria-label="Repository">
     {
       tabs.map((item) => (
-        <a href={item.href} class:list={['tab whitespace-nowrap', { 'tab-active': item.id === tab }]} aria-current={item.id === tab ? 'page' : undefined}>
+        <a href={item.href} class:list={['tab whitespace-nowrap px-3', { 'tab-active font-semibold': item.id === active }]} aria-current={item.id === active ? 'page' : undefined}>
+          <Icon name={item.icon} class="size-4 opacity-70" />
           {item.label}
-          {item.count !== undefined && <span class="badge badge-sm ml-2">{item.count}</span>}
+          {item.count !== undefined && item.count > 0 && <span class="badge badge-sm rounded-full px-1.5 min-w-5">{item.count}</span>}
         </a>
       ))
     }

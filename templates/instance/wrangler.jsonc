@@ -20,6 +20,6 @@
     "consumers": [{ "queue": "git-forge-imports", "max_batch_size": 1, "max_batch_timeout": 1, "max_retries": 3 }]
   },
   "triggers": { "crons": ["*/30 * * * *"] },
-  "vars": { "MAX_PUSH_BYTES": "16777216", "MAX_LFS_OBJECT_BYTES": "104857600", "MIRROR_INTERVAL_MINUTES": "30" },
+  "vars": { "MAX_LFS_OBJECT_BYTES": "104857600", "MIRROR_INTERVAL_MINUTES": "30" },
   "secrets": { "required": ["BOOTSTRAP_TOKEN"] }
 }

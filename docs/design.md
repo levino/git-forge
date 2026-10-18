@@ -267,8 +267,8 @@ Memory is the cache budget (16 MiB), one staging chunk (4 MiB) and about
 60–100 bytes per object, independent of the pack's size in bytes. Plain
 blobs of any size are only streamed, but objects that must be materialized
 (commits, trees, tags, delta bases and delta results) are limited to 64 MiB;
-large files belong in LFS. The Worker sets no push size limit of its own (`MAX_PUSH_BYTES` is
-optional); the platform's request body limit applies
+large files belong in LFS. The Worker sets no push size limit of its own
+(`MAX_PUSH_BYTES` is optional); the platform's request body limit applies
 (`apps/forge-worker/README.md`).
 
 **Large pushes** — a push is one HTTP request, and Cloudflare caps request

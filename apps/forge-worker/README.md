@@ -297,46 +297,46 @@ staging chunks):
 
 | operation | requests | CPU total (ms) | CPU max per request (ms) | wall (ms) | peak JS memory (MiB) |
 |---|---|---|---|---|---|
-| push small (120 commits, 1047 objects, 0.9 MiB pack) | 3 | 505 | 495 | 319 | 12 |
-| clone v2 small | 3 | 47 | 34 | 101 | 0 |
-| clone v2 with packfile-uris small | 4 | 27 | 11 | 135 | 3 |
-| clone dumb small | 8 | 16 | 3 | 95 | 1 |
-| push incremental small (20 commits) | 3 | 292 | 288 | 192 | 12 |
-| fetch incremental small | 3 | 170 | 159 | 169 | 5 |
-| clone v2 small (2 packs) | 3 | 111 | 96 | 136 | 6 |
-| compact small (2 packs into 1) | 0 | 229 | 229 | 190 | 8 |
-| push medium (500 commits, 4382 objects, 14.1 MiB pack) | 4 | 2004 | 1994 | 1267 | 49 |
-| clone v2 medium | 3 | 138 | 122 | 408 | 0 |
-| clone v2 with packfile-uris medium | 4 | 53 | 33 | 366 | 17 |
-| clone dumb medium | 8 | 35 | 26 | 400 | 15 |
-| push incremental medium (20 commits) | 3 | 312 | 309 | 164 | 15 |
-| fetch incremental medium | 3 | 364 | 357 | 353 | 11 |
-| clone v2 medium (2 packs) | 3 | 411 | 403 | 420 | 19 |
-| compact medium (2 packs into 1) | 0 | 966 | 966 | 732 | 26 |
-| push large (600 commits, 5272 objects, 32.0 MiB pack) | 4 | 2367 | 2359 | 1686 | 45 |
-| clone v2 large | 3 | 334 | 316 | 942 | 0 |
-| clone v2 with packfile-uris large | 4 | 124 | 103 | 817 | 30 |
-| clone dumb large | 8 | 133 | 125 | 692 | 18 |
-| push incremental large (20 commits) | 3 | 342 | 338 | 173 | 15 |
-| fetch incremental large | 3 | 357 | 347 | 323 | 10 |
-| clone v2 large (2 packs) | 3 | 760 | 751 | 867 | 16 |
-| compact large (2 packs into 1) | 0 | 1240 | 1240 | 949 | 24 |
-| push xl (400 commits, 1680 objects, 200.6 MiB pack) | 4 | 9158 | 9138 | 7894 | 37 |
-| clone v2 xl | 3 | 1353 | 1334 | 4544 | 25 |
-| clone v2 with packfile-uris xl | 4 | 697 | 671 | 4290 | 30 |
-| clone dumb xl | 8 | 796 | 774 | 3350 | 31 |
-| push incremental xl (20 commits) | 3 | 184 | 176 | 136 | 9 |
-| fetch incremental xl | 3 | 149 | 142 | 957 | 7 |
-| clone v2 xl (2 packs) | 3 | 2999 | 2990 | 4427 | 34 |
-| compact xl (2 packs into 1) | 0 | 2731 | 2731 | 2254 | 34 |
-| push xxl (1000 commits, 4200 objects, 1025.6 MiB pack) | 4 | 48324 | 48297 | 42807 | 38 |
-| clone v2 xxl | 3 | 5275 | 5258 | 29608 | 23 |
-| clone v2 with packfile-uris xxl | 4 | 2824 | 2795 | 19495 | 34 |
-| clone dumb xxl | 8 | 2646 | 2627 | 19413 | 33 |
-| push incremental xxl (20 commits) | 3 | 210 | 202 | 146 | 7 |
-| fetch incremental xxl | 3 | 256 | 247 | 684 | 0 |
-| clone v2 xxl (2 packs) | 3 | 13939 | 13930 | 27175 | 37 |
-| compact xxl (2 packs into 1) | 0 | 14198 | 14198 | 12964 | 36 |
+| push small (120 commits, 1047 objects, 0.9 MiB pack) | 3 | 451 | 441 | 259 | 17 |
+| clone v2 small | 3 | 49 | 36 | 89 | 0 |
+| clone v2 with packfile-uris small | 4 | 19 | 7 | 98 | 3 |
+| clone dumb small | 8 | 16 | 3 | 87 | 2 |
+| push incremental small (20 commits) | 3 | 245 | 240 | 159 | 7 |
+| fetch incremental small | 3 | 156 | 142 | 134 | 5 |
+| clone v2 small (2 packs) | 3 | 63 | 54 | 94 | 6 |
+| compact small (2 packs into 1) | 0 | 172 | 172 | 131 | 8 |
+| push medium (500 commits, 4382 objects, 14.1 MiB pack) | 4 | 1418 | 1411 | 873 | 37 |
+| clone v2 medium | 3 | 132 | 119 | 413 | 0 |
+| clone v2 with packfile-uris medium | 4 | 47 | 29 | 340 | 14 |
+| clone dumb medium | 8 | 73 | 63 | 346 | 10 |
+| push incremental medium (20 commits) | 3 | 320 | 315 | 169 | 11 |
+| fetch incremental medium | 3 | 274 | 260 | 255 | 10 |
+| clone v2 medium (2 packs) | 3 | 356 | 350 | 443 | 18 |
+| compact medium (2 packs into 1) | 0 | 751 | 751 | 515 | 24 |
+| push large (600 commits, 5272 objects, 32.0 MiB pack) | 4 | 2290 | 2279 | 1589 | 44 |
+| clone v2 large | 3 | 309 | 293 | 778 | 0 |
+| clone v2 with packfile-uris large | 4 | 120 | 102 | 671 | 20 |
+| clone dumb large | 8 | 107 | 96 | 740 | 23 |
+| push incremental large (20 commits) | 3 | 327 | 323 | 187 | 13 |
+| fetch incremental large | 3 | 327 | 319 | 326 | 11 |
+| clone v2 large (2 packs) | 3 | 729 | 718 | 799 | 22 |
+| compact large (2 packs into 1) | 0 | 1131 | 1131 | 849 | 22 |
+| push xl (400 commits, 1680 objects, 200.6 MiB pack) | 4 | 9154 | 9145 | 7469 | 37 |
+| clone v2 xl | 3 | 1483 | 1473 | 3524 | 26 |
+| clone v2 with packfile-uris xl | 4 | 720 | 702 | 3052 | 31 |
+| clone dumb xl | 8 | 719 | 707 | 3079 | 32 |
+| push incremental xl (20 commits) | 3 | 218 | 213 | 123 | 11 |
+| fetch incremental xl | 3 | 177 | 168 | 841 | 17 |
+| clone v2 xl (2 packs) | 3 | 3140 | 3131 | 3659 | 29 |
+| compact xl (2 packs into 1) | 0 | 3278 | 3278 | 2702 | 36 |
+| push xxl (1000 commits, 4200 objects, 1025.6 MiB pack) | 4 | 50048 | 50022 | 44300 | 38 |
+| clone v2 xxl | 3 | 5943 | 5922 | 26543 | 24 |
+| clone v2 with packfile-uris xxl | 4 | 2698 | 2672 | 20113 | 33 |
+| clone dumb xxl | 8 | 2792 | 2766 | 21155 | 34 |
+| push incremental xxl (20 commits) | 3 | 193 | 185 | 137 | 6 |
+| fetch incremental xxl | 3 | 211 | 200 | 472 | 0 |
+| clone v2 xxl (2 packs) | 3 | 13188 | 13181 | 24937 | 38 |
+| compact xxl (2 packs into 1) | 0 | 14425 | 14425 | 12918 | 35 |
 
 `small`, `medium` and `large` are text-heavy histories with some binary
 files; `xl` and `xxl` mostly consist of incompressible 5 and 10 MiB blobs. The
@@ -373,9 +373,9 @@ Conclusions for the configuration:
   sets 60 000, which covers about 1 GiB of incompressible or 400 MiB of
   text-heavy pack. Raise it if you expect larger initial pushes.
 - **Clone over protocol v2** streams the stored pack verbatim when there is
-  one pack (about 5 ms of CPU per MiB, mostly for the side-band framing), and
+  one pack (about 6 ms of CPU per MiB, mostly for the side-band framing), and
   concatenates several packs with a recomputed header and trailer otherwise
-  (about 14 ms per MiB, dominated by SHA-1). Compaction after each push keeps
+  (about 13–16 ms per MiB, dominated by SHA-1). Compaction after each push keeps
   the number of packs logarithmic in the number of pushes. With
   `packfile-uris` (clients that set `fetch.uriProtocols`, e.g.
   `git -c fetch.uriProtocols=https clone …`) the client downloads the stored

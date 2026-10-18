@@ -24,3 +24,9 @@ dort nachlesen und es mitpflegen.
   getestet, nicht nur mit eigenen Mocks.
 - **Keine Secrets committen.**
 - Dokumentation auf Deutsch.
+- **Keine Code-Kommentare.** Erläuterungen gehören in `KONZEPT.md` bzw. die
+  README des Pakets.
+- **Alles direkt auf `main`.** Vor jedem Push grün: `pnpm run typecheck` und
+  `pnpm test` im Root.
+- **Speicher ist nur fortschreibend:** Das `Storage`-Interface kennt kein
+  Löschen.

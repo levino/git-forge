@@ -102,12 +102,17 @@ export const lfsObjectSize = async (storage: Storage, repo: RepositoryName, oid:
 export const hasLfsObject = async (storage: Storage, repo: RepositoryName, object: LfsObjectSpec): Promise<boolean> =>
   (await lfsObjectSize(storage, repo, object.oid)) === object.size
 
+export type LfsLimits = {
+  readonly maxObjectBytes?: number
+}
+
 const describeObject = async (
   storage: Storage,
   repo: RepositoryName,
   operation: LfsOperation,
   object: LfsObjectSpec,
   links: LfsLinks,
+  limits: LfsLimits,
 ): Promise<LfsObjectResult> => {
   const invalid = objectError(object)
   if (invalid) return { oid: object.oid, size: object.size, error: { code: 422, message: invalid } }
@@ -119,6 +124,9 @@ const describeObject = async (
   }
   if (stored === object.size) return { ...object, authenticated: true }
   if (stored !== null) return { ...object, error: { code: 422, message: `object size is ${stored}, not ${object.size}` } }
+  if (limits.maxObjectBytes !== undefined && object.size > limits.maxObjectBytes) {
+    return { ...object, error: { code: 422, message: `object exceeds ${limits.maxObjectBytes} bytes` } }
+  }
   return { ...object, authenticated: true, actions: { upload: await links.upload(object), verify: await links.verify(object) } }
 }
 
@@ -127,10 +135,11 @@ export const lfsBatch = async (
   repo: RepositoryName,
   request: LfsBatchRequest,
   links: LfsLinks,
+  limits: LfsLimits = {},
 ): Promise<LfsBatchResponse> => ({
   transfer: 'basic',
   hash_algo: 'sha256',
-  objects: await Promise.all(request.objects.map((object) => describeObject(storage, repo, request.operation, object, links))),
+  objects: await Promise.all(request.objects.map((object) => describeObject(storage, repo, request.operation, object, links, limits))),
 })
 
 export class LfsIntegrityError extends Error {}

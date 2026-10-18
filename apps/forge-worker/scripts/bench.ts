@@ -8,16 +8,15 @@ import { join } from 'node:path'
 import { Readable } from 'node:stream'
 import { compactRepository, ObjectDatabase } from '@git-forge/core'
 import { FsStorage } from '@git-forge/node'
-import { handleRequest } from '../src/app.ts'
 import { generateHistory, git, gitEnv, tempDir } from '../test/e2e/history.ts'
+import { bootstrap, call, nodeForge } from '../test/support/node-forge.ts'
 
 type Sample = { label: string; cpuMs: number; wallMs: number; requests: number; maxRequestCpuMs: number; peakMemoryMiB: number }
 
 const MiB = 1024 * 1024
-const token = 'bench'
 const root = mkdtempSync(join(tmpdir(), 'git-forge-bench-'))
 const storage = new FsStorage(join(root, 'bucket'))
-const config = { storage, adminToken: token, publicRead: true, compactMaxBytes: 0 }
+const forge = await nodeForge({ storage, maxPushBytes: undefined, compactMaxBytes: 0 })
 let current: Sample | null = null
 
 const server = createServer((incoming, outgoing) => {
@@ -31,7 +30,7 @@ const server = createServer((incoming, outgoing) => {
     ...(method === 'GET' || method === 'HEAD' ? {} : { body: Readable.toWeb(incoming) as ReadableStream, duplex: 'half' }),
   } as RequestInit)
   void (async () => {
-    const response = await handleRequest(request, config)
+    const response = await forge.fetch(request)
     outgoing.statusCode = response.status
     response.headers.forEach((value, key) => outgoing.setHeader(key, value))
     if (response.body) {
@@ -54,6 +53,7 @@ const server = createServer((incoming, outgoing) => {
 })
 await new Promise<void>((done) => server.listen(0, '127.0.0.1', done))
 const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
+const token = await bootstrap(forge, base, 'bench')
 
 const memory = () => {
   const usage = process.memoryUsage()
@@ -124,14 +124,7 @@ const selected = process.argv.slice(2)
 
 const samples: Sample[] = []
 for (const scenario of scenarios.filter((entry) => selected.length === 0 || selected.includes(entry.name))) {
-  await handleRequest(
-    new Request(`${base}/api/admin/repos`, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${token}` },
-      body: JSON.stringify({ owner: 'bench', name: scenario.name }),
-    }),
-    config,
-  )
+  await call(forge, base, 'POST', '/api/repos', token, { owner: 'bench', name: scenario.name, visibility: 'public' })
   const source = tempDir()
   await git(source, ['init', '-q', '-b', 'main'])
   await scenario.prepare(source)

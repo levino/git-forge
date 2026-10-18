@@ -1,0 +1,102 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+    branches: [main]
+    paths: [release/VERSION]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag to create on the selected commit, e.g. v0.1.0
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            tag="$GITHUB_REF_NAME"
+          elif [ -n "$INPUT_TAG" ]; then
+            tag="$INPUT_TAG"
+          else
+            tag="v$(tr -d '[:space:]' < release/VERSION)"
+          fi
+          if [ "$GITHUB_REF_TYPE" != tag ] && gh release view "$tag" >/dev/null 2>&1; then
+            echo "Release $tag exists already, nothing to do"
+            tag=""
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+  release:
+    needs: prepare
+    if: needs.prepare.outputs.tag != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      TAG: ${{ needs.prepare.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run typecheck
+      - id: build
+        run: echo "sha256=$(sh release/build-release.sh "$RUNNER_TEMP/release")" >> "$GITHUB_OUTPUT"
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - name: Build the git-forge CLI executables
+        run: sh packages/cli/build-executables.sh "$RUNNER_TEMP/cli"
+      - name: Publish release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA256: ${{ steps.build.outputs.sha256 }}
+        run: |
+          version=${TAG#v}
+          {
+            echo "Pin this release in your instance's \`git-forge.json\`:"
+            echo
+            echo '```json'
+            printf '{\n  "version": "%s",\n  "sha256": "%s"\n}\n' "$version" "$SHA256"
+            echo '```'
+            echo
+            echo '`sha256` is the SHA-256 of the `SHA256SUMS` asset, which lists the checksums of the Worker bundle and the migrations.'
+            echo
+            echo 'The `git-forge-<os>-<arch>` assets are single executables of the `git-forge` CLI (`git forge push`); `CLI-SHA256SUMS` lists their checksums.'
+          } > "$RUNNER_TEMP/notes.md"
+          prerelease=""
+          case "$version" in *-*) prerelease="--prerelease" ;; esac
+          verify="--verify-tag"
+          [ "$GITHUB_REF_TYPE" = tag ] || verify="--target $GITHUB_SHA"
+          gh release create "$TAG" \
+            "$RUNNER_TEMP/release/git-forge-worker.mjs" \
+            "$RUNNER_TEMP/release/migrations.tar.gz" \
+            "$RUNNER_TEMP/release/SHA256SUMS" \
+            "$RUNNER_TEMP"/cli/* \
+            $verify --title "$TAG" --notes-file "$RUNNER_TEMP/notes.md" $prerelease
+
+  sync-template:
+    needs: [prepare, release]
+    uses: ./.github/workflows/sync-instance-template.yml
+    with:
+      tag: ${{ needs.prepare.outputs.tag }}
+    secrets: inherit

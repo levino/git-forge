@@ -24,12 +24,14 @@ export type FetchObjectsResult = {
 
 export type RemoteConnection = {
   readonly protocol: Protocol
+  readonly capabilities?: V2Capabilities
   listRefs(prefixes: readonly string[]): Promise<RemoteRefs>
   fetchObjects(odb: ObjectDatabase, options: FetchObjectsOptions): Promise<FetchObjectsResult>
 }
 
 const v2Connection = (remote: Remote, capabilities: V2Capabilities): RemoteConnection => ({
   protocol: 'v2',
+  capabilities,
   listRefs: (prefixes) => lsRefsV2(remote, capabilities, prefixes),
   async fetchObjects(odb, options) {
     const fetched = await fetchPackV2(remote, capabilities, {

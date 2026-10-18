@@ -21,6 +21,8 @@ import { isAncestor, MissingObjectError, type ObjectSource } from './walk.ts'
 
 export type MirrorMode = 'auto' | 'manual'
 
+export type MirrorAuth = 'none' | 'instance'
+
 export type MirrorConfig = {
   readonly version: 1
   readonly remote: string
@@ -29,6 +31,7 @@ export type MirrorConfig = {
   readonly namespace: string
   readonly lfs: boolean
   readonly lfsUrl?: string
+  readonly auth?: MirrorAuth
   readonly createdAt: string
   readonly detachedAt?: string
 }
@@ -103,6 +106,7 @@ export type MirrorSettings = {
   readonly namespace?: string
   readonly lfs?: boolean
   readonly lfsUrl?: string
+  readonly auth?: MirrorAuth
 }
 
 const validNamespace = (namespace: string): boolean => /^([A-Za-z0-9_][A-Za-z0-9._-]*\/)*$/.test(namespace) && !namespace.includes('..') && !/\.lock\//.test(namespace)
@@ -122,6 +126,7 @@ export const configureMirror = async (storage: Storage, repo: RepositoryName, se
   if (!isValidName(remote)) throw new Error(`invalid remote name ${remote}`)
   if (!validUrl(settings.url)) throw new Error(`invalid upstream URL ${settings.url}`)
   if (!validNamespace(namespace)) throw new Error(`invalid upstream namespace ${namespace}`)
+  if (settings.auth !== undefined && settings.auth !== 'none' && settings.auth !== 'instance') throw new Error(`invalid mirror auth ${String(settings.auth)}`)
   if (!(await readRefs(storage, repo))) throw new Error(`repository ${repo.owner}/${repo.name} not found`)
   const config: MirrorConfig = {
     version: 1,
@@ -131,6 +136,7 @@ export const configureMirror = async (storage: Storage, repo: RepositoryName, se
     namespace,
     lfs: settings.lfs ?? true,
     ...(settings.lfsUrl ? { lfsUrl: settings.lfsUrl } : {}),
+    ...(settings.auth && settings.auth !== 'none' ? { auth: settings.auth } : {}),
     createdAt: now.toISOString(),
   }
   const result = await writeJson(storage, mirrorConfigKey(repo, remote), config, { ifNoneMatch: '*' })

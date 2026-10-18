@@ -304,8 +304,9 @@ describe('mirror configuration', () => {
     await expect(configureMirror(storage, repo, { url: 'file:///etc' })).rejects.toThrow(/invalid upstream URL/)
     await expect(configureMirror(storage, repo, { url: 'https://example.org/a.git', remote: '../x' })).rejects.toThrow(/invalid remote/)
     await expect(configureMirror(storage, repo, { url: 'https://example.org/a.git', namespace: '../' })).rejects.toThrow(/namespace/)
-    await configureMirror(storage, repo, { url: 'https://example.org/a.git' })
-    await configureMirror(storage, repo, { url: 'https://example.org/b.git', remote: 'second', mode: 'manual' })
+    await expect(configureMirror(storage, repo, { url: 'https://example.org/a.git', auth: 'cookie' as never })).rejects.toThrow(/auth/)
+    expect(await configureMirror(storage, repo, { url: 'https://example.org/a.git', auth: 'none' })).not.toHaveProperty('auth')
+    expect((await configureMirror(storage, repo, { url: 'https://example.org/b.git', remote: 'second', mode: 'manual', auth: 'instance' })).auth).toBe('instance')
     await expect(configureMirror(storage, repo, { url: 'https://example.org/c.git' })).rejects.toThrow(MirrorExistsError)
     expect((await setMirrorMode(storage, repo, 'manual')).mode).toBe('manual')
     expect((await listMirrors(storage, repo)).map((mirror) => [mirror.remote, mirror.mode])).toEqual([

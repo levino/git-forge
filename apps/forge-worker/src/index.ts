@@ -1,36 +1,53 @@
+import { d1Database } from '@git-forge/accounts'
 import { R2Storage } from '@git-forge/cloudflare'
-import { handleRequest } from './app.ts'
+import { continueImport, type ImportJob, type ImportScheduler } from '@git-forge/core'
+import { createForge, type Forge } from './app.ts'
+import { type ForgeVars, parseSettings } from './config.ts'
 
-export type Env = {
+export type Env = ForgeVars & {
   readonly BUCKET: R2Bucket
   readonly DB: D1Database
-  readonly ADMIN_TOKEN?: string
-  readonly PUBLIC_READ?: string
-  readonly MAX_PUSH_BYTES?: string
-  readonly PACKFILE_URI_BASE?: string
-  readonly COMPACT_MAX_BYTES?: string
+  readonly IMPORTS?: Queue<ImportJob>
 }
 
-const positive = (value: string | undefined): number | undefined => {
-  const parsed = Number(value)
-  return value && Number.isSafeInteger(parsed) && parsed > 0 ? parsed : undefined
+const importScheduler =
+  (queue: Queue<ImportJob>): ImportScheduler =>
+  async (job, delaySeconds) => {
+    await queue.send(job, delaySeconds > 0 ? { delaySeconds } : {})
+  }
+
+let forge: Promise<Forge> | undefined
+
+const forgeFor = (env: Env): Promise<Forge> => {
+  forge ??= parseSettings(env)
+    .then((settings) => createForge({
+        ...settings,
+        storage: new R2Storage(env.BUCKET),
+        db: d1Database(env.DB),
+        ...(env.IMPORTS ? { scheduleImport: importScheduler(env.IMPORTS) } : {}),
+      }))
+    .catch((error: unknown) => {
+      forge = undefined
+      throw error
+    })
+  return forge
 }
 
 export default {
   async fetch(request, env, ctx): Promise<Response> {
-    const maxPushBytes = positive(env.MAX_PUSH_BYTES)
-    const compactMaxBytes = positive(env.COMPACT_MAX_BYTES)
-    return handleRequest(request, {
-      storage: new R2Storage(env.BUCKET),
-      adminToken: env.ADMIN_TOKEN,
-      publicRead: env.PUBLIC_READ !== 'false',
-      ...(maxPushBytes !== undefined ? { maxPushBytes } : {}),
-      ...(compactMaxBytes !== undefined ? { compactMaxBytes } : {}),
-      ...(env.PACKFILE_URI_BASE ? { packfileUriBase: env.PACKFILE_URI_BASE } : {}),
-      waitUntil: (promise) => ctx.waitUntil(promise),
-    })
+    return (await forgeFor(env)).fetch(request, (promise) => ctx.waitUntil(promise))
   },
-  async scheduled(controller): Promise<void> {
-    console.log(JSON.stringify({ event: 'scheduled', cron: controller.cron, at: new Date(controller.scheduledTime).toISOString(), task: 'mirror-sync', status: 'not-implemented' }))
+  async scheduled(controller, env): Promise<void> {
+    const runs = await (await forgeFor(env)).scheduled(new Date(controller.scheduledTime))
+    console.log(JSON.stringify({ event: 'scheduled', cron: controller.cron, at: new Date(controller.scheduledTime).toISOString(), task: 'mirror-sync', runs }))
   },
-} satisfies ExportedHandler<Env>
+  async queue(batch, env): Promise<void> {
+    const queue = env.IMPORTS
+    if (!queue) throw new Error('IMPORTS queue binding is missing')
+    for (const message of batch.messages) {
+      const state = await continueImport(message.body, { storage: new R2Storage(env.BUCKET), schedule: importScheduler(queue) })
+      console.log(JSON.stringify({ event: 'import-step', repo: `${message.body.owner}/${message.body.name}`, phase: state.phase, steps: state.steps, error: state.error }))
+      message.ack()
+    }
+  },
+} satisfies ExportedHandler<Env, ImportJob>

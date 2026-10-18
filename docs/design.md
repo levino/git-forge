@@ -42,7 +42,8 @@ or pull requests between instances.
 2. **Data outlives the software.** Without the code, cloneable Git
    repositories and an LFS directory remain.
 3. **Append only.** Nothing is deleted automatically. Force pushes and
-   deletions are allowed, but the previous state is archived (§5).
+   deletions are allowed unless branch protection forbids them, and the
+   previous state is archived (§5).
 4. **Trust through signatures and recomputation, not claims.**
 5. **One language:** TypeScript, Web-standard APIs only (`fetch`, Streams,
    `DecompressionStream`, WebCrypto). No WebAssembly.
@@ -74,11 +75,11 @@ issues, pull requests and discussions.
 - **Pull requests:** from a branch, diff view, comments (general and inline),
   reviews (approve / request changes), merge (merge, squash or rebase —
   conflict-free only), close.
+- **Branch protection:** GitHub-style rules per repository (§5).
 - **Discussions:** separate from issues; categories, threads, mark answer.
 
 **Should (soon after)**
 
-- Branch protection (no force push, required reviews).
 - Notifications, email, webhooks.
 - Reactions, search in issues and discussions.
 - Edit and upload files in the browser (commit via form).
@@ -135,19 +136,67 @@ OIDC-style, modelled on GitHub Actions OIDC:
 - The target fetches the issuer's JWKS over HTTPS; the trust anchor is the
   issuer's domain. Optionally a key thumbprint is pinned per grant.
 - Public repositories need no grant.
+- The token carries the scopes `git:read` and `lfs:read`. The core tells the
+  authorization hook whether a request is a Git or an LFS request, so both are
+  checked separately.
+- A mirror marks in its config (`auth: "instance"`) that it presents an
+  instance token to its upstream; otherwise it fetches anonymously. A mirror
+  of a mirror reads the upstream's `refs/upstream/{remote}/*` by setting the
+  namespace to `upstream/{remote}/`.
+- JWKS documents are fetched without following redirects (`redirect:
+  "manual"`, any 3xx is an error), because Workers do not implement
+  `redirect: "error"`.
 - There are no push certificates. The instance signs; trust is
   server-to-server.
 
 ## 5. Refs, force pushes and archive
 
 - Refs are updated with compare-and-swap (conditional writes).
-- Force pushes and ref deletions are allowed (branch protection comes later).
-  The previous value is always kept under
+- Force pushes and ref deletions are allowed unless a branch protection rule
+  forbids them (below). The previous value is always kept under
   `refs/archive/{timestamp}/heads/...` resp. `refs/archive/{timestamp}/tags/...`,
   so no commit becomes unreachable.
 - `refs/archive/*` and `refs/upstream/*` cannot be pushed to by clients.
 - Git object format stays SHA-1 (compatibility). Signatures and LFS use
   SHA-256.
+
+### Branch protection
+
+Modelled on GitHub's classic branch protection rules; details and API in
+the [accounts README](../packages/accounts/README.md#branch-protection).
+
+- **Rules per repository**, each with a branch name pattern (`fnmatch` with
+  `FNM_PATHNAME` like GitHub: `*` stops at `/`, `**/` spans directories).
+  Exactly one rule applies to a branch: an exact name beats wildcards, among
+  wildcards the oldest wins. Rules never combine. Only `refs/heads/*` is
+  protected.
+- **Settings:** allow force pushes (default no), allow deletions (default
+  no), restrict who may push (users, teams, apps, minimum roles), require a
+  pull request with 0–6 approving reviews (plus stale-review dismissal,
+  code-owner review, last-push approval), require named status checks
+  (optionally strict = up to date). `enforce_admins` off means repository
+  admins bypass the rule, as on GitHub.
+- **One pure check:** `evaluateBranchUpdate(rule, actor, update, evidence)`
+  returns all unmet requirements. The actor (principal, resolved access,
+  teams) comes from the verified token only. Direct pushes pass
+  `via: 'push'`; the pull request merge will pass `via: 'pull-request'` with
+  approvals and statuses and call the same function. Required reviews
+  therefore already block direct pushes; required status checks block pushes
+  whose commit has no passing statuses (no CI exists yet, so in practice all
+  direct pushes).
+- **Pre-receive policy:** receive-pack asks the `pushPolicy` hook once per
+  request, which loads the rules and the actor before the ref transaction and
+  returns a synchronous per-ref check. A violation rejects only that ref with
+  `ng <ref> protected branch: <reason>`, shown by `git push` as
+  `[remote rejected]`; with `--atomic` the whole push fails. A rejected force
+  push archives nothing.
+- **Mirrors:** `refs/upstream/*` and `refs/archive/*` are not client-writable
+  at all and are never matched by branch protection; mirror sync writes
+  `refs/upstream/*` itself. Branch protection applies only to the
+  repository's own branches.
+- **Storage:** rules live in the accounts database (migration
+  `0002_branch_protection`), not in the bucket, so a plain clone of a bucket
+  carries no rules. Changes are audited.
 
 ## 6. Bucket layout
 
@@ -161,8 +210,10 @@ OIDC-style, modelled on GitHub Actions OIDC:
     objects/pack/pack-<sha>.idx
   lfs/
     objects/<oid[0:2]>/<oid[2:4]>/<oid>
+  import/status.json                # progress of the last import
+  import/commits.txt                # commit order of the last import
   README.txt                        # plain text: what this is, how to read it
-tmp/<repo>/<timestamp>-<uuid>/<n>   # staging chunks of a push, expired by the bucket
+tmp/<repo>/<timestamp>-<uuid>/<n>   # staging chunks of a push or fetch, expired by the bucket
 ```
 
 - `<sha>` is the pack's trailing SHA-1 checksum, as with `git index-pack`.
@@ -187,6 +238,7 @@ tmp/<repo>/<timestamp>-<uuid>/<n>   # staging chunks of a push, expired by the b
 - The bucket layout is a durable format and may only change
   backwards-compatibly.
 
+
 ## 7. Flows
 
 **Push** — `receive-pack` over smart HTTP, streamed end to end
@@ -204,8 +256,8 @@ tmp/<repo>/<timestamp>-<uuid>/<n>   # staging chunks of a push, expired by the b
    whose base is not in the pack are looked up in the repository (thin pack).
 4. While resolving, check that every object a new commit, tree or tag refers
    to is in the pack or in the repository, collect LFS pointers, and check the
-   ref commands (object exists, branches point at commits, fast-forward or
-   archive).
+   ref commands (object exists, branches point at commits, branch protection
+   (§5), fast-forward or archive).
 5. Write the final pack (the staged bytes, or for thin packs a new header, the
    staged entries, the appended bases and a new trailer) and an idx v2 built
    from compact column arrays, register the pack in `objects/info/packs`,
@@ -215,10 +267,67 @@ Memory is the cache budget (16 MiB), one staging chunk (4 MiB) and about
 60–100 bytes per object, independent of the pack's size in bytes. Plain
 blobs of any size are only streamed, but objects that must be materialized
 (commits, trees, tags, delta bases and delta results) are limited to 64 MiB;
-large files belong in LFS. The Worker sets no push size limit of its own; the platform's request
-body limit applies (`apps/forge-worker/README.md`). Repositories larger than
-that are pushed in slices or imported through a mirror, whose fetch uses the
-same indexer.
+large files belong in LFS. The Worker sets no push size limit of its own (`MAX_PUSH_BYTES` is
+optional); the platform's request body limit applies
+(`apps/forge-worker/README.md`).
+
+**Large pushes** — a push is one HTTP request, and Cloudflare caps request
+bodies at 100 MB (Free/Pro), 200 MB (Business) and 500 MB (Enterprise). Three ways around it, none of which changes git:
+
+- *Chunked push helper* `git forge push` (`packages/cli`, a single executable
+  built with `bun build --compile`): splits the history not yet on the remote
+  into pushes below a byte budget (default 80 MB, measured with
+  `git pack-objects` dry runs) and pushes them one after another with the
+  unmodified `git` client. Chunks of a branch go directly to the destination
+  branch, so every step after the first is a fast-forward (works with branch
+  protection, no garbage); only merged side branches and tags need temporary
+  `refs/forge-chunk/…` refs, which the final atomic push deletes. Resuming is
+  a rerun: what landed is on the remote. Details in `packages/cli/README.md`.
+- *Server-side import* (below): the forge pulls from a URL, so no request
+  body is involved at all.
+- Later: a remote helper uploading packs directly to object storage
+  (roadmap M5a).
+
+**Import** — create or update a repository by pulling from any Git URL
+(smart HTTP v2 or dumb HTTP, optional token). It reuses the mirror client
+(`connectRemote`, `fetchPackV2`, the dumb walker, `commitClosure`,
+`scanNewObjects`, `mirrorLfsObjects`). Unlike a mirror, refs land directly in
+`refs/heads/*` and `refs/tags/*`, it runs once and keeps no upstream config.
+Rewritten refs are archived as on a force push; local refs missing upstream
+are kept. To stay within the CPU and memory limits of one invocation it runs
+as a sequence of stateless steps, each persisting its progress in
+`<repo>/import/status.json` (compare-and-swap):
+
+1. *discover* — list upstream heads and tags, note local tips and the wanted
+   tips.
+2. *graph* — if the server supports `filter`, fetch only the commit graph
+   (`filter tree:0`), order the new commits parents-first (depth-first
+   post-order, so side branches precede their merge) and store the order in
+   `<repo>/import/commits.txt`. Nothing of this pack is kept.
+3. *fetch* — one step per range of `commitsPerStep` commits (default 500):
+   `want` the last commit of the range, `have` every earlier range end and all
+   local tips, so the server sends exactly the new objects; store the pack,
+   check connectivity, collect LFS pointers. A step whose pack exceeds
+   `maxStepBytes` (32 MiB) is retried with a quarter of the commits; small
+   packs double the range. A final fetch picks up tag objects. Servers without
+   `filter`, and dumb servers, are fetched in one step.
+4. *lfs* — 100 LFS objects per step via the upstream's batch API; missing
+   objects are recorded, not fatal.
+5. *refs* — update refs via compare-and-swap and rewrite `info/refs`; an
+   empty repository adopts the upstream `HEAD`.
+
+Fetched packs are handed to a `PackIngester` (`ingestPack`); the default
+streams each fetched pack into the same indexer as a push, so a step never
+holds its pack in memory. The commit graph of the *graph* phase is read with
+the indexer's object visitor without storing the pack.
+
+A failing step is retried with exponential backoff (15 s … 10 min); after
+five failures in a row the import is `failed`, and starting it again with the
+same URL resumes at the failed phase. Credentials are never written to the
+bucket: the token travels with each scheduled step. Steps are driven by the
+scheduling adapter (`ImportScheduler`): a Cloudflare Queue in the Worker
+(each message is one step in its own invocation), a simple loop (`runImport`)
+elsewhere.
 
 **Fetch** — public: dumb HTTP directly from the bucket/CDN. Private or
 protocol v2 clients: `upload-pack` (smart HTTP protocol v2), streamed:
@@ -256,12 +365,58 @@ pass through the function on upload.
 `refs/upstream/{remote}/*` (archive and alarm on rewrites), fetch missing LFS
 objects via the Batch API and verify their hashes.
 
-**Media URLs (LFS onto a CDN without CI)** — the forge serves
-content-addressed, immutable URLs such as `/{owner}/{repo}/media/{oid}` and a
-path/ref-based raw endpoint that resolves LFS pointers. Both redirect to
-presigned bucket URLs or stream the object. A CDN (e.g. a Bunny pull zone) in
-front caches them. Optional later: a "publish" setting that copies public LFS
-objects into a public CDN bucket on push.
+**Media URLs (LFS onto a CDN without CI)** — two read-only endpoints that a
+pull-zone CDN (e.g. Bunny) can sit in front of. The CDN pulls on a cache miss;
+there is no upload or publish step.
+
+- `GET|HEAD /{owner}/{repo}/media/{oid}[/{filename}]` streams the LFS object
+  with that SHA-256 oid from the bucket. Content-addressed, so
+  `Cache-Control: public, max-age=31536000, immutable` and the strong ETag
+  `"{oid}"`. The optional trailing file name sets `Content-Type` (by
+  extension) and `Content-Disposition: inline`; without it the type is sniffed
+  from the first 64 bytes (images, video, audio, PDF, fonts, archives),
+  otherwise `application/octet-stream`. The file name does not change the
+  bytes, only the headers.
+- `GET|HEAD /{owner}/{repo}/raw/{ref}/{path}` resolves `{ref}` and walks the
+  trees to `{path}`. `{ref}` is a full 40-character commit (or tag object) id,
+  a tag, a branch (names with slashes work: the longest prefix of the path
+  that names a ref wins, tags before branches as in `git rev-parse`) or
+  `HEAD`. Abbreviated ids are not resolved. A plain blob is streamed with its
+  Git blob id as ETag; an LFS pointer answers `302` to
+  `/{owner}/{repo}/media/{oid}/{basename}` (relative, so a CDN keeps its own
+  host), so the large bytes are cached once, immutably, however many refs
+  point at them. Directories, submodules and pointers whose object is not in
+  the bucket answer `404`.
+- Caching of raw responses (including the redirect): full commit ids are
+  immutable; branches, tags and `HEAD` get `public, max-age=60` (core option
+  `refMaxAgeSeconds`) because they move.
+- Both support single `Range` requests (`206`, `416` with
+  `Content-Range: bytes */size`; multi-range requests get the full body),
+  `If-Range`, `If-None-Match` (`304`) and `HEAD`.
+- Served content must not run script on the forge origin: every response
+  carries `X-Content-Type-Options: nosniff` and, except PDFs (browser PDF
+  viewers refuse sandboxed documents), `Content-Security-Policy: default-src
+  'none'; …; sandbox`. HTML is never labelled `text/html`; unknown types are
+  `text/plain` if valid UTF-8, else `application/octet-stream`.
+- Permissions use the same `Authorize` callback as Git and LFS with access
+  `read`: public repositories anonymously, private ones need a token. A CDN
+  pulls private content with a read-only token that the pull zone adds to
+  every origin request (`Authorization: Bearer <token>`; in Bunny an Edge
+  Rule "Set Request Header" or origin header setting). Everything the CDN
+  caches is then readable by whoever can reach the CDN URL, so for private
+  repositories the pull zone itself must restrict access (e.g. Bunny token
+  authentication / signed URLs) or the repository should be public. The
+  Worker has no special token for this: a personal access token with the
+  scope `repo:read` of a user with read access does it.
+- Core: `matchContentRoute`, `resolveRevision`, `resolvePath`, `resolveRaw`,
+  `parseRange` and the content-type helpers are pure functions;
+  `handleContentRequest` builds the HTTP responses. Plain blobs are read
+  through the object database, which still loads packs into memory (see
+  Push); LFS bytes are always streamed from the bucket, ranges via ranged
+  bucket reads.
+
+Optional later: a "publish" setting that copies public LFS objects into a
+public CDN bucket on push.
 
 **Submit via form** — the server creates blob, tree and commit on a proposal
 branch.
@@ -289,11 +444,29 @@ SQLite database. A new instance works without an external identity provider.
 For the village archive: people log in via OIDC with ZITADEL; apps and
 automations use app tokens; mirrors use instance federation (§4).
 
+**Instance admins and bootstrap.** Instance admins (table `instance_admins`)
+create users and tokens, trust other instances and count as admins of every
+repository. A fresh instance has none: one call of `POST /api/bootstrap`,
+authenticated with the deployment secret `BOOTSTRAP_TOKEN`, creates the first
+admin atomically and returns a personal access token; further calls answer
+`409`. Until login methods exist, the JSON API is used with personal access
+tokens that carry the scope `repo:admin`.
+
+**Visibility.** Repositories are private by default; visibility is a
+per-repository setting in the database. There is no instance-wide public read
+switch.
+
+**Size limits.** Git pushes are only limited by the platform's request body
+limit unless `MAX_PUSH_BYTES` is set; single LFS
+objects by `MAX_LFS_OBJECT_BYTES` (default 100 MiB, the request body limit of
+Cloudflare's Free and Pro plans), enforced in the batch API and on `PUT`.
+
 ## 9. Git over SSH
 
-Not supported: serverless functions accept only HTTP. Git uses HTTPS with
-tokens, later also a device flow. An optional SSH-to-HTTPS gateway could run
-on a Pi or VPS later.
+Not supported, by decision. Serverless functions accept only HTTP; SSH would
+need an always-on host or a TCP-capable container platform, and SSH over
+WebSocket needs client-side configuration. Git uses HTTPS with tokens, made
+convenient by `git forge auth login` (credential helper, device flow).
 
 ## 10. Mirror overview and verification
 
@@ -322,6 +495,16 @@ dev environments) need real machines, started on demand via API.
 | CI (later) | Compute adapter, e.g. with `act` |
 
 Every building block is an interface; Cloudflare is the first implementation.
+
+**Cloudflare deployment.** One Worker serves Git, LFS, media and raw URLs, the
+JSON API and the well-known federation documents, and runs mirror sync from a
+Cron Trigger. It binds one R2 bucket (`BUCKET`) and one D1 database (`DB`).
+The Worker never migrates its database: `wrangler d1 migrations apply` does,
+from `packages/accounts/migrations` (`migrations_dir` in
+`apps/forge-worker/wrangler.jsonc`, the release's `dist/migrations` in the
+instance template; see §15). Several instances on one account are Wrangler
+environments (`alpha`, `beta`, `gamma`), each with its own Worker, bucket and
+database.
 
 | Building block | Cloudflare | Others |
 |---|---|---|
@@ -452,20 +635,70 @@ GitHub mirror are needed.
 ### Distribution, new instances and updates
 
 An instance is a stateless deployment; its operators choose the version. The
-deployable unit is a release artifact, not an npm package:
+deployable unit is a release artifact, not an npm package, and instances never
+update themselves.
 
-- **Release artifact:** on every release tag, CI builds the worker as a single
-  bundled ES module file plus the D1 migrations and publishes them with
-  SHA-256 checksums as release assets.
-- **Instance template** (`templates/instance`, later its own repository
-  `git-forge-instance`): only `wrangler.jsonc` (own bindings, domain, vars) and
-  `git-forge.json` (`version`, `sha256`). No `package.json`, no lockfile.
-- **Build:** the Cloudflare build step downloads the pinned bundle, verifies the
-  checksum, applies D1 migrations and runs `wrangler deploy`.
-- **First install:** fork/use the template or click "Deploy to Cloudflare",
-  connect the repository to Cloudflare.
+- **Release artifact** (`release/build-release.sh`, run by
+  `.github/workflows/release.yml` on every `v*` tag with `GITHUB_TOKEN` only):
+  - `git-forge-worker.mjs`: `apps/forge-worker` bundled by
+    `wrangler deploy --dry-run` into one ES module without imports, uploaded by
+    instances with `no_bundle: true`, so workerd runs exactly the released
+    bytes.
+  - `migrations.tar.gz`: the D1 migrations (`migrations/*.sql`, currently from
+    `packages/accounts`), built reproducibly.
+  - `SHA256SUMS`: `sha256sum` output for both files.
+  - The release notes contain the `git-forge.json` to pin. Tags with a `-` are
+    pre-releases.
+- **One pin covers everything:** `git-forge.json` holds `version` and the
+  SHA-256 of `SHA256SUMS`. The build script checks `SHA256SUMS` against the
+  pin and then every asset against `SHA256SUMS`; any mismatch fails the build
+  before anything is deployed. Asset names and the archive layout are a durable
+  format: later releases may add assets, never rename or remove these.
+- **Instance template** (`templates/instance`, synced to its own repository
+  `levino/git-forge-instance`): `wrangler.jsonc` (own bindings, vars, domain,
+  `main: dist/git-forge-worker.mjs`, `build.command: sh build.sh`,
+  `migrations_dir: dist/migrations`), `git-forge.json`, `build.sh` (POSIX sh,
+  `curl`, `sha256sum`, `tar`), `deploy.sh`, `renovate.json`, a checksum
+  workflow and a README. No `package.json`, no lockfile, nothing from npm in the Worker.
+  `GIT_FORGE_RELEASE_URL` overrides the download base for mirrors and tests.
+- **Resources only from config:** every Cloudflare resource is declared in
+  `wrangler.jsonc` and created by Wrangler, never by hand. D1 and R2 have a
+  name and no id, so the first `wrangler deploy` provisions them (automatic
+  resource provisioning) and later commands find them by name. Cron, vars,
+  routes (custom domains) and the required `BOOTSTRAP_TOKEN` secret
+  (`secrets.required`) are declared there as well; only the secret's value is
+  set outside the repository.
+- **Build on Cloudflare (Workers Builds):** build command `sh build.sh`,
+  deploy command `sh deploy.sh`. `deploy.sh` applies the D1 migrations before
+  the upload so new code never sees an old schema; migrations are therefore
+  additive and compatible with the previous release, which keeps a rollback
+  (reverting the pin) safe. When the database does not exist yet (first
+  deploy), it deploys first, which provisions the database, and migrates right
+  after. `build.sh` is idempotent, so the second run through `build.command` is
+  a no-op.
+- **First install:** "Deploy to Cloudflare" button (copies the template and
+  connects Workers Builds) or "Use this template" plus importing the
+  repository in the dashboard. The setup page asks for `BOOTSTRAP_TOKEN`
+  (from `.dev.vars.example`); one call of `POST /api/bootstrap` with it
+  creates the first instance admin (§8).
 - **Update:** bump `version` and `sha256` in `git-forge.json` and push.
-  Renovate can propose the bump via a regex manager on releases.
+  Renovate proposes the version via a regex manager on the GitHub releases of
+  `levino/git-forge`. It cannot compute the checksum (the `github-releases`
+  datasource's digest is the tag's commit, not a file hash, and
+  `postUpgradeTasks` exist only for self-hosted Renovate), so the template's
+  `Pin checksum` workflow fills in `sha256` on Renovate's pull requests from
+  the new `SHA256SUMS` and runs `build.sh`; a human reviews and merges.
+- **Template sync:** `.github/workflows/sync-instance-template.yml` copies
+  `templates/instance` to `levino/git-forge-instance` with `git-forge.json`
+  pinned to the latest release, after every release and on template changes on
+  `main`. It pushes with the deploy key `INSTANCE_TEMPLATE_DEPLOY_KEY` and is
+  skipped while that secret is missing. The copy in this repository carries an
+  all-zero placeholder pin that fails the build on purpose.
+- **Test:** `release/test/instance.test.ts` builds a release, runs the
+  template's `build.sh` against it via `file://`, checks that wrong pins and
+  tampered assets are refused, checks the order of `deploy.sh` with a stub
+  Wrangler, applies the migrations and does a push/clone
+  smoke test against `wrangler dev` running the template.
 - The same bundle may additionally be published to npm later; the template
   never depends on it.
 

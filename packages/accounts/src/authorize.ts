@@ -1,4 +1,4 @@
-import type { Authorize, RepositoryName } from '@git-forge/core'
+import type { Authorize, RepositoryName, Surface } from '@git-forge/core'
 import { fromUtf8, base64UrlDecode } from './encoding.ts'
 import { looksLikeJwt } from './jwt.ts'
 import {
@@ -74,7 +74,7 @@ export const checkRepositoryAccess = async (
   principal: Principal,
   repo: RepositoryName,
   required: Role,
-  surface: 'git' | 'lfs' = 'git',
+  surface: Surface = 'git',
 ): Promise<AccessCheck> => {
   const repository = await directory.findRepository(repo.owner, repo.name)
   if (!repository) return { decision: decide(principal, 'none', required), access: 'none', repository: null }
@@ -102,9 +102,9 @@ export const decisionResponse = (decision: Decision, principal: Principal): Resp
   }
 }
 
-export const createGitAuthorizer = (options: AuthenticateOptions): Authorize => async (request, repo, access) => {
+export const createGitAuthorizer = (options: AuthenticateOptions): Authorize => async (request, repo, access, surface) => {
   const principal = await authenticateRequest(request, options)
   if (!principal) return challenge('invalid credentials\n')
-  const check = await checkRepositoryAccess(options.directory, principal, repo, access === 'write' ? 'write' : 'read')
+  const check = await checkRepositoryAccess(options.directory, principal, repo, access === 'write' ? 'write' : 'read', surface)
   return decisionResponse(check.decision, principal)
 }

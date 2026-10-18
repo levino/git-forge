@@ -243,3 +243,36 @@ describe('git over HTTP', () => {
     expect(await gitAsync(`${early}/out`, ['fsck', '--full', '--strict'])).toBe('')
   })
 })
+
+describe('push policy hook', () => {
+  it('asks pushPolicy per request and reports its rejection per ref to real git', async () => {
+    const seen: string[] = []
+    const guarded = await startServer(
+      async (request) =>
+        (await handleGitRequest(request, {
+          storage,
+          receive: { policy: (command) => (command.name === 'refs/heads/frozen' ? 'frozen by receive.policy' : null) },
+          pushPolicy: async (request, repo) => {
+            seen.push(`${request.headers.get('X-Who')}:${repo.name}`)
+            return (command) => (command.name === 'refs/heads/main' && !command.fastForward ? 'no rewrites' : null)
+          },
+        })) ?? new Response('not found', { status: 404 }),
+    )
+    try {
+      await createRepository(storage, { owner: 'test', name: 'guarded' })
+      const remote = `${guarded.url}/test/guarded.git`
+      const source = initRepo()
+      sampleHistory(source, 2)
+      const header = ['-c', 'http.extraHeader=X-Who: tester']
+      await gitAsync(source, [...header, 'push', '-q', remote, 'main', 'main:frozen-not'])
+      await gitAsync(source, ['commit', '-q', '--amend', '-m', 'rewritten'])
+      const stderr = await gitFails(source, [...header, 'push', '--force', remote, 'main', 'main:frozen'])
+      expect(stderr).toContain('! [remote rejected] main -> main (no rewrites)')
+      expect(stderr).toContain('! [remote rejected] main -> frozen (frozen by receive.policy)')
+      expect(seen).toEqual(['tester:guarded', 'tester:guarded'])
+      expect(Object.keys((await readRefs(storage, { owner: 'test', name: 'guarded' }))!.state.refs).sort()).toEqual(['refs/heads/frozen-not', 'refs/heads/main'])
+    } finally {
+      await guarded.close()
+    }
+  })
+})

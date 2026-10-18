@@ -1,5 +1,5 @@
 import { readAll, SizeLimitError } from './bytes.ts'
-import { advertiseReceivePack, type PushOutcome, receivePack, type ReceiveOptions } from './receive-pack.ts'
+import { advertiseReceivePack, type PushOutcome, receivePack, type ReceiveOptions, type RefPolicy } from './receive-pack.ts'
 import { handleLfsRequest, type LfsHttpOptions } from './lfs-http.ts'
 import { lfsPushCheck } from './lfs.ts'
 import { gitPrefix, isValidName, readRefs, type RepositoryName } from './repository.ts'
@@ -8,17 +8,22 @@ import { advertiseUploadPackV2, type PackfileUri, uploadPackV2 } from './upload-
 
 export type Access = 'read' | 'write'
 
-export type Authorize = (request: Request, repo: RepositoryName, access: Access) => Promise<Response | null>
+export type Surface = 'git' | 'lfs'
+
+export type Authorize = (request: Request, repo: RepositoryName, access: Access, surface: Surface) => Promise<Response | null>
+
+export type PushPolicy = (request: Request, repo: RepositoryName) => Promise<RefPolicy | null>
 
 export type GitHttpOptions = {
   readonly storage: Storage
   readonly authorize?: Authorize
+  readonly pushPolicy?: PushPolicy
   readonly maxRequestBytes?: number
   readonly maxPushBytes?: number
   readonly receive?: Omit<ReceiveOptions, 'storage' | 'repo'>
   readonly onPush?: (repo: RepositoryName, outcome: PushOutcome) => Promise<void>
   readonly lfs?: LfsHttpOptions | false
-  readonly packfileUris?: (request: Request, repo: RepositoryName) => PackfileUri | undefined
+  readonly packfileUris?: (request: Request, repo: RepositoryName) => PackfileUri | undefined | Promise<PackfileUri | undefined>
 }
 
 export const publicPackfileUris =
@@ -107,6 +112,16 @@ const withLfsCheck = (options: GitHttpOptions, repo: RepositoryName): NonNullabl
   return async (objects, commands) => (await lfs?.(objects)) ?? (await custom?.(objects, commands)) ?? null
 }
 
+export const combinePolicies =
+  (...policies: readonly (RefPolicy | null | undefined)[]): RefPolicy =>
+  (command) => {
+    for (const policy of policies) {
+      const denied = policy?.(command) ?? null
+      if (denied) return denied
+    }
+    return null
+  }
+
 export const handleGitRequest = async (request: Request, options: GitHttpOptions): Promise<Response | null> => {
   const url = new URL(request.url)
   const route = matchGitRoute(url.pathname)
@@ -126,7 +141,7 @@ export const handleGitRequest = async (request: Request, options: GitHttpOptions
   const isReceive = service === 'git-receive-pack' || path === '/git-receive-pack'
   const isGitPath = path === '/git-upload-pack' || path === '/git-receive-pack' || DUMB_PATHS.some((pattern) => pattern.test(path))
   if (!isGitPath) return null
-  const denied = await options.authorize?.(request, repo, isReceive ? 'write' : 'read')
+  const denied = await options.authorize?.(request, repo, isReceive ? 'write' : 'read', 'git')
   if (denied) return denied
   const refs = await readRefs(storage, repo)
   if (!refs) return text(404, 'repository not found\n')
@@ -136,9 +151,12 @@ export const handleGitRequest = async (request: Request, options: GitHttpOptions
       headers: { 'Content-Type': 'application/x-git-receive-pack-advertisement', ...noCache },
     })
   }
-  const packfileUri = options.packfileUris?.(request, repo)
+  const uploadOptions = async () => {
+    const packfileUri = await options.packfileUris?.(request, repo)
+    return packfileUri ? { packfileUri } : {}
+  }
   if (request.method === 'GET' && path === '/info/refs' && service === 'git-upload-pack' && isProtocolV2(request)) {
-    return new Response(binary(advertiseUploadPackV2(packfileUri ? { packfileUri } : {})), {
+    return new Response(binary(advertiseUploadPackV2(await uploadOptions())), {
       headers: { 'Content-Type': 'application/x-git-upload-pack-advertisement', ...noCache },
     })
   }
@@ -155,16 +173,17 @@ export const handleGitRequest = async (request: Request, options: GitHttpOptions
       if (error instanceof SizeLimitError) return text(413, 'request too large\n')
       throw error
     }
-    return new Response(await uploadPackV2(storage, repo, body, packfileUri ? { packfileUri } : {}), {
+    return new Response(await uploadPackV2(storage, repo, body, await uploadOptions()), {
       headers: { 'Content-Type': 'application/x-git-upload-pack-result', ...noCache },
     })
   }
   if (request.method === 'POST' && path === '/git-receive-pack') {
-    const pushLimit = options.maxPushBytes ?? Number.POSITIVE_INFINITY
+    const pushLimit = options.maxPushBytes ?? options.maxRequestBytes ?? Number.POSITIVE_INFINITY
+    const policy = combinePolicies(options.receive?.policy, await options.pushPolicy?.(request, repo))
     let received: Awaited<ReturnType<typeof receivePack>>
     try {
       received = await receivePack(
-        { ...options.receive, storage, repo, beforeUpdate: withLfsCheck(options, repo) },
+        { ...options.receive, storage, repo, policy, beforeUpdate: withLfsCheck(options, repo) },
         limited(bodyStream(request), pushLimit),
       )
     } catch (error) {

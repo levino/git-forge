@@ -1,4 +1,4 @@
-import { concat, fromHex, fromUtf8, readUint32, toHex, uint32, utf8 } from './bytes.ts'
+import { concat, fromHex, fromUtf8, readUint32, SizeLimitError, toHex, uint32, utf8 } from './bytes.ts'
 import type { ByteCursor } from './cursor.ts'
 import { applyDelta, deltaResultSize } from './delta.ts'
 import { crc32, createSha1, hashObject, type ObjectId } from './hash.ts'
@@ -25,6 +25,7 @@ export type IndexPackOptions = {
   readonly memoryBudget?: number
   readonly chunkSize?: number
   readonly maxObjectBytes?: number
+  readonly onObject?: (id: ObjectId, type: ObjectType, data: Uint8Array) => void
 }
 
 export const DEFAULT_MAX_OBJECT_BYTES = 64 * 1024 * 1024
@@ -102,6 +103,7 @@ type Appended = { readonly id: Uint8Array; readonly type: ObjectType; readonly l
 
 export type IndexedPack = {
   readonly objectCount: number
+  readonly byteLength: number
   readonly checksum: Uint8Array
   readonly lfsPointers: readonly LfsObjectSpec[]
   readonly thinBases: number
@@ -142,6 +144,7 @@ export const indexPack = async (cursor: ByteCursor, options: IndexPackOptions): 
     entries.ids.set(id, index * ID_BYTES)
     idIndex.add(index)
     if (!data) return
+    options.onObject?.(toHex(id), typeFromCode(typeCode), data)
     if (data.length <= keepLimit) cache.set(index, data, data.length)
     if (typeCode === 3) {
       if (data.length <= LFS_POINTER_MAX_SIZE) {
@@ -232,7 +235,7 @@ export const indexPack = async (cursor: ByteCursor, options: IndexPackOptions): 
     if (toHex(trailer) !== toHex(checksum)) throw new PackError('pack checksum mismatch')
     if (!(await cursor.atEnd())) throw new PackError('unexpected data after pack entries')
   } catch (error) {
-    if (error instanceof PackError) throw error
+    if (error instanceof PackError || error instanceof SizeLimitError) throw error
     throw new PackError((error as Error).message)
   } finally {
     cursor.onConsume = null
@@ -391,6 +394,7 @@ export const indexPack = async (cursor: ByteCursor, options: IndexPackOptions): 
 
   return {
     objectCount: entries.count,
+    byteLength: source.size,
     checksum,
     lfsPointers: [...lfs.values()],
     thinBases: discovered.filter((id) => idIndex.getBytes(id) === -1).length,

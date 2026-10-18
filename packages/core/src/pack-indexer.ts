@@ -29,6 +29,15 @@ export type IndexPackOptions = {
 }
 
 export const DEFAULT_MAX_OBJECT_BYTES = 64 * 1024 * 1024
+
+export class ObjectTooLargeError extends PackError {
+  constructor(
+    readonly size: number,
+    readonly limit: number,
+  ) {
+    super(`object of ${size} bytes is too large to resolve in memory (limit ${limit}); store large files in Git LFS`)
+  }
+}
 export const DEFAULT_MEMORY_BUDGET = 16 * 1024 * 1024
 export const DEFAULT_CHUNK_SIZE = 4 * 1024 * 1024
 
@@ -119,8 +128,8 @@ export const indexPack = async (cursor: ByteCursor, options: IndexPackOptions): 
   const keepLimit = Math.max(LFS_POINTER_MAX_SIZE, Math.floor(budget / 16))
   const checkReferences = options.checkReferences ?? true
   const maxObject = options.maxObjectBytes ?? DEFAULT_MAX_OBJECT_BYTES
-  const tooLarge = (size: number): PackError =>
-    new PackError(`object of ${size} bytes is too large to resolve in memory (limit ${maxObject}); store large files in Git LFS`)
+  const tooLarge = (size: number): ObjectTooLargeError => new ObjectTooLargeError(size, maxObject)
+  const streamLimit = Math.min(keepLimit, maxObject)
   const entries = new Entries()
   const idIndex = new IdIndex(() => entries.ids)
   const cache = new ByteLru<number, Uint8Array>(budget)
@@ -207,7 +216,7 @@ export const indexPack = async (cursor: ByteCursor, options: IndexPackOptions): 
       if (baseId) refBases.set(index, baseId)
       if (entry.typeCode !== OFS_DELTA && entry.typeCode !== REF_DELTA) {
         const type = typeFromCode(entry.typeCode)
-        if (entry.size <= keepLimit || entry.typeCode !== 3) {
+        if (entry.size <= streamLimit || entry.typeCode !== 3) {
           if (entry.size > maxObject) throw tooLarge(entry.size)
           const data = (await cursor.inflate(entry.size, { keep: true, scratch })) as Uint8Array
           resolveWithData(index, entry.typeCode, data)

@@ -416,8 +416,10 @@ reaches the Worker. Ways around it:
   with `POST /api/repos/{owner}/{name}/import`. Each step runs as one queue
   message with its own CPU budget (`limits.cpu_ms`), fetches about
   `commitsPerStep` commits and at most 32 MiB of pack, and streams it into the
-  same indexer as a push (`docs/design.md` §7, Import). Mirrors fetch the same
-  way.
+  same indexer as a push (`docs/design.md` §7, Import). A single commit above
+  that limit is split into its trees and batches of its blobs; a single blob
+  above it is fetched alone in one step of its own, so there is no size limit
+  for imports. Mirrors fetch the same way.
 
 Every staging chunk is one R2 write and is read back once when the final pack
 is written, so a 500 MB push performs a few hundred R2 operations.

@@ -279,6 +279,7 @@ the [accounts README](../packages/accounts/README.md#branch-protection).
     objects/<oid[0:2]>/<oid[2:4]>/<oid>   # LFS objects and release assets
   import/status.json                # progress of the last import
   import/commits.txt                # commit order of the last import
+  import/blobs.txt                  # blobs of the commit an import is splitting
   README.txt                        # plain text: what this is, how to read it
 tmp/<repo>/<timestamp>-<uuid>/<n>   # staging chunks of a push or fetch, expired by the bucket
 tmp/<repo>/<timestamp>-<uuid>/asset # a release asset upload without a declared SHA-256 (§16)
@@ -302,7 +303,12 @@ tmp/<repo>/<timestamp>-<uuid>/asset # a release asset upload without a declared 
   which is only known at the end, and `put` needs a key and a size. The chunks
   are read back once to write the final pack and never again. The `Storage`
   interface has no delete; operators expire `tmp/` with a bucket lifecycle
-  rule (e.g. one day). Pushes up to one chunk never touch `tmp/`.
+  rule (e.g. one day). Pushes up to one chunk never touch `tmp/`. Fetched
+  packs (import, mirror sync) are staged the same way. Every attempt writes
+  under a fresh `<timestamp>-<uuid>` prefix, so the chunks of an attempt that
+  failed (pack over the step limit, crash, timeout) are never read or reused
+  again; they stay until the lifecycle rule expires them. The same holds for
+  pack files that were written but never listed in `objects/info/packs`.
 - **Release assets** are content-addressed like LFS objects
   (`lfs/objects/…`, §16). Which asset belongs to which release lives only in
   the database; a deleted asset or release leaves its bytes in place.
@@ -338,7 +344,9 @@ Memory is the cache budget (16 MiB), one staging chunk (4 MiB) and about
 60–100 bytes per object, independent of the pack's size in bytes. Plain
 blobs of any size are only streamed, but objects that must be materialized
 (commits, trees, tags, delta bases and delta results) are limited to 64 MiB;
-large files belong in LFS. The Worker sets no push size limit of its own
+large files belong in LFS. A blob above the limit (or above the cache's keep
+limit) that arrives as a plain entry is always streamed, and an import refetches
+large blobs one by one so that they arrive plain (Import, below). The Worker sets no push size limit of its own
 (`MAX_PUSH_BYTES` is optional); the platform's request body limit applies
 (`apps/forge-worker/README.md`).
 
@@ -379,9 +387,49 @@ as a sequence of stateless steps, each persisting its progress in
    `want` the last commit of the range, `have` every earlier range end and all
    local tips, so the server sends exactly the new objects; store the pack,
    check connectivity, collect LFS pointers. A step whose pack exceeds
-   `maxStepBytes` (32 MiB) is retried with a quarter of the commits; small
-   packs double the range. A final fetch picks up tag objects. Servers without
-   `filter`, and dumb servers, are fetched in one step.
+   `maxStepBytes` (32 MiB), or that contains a delta whose result exceeds the
+   indexer's object limit (64 MiB), is retried with a quarter of the commits;
+   small packs double the range. A final fetch picks up tag objects (without
+   a byte limit: every commit is already present). Servers without `filter`,
+   and dumb servers, are fetched in one step.
+
+   *Splitting a commit.* The step limit only bounds the work per invocation,
+   never what can be imported. If a range of one commit is still too large,
+   the import splits it over several steps, recorded in `split` in the state:
+   - *list* — fetch the commit with `filter blob:none` (same `have`s), store
+     its commits and trees as a pack that is written but **not** listed in
+     `objects/info/packs`, and write the blobs that its new trees reference
+     and the repository lacks (subtrees not in the pack are reachable from a
+     `have` and therefore complete; gitlinks are skipped) to
+     `<repo>/import/blobs.txt`.
+   - *blobs* — `want` the listed blobs by id, `blobsPerStep` at a time
+     (start: half the list; halved when the pack exceeds `maxStepBytes` or a
+     delta result exceeds the object limit; doubled after small packs).
+     Without `thin-pack` the server only deltifies against objects in the same
+     pack, so a batch of one blob arrives undeltified and is fetched without a
+     byte limit: the indexer only hashes plain blobs while streaming them to
+     `tmp/`, whatever their size.
+   - *done* — after the last batch the tree pack is listed, the commit becomes
+     a cut (`have`) and the next step continues with a one-commit range.
+
+   The tree pack stays unlisted until all blobs are stored, so an object
+   database never sees a commit without its blobs: an abandoned split leaves
+   only unlisted files and complete blob packs, and a new import cannot take
+   the half-split commit for a complete one. Retries repeat the current
+   sub-step (the server sends the same trees again; blob batches skip blobs
+   already present). github.com supports `filter blob:none` and `want` of a
+   blob id (checked against `dorfpflege-roessing/dorfarchiv`, whose 32 MiB+
+   commit made this necessary); it advertises no `object-info`, so blob sizes
+   are not known in advance and batches adapt to failures instead.
+
+   *CPU bound.* What cannot be split is one blob (and the trees of one
+   commit): a blob of N bytes costs one invocation inflating, hashing and
+   writing N bytes to `tmp/` and then copying them to the final pack, about
+   6 s of CPU per 100 MiB (measured in Node: a 150 MiB blob took 9.6 s; the
+   inflater and SHA-1 run in JavaScript). The Worker sets `limits.cpu_ms` to
+   60 s, enough for single blobs of about 1 GiB; Cloudflare allows up to five
+   minutes, which the operator can configure for larger ones. GitHub rejects
+   pushes of files above 100 MiB outside LFS.
 4. *lfs* — 100 LFS objects per step via the upstream's batch API; missing
    objects are recorded, not fatal.
 5. *refs* — update refs via compare-and-swap and rewrite `info/refs`; an

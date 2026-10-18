@@ -72,6 +72,7 @@ discussions.
 - [x] Server-side import: create or update a repository by pulling from a URL (no request body limit), in resumable steps driven by a queue
 - [x] Chunked push helper: `git forge push` splits history into pushes below the platform body limit, using the unmodified git client; single executables per platform from the release workflow
 - [x] Import and mirror sync: stream fetched packs into the streaming indexer (via `ingestPack`)
+- [x] Import of commits and blobs larger than one step: split a commit into its trees (`filter blob:none`) and batches of blobs wanted by id; a single oversized blob gets a step of its own without a byte limit (#51)
 - [ ] Remote helper `git-remote-forge`: resumable multipart pack upload directly to object storage via presigned URLs, then a finalize call that indexes the pack and updates refs
 
 ## M5b — CI and distribution

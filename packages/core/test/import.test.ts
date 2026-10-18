@@ -1,13 +1,16 @@
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { afterEach, describe, expect, it } from 'vitest'
-import { readAll } from '../src/bytes.ts'
+import { concat, readAll, utf8 } from '../src/bytes.ts'
 import { handleGitRequest } from '../src/http.ts'
 import {
   commitOrder,
   continueImport,
+  importBlobsKey,
   ingestStreamed,
   type ImportJob,
+  type ImportState,
+  type ImportStepOptions,
   ImportRunningError,
   importStep,
   planImportRefUpdates,
@@ -117,6 +120,53 @@ const expectIdentical = async (storage: Storage, bare: string): Promise<void> =>
   expect(await objectList(clone)).toEqual(await objectList(bare))
 }
 
+const largeSource = async (): Promise<Source> => {
+  const work = initRepo()
+  sampleHistory(work, 6)
+  for (let i = 0; i < 24; i++) writeFile(work, `bulk/${i}.bin`, randomBytes(70_000, 100 + i))
+  commitAll(work, 'bulk')
+  const big = randomBytes(600_000, 7)
+  const copy = big.slice()
+  copy[1000] = ((copy[1000] as number) + 1) % 256
+  writeFile(work, 'media/big.bin', big)
+  writeFile(work, 'media/big-copy.bin', copy)
+  writeFile(work, 'media/small.txt', 'small\n')
+  commitAll(work, 'big')
+  writeFile(work, 'media/big.bin', concat([big, randomBytes(1000, 8)]))
+  commitAll(work, 'big changed')
+  const twin = randomBytes(250_000, 9)
+  for (const name of ['a', 'b', 'c', 'd']) writeFile(work, `twins/${name}.bin`, concat([twin, utf8(`${name}\n`)]))
+  commitAll(work, 'twins')
+  for (let i = 0; i < 4; i++) {
+    writeFile(work, `after/${i}.txt`, `after ${i}\n`)
+    commitAll(work, `after ${i}`)
+  }
+  const root = tempDir('git-forge-import-root-')
+  await git(root, ['clone', '-q', '--bare', work, 'source.git'])
+  const bare = `${root}/source.git`
+  await git(bare, ['config', 'uploadpack.allowFilter', 'true'])
+  await git(bare, ['repack', '-q', '-a', '-d', '-f'])
+  return { work, root, bare }
+}
+
+const stepSplitting = async (options: ImportStepOptions): Promise<{ states: ImportState[]; splits: Set<string> }> => {
+  const splits = new Set<string>()
+  const states: ImportState[] = []
+  for (let i = 0; i < 300; i++) {
+    const state = await importStep({
+      ...options,
+      ingestPack: async (odb, pack, ingest) => {
+        const stored = await ingestStreamed(odb, pack, ingest)
+        if (ingest?.register === false && stored.name) splits.add(stored.name)
+        return stored
+      },
+    })
+    states.push(state)
+    if (state.phase === 'done' || state.phase === 'failed') break
+  }
+  return { states, splits }
+}
+
 describe('commit order', () => {
   it('lists parents before children and side branches before their merge', () => {
     const commits = new Map<string, string[]>([
@@ -202,6 +252,40 @@ describe('server-side import', () => {
     expect(filtered.length).toBeGreaterThan(5)
     await expectIdentical(storage, source.bare)
   }, 60_000)
+
+  it('splits commits and blobs larger than one step and resumes after crashes in between', async () => {
+    const source = await largeSource()
+    const remote = await serve(httpBackendHandler(source.root))
+    const inner = new MemoryStorage()
+    let packWrites = 0
+    const storage = new FaultyStorage(inner, (key) => key.endsWith('.pack') && [4, 9].includes(++packWrites))
+    await startImport(storage, target, { url: `${remote.url}/source.git`, commitsPerStep: 8 })
+    const { states, splits } = await stepSplitting({ storage, repo: target, maxStepBytes: 400_000, maxObjectBytes: 200_000 })
+    const state = states.at(-1)
+    expect(state?.phase).toBe('done')
+    expect(state?.split).toBeUndefined()
+    expect(states.some((step) => step.error?.includes('simulated crash'))).toBe(true)
+    expect(states.some((step) => step.error?.includes('exceeds'))).toBe(false)
+    expect(splits.size).toBe(4)
+    expect(states.some((step) => step.split?.blobs === 24)).toBe(true)
+    expect(states.some((step) => step.split?.listed && step.split.blobsPerStep < Math.ceil(step.split.blobs / 2))).toBe(true)
+    expect(await inner.get(importBlobsKey(target))).not.toBeNull()
+    await expectIdentical(inner, source.bare)
+  }, 120_000)
+
+  it('splits a commit whose deltas resolve to objects above the memory limit', async () => {
+    const source = await largeSource()
+    const remote = await serve(httpBackendHandler(source.root))
+    const storage = new MemoryStorage()
+    await startImport(storage, target, { url: `${remote.url}/source.git` })
+    const { states, splits } = await stepSplitting({ storage, repo: target, maxObjectBytes: 200_000 })
+    expect(states.at(-1)?.phase).toBe('done')
+    expect(states.every((step) => step.error === undefined)).toBe(true)
+    expect(states.some((step) => step.commitsPerStep === 1)).toBe(true)
+    expect(states.some((step) => step.split?.listed && step.split.blobsPerStep < Math.ceil(step.split.blobs / 2))).toBe(true)
+    expect(splits.size).toBe(1)
+    await expectIdentical(storage, source.bare)
+  }, 120_000)
 
   it('updates an imported repository and archives rewritten history', async () => {
     const source = await sourceRepo(10)

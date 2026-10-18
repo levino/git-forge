@@ -7,7 +7,7 @@ import { continueImport, createMemoryJobQueue, type FetchFunction, type ImportJo
 import { FsStorage, nodeDigests } from '@git-forge/node'
 import { S3Storage } from '@git-forge/s3'
 import { type AppJob, createForge, type Forge } from 'forge-worker/app'
-import { ConfigurationError, parseActionsSettings, parseSettings } from 'forge-worker/config'
+import { ConfigurationError, loadSecretsKey, parseActionsSettings, parseSettings } from 'forge-worker/config'
 import { type NodeConfig, type NodeVars, parseNodeConfig, type StorageConfig } from './config.ts'
 
 export type Log = (event: Record<string, unknown>) => void
@@ -69,6 +69,7 @@ export const createInstance = async (vars: NodeVars, overrides: InstanceOverride
   const config = parseNodeConfig(vars)
   const settings = await parseSettings(vars)
   const actions = parseActionsSettings(vars)
+  const secretsKey = await loadSecretsKey(actions)
   const { db, handle } = await openDatabase(config.databasePath)
   try {
     const pending = await pendingMigrations(db, MIGRATIONS)
@@ -105,7 +106,17 @@ export const createInstance = async (vars: NodeVars, overrides: InstanceOverride
     scheduleImport: (job, delaySeconds) => imports.enqueue(job, { delaySeconds }),
     ...(overrides.fetch ? { fetch: overrides.fetch } : {}),
     ...(overrides.now ? { now: overrides.now } : {}),
-    ...(actions ? { actions: { instanceId: actions.instanceId, secrets: async () => actions.secrets } } : {}),
+    ...(actions
+      ? {
+          actions: {
+            instanceId: actions.instanceId,
+            secrets: async () => actions.secrets,
+            ...(secretsKey ? { secretsKey } : {}),
+            repositories: actions.repositories,
+            githubFallback: actions.githubFallback,
+          },
+        }
+      : {}),
   })
   let closed = false
   return {

@@ -1,3 +1,5 @@
+import type { ExpressionValue } from '@git-forge/core'
+
 export type TemplateToken =
   | string
   | boolean
@@ -25,6 +27,12 @@ export const sequenceToken = (items: readonly TemplateToken[]): TemplateToken =>
 export const contextDictionary = (entries: Readonly<Record<string, ContextData>>): ContextData => {
   const d = Object.entries(entries).map(([k, v]) => ({ k, v }))
   return d.length === 0 ? { t: 2 } : { t: 2, d }
+}
+
+export const toContextData = (value: ExpressionValue): ContextData => {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean' || typeof value === 'number') return value
+  if (Array.isArray(value)) return contextArray(value.map(toContextData))
+  return contextDictionary(Object.fromEntries(Object.entries(value as Readonly<Record<string, ExpressionValue>>).map(([key, item]) => [key, toContextData(item)])))
 }
 
 export const contextArray = (items: readonly ContextData[]): ContextData => (items.length === 0 ? { t: 1 } : { t: 1, a: items })

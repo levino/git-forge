@@ -3,7 +3,7 @@ import { consumeJobs, digestStreams, QueueJobs, R2Storage } from '@git-forge/clo
 import { continueImport, createConsoleEmailSender, type EmailSender, type ImportJob, type ImportScheduler } from '@git-forge/core'
 import { createSesEmailSender } from '@git-forge/ses'
 import { type AppJob, createForge, type Forge } from './app.ts'
-import { type EmailSettings, type ForgeVars, parseActionsSettings, parseEmailSettings, parseSettings } from './config.ts'
+import { ACTIONS_CRON, type EmailSettings, type ForgeVars, loadSecretsKey, parseActionsSettings, parseEmailSettings, parseSettings } from './config.ts'
 import { containerLauncher } from './runner-launcher.ts'
 
 export { RunnerContainer } from './runner-container.ts'
@@ -32,8 +32,9 @@ let forge: Promise<Forge> | undefined
 
 const forgeFor = (env: Env): Promise<Forge> => {
   forge ??= parseSettings(env)
-    .then((settings) => {
+    .then(async (settings) => {
       const actions = parseActionsSettings(env)
+      const secretsKey = await loadSecretsKey(actions)
       const email = emailSender(parseEmailSettings(env))
       return createForge({
         ...settings,
@@ -48,6 +49,9 @@ const forgeFor = (env: Env): Promise<Forge> => {
               actions: {
                 instanceId: actions.instanceId,
                 secrets: async () => actions.secrets,
+                ...(secretsKey ? { secretsKey } : {}),
+                repositories: actions.repositories,
+                githubFallback: actions.githubFallback,
                 ...(env.RUNNER ? { launcher: containerLauncher(env.RUNNER) } : {}),
               },
             }
@@ -68,6 +72,11 @@ export default {
     return (await forgeFor(env)).fetch(request, (promise) => ctx.waitUntil(promise))
   },
   async scheduled(controller, env): Promise<void> {
+    if (controller.cron === ACTIONS_CRON) {
+      const tick = await (await forgeFor(env)).actionsTick()
+      console.log(JSON.stringify({ event: 'scheduled', cron: controller.cron, at: new Date(controller.scheduledTime).toISOString(), task: 'actions', scheduled: tick?.scheduled.length ?? 0, reaped: tick?.reaped ?? null }))
+      return
+    }
     const runs = await (await forgeFor(env)).scheduled(new Date(controller.scheduledTime))
     console.log(JSON.stringify({ event: 'scheduled', cron: controller.cron, at: new Date(controller.scheduledTime).toISOString(), task: 'mirror-sync', runs }))
   },

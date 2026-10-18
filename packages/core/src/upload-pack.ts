@@ -1,6 +1,6 @@
 import { concat, streamOf, utf8 } from './bytes.ts'
 import { isObjectId, type ObjectId } from './hash.ts'
-import { parseTag } from './objects.ts'
+import { type GitObject, parseCommit, parseTag, references } from './objects.ts'
 import { streamFrom } from './pack-indexer.ts'
 import { emptyPack, generatePack, sidebandFrames, storedPacks, withTrailer } from './pack-writer.ts'
 import { DELIM, FLUSH, packetText, parsePackets, pkt, sideband, SIDEBAND_DATA, SIDEBAND_ERROR, SIDEBAND_PROGRESS } from './pktline.ts'
@@ -22,7 +22,7 @@ export const advertiseUploadPackV2 = (options: UploadPackOptions = {}): Uint8Arr
     pkt('version 2\n'),
     pkt(`agent=${AGENT}\n`),
     pkt('ls-refs=unborn\n'),
-    pkt(options.packfileUri ? 'fetch=packfile-uris\n' : 'fetch\n'),
+    pkt(options.packfileUri ? 'fetch=shallow packfile-uris\n' : 'fetch=shallow\n'),
     pkt('server-option\n'),
     pkt('object-format=sha1\n'),
     FLUSH,
@@ -92,9 +92,119 @@ const uriSection = async (packs: readonly LoadedPack[], protocols: readonly stri
   return [pkt('packfile-uris\n'), ...lines, DELIM]
 }
 
+const mustRead = async (odb: ObjectDatabase, id: ObjectId): Promise<GitObject> => {
+  const object = await odb.read(id)
+  if (!object) throw new MissingObjectError(id)
+  return object
+}
+
+const walkObjects = async (odb: ObjectDatabase, tips: Iterable<ObjectId>, stop: (id: ObjectId) => boolean): Promise<ObjectId[]> => {
+  const seen = new Set<ObjectId>()
+  const order: ObjectId[] = []
+  const stack = [...tips]
+  while (stack.length > 0) {
+    const id = stack.pop() as ObjectId
+    if (seen.has(id) || stop(id)) continue
+    seen.add(id)
+    order.push(id)
+    const refs = references(await mustRead(odb, id))
+    for (let i = refs.length - 1; i >= 0; i--) stack.push(refs[i] as ObjectId)
+  }
+  return order
+}
+
+type ShallowWalk = { readonly commits: ObjectId[]; readonly tags: ObjectId[]; readonly boundary: Set<ObjectId> }
+
+const shallowWalk = async (odb: ObjectDatabase, wants: Iterable<ObjectId>, depth: number): Promise<ShallowWalk> => {
+  const tags: ObjectId[] = []
+  let level: ObjectId[] = []
+  for (let id of wants) {
+    for (;;) {
+      const object = await mustRead(odb, id)
+      if (object.type !== 'tag') {
+        if (object.type === 'commit') level.push(id)
+        break
+      }
+      tags.push(id)
+      id = parseTag(object.data).object
+    }
+  }
+  const seen = new Set<ObjectId>()
+  const commits: ObjectId[] = []
+  const boundary = new Set<ObjectId>()
+  for (let current = 1; level.length > 0; current++) {
+    const next: ObjectId[] = []
+    for (const id of level) {
+      if (seen.has(id)) continue
+      seen.add(id)
+      commits.push(id)
+      const { parents } = parseCommit((await mustRead(odb, id)).data)
+      if (current >= depth) {
+        if (parents.length > 0) boundary.add(id)
+      } else next.push(...parents)
+    }
+    level = next
+  }
+  return { commits, tags, boundary }
+}
+
+type ShallowRequest = {
+  readonly wants: ReadonlySet<ObjectId>
+  readonly common: readonly ObjectId[]
+  readonly clientShallow: ReadonlySet<ObjectId>
+  readonly depth: number | undefined
+  readonly relative: boolean
+}
+
+type ShallowPlan = { readonly lines: Uint8Array[]; readonly ids: ObjectId[] }
+
+const planShallow = async (odb: ObjectDatabase, request: ShallowRequest): Promise<ShallowPlan> => {
+  const behindShallow = new Set<ObjectId>()
+  for (const id of request.clientShallow) {
+    const object = isObjectId(id) ? await odb.read(id) : null
+    if (object?.type === 'commit') for (const parent of parseCommit(object.data).parents) behindShallow.add(parent)
+  }
+  const excluded = new Set(await walkObjects(odb, request.common, (id) => behindShallow.has(id)))
+  if (request.depth === undefined) return { lines: [], ids: await walkObjects(odb, request.wants, (id) => excluded.has(id) || behindShallow.has(id)) }
+  let walk: ShallowWalk
+  if (request.relative) {
+    const beyond = await shallowWalk(odb, request.clientShallow, request.depth + 1)
+    const commits = new Set(beyond.commits)
+    const tags: ObjectId[] = []
+    for (const id of await walkObjects(odb, request.wants, (candidate) => excluded.has(candidate) || behindShallow.has(candidate) || commits.has(candidate))) {
+      const object = await mustRead(odb, id)
+      if (object.type === 'commit') commits.add(id)
+      else if (object.type === 'tag') tags.push(id)
+    }
+    walk = { commits: [...commits], tags, boundary: beyond.boundary }
+  } else walk = await shallowWalk(odb, request.wants, request.depth)
+  const lines: Uint8Array[] = []
+  for (const id of walk.boundary) if (!request.clientShallow.has(id)) lines.push(pkt(`shallow ${id}\n`))
+  for (const id of request.clientShallow) if (walk.commits.includes(id) && !walk.boundary.has(id)) lines.push(pkt(`unshallow ${id}\n`))
+  const sent = new Set<ObjectId>()
+  const ids: ObjectId[] = []
+  for (const id of [...walk.tags, ...walk.commits]) {
+    if (excluded.has(id) && !request.clientShallow.has(id)) continue
+    if (!excluded.has(id) && !sent.has(id)) {
+      sent.add(id)
+      ids.push(id)
+    }
+    const object = await mustRead(odb, id)
+    if (object.type !== 'commit') continue
+    for (const treeObject of await walkObjects(odb, [parseCommit(object.data).tree], (candidate) => sent.has(candidate) || excluded.has(candidate))) {
+      sent.add(treeObject)
+      ids.push(treeObject)
+    }
+  }
+  return { lines, ids }
+}
+
 const fetch = async (state: AdvertisedRefs, odb: ObjectDatabase, args: readonly string[], options: UploadPackOptions): Promise<AsyncIterable<Uint8Array> | Uint8Array> => {
   const wants = new Set<ObjectId>()
   const haves: ObjectId[] = []
+  const clientShallow = new Set<ObjectId>()
+  let depth: number | undefined
+  let relative = false
   let done = false
   let uriProtocols: string[] = []
   const noProgress = args.includes('no-progress')
@@ -104,8 +214,13 @@ const fetch = async (state: AdvertisedRefs, odb: ObjectDatabase, args: readonly 
     else if (arg.startsWith('have ')) haves.push(arg.slice(5))
     else if (arg === 'done') done = true
     else if (arg.startsWith('packfile-uris ')) uriProtocols = arg.slice('packfile-uris '.length).split(',')
-    else if (arg.startsWith('deepen') || arg.startsWith('shallow ') || arg.startsWith('filter ')) {
-      return errorResponse('shallow and partial clones are not supported')
+    else if (arg.startsWith('shallow ')) clientShallow.add(arg.slice('shallow '.length))
+    else if (arg.startsWith('deepen ')) {
+      depth = Number(arg.slice('deepen '.length))
+      if (!Number.isSafeInteger(depth) || depth < 1) return errorResponse(`invalid depth ${arg.slice('deepen '.length)}`)
+    } else if (arg === 'deepen-relative') relative = true
+    else if (arg.startsWith('deepen') || arg.startsWith('filter ')) {
+      return errorResponse('only "deepen <depth>" shallow fetches are supported; partial clones are not')
     }
   }
   for (const id of wants) {
@@ -122,7 +237,30 @@ const fetch = async (state: AdvertisedRefs, odb: ObjectDatabase, args: readonly 
   }
   let pack: AsyncIterable<Uint8Array>
   let progress: string
-  if (common.length === 0) {
+  if (depth !== undefined || clientShallow.size > 0) {
+    let plan: ShallowPlan
+    try {
+      plan = await planShallow(odb, { wants, common, clientShallow, depth, relative })
+    } catch (error) {
+      if (error instanceof MissingObjectError) return concat([...sections, pkt('packfile\n'), ...sideband(SIDEBAND_ERROR, utf8(`${error.message}\n`)), FLUSH])
+      throw error
+    }
+    const ids = plan.ids
+    if (args.includes('include-tag')) {
+      const sent = new Set(ids)
+      for (const [, id] of sortedRefs(state)) {
+        if (sent.has(id)) continue
+        const object = await odb.read(id)
+        if (object?.type === 'tag' && sent.has(parseTag(object.data).object)) {
+          ids.push(id)
+          sent.add(id)
+        }
+      }
+    }
+    sections.push(pkt('shallow-info\n'), ...plan.lines, DELIM)
+    pack = withTrailer(generatePack(odb, ids, { sending: new Set(ids) }))
+    progress = `Sending ${ids.length} objects\n`
+  } else if (common.length === 0) {
     const packs = await odb.packs()
     const uris = options.packfileUri && uriProtocols.length > 0 ? await uriSection(packs, uriProtocols, options.packfileUri) : null
     if (uris) {

@@ -962,11 +962,16 @@ Pieces and where they live:
 
 | Piece | Package | Notes |
 |---|---|---|
-| YAML subset parser, workflow/job model, push filters, reading workflow files from a commit | `@git-forge/core` (`yaml.ts`, `workflow.ts`) | Pure functions. Unsupported YAML (anchors, tags, multi-document, multi-line plain scalars) and unsupported workflow keys are rejected with all problems listed, never silently ignored. |
+| YAML subset parser, workflow/job model, trigger filters, reading workflow files from a commit | `@git-forge/core` (`yaml.ts`, `workflow.ts`) | Pure functions. Unsupported YAML (anchors, tags, multi-document, multi-line plain scalars) and unsupported workflow keys are rejected with all problems listed, never silently ignored. |
+| Expression evaluator, matrix expansion, cron | `@git-forge/core` (`expression.ts`, `matrix.ts`, `cron.ts`) | Pure. The GitHub expression language (literals, contexts, `.`/`[]`/`.*`, operators with GitHub's loose equality, `contains`/`startsWith`/`endsWith`/`format`/`join`/`toJSON`/`fromJSON`, status functions), used server-side for job `if`, `runs-on`, `strategy`, job names, `environment`, `concurrency`. |
+| Commit tarballs, shallow fetch | `@git-forge/core` (`tarball.ts`, `upload-pack.ts`) | `uses:` actions are downloaded as `tar.gz` streamed from a commit; `deepen <n>` and `deepen-relative` in upload-pack because `actions/checkout` fetches with depth 1. |
+| Check runs | `CheckRunSink` adapter (`dispatch.ts`) | One check run per job, written through the collaboration package's check-run store (required status checks). |
 | Actions service (runner protocol) | `@git-forge/actions` (`service.ts`) | Mounted at `/_services/actions`; that URL is the runner's `ServerUrl`. |
 | GHES REST subset | `@git-forge/actions` (`rest.ts`) | Under `/api/v3`. |
 | Job message, template tokens, context data | `@git-forge/actions` (`job-message.ts`, `template.ts`) | Pure. `${{ }}` in strings becomes a `format()` expression token, so the runner evaluates expressions exactly as on GitHub. |
-| Dispatch: push → runs → jobs → JIT runners, `needs` ordering | `@git-forge/actions` (`dispatch.ts`) | Jobs with `needs` wait in `pending` and are queued (or skipped) when their needs complete. |
+| Dispatch: triggers → runs → jobs → JIT runners; `needs`, `if`, matrix, throttling, approvals, cancellation, re-runs, schedules, reaper | `@git-forge/actions` (`dispatch.ts`) | See "Workflow semantics" below. |
+| Secrets and environments | `@git-forge/actions` (`secrets.ts`) | AES-256-GCM under the instance key `ACTIONS_SECRETS_KEY`. |
+| Action downloads | `@git-forge/actions` (`actions-download.ts`) | `owner/repo@ref` → repository on the forge (usually a mirror) → tarball URL plus a scoped token. |
 | Runner container | `apps/forge-worker` (`runner-container.ts`, `runner-launcher.ts`, `runner/Dockerfile`), declared in `apps/forge-worker/wrangler.jsonc` (opt-in snippet in `templates/instance`) | Cloudflare Containers; the only Cloudflare-specific part. A plain Durable Object class on `ctx.container`, so the release bundle stays one module without imports. |
 
 #### Runner protocol
@@ -981,22 +986,135 @@ location IDs as in the runner SDK and in ChristopherHX/runner.server):
 | `GET _apis/connectionData`, `OPTIONS _apis` | Location service: maps location GUIDs to route templates. |
 | `POST _apis/v1/auth/` | OAuth 2 client-credentials with an RS256/PS256 JWT client assertion signed by the runner's RSA key; answers a short-lived runner token. Unauthenticated calls get `401` with `WWW-Authenticate: Bearer`, which makes the runner fetch a token. |
 | `POST/DELETE _apis/v1/AgentSession/1[/{sessionId}]` | Session per listener process. Messages are not encrypted (no session key); TLS protects them. |
-| `GET/DELETE _apis/v1/Message/1[/{messageId}]` | Long-poll (≤ 50 s, polling the job table) for a `PipelineAgentJobRequest`. A job is claimed atomically (`UPDATE … WHERE status = 'queued'`); an unacknowledged message is re-delivered to the same session. |
+| `GET/DELETE _apis/v1/Message/1[/{messageId}]` | Long-poll (≤ 50 s, polling the job table) for a `PipelineAgentJobRequest` or a `JobCancellation` (`{ jobId, timeout }`) for a job of this session. A job is claimed atomically (`UPDATE … WHERE status = 'queued'`); a job message not yet acknowledged with `DELETE` is re-delivered to the same session. The listener keeps polling while its job runs, which is how cancellations reach it. |
 | `GET/PATCH _apis/v1/AgentRequest/1/{requestId}` | Renew the job lock (first renew = job started) and finish it. |
 | `PATCH _apis/v1/Timeline/{scope}/{hub}/{plan}/{timelineId}` | Timeline records (job and steps). |
 | `POST _apis/v1/Logfiles/{scope}/{hub}/{plan}[/{logId}]` | Step logs, stored as append-only chunks in the bucket. |
 | `POST _apis/v1/TimeLineWebConsoleLog/…` | Live console lines, stored in the bucket. |
-| `POST _apis/v1/FinishJob/{scope}/{hub}/{plan}` | `JobCompleted` event from the worker: result, then `needs` advance. |
+| `POST _apis/v1/FinishJob/{scope}/{hub}/{plan}` | `JobCompleted` event from the worker: result and job outputs, then the run advances. |
 | `PUT …/attachments/{recordId}/{type}/{name}` | Step summaries and other attachments. |
-| `POST _apis/v1/ActionDownloadInfo/…` | Not implemented: `uses:` steps fail with a clear error. |
+| `POST _apis/v1/ActionDownloadInfo/…` | Resolves `{ nameWithOwner, ref }` to `{ resolvedNameWithOwner, resolvedSha, tarballUrl, authentication }`, keyed `owner/repo@ref`; `404` listing every action that cannot be resolved. |
 | `GET/POST _apis/v1/AgentPools`, `_apis/v1/Agent/1` | Classic `config.sh` registration with a registration token. |
 
 The job message is built server-side from the job model: `run` steps become
 `ActionStep`s with a `script` reference; `uses` steps get a `repository` /
 `containerRegistry` reference; job and workflow `env` become
-`environmentVariables`; the `github` context is filled from the run; the job
-token is `system.github.token`; secrets are variables with `isSecret: true`
-(so the runner masks them and exposes them as the `secrets` context).
+`environmentVariables`, `defaults.run` becomes `defaults`, job `outputs`
+become `jobOutputs` (evaluated by the runner, returned in `JobCompleted`);
+the `github` (with the event payload), `inputs`, `needs`, `matrix` and
+`strategy` contexts are filled from the run and the job leg; the job token is
+`system.github.token`; secrets are variables with `isSecret: true` (so the
+runner masks them in logs and exposes them as the `secrets` context). Step
+expressions (`${{ }}` in `run`, `with`, `env`, step `if`) stay expressions
+for the runner.
+
+#### Workflow semantics
+
+A run is created by a trigger (`createWorkflowRun`): it stores the parsed
+workflow, the event payload and the inputs in `actions_runs.definition`, and
+inserts one placeholder job per workflow job (`expanded = 0`, `pending`).
+`advance(runId)` then loops until nothing changes:
+
+- A placeholder whose `needs` are all complete is evaluated: `if` (default
+  `success()`; `success()`/`failure()`/`cancelled()`/`always()` refer to
+  the needed jobs and the run) with the `github`, `inputs`, `vars` and
+  `needs` contexts. False → `skipped` (or `cancelled` in a cancelled run).
+  True → the matrix is evaluated (it may come from `fromJSON(needs.…)`) and
+  expanded into legs; the placeholder becomes the first leg, the others are
+  inserted. Each leg gets its evaluated name (`build (linux, 22)` unless the
+  name references `matrix`), labels, environment and `continue-on-error`.
+  Evaluation errors fail the job with the message in its definition and
+  check run.
+- Legs start `queued` (a JIT runner is launched) up to `max-parallel`, the
+  rest wait `pending` and are promoted as others finish. Legs whose
+  environment has required reviewers wait with `approval = 'waiting'`.
+- `fail-fast` (default on): a failed leg that does not continue on error
+  cancels the other legs of its job.
+- The result of a job for `needs.<job>.result`: `failure` if a leg failed
+  without `continue-on-error`, else `cancelled` if one was cancelled, else
+  `skipped` if all were skipped, else `success`. Its outputs are the legs'
+  outputs merged in order (the last leg that sets a name wins).
+- When every job is complete the run gets `completed_at` and a conclusion
+  (`failure`, `cancelled` or `success`).
+- `concurrency` (workflow level): the group is evaluated at creation. With
+  `cancel-in-progress` older runs of the group are cancelled; without it,
+  older runs that have not started are cancelled. A run waits (its
+  placeholders stay) while an older run of its group is not complete.
+
+Cancellation (`cancelRun`, API `…/cancel`): `pending` and `queued` jobs are
+completed as `cancelled` at once (and their ephemeral runner is removed,
+which makes it exit); running jobs get `cancel_requested_at`, and the next
+long-poll of their session returns a `JobCancellation` message. The runner
+cancels the steps and reports `canceled`.
+
+Re-runs (`rerunRun`, API `…/rerun`, `…/rerun-failed-jobs`,
+`…/jobs/{id}/rerun`) need a completed run with a stored definition. They
+start a new attempt (`actions_runs.attempt`, `github.run_attempt`): the
+selected jobs (all, those that failed or were cancelled, or one) and every
+job that needs them transitively get new placeholders with the new attempt.
+The current state of a run is, per workflow job, the rows of its latest
+attempt; older attempts stay for the API (`?filter=all`). A whole matrix is
+re-run, not single legs.
+
+Reaper (`reapActions`, from `actionsTick` on the `*/5 * * * *` cron):
+
+- sessions without a poll for 10 min are closed (their undelivered jobs go
+  back to `queued`);
+- `in_progress` jobs past `timeout-minutes` get a cancellation (reason
+  `timeout`, check-run conclusion `timed_out`); jobs whose cancellation was
+  not acknowledged within 5 min are completed as `cancelled`;
+- `in_progress` jobs whose lock was not renewed for 5 min past its expiry
+  (the runner renews every minute, the lock lasts 10 min) are failed
+  (`runner-lost`);
+- jobs delivered but not started within 10 min, and queued jobs whose
+  ephemeral runner never connected within 10 min, are requeued and get a new
+  runner, up to three launches per job; then they fail;
+- expired tokens older than a day are deleted.
+
+#### Triggers
+
+| Event | Entry point | Notes |
+|---|---|---|
+| `push` | `queueRunsForPush` (receive-pack hook) | Branch and tag filters. A push to the default branch also refreshes the repository's schedules. |
+| `workflow_dispatch` | `dispatchWorkflow`, `POST …/actions/workflows/{file}/dispatches` | `ref` (branch, tag or SHA) and `inputs`, validated against the typed inputs (`string`, `boolean`, `number`, `choice`, `environment`), defaults applied. |
+| `schedule` | `syncSchedules` (on push to the default branch) and `runDueSchedules` (cron) | `actions_schedules` holds `(repo, workflow, cron, next_run_at)`; a due row is claimed with a compare-and-swap on `next_run_at`, the workflow is read again from the current default branch. Cron in UTC, five fields with names, ranges, steps, lists. |
+| `pull_request` | `queueRunsForPullRequest(event)`, called by the Worker for the collaboration package's `pull_request` activities | Base branch filters and `types` (default `opened`, `synchronize`, `reopened`); the workflow is read from the merge commit if given, else the head; `github.ref` is `refs/pull/{n}/merge` or `…/head`. The caller decides `trusted`; pull requests on this forge come from branches of the same repository, so they are trusted. |
+
+`paths` filters are rejected as unsupported until they are implemented.
+
+#### Actions (`uses:`)
+
+The runner asks `ActionDownloadInfo` for every `owner/repo@ref` of the job
+(also nested ones of composite actions). The forge maps the name to a
+repository on the forge (`ACTIONS_REPOSITORIES`, e.g. `{"actions/*":
+"mirrors/*"}`, identity by default), resolves the ref there (SHA, tag,
+branch; for mirrors through the read-side view or `refs/upstream/*`) and
+answers `tarballUrl = /api/v3/repos/{o}/{r}/tarball/{sha}` with a `github`
+token scoped to that repository and the job (revoked with the job's other
+tokens). The runner downloads with `Authorization: Basic x-access-token:…`.
+A job may use repositories of its own owner and public ones (`canUse`).
+Without a repository on the forge the action either fails the job (default)
+or, with `ACTIONS_GITHUB_FALLBACK`, is downloaded from `api.github.com`.
+Tarballs are built while streaming (`commitTarball`: ustar with pax headers
+for long names, symlinks, executable bits, a top-level `owner-repo-sha7/`
+directory like GitHub) and gzipped with `CompressionStream`.
+
+`actions/checkout` fetches the job's commit with `--depth=1` over smart
+HTTP with the job token as `AUTHORIZATION: basic …` extra header, so
+upload-pack supports `deepen <n>`, `deepen-relative` and `shallow` lines
+(`shallow-info` section), not `deepen-since`, `deepen-not` or filters.
+
+#### Check runs
+
+Every job leg reports a check run through the `CheckRunSink` adapter
+(`create(repo, report) → id`, `update(repo, id, report)`): name = job
+display name, `head_sha` = run SHA, `status` queued → in_progress (first
+lock renewal) → completed, conclusion from the job (`timed_out` for
+timeouts), `external_id` = job ID, `details_url` = job URL; the id is kept
+in `actions_jobs.check_run_id`. The collaboration package owns the
+`check_runs` table, its API and the evaluation of required status checks;
+the Worker implements the sink with its `recordCheckRun` /
+`updateCheckRunRecord`. Without a sink no check runs are written.
 
 #### GHES API (`/api/v3`)
 
@@ -1004,8 +1122,14 @@ Implemented for repositories: `POST …/actions/runners/generate-jitconfig`,
 `POST …/actions/runners/registration-token` (and `remove-token`),
 `GET …/actions/runners[?name=]`, `GET/DELETE …/actions/runners/{id}`,
 `POST /api/v3/actions/runner-registration` (`RemoteAuth`), `GET
-…/actions/runs[/{id}[/jobs]]`, `GET …/actions/jobs/{id}[/logs]`, `GET
-/api/v3/meta`. Pure functions for signed `workflow_job` webhooks
+…/actions/runs[/{id}[/jobs]]`, `GET …/actions/jobs/{id}[/logs]`, `POST
+…/actions/runs/{id}/cancel|force-cancel|rerun|rerun-failed-jobs`, `POST
+…/actions/jobs/{id}/rerun`, `GET/POST …/actions/runs/{id}/pending_deployments`,
+`POST …/actions/workflows/{file}/dispatches`, `…/actions/secrets[/{name}]`,
+`…/environments[/{name}[/secrets[/{name}]]]`, `GET
+…/tarball/{ref}`, `GET /api/v3/meta`. Reading runs, jobs, logs
+and tarballs needs read access, cancel/re-run/dispatch need write access,
+runners, secrets and environments need admin access. Pure functions for signed `workflow_job` webhooks
 (`X-Hub-Signature-256`) exist; delivering them to providers, GitHub App auth
 (JWT → installation token) and org-level runners come with the provider work
 package.
@@ -1020,7 +1144,7 @@ All CI credentials are random opaque tokens, stored only as SHA-256 hashes in
 | `registration` | `config.sh` | Register one runner for one repository (1 h). |
 | `runner` | Runner listener | Its own sessions, messages and job requests (1 h, renewed via OAuth). |
 | `runtime` | Runner worker (`SystemVssConnection`) | Timeline, logs and completion of exactly one job (plan id checked on every call). Revoked when the job completes. |
-| `github` | Steps (`GITHUB_TOKEN`) | Read access to the job's repository over Git HTTP. Revoked when the job completes. |
+| `github` | Steps (`GITHUB_TOKEN`); action downloads | Read access to the job's repository over Git HTTP, or, for an action, to that action's repository (Git HTTP and tarball). Revoked when the job completes. |
 
 The forge never trusts IDs from the runner: the runner is derived from the
 token, a session must belong to that runner, a job request must be assigned to
@@ -1062,51 +1186,72 @@ and stays queued for any registered runner with matching labels.
   `workflow_job` webhook; the forge only has to deliver signed webhooks and
   accept GitHub App or PAT authentication on `/api/v3`.
 
-#### Secrets
+#### Secrets and environments
 
-Secrets come from a `SecretsProvider` adapter (`(owner, repo) → name/value`).
-The Worker reads instance secrets from the `ACTIONS_SECRETS` secret (a JSON
-object, e.g. `{"CLOUDFLARE_API_TOKEN": "…"}`). They are sent only inside the
-job message to the runner of that job, marked secret. Later: per-repository
-and per-environment secrets encrypted in the database, required reviewers for
-environments, and no secrets for runs triggered from forks.
+Three sources, later ones win on equal names: instance secrets from a
+`SecretsProvider` adapter (the Worker reads the `ACTIONS_SECRETS` secret, a
+JSON object), repository secrets and environment secrets. Repository and
+environment secrets live in `actions_secrets`, encrypted with AES-256-GCM
+under the instance key `ACTIONS_SECRETS_KEY` (32 bytes, a Worker secret);
+the additional data binds each ciphertext to owner, repository, environment
+and name, so rows cannot be swapped, and `key_id` (a hash prefix of the key)
+detects a changed key. Names follow GitHub (`[A-Za-z_][A-Za-z0-9_]*`, not
+`GITHUB_*`, stored upper case), values up to 48 KiB. The API takes the plain
+value over HTTPS (`PUT …/actions/secrets/{name}` with `{"value": "…"}`);
+GitHub's sealed boxes (libsodium) are not available with WebCrypto, so
+`public-key` answers `501`. Values are only ever decrypted for a job
+message and are sent marked secret, so the runner masks them in logs.
+
+Runs have a `trusted` flag: pushes, dispatches and schedules are trusted,
+pull requests are trusted only when the caller says so (the collaboration
+package: head in the same repository). Untrusted runs get no secrets at all,
+only the read-only `GITHUB_TOKEN`.
+
+Environments (`actions_environments`) have required reviewers (logins).
+A job leg with such an environment waits (`approval = 'waiting'`, run status
+`waiting`) until a reviewer approves via `POST …/runs/{id}/pending_deployments`
+(`{ environment_ids, state }`, the reviewer must be listed); rejected legs
+fail. Environment secrets are only sent once approved. The UI will use the
+same functions (`reviewDeployment`).
 
 #### Data
 
-- SQLite, migration `packages/accounts/migrations/0005_actions.sql`, applied by
-  `wrangler d1 migrations apply` like every other migration and shipped in
-  the release's `migrations.tar.gz`: `actions_runners`, `actions_tokens`,
-  `actions_sessions`, `actions_runs`, `actions_jobs`,
-  `actions_timeline_records`, `actions_logs`.
+- SQLite, migrations `packages/accounts/migrations/0005_actions.sql` and
+  `0009_actions_workflows.sql`, applied by `wrangler d1 migrations apply`
+  like every other migration and shipped in the release's
+  `migrations.tar.gz`: `actions_runners`, `actions_tokens`,
+  `actions_sessions`, `actions_runs` (plus definition, attempt, trusted,
+  concurrency group, cancellation, completion), `actions_jobs` (plus
+  attempt, `expanded`, matrix, outputs, environment, approval,
+  cancellation, launches, check run), `actions_timeline_records`,
+  `actions_logs`, `actions_secrets`, `actions_environments`,
+  `actions_schedules`. `0009` only adds columns and tables,
+  so the previous release keeps working on the new schema.
 - Bucket, append-only, written with `If-None-Match: *`:
   `repos/<owner>/<repo>/actions/jobs/<jobId>/logs/<logId>/<chunk>`,
   `…/console/<recordId>/<startLine>` and
   `…/attachments/<recordId>/<type>/<name>`. Like the rest of the bucket
   layout this is a durable format.
 
-#### Spike status and known gaps
+#### Status and known gaps
 
-- The protocol is implemented from the runner sources and runner.server and
-  tested step by step with our own client in Node and in `wrangler dev` (D1).
-  The end-to-end test with the real runner downloads the latest release and
-  skips when that is impossible; in the environment where the spike was
-  written GitHub downloads were blocked, so **the real runner has not run
-  against the forge yet**. That is the first thing to do next.
-- `uses:` actions (needs `ActionDownloadInfo` with tarballs, ideally from
-  mirrored action repositories), so no `actions/checkout` yet.
-- Job-level `if`, `strategy`/`matrix`, `container`, `services`, reusable
-  workflows, `concurrency`, `workflow_dispatch` inputs, job outputs across
-  `needs`.
-- Cancellation, job timeouts and a reaper for expired locks and dead runners.
+- The real runner runs in CI (`packages/actions/test/runner.integration.test.ts`):
+  `actions/checkout@v4` from a mirror of `github.com/actions/checkout` on
+  the forge, a matrix with job outputs through `needs`, a masked secret,
+  `wrangler deploy --dry-run`, and the cancellation of a running job.
+- Not deployed on Cloudflare Containers yet.
+- Not supported yet: `container:`, `services:`, reusable workflows,
+  job-level `concurrency`, `paths` filters, `vars` (configuration
+  variables, the context is empty), `hashFiles` server-side, wait timers and
+  branch policies of environments, re-running single matrix legs.
 - Broker / run service (v2 flow), results service, cache, artifacts, OIDC
-  tokens.
-- Message encryption with the session key.
-- Web UI for runs and logs; check runs / commit statuses.
+  tokens, message encryption with the session key.
+- Web UI for runs, logs and reviews.
 
 ### Deployment
 
 Deployments run in our own CI: a job calls `wrangler deploy` with a Cloudflare
-API token stored as an instance secret. No Cloudflare Workers Builds and no
+API token stored as a secret. No Cloudflare Workers Builds and no
 GitHub mirror are needed.
 
 For example:
@@ -1118,19 +1263,16 @@ on:
 jobs:
   deploy:
     runs-on: [self-hosted, linux]
+    environment: production
     steps:
-      - name: Checkout
-        env:
-          TOKEN: ${{ github.token }}
-        run: |
-          auth=$(printf 'x-access-token:%s' "$TOKEN" | base64 | tr -d '\n')
-          git -c http.extraHeader="Authorization: Basic $auth" clone -q "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" .
+      - uses: actions/checkout@v4
       - run: npm ci && npx wrangler deploy
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
 ```
 
-`actions/checkout` is replaced by a `git clone` step until `uses:` works.
+`actions/checkout` comes from a mirror on the forge (see "Actions" above),
+`CLOUDFLARE_API_TOKEN` is an environment secret of `production`.
 
 ### Distribution, new instances and updates
 

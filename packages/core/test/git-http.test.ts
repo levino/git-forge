@@ -5,6 +5,8 @@ import { compactRepository } from '../src/compaction.ts'
 import { type GitHttpOptions, handleGitRequest, publicPackfileUris } from '../src/http.ts'
 import { MemoryStorage } from '../src/memory-storage.ts'
 import { createRepository, ObjectDatabase, packKey, readRefs } from '../src/repository.ts'
+import { commitTarball, gzipStream, resolveCommitish } from '../src/tarball.ts'
+import { chmodSync, readFileSync, readlinkSync, statSync, writeFileSync } from 'node:fs'
 import { commitAll, gitEnv, initRepo, sampleHistory, tempDir, writeFile } from './git-helpers.ts'
 import { type RunningServer, startServer } from './http-server.ts'
 
@@ -241,6 +243,65 @@ describe('git over HTTP', () => {
     await gitAsync(source, ['push', '-q', remote, 'main'])
     await gitAsync(`${early}/out`, ['pull', '-q', '--ff-only'])
     expect(await gitAsync(`${early}/out`, ['fsck', '--full', '--strict'])).toBe('')
+  })
+})
+
+describe('shallow fetches and tarballs', () => {
+  it('serves depth-limited clones, deepening and unshallowing to real git', async () => {
+    const remote = await newRemote()
+    const source = initRepo()
+    const ids = sampleHistory(source, 5)
+    await gitAsync(source, ['tag', '-a', '-m', 'release', 'v1', ids[3]!])
+    await gitAsync(source, ['push', remote, 'main', 'v1'])
+    const clone = tempDir()
+    await gitAsync(clone, ['clone', '-q', '--depth', '1', remote, 'out'])
+    const out = `${clone}/out`
+    expect((await log(out)).trim().split('\n')).toHaveLength(1)
+    expect((await gitAsync(out, ['rev-parse', '--is-shallow-repository'])).trim()).toBe('true')
+    expect(await gitAsync(out, ['fsck', '--full'])).toBe('')
+    await gitAsync(out, ['fetch', '-q', '--deepen', '2'])
+    expect((await log(out)).trim().split('\n')).toHaveLength(3)
+    await gitAsync(out, ['fetch', '-q', '--unshallow'])
+    expect(await log(out)).toBe(await log(source))
+    expect((await gitAsync(out, ['rev-parse', '--is-shallow-repository'])).trim()).toBe('false')
+    const bySha = tempDir()
+    await gitAsync(bySha, ['init', '-q'])
+    await gitAsync(bySha, ['fetch', '-q', '--depth', '1', remote, `+${ids[2]}:refs/remotes/origin/main`])
+    expect((await gitAsync(bySha, ['rev-parse', 'refs/remotes/origin/main'])).trim()).toBe(ids[2])
+    const tagged = tempDir()
+    await gitAsync(tagged, ['clone', '-q', '--depth', '1', '--branch', 'v1', remote, 'out'])
+    expect((await gitAsync(`${tagged}/out`, ['rev-parse', 'HEAD'])).trim()).toBe(ids[3])
+  })
+
+  it('streams a commit as a gzipped tarball that tar extracts like git archive', async () => {
+    const repo = { owner: 'test', name: `tar${++repoCounter}` }
+    await createRepository(storage, repo)
+    const source = initRepo()
+    writeFile(source, 'action.yml', 'name: x\n')
+    writeFile(source, `deep/${'d'.repeat(60)}/${'n'.repeat(80)}.js`, 'console.log(1)\n')
+    writeFile(source, 'bin/run.sh', '#!/bin/sh\necho hi\n')
+    chmodSync(`${source}/bin/run.sh`, 0o755)
+    commitAll(source, 'action')
+    await run('ln', ['-s', 'action.yml', 'link.yml'], { cwd: source })
+    const head = commitAll(source, 'link')
+    await gitAsync(source, ['push', `${server.url}/test/${repo.name}.git`, 'main', 'main:refs/tags/v2'])
+    expect(await resolveCommitish(storage, repo, 'v2')).toBe(head)
+    expect(await resolveCommitish(storage, repo, 'main')).toBe(head)
+    expect(await resolveCommitish(storage, repo, head)).toBe(head)
+    expect(await resolveCommitish(storage, repo, 'missing')).toBeNull()
+    const archive = new Uint8Array(await new Response(gzipStream(commitTarball(new ObjectDatabase(storage, repo), head, { prefix: 'test-tar-abc' }))).arrayBuffer())
+    const target = tempDir()
+    writeFileSync(`${target}/a.tar.gz`, archive)
+    await run('tar', ['-xzf', 'a.tar.gz'], { cwd: target })
+    const listing = (await run('tar', ['-tzf', 'a.tar.gz'], { cwd: target })).stdout.trim().split('\n').sort()
+    const expected = (await gitAsync(source, ['archive', '--format=tar', '--prefix=test-tar-abc/', 'HEAD']).then(() => run('sh', ['-c', 'git archive --format=tar --prefix=test-tar-abc/ HEAD | tar -t'], { cwd: source, env: { ...process.env, ...gitEnv } }))).stdout
+      .trim()
+      .split('\n')
+      .sort()
+    expect(listing).toEqual(expected)
+    expect(readFileSync(`${target}/test-tar-abc/deep/${'d'.repeat(60)}/${'n'.repeat(80)}.js`, 'utf8')).toBe('console.log(1)\n')
+    expect(statSync(`${target}/test-tar-abc/bin/run.sh`).mode & 0o111).not.toBe(0)
+    expect(readlinkSync(`${target}/test-tar-abc/link.yml`)).toBe('action.yml')
   })
 })
 

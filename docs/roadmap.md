@@ -83,12 +83,15 @@ Design: [design.md §15](design.md#ci).
 - [x] Spike, part 1: GHES REST subset (`generate-jitconfig`, `registration-token`, `runner-registration`, list/get/delete runners, runs, jobs, job logs)
 - [x] Spike, part 1: dispatch on push, one ephemeral JIT runner per job via `RunnerLauncher`, `needs` with skip on failure; job tokens (`GITHUB_TOKEN` read over Git HTTP, runtime token per job), instance secrets
 - [x] Spike, part 1: Cloudflare Container definition for the runner (Dockerfile, `wrangler.jsonc`)
-- [ ] Spike, part 2: run the real-runner integration test where GitHub downloads are allowed and fix what it finds; deploy the container and deploy a hello-world Worker with `wrangler` from our own CI
-- [ ] `uses:` actions: `ActionDownloadInfo` with tarballs from mirrored action repositories (`actions/checkout`, `actions/setup-node`, …)
-- [ ] Expressions server-side: job-level `if`, `runs-on` expressions, `strategy`/`matrix`, job outputs across `needs`
-- [ ] Cancellation, job timeouts, reaper for expired locks and dead runners, re-runs
-- [ ] Per-repository and per-environment secrets (encrypted in SQLite), environments with required reviewers, no secrets for fork runs
-- [ ] `workflow_dispatch`, `pull_request`, `schedule` triggers; write commit statuses / check runs from CI (storage and API exist in `@git-forge/collaboration`)
+- [x] Spike, part 2: the real-runner integration test runs in GitHub CI
+- [ ] Deploy the runner container and deploy a hello-world Worker with `wrangler` from our own CI
+- [x] `uses:` actions: `ActionDownloadInfo` with tarballs streamed from repositories on the forge (mirrors of `actions/checkout`, …), name mapping, optional fallback to github.com tarballs; shallow fetch (`deepen`) for `actions/checkout`
+- [x] Expressions server-side: job-level `if`, `runs-on` expressions, `strategy`/`matrix` (include/exclude, fail-fast, max-parallel), job outputs across `needs`, `env`/`defaults`, step `if`/`continue-on-error`/`timeout-minutes`, workflow `concurrency`
+- [x] Cancellation (`JobCancellation`), job timeouts, reaper for expired locks, dead runners and lost launches, re-runs (all, failed, one job) as new attempts
+- [x] Per-repository and per-environment secrets (AES-GCM in SQLite under an instance key), environments with required reviewers (`pending_deployments`), no secrets for untrusted runs
+- [x] `workflow_dispatch` (typed inputs), `schedule` (cron table + Worker cron), `pull_request` trigger function (`queueRunsForPullRequest`, wired to collaboration's events); check runs per job through a `CheckRunSink`
+- [x] `pull_request` runs from the collaboration package's pull request events; check runs written with its store
+- [ ] `paths` filters; job-level `concurrency`; configuration variables (`vars`)
 - [ ] Broker and run service (v2 flow), results service, message encryption; then cache, artifacts, OIDC id tokens
 - [ ] External providers: signed `workflow_job` webhook delivery, GitHub App auth (JWT → installation token, manifest flow) and PATs on `/api/v3`, org-level runners; try WarpBuild Enterprise, AWS CodeBuild, RunsOn
 - [ ] `container:` and `services:` (Docker-in-Docker in the runner container)

@@ -54,6 +54,19 @@ export type JobRow = {
   readonly started_at: number | null
   readonly completed_at: number | null
   readonly locked_until: number | null
+  readonly attempt: number
+  readonly expanded: number
+  readonly matrix: string | null
+  readonly outputs: string | null
+  readonly environment: string | null
+  readonly approval: 'waiting' | 'approved' | 'rejected' | null
+  readonly reviewed_by: string | null
+  readonly message_acked_at: number | null
+  readonly cancel_requested_at: number | null
+  readonly cancel_reason: string | null
+  readonly cancel_delivered_at: number | null
+  readonly launches: number
+  readonly check_run_id: number | null
 }
 
 export type RunRow = {
@@ -67,6 +80,13 @@ export type RunRow = {
   readonly sha: string
   readonly actor: string
   readonly created_at: number
+  readonly definition: string | null
+  readonly attempt: number
+  readonly trusted: number
+  readonly concurrency_group: string | null
+  readonly cancelled_at: number | null
+  readonly completed_at: number | null
+  readonly conclusion: string | null
 }
 
 export type TokenRow = {
@@ -133,6 +153,11 @@ export const createRunner = async (db: Database, runner: NewRunner, now: number)
   )
   const row = await first<RunnerRow>(db, sql('SELECT * FROM actions_runners WHERE client_id = ?', clientId))
   return toRunner(row!)
+}
+
+export const getRunnerIncludingRemoved = async (db: Database, id: number): Promise<Runner | null> => {
+  const row = await first<RunnerRow>(db, sql('SELECT * FROM actions_runners WHERE id = ?', id))
+  return row ? toRunner(row) : null
 }
 
 export const getRunner = async (db: Database, id: number): Promise<Runner | null> => {
@@ -243,17 +268,29 @@ export const touchSession = async (db: Database, id: string, now: number): Promi
 export const closeSession = async (db: Database, id: string, runnerId: number, now: number): Promise<void> => {
   await db.batch([
     sql('UPDATE actions_sessions SET closed_at = ? WHERE id = ? AND runner_id = ? AND closed_at IS NULL', now, id, runnerId),
-    sql("UPDATE actions_jobs SET status = 'queued', session_id = NULL, assigned_at = NULL WHERE session_id = ? AND runner_id = ? AND status = 'assigned'", id, runnerId),
+    sql("UPDATE actions_jobs SET status = 'queued', session_id = NULL, assigned_at = NULL, message_acked_at = NULL WHERE session_id = ? AND runner_id = ? AND status = 'assigned'", id, runnerId),
     sql('UPDATE actions_runners SET status = ? WHERE id = ?', 'offline', runnerId),
   ])
 }
 
-export type NewRun = Omit<RunRow, 'id' | 'created_at'>
+export type NewRun = {
+  readonly owner: string
+  readonly repo: string
+  readonly workflow_path: string
+  readonly workflow_name: string
+  readonly event: string
+  readonly ref: string
+  readonly sha: string
+  readonly actor: string
+  readonly definition?: unknown
+  readonly trusted?: boolean
+  readonly concurrency_group?: string | null
+}
 
 export const createRun = async (db: Database, run: NewRun, now: number): Promise<number> => {
   const [row] = await db.all<{ id: number }>(
     sql(
-      'INSERT INTO actions_runs (owner, repo, workflow_path, workflow_name, event, ref, sha, actor, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id',
+      'INSERT INTO actions_runs (owner, repo, workflow_path, workflow_name, event, ref, sha, actor, created_at, definition, trusted, concurrency_group) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id',
       run.owner,
       run.repo,
       run.workflow_path,
@@ -263,10 +300,29 @@ export const createRun = async (db: Database, run: NewRun, now: number): Promise
       run.sha,
       run.actor,
       now,
+      run.definition === undefined ? null : JSON.stringify(run.definition),
+      run.trusted === false ? 0 : 1,
+      run.concurrency_group ?? null,
     ),
   )
   return row!.id
 }
+
+export const completeRun = async (db: Database, id: number, conclusion: string, now: number): Promise<boolean> =>
+  (await db.run(sql('UPDATE actions_runs SET completed_at = ?, conclusion = ? WHERE id = ? AND completed_at IS NULL', now, conclusion, id))).changes === 1
+
+export const markRunCancelled = async (db: Database, id: number, now: number): Promise<boolean> =>
+  (await db.run(sql('UPDATE actions_runs SET cancelled_at = ? WHERE id = ? AND cancelled_at IS NULL AND completed_at IS NULL', now, id))).changes === 1
+
+export const startRunAttempt = async (db: Database, id: number, attempt: number): Promise<boolean> =>
+  (
+    await db.run(
+      sql('UPDATE actions_runs SET attempt = ?, completed_at = NULL, conclusion = NULL, cancelled_at = NULL WHERE id = ? AND attempt = ? AND completed_at IS NOT NULL', attempt, id, attempt - 1),
+    )
+  ).changes === 1
+
+export const activeRunsInGroup = async (db: Database, owner: string, repo: string, group: string): Promise<RunRow[]> =>
+  db.all<RunRow>(sql('SELECT * FROM actions_runs WHERE owner = ? AND repo = ? AND concurrency_group = ? AND completed_at IS NULL ORDER BY id', owner, repo, group))
 
 export const listRuns = async (db: Database, owner: string, repo: string, limit = 30): Promise<RunRow[]> =>
   db.all<RunRow>(sql('SELECT * FROM actions_runs WHERE owner = ? AND repo = ? ORDER BY id DESC LIMIT ?', owner, repo, limit))
@@ -280,13 +336,19 @@ export type NewJob = {
   readonly labels: readonly string[]
   readonly needs: readonly string[]
   readonly definition: unknown
+  readonly attempt?: number
+  readonly expanded?: boolean
+  readonly status?: JobStatus
+  readonly matrix?: unknown
+  readonly environment?: string | null
+  readonly approval?: 'waiting' | null
 }
 
 export const createJob = async (db: Database, job: NewJob, now: number): Promise<JobRow> => {
   const id = crypto.randomUUID()
   await db.run(
     sql(
-      'INSERT INTO actions_jobs (id, run_id, job_key, display_name, labels, needs, definition, plan_id, timeline_id, status, queued_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      'INSERT INTO actions_jobs (id, run_id, job_key, display_name, labels, needs, definition, plan_id, timeline_id, status, queued_at, attempt, expanded, matrix, environment, approval) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
       id,
       job.runId,
       job.jobKey,
@@ -296,12 +358,130 @@ export const createJob = async (db: Database, job: NewJob, now: number): Promise
       JSON.stringify(job.definition),
       crypto.randomUUID(),
       crypto.randomUUID(),
-      job.needs.length === 0 ? 'queued' : 'pending',
+      job.status ?? (job.needs.length === 0 ? 'queued' : 'pending'),
       now,
+      job.attempt ?? 1,
+      job.expanded === false ? 0 : 1,
+      job.matrix === undefined || job.matrix === null ? null : JSON.stringify(job.matrix),
+      job.environment ?? null,
+      job.approval ?? null,
     ),
   )
   return (await getJobById(db, id))!
 }
+
+export type LegUpdate = {
+  readonly displayName: string
+  readonly labels: readonly string[]
+  readonly definition: unknown
+  readonly status: 'pending' | 'queued'
+  readonly matrix: unknown
+  readonly environment: string | null
+  readonly approval: 'waiting' | null
+}
+
+export const expandPlaceholder = async (db: Database, requestId: number, leg: LegUpdate): Promise<boolean> =>
+  (
+    await db.run(
+      sql(
+        "UPDATE actions_jobs SET display_name = ?, labels = ?, definition = ?, status = ?, matrix = ?, environment = ?, approval = ?, expanded = 1 WHERE request_id = ? AND expanded = 0 AND status = 'pending'",
+        leg.displayName,
+        JSON.stringify(leg.labels),
+        JSON.stringify(leg.definition),
+        leg.status,
+        leg.matrix === null ? null : JSON.stringify(leg.matrix),
+        leg.environment,
+        leg.approval,
+        requestId,
+      ),
+    )
+  ).changes === 1
+
+export const finishPending = async (db: Database, requestId: number, conclusion: string, reason: string | null, now: number): Promise<boolean> =>
+  (
+    await db.run(
+      sql(
+        "UPDATE actions_jobs SET status = 'completed', conclusion = ?, cancel_reason = COALESCE(?, cancel_reason), completed_at = ?, expanded = 1 WHERE request_id = ? AND status IN ('pending', 'queued') AND session_id IS NULL",
+        conclusion,
+        reason,
+        now,
+        requestId,
+      ),
+    )
+  ).changes === 1
+
+export const requestJobCancel = async (db: Database, requestId: number, reason: string, now: number): Promise<boolean> =>
+  (
+    await db.run(
+      sql(
+        "UPDATE actions_jobs SET cancel_requested_at = ?, cancel_reason = ? WHERE request_id = ? AND status IN ('assigned', 'in_progress') AND cancel_requested_at IS NULL",
+        now,
+        reason,
+        requestId,
+      ),
+    )
+  ).changes === 1
+
+export const pendingCancellation = async (db: Database, sessionId: string): Promise<JobRow | null> =>
+  first<JobRow>(
+    db,
+    sql(
+      "SELECT * FROM actions_jobs WHERE session_id = ? AND status IN ('assigned', 'in_progress') AND cancel_requested_at IS NOT NULL AND cancel_delivered_at IS NULL ORDER BY request_id LIMIT 1",
+      sessionId,
+    ),
+  )
+
+export const markCancelDelivered = async (db: Database, requestId: number, now: number): Promise<boolean> =>
+  (await db.run(sql('UPDATE actions_jobs SET cancel_delivered_at = ? WHERE request_id = ? AND cancel_delivered_at IS NULL', now, requestId))).changes === 1
+
+export const acknowledgeMessage = async (db: Database, requestId: number, sessionId: string, now: number): Promise<void> => {
+  await db.run(sql('UPDATE actions_jobs SET message_acked_at = COALESCE(message_acked_at, ?) WHERE request_id = ? AND session_id = ?', now, requestId, sessionId))
+}
+
+export const setJobOutputs = async (db: Database, requestId: number, outputs: Readonly<Record<string, string>>): Promise<void> => {
+  await db.run(sql('UPDATE actions_jobs SET outputs = ? WHERE request_id = ?', JSON.stringify(outputs), requestId))
+}
+
+export const setJobApproval = async (db: Database, requestId: number, approval: 'approved' | 'rejected', reviewer: string): Promise<boolean> =>
+  (
+    await db.run(
+      sql("UPDATE actions_jobs SET approval = ?, reviewed_by = ? WHERE request_id = ? AND approval = 'waiting' AND status = 'pending'", approval, reviewer, requestId),
+    )
+  ).changes === 1
+
+export const setCheckRunId = async (db: Database, requestId: number, checkRunId: number): Promise<void> => {
+  await db.run(sql('UPDATE actions_jobs SET check_run_id = ? WHERE request_id = ?', checkRunId, requestId))
+}
+
+export const recordLaunch = async (db: Database, requestId: number): Promise<void> => {
+  await db.run(sql('UPDATE actions_jobs SET launches = launches + 1 WHERE request_id = ?', requestId))
+}
+
+export const requeueJob = async (db: Database, requestId: number): Promise<boolean> =>
+  (
+    await db.run(
+      sql(
+        "UPDATE actions_jobs SET status = 'queued', runner_id = NULL, session_id = NULL, assigned_at = NULL, message_acked_at = NULL WHERE request_id = ? AND status IN ('queued', 'assigned')",
+        requestId,
+      ),
+    )
+  ).changes === 1
+
+export const listCurrentJobs = async (db: Database, runId: number): Promise<JobRow[]> =>
+  db.all<JobRow>(
+    sql(
+      'SELECT * FROM actions_jobs AS j WHERE run_id = ? AND attempt = (SELECT MAX(attempt) FROM actions_jobs WHERE run_id = j.run_id AND job_key = j.job_key) ORDER BY request_id',
+      runId,
+    ),
+  )
+
+export const listJobsByStatus = async (db: Database, statuses: readonly JobStatus[], limit = 200): Promise<JobRow[]> =>
+  db.all<JobRow>(sql(`SELECT * FROM actions_jobs WHERE status IN (${statuses.map(() => '?').join(', ')}) ORDER BY request_id LIMIT ?`, ...statuses, limit))
+
+export const listStaleSessions = async (db: Database, before: number): Promise<SessionRow[]> =>
+  db.all<SessionRow>(sql('SELECT * FROM actions_sessions WHERE closed_at IS NULL AND last_seen_at < ? LIMIT 200', before))
+
+export const deleteExpiredTokens = async (db: Database, before: number): Promise<number> => (await db.run(sql('DELETE FROM actions_tokens WHERE expires_at < ?', before))).changes
 
 export const getJob = async (db: Database, requestId: number): Promise<JobRow | null> => first<JobRow>(db, sql('SELECT * FROM actions_jobs WHERE request_id = ?', requestId))
 
@@ -325,7 +505,7 @@ const labelsMatch = (required: readonly string[], offered: readonly string[]): b
 }
 
 export const pendingDelivery = async (db: Database, sessionId: string): Promise<JobRow | null> =>
-  first<JobRow>(db, sql("SELECT * FROM actions_jobs WHERE session_id = ? AND status = 'assigned' ORDER BY request_id LIMIT 1", sessionId))
+  first<JobRow>(db, sql("SELECT * FROM actions_jobs WHERE session_id = ? AND status = 'assigned' AND message_acked_at IS NULL ORDER BY request_id LIMIT 1", sessionId))
 
 export const claimJob = async (db: Database, runner: Runner, sessionId: string, now: number): Promise<JobRow | null> => {
   const candidates = await db.all<JobRow>(

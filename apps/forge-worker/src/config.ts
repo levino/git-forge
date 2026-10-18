@@ -8,6 +8,9 @@ export type ForgeVars = {
   readonly MAX_LFS_OBJECT_BYTES?: string
   readonly MIRROR_INTERVAL_MINUTES?: string
   readonly ALLOW_INSECURE_FEDERATION?: string
+  readonly ACTIONS?: string
+  readonly ACTIONS_INSTANCE_ID?: string
+  readonly ACTIONS_SECRETS?: string
   readonly MIRROR_DEEP_CHECK_DAYS?: string
   readonly MIRROR_UNIT_BYTES?: string
 }
@@ -22,6 +25,30 @@ export type ForgeSettings = {
   readonly allowInsecureFederation: boolean
   readonly deepCheckDays: number
   readonly mirrorUnitBytes: number
+}
+
+export type ActionsSettings = {
+  readonly instanceId: string
+  readonly secrets: Readonly<Record<string, string>>
+}
+
+export const DEFAULT_ACTIONS_INSTANCE_ID = '00000000-0000-0000-0000-000000000000'
+
+const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+export const parseActionsSecrets = (value: string | undefined): Record<string, string> => {
+  const text = present(value)
+  if (!text) return {}
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    throw new ConfigurationError('ACTIONS_SECRETS must be a JSON object of strings')
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed) || !Object.values(parsed).every((item) => typeof item === 'string')) {
+    throw new ConfigurationError('ACTIONS_SECRETS must be a JSON object of strings')
+  }
+  return parsed as Record<string, string>
 }
 
 export const DEFAULT_MAX_PUSH_BYTES = 16 * 1024 * 1024
@@ -71,4 +98,11 @@ export const parseSettings = async (vars: ForgeVars): Promise<ForgeSettings> => 
     deepCheckDays: positiveInteger(vars.MIRROR_DEEP_CHECK_DAYS, DEFAULT_DEEP_CHECK_DAYS, true),
     mirrorUnitBytes: positiveInteger(vars.MIRROR_UNIT_BYTES, 0, true),
   }
+}
+
+export const parseActionsSettings = (vars: ForgeVars): ActionsSettings | undefined => {
+  if (vars.ACTIONS !== 'true') return undefined
+  const instanceId = present(vars.ACTIONS_INSTANCE_ID)
+  if (instanceId !== undefined && !GUID.test(instanceId)) throw new ConfigurationError('ACTIONS_INSTANCE_ID must be a GUID')
+  return { instanceId: instanceId ?? DEFAULT_ACTIONS_INSTANCE_ID, secrets: parseActionsSecrets(vars.ACTIONS_SECRETS) }
 }

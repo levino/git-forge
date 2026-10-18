@@ -58,12 +58,40 @@
     "MAX_LFS_OBJECT_BYTES": "104857600",
     "MIRROR_INTERVAL_MINUTES": "1440",
     "MIRROR_DEEP_CHECK_DAYS": "30",
-    "MIRROR_UNIT_BYTES": "0"
+    "MIRROR_UNIT_BYTES": "0",
+    "ACTIONS": "true"
   },
   "secrets": {
     "required": [
       "BOOTSTRAP_TOKEN"
     ]
+  },
+  "containers": [
+    {
+      "class_name": "RunnerContainer",
+      "image": "./runner/Dockerfile",
+      "instance_type": "standard-1",
+      "max_instances": 4
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "RUNNER",
+        "class_name": "RunnerContainer"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": [
+        "RunnerContainer"
+      ]
+    }
+  ],
+  "dev": {
+    "enable_containers": false
   },
   "env": {
     "alpha": {
@@ -112,13 +140,38 @@
         "MAX_LFS_OBJECT_BYTES": "104857600",
         "MIRROR_INTERVAL_MINUTES": "1440",
         "MIRROR_DEEP_CHECK_DAYS": "30",
-        "MIRROR_UNIT_BYTES": "0"
+        "MIRROR_UNIT_BYTES": "0",
+        "ACTIONS": "true"
       },
       "secrets": {
         "required": [
           "BOOTSTRAP_TOKEN"
         ]
-      }
+      },
+      "containers": [
+        {
+          "class_name": "RunnerContainer",
+          "image": "./runner/Dockerfile",
+          "instance_type": "standard-1",
+          "max_instances": 4
+        }
+      ],
+      "durable_objects": {
+        "bindings": [
+          {
+            "name": "RUNNER",
+            "class_name": "RunnerContainer"
+          }
+        ]
+      },
+      "migrations": [
+        {
+          "tag": "v1",
+          "new_sqlite_classes": [
+            "RunnerContainer"
+          ]
+        }
+      ]
     },
     "beta": {
       "name": "git-forge-beta",
@@ -166,13 +219,38 @@
         "MAX_LFS_OBJECT_BYTES": "104857600",
         "MIRROR_INTERVAL_MINUTES": "1440",
         "MIRROR_DEEP_CHECK_DAYS": "30",
-        "MIRROR_UNIT_BYTES": "0"
+        "MIRROR_UNIT_BYTES": "0",
+        "ACTIONS": "true"
       },
       "secrets": {
         "required": [
           "BOOTSTRAP_TOKEN"
         ]
-      }
+      },
+      "containers": [
+        {
+          "class_name": "RunnerContainer",
+          "image": "./runner/Dockerfile",
+          "instance_type": "standard-1",
+          "max_instances": 4
+        }
+      ],
+      "durable_objects": {
+        "bindings": [
+          {
+            "name": "RUNNER",
+            "class_name": "RunnerContainer"
+          }
+        ]
+      },
+      "migrations": [
+        {
+          "tag": "v1",
+          "new_sqlite_classes": [
+            "RunnerContainer"
+          ]
+        }
+      ]
     },
     "gamma": {
       "name": "git-forge-gamma",
@@ -220,13 +298,38 @@
         "MAX_LFS_OBJECT_BYTES": "104857600",
         "MIRROR_INTERVAL_MINUTES": "1440",
         "MIRROR_DEEP_CHECK_DAYS": "30",
-        "MIRROR_UNIT_BYTES": "0"
+        "MIRROR_UNIT_BYTES": "0",
+        "ACTIONS": "true"
       },
       "secrets": {
         "required": [
           "BOOTSTRAP_TOKEN"
         ]
-      }
+      },
+      "containers": [
+        {
+          "class_name": "RunnerContainer",
+          "image": "./runner/Dockerfile",
+          "instance_type": "standard-1",
+          "max_instances": 4
+        }
+      ],
+      "durable_objects": {
+        "bindings": [
+          {
+            "name": "RUNNER",
+            "class_name": "RunnerContainer"
+          }
+        ]
+      },
+      "migrations": [
+        {
+          "tag": "v1",
+          "new_sqlite_classes": [
+            "RunnerContainer"
+          ]
+        }
+      ]
     }
   }
 }

@@ -8,6 +8,7 @@ forge code: it pins a release of git-forge and configures one instance.
 |---|---|
 | `git-forge.json` | The pinned release: `version` and the `sha256` of the release's `SHA256SUMS` asset. |
 | `wrangler.jsonc` | The instance: Worker name, R2 bucket, D1 database, cron, vars, domain. |
+| `runner/Dockerfile` | Image for CI jobs, used only when [CI is enabled](#ci-opt-in): the official `ghcr.io/actions/actions-runner` image plus Git and Node.js. |
 | `build.sh` | Downloads the pinned release, verifies every file against the pin and unpacks it into `dist/`. Needs only `sh`, `curl`, `sha256sum` and `tar`. |
 | `deploy.sh` | Applies the release's D1 migrations and deploys, in the right order also on the very first deploy. |
 | `renovate.json` | Lets Renovate propose updates when git-forge publishes a release. |
@@ -178,3 +179,26 @@ sh release/build-release.sh /tmp/git-forge-release
 
 prints the `sha256` to put into `git-forge.json` (any `version` works); then
 `GIT_FORGE_RELEASE_URL=file:///tmp/git-forge-release sh build.sh`.
+
+## CI (opt-in)
+
+CI (GitHub Actions compatible, running the official `actions/runner`) is off
+by default, because its runner container makes `wrangler deploy` build a
+Docker image, and building container images in Workers Builds is not
+verified yet. To enable it where Docker is available, add to
+`wrangler.jsonc`:
+
+```jsonc
+  "vars": { "…": "…", "ACTIONS": "true" },
+  "containers": [{ "class_name": "RunnerContainer", "image": "./runner/Dockerfile", "instance_type": "standard-1", "max_instances": 4 }],
+  "durable_objects": { "bindings": [{ "name": "RUNNER", "class_name": "RunnerContainer" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["RunnerContainer"] }],
+  "dev": { "enable_containers": false }
+```
+
+Every CI job then starts one container with the runner and a JIT config. With
+`ACTIONS` set but without the container entries, workflows are queued and
+picked up by runners you register yourself (`/api/v3/repos/…/actions/runners/generate-jitconfig`).
+Workflow secrets go into the `ACTIONS_SECRETS` secret, a JSON object such as
+`{"CLOUDFLARE_API_TOKEN": "…"}`.
+

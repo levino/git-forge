@@ -1,4 +1,15 @@
 import {
+  advanceRun,
+  type DispatchOptions,
+  handleActionsService,
+  handleGhesApi,
+  queueRunsForPush,
+  type RunnerLauncher,
+  type SecretsProvider,
+  GITHUB_TOKEN_PREFIX,
+  verifyToken,
+} from '@git-forge/actions'
+import {
   type AccountsStore,
   AccountsError,
   authenticateRequest,
@@ -15,11 +26,13 @@ import {
   isTokenScope,
   type JwksSource,
   normalizeIssuer,
+  parseAuthorization,
   type Principal,
   type RepositorySubject,
   type UserPrincipal,
 } from '@git-forge/accounts'
 import {
+  type Authorize,
   configureMirror,
   createRepository,
   deepCheckMirror,
@@ -59,15 +72,24 @@ import {
 } from './mirror-federation.ts'
 import { MirrorAuthError, type MirrorContext, runMirrorSync, type ScheduledMirrorRun, syncDueMirrors } from './mirrors.ts'
 
+export type ActionsOptions = {
+  readonly instanceId: string
+  readonly launcher?: RunnerLauncher
+  readonly secrets?: SecretsProvider
+}
+
 export type ForgeOptions = ForgeSettings & {
   readonly storage: Storage
   readonly db: Database
   readonly fetch?: FetchFunction
   readonly now?: () => Date
+  readonly actions?: ActionsOptions
   readonly jobs?: JobQueue<ForgeJob>
   readonly digests?: DigestFactory
   readonly scheduleImport?: ImportScheduler
 }
+
+export const ACTIONS_SERVICE_PATH = '/_services/actions'
 
 export type Forge = {
   readonly fetch: (request: Request) => Promise<Response>
@@ -459,6 +481,69 @@ export const createForge = (options: ForgeOptions): Forge => {
     }
   }
 
+  const dispatchOptions = (request: Request): DispatchOptions => {
+    const serverUrl = issuerFor(request)
+    return {
+      db,
+      storage,
+      urls: { serverUrl, serviceUrl: `${serverUrl}${ACTIONS_SERVICE_PATH}` },
+      ...(options.actions?.launcher ? { launcher: options.actions.launcher } : {}),
+      now: () => now().getTime(),
+      log: (event) => console.log(JSON.stringify(event)),
+    }
+  }
+
+  const isRepositoryAdmin = async (request: Request, owner: string, name: string): Promise<boolean> => {
+    if (!isValidName(owner) || !isValidName(name)) return false
+    try {
+      await requireRepositoryAdmin(request, { owner, name })
+      return true
+    } catch (error) {
+      if (error instanceof HttpError) return false
+      throw error
+    }
+  }
+
+  const actionsRoute = async (request: Request): Promise<Response | null> => {
+    const { actions } = options
+    const { pathname } = new URL(request.url)
+    if (!actions || !(pathname.startsWith(`${ACTIONS_SERVICE_PATH}/`) || pathname === '/api/v3' || pathname.startsWith('/api/v3/'))) return null
+    const dispatch = dispatchOptions(request)
+    return (
+      (await handleActionsService(request, {
+        db,
+        storage,
+        basePath: ACTIONS_SERVICE_PATH,
+        instanceId: actions.instanceId,
+        serverUrl: dispatch.urls.serverUrl,
+        now: () => now().getTime(),
+        ...(actions.secrets ? { secrets: actions.secrets } : {}),
+        onJobCompleted: async (job) => {
+          await advanceRun(dispatch, job)
+        },
+      })) ?? (await handleGhesApi(request, { db, storage, urls: dispatch.urls, authorize: isRepositoryAdmin, now: () => now().getTime() }))
+    )
+  }
+
+  const withJobTokens = (authorize: Authorize): Authorize => {
+    if (!options.actions) return authorize
+    return async (request, repo, access, ...rest) => {
+      const credential = parseAuthorization(request.headers.get('Authorization'))
+      const secret = credential.kind === 'secret' ? credential.secret : null
+      if (access === 'read' && secret?.startsWith(GITHUB_TOKEN_PREFIX)) {
+        const grant = await verifyToken(db, secret, 'github', now().getTime())
+        if (grant && grant.owner === repo.owner && grant.repo === repo.name) return null
+      }
+      return authorize(request, repo, access, ...rest)
+    }
+  }
+
+  const actorOf = async (request: Request): Promise<string> => {
+    const principal = await authenticateRequest(request, authenticateOptions(request))
+    if (principal?.kind === 'user') return principal.login
+    return principal?.kind ?? 'unknown'
+  }
+
   const health = async () => json(200, { ok: true, service: 'git-forge' })
 
   const SEGMENT = '([^/]+)'
@@ -502,6 +587,8 @@ export const createForge = (options: ForgeOptions): Forge => {
     const protection = await handleBranchProtectionRequest(request, { store, verifyInstance: authentication.verifyInstance })
     if (protection) return protection
     try {
+      const actions = await actionsRoute(request)
+      if (actions) return actions
       const api = await route(request)
       if (api) return api
     } catch (error) {
@@ -510,15 +597,23 @@ export const createForge = (options: ForgeOptions): Forge => {
       throw error
     }
     const access = createGitAccess(authentication)
-    const content = await handleContentRequest(request, { storage, authorize: access.authorize })
+    const authorize = withJobTokens(access.authorize)
+    const content = await handleContentRequest(request, { storage, authorize })
     if (content) return content
     const git = await handleGitRequest(request, {
       storage,
-      authorize: access.authorize,
+      authorize,
       pushPolicy: access.pushPolicy,
       maxRequestBytes: options.maxPushBytes,
       lfs: { maxObjectBytes: options.maxLfsObjectBytes },
-      ...(federation ? { onPush: notifyAfterPush(federation) } : {}),
+      ...(options.actions || federation
+        ? {
+            onPush: async (repo, outcome) => {
+              if (federation) await notifyAfterPush(federation)(repo, outcome)
+              if (options.actions) await queueRunsForPush(dispatchOptions(request), { repo, outcome, actor: await actorOf(request) })
+            },
+          }
+        : {}),
     })
     return git ?? json(404, { error: 'not found' })
   }

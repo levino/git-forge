@@ -31,6 +31,10 @@ tests and the benchmark.
 | `MIRROR_UNIT_BYTES` | var | `0` (default): a mirror sync copies all new packs and LFS objects in one job. Otherwise a byte budget per invocation: one job per pack and per LFS object, a final job moves the refs, units above the budget stay pending (`docs/design.md` §12). For a mirror on the Workers Free plan. |
 | `MIRROR_DEEP_CHECK_DAYS` | var | Every how many days a mirror gets the full re-verification (re-hash every object, recompute every index), default 30, `0` = only on demand. |
 | `ALLOW_INSECURE_FEDERATION` | var | `true` lets the instance fetch other instances' JWKS over plain HTTP. Only for local tests. |
+| `ACTIONS` | var | `true` (default in every environment): CI is on. Pushes queue workflow runs, `/_services/actions` (Actions service for `actions/runner`) and `/api/v3` (GHES-style runner, run and job API, repository admins) are served. The CI tables come from `packages/accounts/migrations/0005_actions.sql`. |
+| `ACTIONS_SECRETS` | secret, optional | JSON object of instance secrets for workflows, e.g. `{"CLOUDFLARE_API_TOKEN":"…"}`. Sent only to the runner of a job, as secret variables. |
+| `ACTIONS_INSTANCE_ID` | var, optional | Stable GUID reported by the Actions location service. |
+| `RUNNER` | Durable Object + Container | `RunnerContainer` (`src/runner-container.ts`, image `runner/Dockerfile`): one container per CI job with the official `actions/runner` and a JIT config. Declared in every environment; without the binding, jobs wait for a runner registered by hand. |
 
 Repositories are **private by default**; visibility is set per repository.
 There is no global "public read" switch any more.
@@ -193,6 +197,33 @@ moved notifies its own subscribers, so chains propagate without cron.
 To use your own domain, add a `routes` entry with `custom_domain: true` to
 `wrangler.jsonc` or attach the domain in the dashboard.
 
+## CI
+
+Architecture, protocol and gaps: `docs/design.md` §15 and
+[`@git-forge/actions`](../../packages/actions). In short: a push that adds or
+changes `.github/workflows/*.yml` queues a run; each job gets an ephemeral
+JIT runner, started in a `RunnerContainer` or by hand:
+
+```sh
+curl -sX POST https://forge.example/api/v3/repos/acme/site/actions/runners/generate-jitconfig \
+  -H "Authorization: Bearer $ADMIN_PAT" \
+  -d '{"name":"laptop","runner_group_id":1,"labels":["self-hosted","linux"]}' | jq -r .encoded_jit_config > jit
+./run.sh --jitconfig "$(cat jit)"
+```
+
+The runner container is declared in `wrangler.jsonc` for every environment
+(`containers`, the `RUNNER` Durable Object binding, its migration), so
+`wrangler deploy` builds `runner/Dockerfile` (the official
+`ghcr.io/actions/actions-runner` image plus Git and Node.js) and pushes it to
+the Cloudflare registry; Docker must be available where you deploy, and
+Containers need the Workers Paid plan. `release/build-release.sh` bundles
+with `--containers-rollout=none`, which skips the image. `RunnerContainer`
+starts the container with the entrypoint `run.sh --jitconfig <config>`; the
+runner is ephemeral and the container stops after its job. Pin
+`RUNNER_VERSION` in the Dockerfile to a runner release you have tested. This
+path has not been deployed yet. `wrangler dev` runs with
+`dev.enable_containers: false`.
+
 ## Several instances: `alpha`, `beta`, `gamma`
 
 `wrangler.jsonc` defines three environments, each with its own Worker name,
@@ -285,6 +316,11 @@ database (Miniflare), persisted under `.wrangler/`. `.dev.vars` is gitignored.
   rejected; subscriptions from untrusted instances or with foreign callbacks
   are refused; a force push is archived with an alarm on both mirrors; the
   deep check passes; and a push still succeeds when the job queue is down.
+- `test/e2e/actions.e2e.test.ts` pushes a workflow to a private repository,
+  checks that the run is queued in D1, registers a JIT runner through
+  `/api/v3`, takes the job over the Actions protocol (OAuth assertion,
+  session, message, renew) and clones the repository with the job's
+  `GITHUB_TOKEN`.
 - `test/e2e/media.e2e.test.ts` starts an instance, issues a `repo:read`
   token, uploads a JPEG to a private repository with the real `git lfs push`
   and reads it back through the media and raw URLs (headers, Range, HEAD,

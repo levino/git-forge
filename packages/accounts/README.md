@@ -41,6 +41,12 @@ change never exists without its audit record. Reads that precede a write
 (e.g. "is this user an org member?") are checks for good error messages; the
 schema's constraints are the real guard.
 
+`changes` is only reliable for statements on tables without triggers: D1
+counts rows written by triggers and FTS5 shadow tables (migration `0026`),
+also for later statements in the same batch. Writes to `accounts`,
+`repositories`, `issues`, `issue_comments`, `discussions` and
+`discussion_comments` check their outcome with a read instead.
+
 Adapters:
 
 - `d1Database(env.DB)` — Cloudflare D1, typed against a minimal structural

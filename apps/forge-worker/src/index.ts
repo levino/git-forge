@@ -1,9 +1,9 @@
 import { d1Database } from '@git-forge/accounts'
 import { consumeJobs, digestStreams, QueueJobs, R2Storage } from '@git-forge/cloudflare'
-import { continueImport, type ImportJob, type ImportScheduler } from '@git-forge/core'
-import { createForge, type Forge } from './app.ts'
-import { ACTIONS_CRON, type ForgeVars, loadSecretsKey, parseActionsSettings, parseSettings } from './config.ts'
-import type { ForgeJob } from './mirror-federation.ts'
+import { continueImport, createConsoleEmailSender, type EmailSender, type ImportJob, type ImportScheduler } from '@git-forge/core'
+import { createSesEmailSender } from '@git-forge/ses'
+import { type AppJob, createForge, type Forge } from './app.ts'
+import { ACTIONS_CRON, type EmailSettings, type ForgeVars, loadSecretsKey, parseActionsSettings, parseEmailSettings, parseSettings } from './config.ts'
 import { containerLauncher } from './runner-launcher.ts'
 
 export { RunnerContainer } from './runner-container.ts'
@@ -13,7 +13,7 @@ export type Env = ForgeVars & {
   readonly DB: D1Database
   readonly RUNNER?: DurableObjectNamespace
   readonly IMPORTS?: Queue<ImportJob>
-  readonly JOBS?: Queue<ForgeJob>
+  readonly JOBS?: Queue<AppJob>
 }
 
 const importScheduler =
@@ -22,6 +22,12 @@ const importScheduler =
     await queue.send(job, delaySeconds > 0 ? { delaySeconds } : {})
   }
 
+const emailSender = (settings: EmailSettings | undefined): EmailSender | undefined => {
+  if (!settings) return undefined
+  if (settings.provider === 'console') return createConsoleEmailSender(settings.from)
+  return createSesEmailSender(settings)
+}
+
 let forge: Promise<Forge> | undefined
 
 const forgeFor = (env: Env): Promise<Forge> => {
@@ -29,6 +35,7 @@ const forgeFor = (env: Env): Promise<Forge> => {
     .then(async (settings) => {
       const actions = parseActionsSettings(env)
       const secretsKey = await loadSecretsKey(actions)
+      const email = emailSender(parseEmailSettings(env))
       return createForge({
         ...settings,
         storage: new R2Storage(env.BUCKET),
@@ -36,6 +43,7 @@ const forgeFor = (env: Env): Promise<Forge> => {
         digests: digestStreams,
         ...(env.IMPORTS ? { scheduleImport: importScheduler(env.IMPORTS) } : {}),
         ...(env.JOBS ? { jobs: new QueueJobs(env.JOBS) } : {}),
+        ...(email ? { email } : {}),
         ...(actions
           ? {
               actions: {
@@ -75,7 +83,7 @@ export default {
   async queue(batch, env): Promise<void> {
     if (isJobQueue(batch.queue)) {
       const instance = await forgeFor(env)
-      const outcomes = await consumeJobs(batch as MessageBatch<ForgeJob>, (job) => instance.runJob(job))
+      const outcomes = await consumeJobs(batch as MessageBatch<AppJob>, (job) => instance.runJob(job))
       console.log(JSON.stringify({ event: 'jobs', outcomes }))
       return
     }
@@ -87,4 +95,4 @@ export default {
       message.ack()
     }
   },
-} satisfies ExportedHandler<Env, ImportJob | ForgeJob>
+} satisfies ExportedHandler<Env, ImportJob | AppJob>

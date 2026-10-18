@@ -10,14 +10,22 @@ import {
   type RunnerLauncher,
   type SecretsProvider,
   GITHUB_TOKEN_PREFIX,
+  getRun,
+  type JobRow,
+  listRunJobs,
   verifyToken,
+  workflowJobPayload,
 } from '@git-forge/actions'
 import {
   type AccountsStore,
   AccountsError,
   authenticateRequest,
   checkRepositoryAccess,
+  checkSession,
   createAccountsStore,
+  createLoginHandler,
+  createLoginStore,
+  createOidcProvider,
   createGitAccess,
   createInstanceVerifier,
   createJwksCache,
@@ -28,6 +36,11 @@ import {
   isRole,
   isTokenScope,
   type JwksSource,
+  type LoginContext,
+  type LoginHttpOptions,
+  type LoginPageRenderer,
+  relyingParty,
+  sessionUserPrincipal,
   normalizeIssuer,
   parseAuthorization,
   type Principal,
@@ -42,6 +55,7 @@ import {
   deepCheckMirror,
   detachMirror,
   type DigestFactory,
+  type EmailSender,
   type FetchFunction,
   handleContentRequest,
   handleGitRequest,
@@ -51,8 +65,10 @@ import {
   isValidImportUrl,
   isValidName,
   listMirrors,
+  type MirrorConfig,
   MirrorExistsError,
   MirrorNotFoundError,
+  ObjectDatabase,
   type PackfileUri,
   publicPackfileUris,
   type PushOutcome,
@@ -60,12 +76,32 @@ import {
   readMirrorConfig,
   readImportState,
   readMirrorStatus,
+  readRefs,
   RepositoryExistsError,
   type RepositoryName,
   SizeLimitError,
   startImport,
   type Storage,
+  type SyncResult,
+  ZERO_ID,
 } from '@git-forge/core'
+import {
+  createNotifications,
+  type EventActor,
+  type ForgeEvent,
+  handleNotificationsRequest,
+  isNotificationJob,
+  mirrorAlarmEvent,
+  type NotificationJob,
+  type Notifications,
+  pushEvent,
+  pushInfos,
+  refEvent,
+  SYSTEM_ACTOR,
+  workflowJobEvent,
+  workflowRunEvent,
+} from '@git-forge/notifications'
+import { handleReleasesRequest } from '@git-forge/releases'
 import type { ForgeSettings } from './config.ts'
 import {
   enqueueDueMirrors,
@@ -94,10 +130,14 @@ export type ForgeOptions = ForgeSettings & {
   readonly fetch?: FetchFunction
   readonly now?: () => Date
   readonly actions?: ActionsOptions
-  readonly jobs?: JobQueue<ForgeJob>
+  readonly jobs?: JobQueue<AppJob>
   readonly digests?: DigestFactory
   readonly scheduleImport?: ImportScheduler
+  readonly email?: EmailSender
+  readonly renderLoginPage?: LoginPageRenderer
 }
+
+export type AppJob = ForgeJob | NotificationJob
 
 export type WaitUntil = (promise: Promise<unknown>) => void
 
@@ -107,7 +147,8 @@ export type Forge = {
   readonly fetch: (request: Request, waitUntil?: WaitUntil) => Promise<Response>
   readonly scheduled: (at?: Date) => Promise<ScheduledMirrorRun[]>
   readonly actionsTick: () => Promise<ActionsTick | null>
-  readonly runJob: (job: ForgeJob) => Promise<void>
+  readonly runJob: (job: AppJob) => Promise<void>
+  readonly notifications: Notifications
 }
 
 class HttpError extends Error {
@@ -189,8 +230,11 @@ type Route = { readonly pattern: RegExp; readonly method: string; readonly handl
 
 export const createForge = (options: ForgeOptions): Forge => {
   const { storage, db } = options
-  const store: AccountsStore = createAccountsStore(db)
   const now = options.now ?? (() => new Date())
+  const store: AccountsStore = createAccountsStore(db, { now: () => now().getTime() })
+  const logins = createLoginStore(db, { now: () => now().getTime() })
+  const outbound = (input: string, init?: RequestInit) => (options.fetch ? options.fetch(new Request(input, init)) : fetch(input, init))
+  const oidc = options.login?.oidc ? createOidcProvider(options.login.oidc, outbound, () => now().getTime()) : null
   const jwks: JwksSource = createJwksCache({
     allowInsecureHttp: options.allowInsecureFederation,
     ...(options.fetch ? { fetch: (input, init) => options.fetch!(new Request(input, init)) } : {}),
@@ -202,10 +246,40 @@ export const createForge = (options: ForgeOptions): Forge => {
     verifyInstance: createInstanceVerifier({ audience: issuerFor(request), trust: store.lookupTrustedIssuer, jwks }),
   })
 
+  const loginOptions = (request: Request): LoginHttpOptions => {
+    const origin = new URL(issuerFor(request)).origin
+    const context: LoginContext = {
+      store,
+      logins,
+      origin,
+      rp: relyingParty(origin),
+      oidc,
+      selfSignup: options.login?.selfSignup ?? false,
+      breakGlassKey: options.login?.breakGlassKey ?? null,
+      fetch: outbound,
+      now: () => now().getTime(),
+    }
+    return { context, secureCookies: origin.startsWith('https:'), ...(options.renderLoginPage ? { renderPage: options.renderLoginPage } : {}) }
+  }
+
   const principalOf = async (request: Request): Promise<Principal> => {
+    if (!request.headers.has('Authorization')) {
+      const check = await checkSession(request, loginOptions(request))
+      if (check.kind === 'csrf-failed') throw new HttpError(403, 'missing or invalid CSRF token')
+      if (check.kind === 'session') return sessionUserPrincipal(check.active.session)
+    }
     const principal = await authenticateRequest(request, authenticateOptions(request))
     if (!principal) throw new HttpError(401, 'invalid credentials', { 'WWW-Authenticate': 'Bearer' })
     return principal
+  }
+
+  const apiPrincipal = async (request: Request): Promise<Principal | null> => {
+    if (!request.headers.has('Authorization')) {
+      const check = await checkSession(request, loginOptions(request))
+      if (check.kind === 'csrf-failed') return null
+      if (check.kind === 'session') return sessionUserPrincipal(check.active.session)
+    }
+    return authenticateRequest(request, authenticateOptions(request))
   }
 
   const canManage = (principal: Principal): principal is UserPrincipal =>
@@ -234,6 +308,49 @@ export const createForge = (options: ForgeOptions): Forge => {
     throw new HttpError(status, message)
   }
 
+  const notifications = createNotifications({
+    db,
+    directory: store,
+    storage,
+    ...(options.jobs ? { jobs: options.jobs } : {}),
+    ...(options.email ? { email: options.email } : {}),
+    ...(options.fetch ? { fetch: options.fetch } : {}),
+    allowInsecureWebhooks: options.allowInsecureWebhooks ?? false,
+    ...(options.publicUrl ? { baseUrl: options.publicUrl } : {}),
+    now: () => now().getTime(),
+  })
+
+  const emit = async (event: ForgeEvent): Promise<void> => {
+    try {
+      await notifications.emit(event)
+    } catch (error) {
+      console.error(JSON.stringify({ event: 'emit-failed', name: event.name, repository: `${event.repository.owner}/${event.repository.name}`, error: String(error) }))
+    }
+  }
+
+  const eventActorOf = (principal: Principal | null): EventActor => {
+    switch (principal?.kind) {
+      case 'user':
+        return { kind: 'user', id: principal.id, login: principal.login }
+      case 'app':
+        return { kind: 'app', id: principal.id, login: `${principal.slug}[bot]` }
+      case 'instance':
+        return { kind: 'instance', id: principal.issuer, login: null }
+      default:
+        return SYSTEM_ACTOR
+    }
+  }
+
+  const emitMirrorAlarms = async (repo: RepositoryName, config: MirrorConfig, result: SyncResult): Promise<void> => {
+    if (result.alarms.length === 0) return
+    await emit(
+      mirrorAlarmEvent(
+        { baseUrl: options.publicUrl ?? 'http://localhost', repository: repo, actor: SYSTEM_ACTOR },
+        { remote: config.remote, upstream: config.url, alarms: result.alarms },
+      ),
+    )
+  }
+
   const mirrorContext = (issuer: string | undefined): MirrorContext => ({
     storage,
     store,
@@ -241,6 +358,7 @@ export const createForge = (options: ForgeOptions): Forge => {
     instanceKey: options.instanceKey,
     ...(options.fetch ? { fetch: options.fetch } : {}),
     ...(options.digests ? { digests: options.digests } : {}),
+    onSynced: emitMirrorAlarms,
   })
 
   const federation: MirrorFederation | null =
@@ -301,6 +419,33 @@ export const createForge = (options: ForgeOptions): Forge => {
     if (expiresAt !== null && (typeof expiresAt !== 'number' || !Number.isSafeInteger(expiresAt))) throw new HttpError(400, 'expiresAt must be Unix milliseconds')
     const created = await store.createPersonalAccessToken(account.id, { name: optionalString(body, 'name') ?? 'api', scopes, expiresAt }, { kind: 'user', id: actor.id })
     return json(201, created)
+  }
+
+  const currentUser = async (request: Request): Promise<Response> => {
+    const principal = await principalOf(request)
+    if (principal.kind !== 'user') throw new HttpError(401, 'authentication required', { 'WWW-Authenticate': 'Bearer' })
+    const via = request.headers.has('Authorization') ? 'token' : 'session'
+    return json(200, { id: principal.id, login: principal.login, admin: await store.isInstanceAdmin(principal.id), via, ceiling: principal.limits?.ceiling ?? null })
+  }
+
+  const createInvite = async (request: Request): Promise<Response> => {
+    const actor = await requireInstanceAdmin(request)
+    const body = await readBody(request)
+    const login = optionalString(body, 'login')
+    const existing = optionalString(body, 'user')
+    const email = optionalString(body, 'email')
+    const days = body.expiresInDays ?? 7
+    if (typeof days !== 'number' || !Number.isInteger(days) || days < 1 || days > 90) throw new HttpError(400, 'expiresInDays must be an integer between 1 and 90')
+    if (login !== undefined && existing !== undefined) throw new HttpError(400, 'pass either login (a new account) or user (an existing one)')
+    let userId: string | null = null
+    if (existing !== undefined) {
+      const account = await store.findAccount(existing)
+      if (!account || account.kind !== 'user') throw new HttpError(404, 'user not found')
+      userId = account.id
+    }
+    if (login !== undefined && (await store.findAccount(login))) throw new HttpError(409, `${login} already exists`)
+    const invite = await logins.createInvite({ login: login ?? null, userId, email: email ?? null, ttlMs: days * 24 * 60 * 60 * 1000 }, { kind: 'user', id: actor.id })
+    return json(201, { code: invite.code, url: new URL(`/login/invite/${invite.code}`, issuerFor(request)).toString(), expiresAt: invite.expiresAt })
   }
 
   const trustInstance = async (request: Request): Promise<Response> => {
@@ -557,6 +702,7 @@ export const createForge = (options: ForgeOptions): Forge => {
         },
         onJobCompleted: async (job) => {
           await advanceRun(dispatch, job)
+          await emitRunEvents(dispatch.urls.serverUrl, job)
         },
       })) ??
       (await handleGhesApi(request, {
@@ -588,10 +734,56 @@ export const createForge = (options: ForgeOptions): Forge => {
     }
   }
 
-  const actorOf = async (request: Request): Promise<string> => {
-    const principal = await authenticateRequest(request, authenticateOptions(request))
-    if (principal?.kind === 'user') return principal.login
-    return principal?.kind ?? 'unknown'
+  const emitRunEvents = async (serverUrl: string, job: JobRow): Promise<void> => {
+    const run = await getRun(db, job.run_id)
+    if (!run) return
+    const context = { baseUrl: serverUrl, repository: { owner: run.owner, name: run.repo }, actor: { kind: 'user' as const, id: null, login: run.actor } }
+    await emit(workflowJobEvent(context, workflowJobPayload('completed', job, run, serverUrl, null)))
+    const jobs = await listRunJobs(db, run.id)
+    if (jobs.some((entry) => entry.status !== 'completed')) return
+    const failed = jobs.some((entry) => entry.conclusion !== null && !['success', 'skipped', 'neutral'].includes(entry.conclusion))
+    await emit(
+      workflowRunEvent(context, 'completed', {
+        id: run.id,
+        name: run.workflow_name,
+        path: run.workflow_path,
+        event: run.event,
+        status: 'completed',
+        conclusion: failed ? 'failure' : 'success',
+        headBranch: run.ref.replace(/^refs\/(heads|tags)\//, ''),
+        headSha: run.sha,
+        actor: run.actor,
+        createdAt: run.created_at,
+        updatedAt: now().getTime(),
+      }),
+    )
+  }
+
+  const emitPushEvents = async (request: Request, repo: RepositoryName, outcome: PushOutcome, principal: Principal | null): Promise<void> => {
+    const actor = eventActorOf(principal)
+    const context = { baseUrl: issuerFor(request), repository: repo, actor }
+    const odb = new ObjectDatabase(storage, repo)
+    const refs = (await readRefs(storage, repo))?.state.refs ?? {}
+    const pushed = new Set(outcome.results.map((result) => result.name))
+    const otherTips = new Set(Object.entries(refs).flatMap(([name, id]) => (pushed.has(name) || !name.startsWith('refs/heads/') ? [] : [id])))
+    const email = principal?.kind === 'user' ? ((await notifications.store.usersById([principal.id]))[0]?.email ?? null) : null
+    const infos = await pushInfos(outcome, { name: actor.login ?? actor.kind, email }, (id) => odb.read(id), otherTips)
+    for (const info of infos) {
+      if (info.before === ZERO_ID) await emit(refEvent(context, 'create', info.ref))
+      await emit(pushEvent(context, info))
+      if (info.after === ZERO_ID) await emit(refEvent(context, 'delete', info.ref))
+    }
+  }
+
+  const afterPush = async (request: Request, repo: RepositoryName, outcome: PushOutcome, waitUntil: WaitUntil | undefined, principal: Principal | null): Promise<void> => {
+    if (federation) await notifyAfterPush(federation)(repo, outcome)
+    if (options.actions) await queueRunsForPush(dispatchOptions(request), { repo, outcome, actor: principal?.kind === 'user' ? principal.login : (principal?.kind ?? 'unknown') })
+    if (!outcome.results.some((result) => result.ok)) return
+    const events = emitPushEvents(request, repo, outcome, principal).catch((error: unknown) =>
+      console.error(JSON.stringify({ event: 'push-events-failed', repository: `${repo.owner}/${repo.name}`, error: String(error) })),
+    )
+    if (waitUntil) waitUntil(events)
+    else await events
   }
 
   const health = async () => json(200, { ok: true, service: 'git-forge' })
@@ -605,6 +797,10 @@ export const createForge = (options: ForgeOptions): Forge => {
     { method: 'POST', pattern: /^\/api\/admin\/users$/, handler: createUser },
     { method: 'POST', pattern: new RegExp(`^/api/admin/users/${SEGMENT}/tokens$`), handler: createToken },
     { method: 'POST', pattern: /^\/api\/admin\/instances$/, handler: trustInstance },
+    { method: 'POST', pattern: /^\/api\/admin\/invites$/, handler: createInvite },
+    { method: 'GET', pattern: /^\/api\/user$/, handler: currentUser },
+    { method: 'POST', pattern: /^\/api\/admin\/invites$/, handler: createInvite },
+    { method: 'GET', pattern: /^\/api\/user$/, handler: currentUser },
     { method: 'POST', pattern: /^\/api\/repos$/, handler: createRepositoryRoute },
     { method: 'PATCH', pattern: new RegExp(`^${REPO}$`), handler: updateRepository },
     { method: 'PUT', pattern: new RegExp(`^${REPO}/collaborators/${SEGMENT}$`), handler: setCollaborator },
@@ -647,9 +843,34 @@ export const createForge = (options: ForgeOptions): Forge => {
     if (wellKnown) return wellKnown
     const federated = federation ? await handleFederationRequest(federation, request) : null
     if (federated) return federated
+    const login = await createLoginHandler(loginOptions(request))(request)
+    if (login) return login
     const authentication = authenticateOptions(request)
     const protection = await handleBranchProtectionRequest(request, { store, verifyInstance: authentication.verifyInstance })
     if (protection) return protection
+    const notificationsResponse = await handleNotificationsRequest(request, {
+      notifications,
+      directory: store,
+      authenticate: apiPrincipal,
+      isInstanceAdmin: store.isInstanceAdmin,
+      baseUrl: issuerFor,
+      allowInsecureWebhooks: options.allowInsecureWebhooks ?? false,
+    })
+    if (notificationsResponse) return notificationsResponse
+    const releases = await handleReleasesRequest(request, {
+      db,
+      storage,
+      directory: store,
+      authenticate: apiPrincipal,
+      isInstanceAdmin: store.isInstanceAdmin,
+      baseUrl: issuerFor,
+      maxAssetBytes: options.maxLfsObjectBytes,
+      ...(options.digests ? { digests: options.digests } : {}),
+      now: () => now().getTime(),
+      emit,
+      onTagCreated: (repo, outcome, principal) => afterPush(request, repo, outcome, waitUntil, principal),
+    })
+    if (releases) return releases
     try {
       const actions = await actionsRoute(request)
       if (actions) return actions
@@ -673,8 +894,7 @@ export const createForge = (options: ForgeOptions): Forge => {
       packfileUris: (incoming, repo) => packfileUris(incoming, repo, authorize),
       onPush: async (repo, outcome) => {
         await compactAfterPush(waitUntil)(repo, outcome)
-        if (federation) await notifyAfterPush(federation)(repo, outcome)
-        if (options.actions) await queueRunsForPush(dispatchOptions(request), { repo, outcome, actor: await actorOf(request) })
+        await afterPush(request, repo, outcome, waitUntil, await authenticateRequest(request, authentication))
       },
     })
     return git ?? json(404, { error: 'not found' })
@@ -682,8 +902,11 @@ export const createForge = (options: ForgeOptions): Forge => {
 
   return {
     fetch: handle,
-    scheduled: (at = now()) =>
-      federation ? enqueueDueMirrors(federation, at, options.mirrorIntervalMinutes) : syncDueMirrors(mirrorContext(options.publicUrl), at, options.mirrorIntervalMinutes),
+    scheduled: async (at = now()) => {
+      const sweep = await notifications.sweep().catch((error: unknown) => ({ error: String(error) }))
+      console.log(JSON.stringify({ event: 'notification-sweep', ...sweep }))
+      return federation ? enqueueDueMirrors(federation, at, options.mirrorIntervalMinutes) : syncDueMirrors(mirrorContext(options.publicUrl), at, options.mirrorIntervalMinutes)
+    },
     actionsTick: async () => {
       if (!options.actions) return null
       const serverUrl = options.publicUrl ?? 'http://localhost'
@@ -697,8 +920,10 @@ export const createForge = (options: ForgeOptions): Forge => {
       })
     },
     runJob: async (job) => {
+      if (isNotificationJob(job)) return notifications.runJob(job)
       if (!federation) throw new Error('jobs need PUBLIC_URL, INSTANCE_KEY and a job queue')
       await runJob(federation, job)
     },
+    notifications,
   }
 }

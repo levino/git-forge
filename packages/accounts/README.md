@@ -80,7 +80,7 @@ triggers with `RAISE`), all of which D1, Durable Objects and libSQL support.
 | Table | Purpose |
 |---|---|
 | `accounts` | users and organizations share one login namespace (like GitHub); `default_repository_role` is an organization's base permission for members |
-| `external_identities` | `(issuer, subject)` → user, ready for OIDC login |
+| `external_identities` | `(issuer, subject)` → user, the OIDC link |
 | `organization_members` | role `member` or `owner` |
 | `teams`, `team_members` | teams belong to one organization; members must be org members |
 | `repositories` | owner is a user or an organization; `visibility` public/private |
@@ -95,6 +95,11 @@ triggers with `RAISE`), all of which D1, Durable Objects and libSQL support.
 | `branch_protection_push_allowances` | who may push when a rule restricts pushes: `user`, `team`, `app` (by ID) or `role` (minimum role) |
 | `branch_protection_status_checks` | required status check names per rule |
 | `instance_admins` | users who administer the instance (create users and tokens, trust other instances, act as admin on every repository)  (migration `0003`) |
+| `sessions` | browser sessions: SHA-256 of the session id, user, method (`oidc`, `passkey`, `break-glass`), expiry, last use, revocation (migration `0006`) |
+| `webauthn_credentials` | passkeys: credential id, user handle, COSE algorithm (`-7`, `-8`, `-257`), public key as JWK, signature counter, AAGUID, revocation |
+| `login_challenges` | one-time state of OIDC logins, WebAuthn ceremonies and used break-glass `jti`s, keyed by the hash of their handle, with expiry |
+| `device_authorizations` | device flow: hash of the device code, user code, status (`pending`, `approved`, `denied`, `consumed`), poll interval, issued token |
+| `invites` | hash of the invite code, fixed login or existing user, expiry, redemption |
 | `actions_*` | CI state of `@git-forge/actions`: runners, hashed CI tokens, sessions, runs, jobs, timeline records, log index (migration `0005`; the schema lives here so that all D1 migrations come from one directory) |
 
 Timestamps are Unix milliseconds. IDs are random UUIDs. Logins and repository
@@ -136,6 +141,51 @@ who can see but not do.
 - App tokens live at most one hour; personal tokens may have no expiry.
 - `last_used_at` is updated at most once per minute per token.
 - Tokens of disabled accounts or apps stop working immediately.
+
+## Login
+
+Interactive login for the web UI and the CLI, as pure functions plus thin
+stores; the HTTP routes (`createLoginHandler`) and the coming web UI call the
+same functions. Only `fetch` and WebCrypto are used.
+
+| Module | Contents |
+|---|---|
+| `cbor.ts` | Minimal CBOR decoder (definite lengths, integer/text keys) for attestation objects and COSE keys. |
+| `jose.ts` | Public JWKs (`RSA`, `EC` P-256, `OKP` Ed25519), compact JWS verification for `RS256`, `ES256`, `EdDSA` (never `none` or HMAC, `crit` rejected, `kid` and `alg` must match), DER → raw ECDSA signatures. |
+| `webauthn.ts` | Creation/request options (attestation `none`, resident key and user verification required), `verifyRegistration`, `verifyAuthentication`: `clientDataJSON` type, challenge and origin, no cross-origin, RP ID hash, UP and UV flags, COSE key → JWK, signature over `authData ‖ SHA-256(clientDataJSON)`, increasing counter. Attestation statements are not verified: whatever format the authenticator sends counts as `none`. |
+| `oidc.ts` | Discovery (issuer must match exactly, PKCE `S256`), authorization URL, code exchange (`client_secret_basic` or public client), ID token verification against the JWKS (re-fetched once per minute on an unknown key): `iss`, `aud`, `azp`, `exp`, `iat`, `nbf`, `nonce`, 60 s clock skew. |
+| `sessions.ts` | Session tokens (`gfs_…`, 256 bits), cookie formatting and parsing, CSRF tokens derived from the session id, safe `return_to`. |
+| `device.ts` | User codes (8 letters from `BCDFGHJKLMNPQRSTVWXZ`, shown as `XXXX-XXXX`), device codes, poll outcomes (`slow_down` adds 5 s). |
+| `break-glass.ts` | Offline Ed25519 key: `signBreakGlassToken` (for the operator), `verifyBreakGlassToken` (purpose, audience = instance origin, at most 10 minutes). |
+| `login-store.ts` | SQLite store for sessions, challenges, passkeys, device authorizations and invites. All one-time items are claimed with a conditional `UPDATE`, so a second use fails even under concurrency. |
+| `login.ts` | The flows: `beginOidcLogin`/`completeOidcLogin`, `beginPasskeyRegistration`/`completePasskeyRegistration`, `beginPasskeyLogin`/`completePasskeyLogin`, `startDeviceAuthorization`/`decideDeviceAuthorization`/`pollDeviceToken`, `breakGlassLogin`, `startSession`. Errors are `LoginError` with a code and an HTTP status. |
+| `login-http.ts`, `login-pages.ts` | `createLoginHandler` (routes in `apps/forge-worker/README.md`), `checkSession` (cookie + CSRF + same origin for unsafe methods) and the default HTML pages, replaceable through a `LoginPageRenderer`. |
+
+Account rules:
+
+- An OIDC identity is the pair `(issuer, sub)` in `external_identities`. An
+  existing link signs in. Otherwise an invite links it (to the invited
+  existing user, or to a new account), `SELF_SIGNUP` creates an account, and
+  without either the login is refused. New logins come from
+  `preferred_username`, the email's local part or the name, made to fit the
+  login pattern, with `-2`, `-3`, … when taken. Email addresses are only
+  taken over when `email_verified` is true.
+- A passkey-only account needs no OIDC: an invite or `SELF_SIGNUP` lets a new
+  user register a passkey, which creates the account in the same step. A
+  signed-in user adds more passkeys (CSRF token required). The user handle is
+  random and the same for all passkeys of a user.
+- The device flow issues a personal access token with `repo:write` (Git and
+  LFS read and write, no admin API), 90 days, named after the client.
+- A break-glass token only works for an existing, enabled instance admin,
+  once (`jti`), and gives a one-hour session.
+
+Test support for other packages: `test/support/mock-oidc.ts` (an OIDC
+provider as a fetch handler, `RS256`/`ES256`/`EdDSA`, checks PKCE and client
+authentication) and `test/support/soft-authenticator.ts` (an ES256 passkey
+authenticator that builds attestation objects and assertions byte by byte).
+The unit tests verify WebAuthn against the registration and assertion vectors
+of py_webauthn (ES256, RS256, EdDSA) and JWS against RFC 7515 A.2/A.3 and
+RFC 8037 A.4, and PKCE against RFC 7636 appendix B.
 
 ## Git authorization
 

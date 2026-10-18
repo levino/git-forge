@@ -33,7 +33,9 @@ Environment variables. The names shared with the Worker mean the same
 `MIRROR_INTERVAL_MINUTES`, `MIRROR_DEEP_CHECK_DAYS`, `MIRROR_UNIT_BYTES`,
 `ALLOW_INSECURE_FEDERATION`, `ACTIONS`, `ACTIONS_SECRETS`,
 `ACTIONS_SECRETS_KEY`, `ACTIONS_REPOSITORIES`, `ACTIONS_GITHUB_FALLBACK`,
-`ACTIONS_INSTANCE_ID`. Push notifications need `PUBLIC_URL` and
+`ACTIONS_INSTANCE_ID`, and the login settings `OIDC_ISSUER`,
+`OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`, `OIDC_NAME`, `OIDC_SCOPES`,
+`SELF_SIGNUP`, `BREAK_GLASS_PUBLIC_KEY`. Push notifications need `PUBLIC_URL` and
 `INSTANCE_KEY`; without them mirrors sync only on the schedule. With
 `ACTIONS=true` CI is served, but there is no runner launcher: jobs wait for a
 runner registered by hand. Every five minutes the instance runs scheduled

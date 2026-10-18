@@ -80,10 +80,10 @@ issues, pull requests and discussions.
 
 **Should (soon after)**
 
-- Notifications, email, webhooks.
+- Notifications, email, webhooks (§16).
 - Reactions, search in issues and discussions.
 - Edit and upload files in the browser (commit via form).
-- Releases.
+- Releases (§16).
 - `gh auth login`-style device flow for the command line.
 
 **Later / maybe**
@@ -276,11 +276,12 @@ the [accounts README](../packages/accounts/README.md#branch-protection).
     objects/pack/pack-<sha>.pack
     objects/pack/pack-<sha>.idx
   lfs/
-    objects/<oid[0:2]>/<oid[2:4]>/<oid>
+    objects/<oid[0:2]>/<oid[2:4]>/<oid>   # LFS objects and release assets
   import/status.json                # progress of the last import
   import/commits.txt                # commit order of the last import
   README.txt                        # plain text: what this is, how to read it
 tmp/<repo>/<timestamp>-<uuid>/<n>   # staging chunks of a push or fetch, expired by the bucket
+tmp/<repo>/<timestamp>-<uuid>/asset # a release asset upload without a declared SHA-256 (§16)
 ```
 
 - `<sha>` is the pack's trailing SHA-1 checksum, as with `git index-pack`.
@@ -302,6 +303,9 @@ tmp/<repo>/<timestamp>-<uuid>/<n>   # staging chunks of a push or fetch, expired
   are read back once to write the final pack and never again. The `Storage`
   interface has no delete; operators expire `tmp/` with a bucket lifecycle
   rule (e.g. one day). Pushes up to one chunk never touch `tmp/`.
+- **Release assets** are content-addressed like LFS objects
+  (`lfs/objects/…`, §16). Which asset belongs to which release lives only in
+  the database; a deleted asset or release leaves its bytes in place.
 - The bucket layout is a durable format and may only change
   backwards-compatibly.
 
@@ -538,11 +542,11 @@ SQLite database. A new instance works without an external identity provider.
 
 | Method | When |
 |---|---|
-| Passkeys (WebAuthn) | Default, built in |
-| OIDC (ZITADEL, Keycloak, Authentik, Pocket ID, Google, …) | Connect existing identities; groups → teams optional |
-| Personal access tokens | Git over HTTPS (as HTTP Basic password) |
-| Device flow (`gh auth login`-style) | Later, for the command line |
-| Break-glass key | Later: offline admin key (Ed25519), works without any IdP |
+| Passkeys (WebAuthn) | Default, built in; passkey-only accounts need no IdP |
+| OIDC (ZITADEL, Keycloak, Authentik, Pocket ID, Google, …) | Connect existing identities; one provider per instance; groups → teams later |
+| Personal access tokens | Git over HTTPS (as HTTP Basic password), JSON API |
+| Device flow (`git forge auth login`, like `gh auth login`) | Command line: issues a `repo:write` token, git uses it through the credential helper |
+| Break-glass key | Offline Ed25519 key, opens a short admin session when the IdP is down |
 | SAML, SCIM | Later, for organizations that require them |
 
 Typical setup: people log in via OIDC or passkeys; apps and automations use
@@ -553,8 +557,80 @@ create users and tokens, trust other instances and count as admins of every
 repository. A fresh instance has none: one call of `POST /api/bootstrap`,
 authenticated with the deployment secret `BOOTSTRAP_TOKEN`, creates the first
 admin atomically and returns a personal access token; further calls answer
-`409`. Until login methods exist, the JSON API is used with personal access
-tokens that carry the scope `repo:admin`.
+`409`. The admin then invites themselves (`POST /api/admin/invites` with
+`user`) to link an OIDC identity or register a passkey. The JSON API accepts
+personal access tokens with the scope `repo:admin` and browser sessions.
+
+### Login
+
+All flows are pure functions in `@git-forge/accounts` (`login.ts`) over a
+SQLite store (`login-store.ts`, migration `0006_login`); `createLoginHandler`
+maps them to routes under `/login`, `createForge` mounts it, and the web UI
+calls the same functions. Cryptography is WebCrypto only: JWS `RS256`,
+`ES256`, `EdDSA` for ID tokens, COSE `-7`, `-8`, `-257` for passkeys, a
+minimal CBOR decoder for attestation objects.
+
+**Sessions.** A session is a random 256-bit id (`gfs_…`) in an `HttpOnly`,
+`SameSite=Lax` cookie (`__Host-gf_session`, `Secure`, on https), stored only
+as SHA-256 with user, method, expiry (30 days, break-glass 1 hour) and
+revocation. A session gives the user's full rights, like a password login on
+GitHub; tokens stay the way to narrow rights. State-changing requests that
+rely on the cookie must come from the instance's origin (`Origin`) and carry
+the CSRF token `base64url(SHA-256("git-forge csrf\n" + session id))`, as
+`X-CSRF-Token` or the form field `csrf`. The token needs no storage and is
+worthless without the cookie. `SameSite=Lax` alone is not relied on, because
+it still sends the cookie on top-level `POST` navigations from same-site
+subdomains.
+
+**OIDC.** Authorization code with PKCE (`S256`), configured per instance
+(`OIDC_ISSUER`, `OIDC_CLIENT_ID`, optional secret `OIDC_CLIENT_SECRET`). The
+`state` is a one-time challenge in `login_challenges` that also holds `nonce`,
+code verifier, `return_to` and intent (login, link, invite), and it is bound
+to the browser by a 10-minute cookie, so a callback started elsewhere is
+refused (login CSRF). The ID token is verified against the provider's JWKS
+(cached 10 minutes, refetched at most once a minute for an unknown key):
+signature, `iss`, `aud`/`azp`, `exp`, `iat`, `nbf`, `nonce`. When the ID token
+carries no profile (ZITADEL's default), the profile comes from the userinfo
+endpoint, which must name the same `sub`. The identity is `(issuer, sub)` in
+`external_identities`; emails count only with `email_verified`.
+
+**Who gets an account.** An existing link signs in. Otherwise an invite
+(`invites`, one-time, 7 days) either links the identity or passkey to an
+existing user or creates a new account (fixed login or chosen), and with
+`SELF_SIGNUP=true` any identity or new passkey creates one. Without either,
+the login is refused with a hint to ask for an invite. Logins are derived from
+`preferred_username`, the email's local part or the name, with `-2`, `-3`, …
+when taken.
+
+**Passkeys.** Registration asks for a discoverable credential, user
+verification and attestation `none`; attestation statements are never
+verified, any format counts as `none` (no AAGUID allow-lists). Verification
+checks type, challenge (one-time, 10 minutes), origin (`PUBLIC_URL`), no
+cross-origin, the RP ID hash (the host of `PUBLIC_URL`), UP and UV, and the
+signature; the counter must increase unless both sides are zero (synced
+passkeys report 0), and it is updated with compare-and-swap. The user handle
+is random and shared by all passkeys of a user. Public keys are stored as
+JWKs.
+
+**Device flow.** RFC 8628 with the fixed client id `git-forge-cli`. The user
+code (8 letters without vowels and look-alikes) is entered or confirmed at
+`/login/device` in a signed-in browser, which shows the client name and the
+scope before approval. The first successful poll consumes the authorization
+and issues a personal access token with `repo:write`, 90 days; a poll faster
+than the interval gets `slow_down`. The CLI stores the token per host in
+`~/.config/git-forge/hosts.json` (0600) and configures
+`credential.<host>.helper = !git-forge auth git-credential` (after an empty
+helper, which resets others), so plain `git` and `git-lfs` authenticate
+without tokens in URLs.
+
+**Break-glass.** An Ed25519 key pair generated offline
+(`pnpm --filter forge-worker break-glass keygen`); only the public JWK is
+deployed (`BREAK_GLASS_PUBLIC_KEY`). The operator signs a JWT
+(`purpose: git-forge-break-glass`, `aud` = instance origin, `sub` = login,
+`jti`, at most 10 minutes) on a trusted machine and pastes it at
+`/login/break-glass`. It works once per `jti`, only for an existing, enabled
+instance admin, and opens a one-hour session; every use is in the audit
+log.
 
 **Visibility.** Repositories are private by default; visibility is a
 per-repository setting in the database. There is no instance-wide public read
@@ -570,7 +646,7 @@ Cloudflare's Free and Pro plans), enforced in the batch API and on `PUT`.
 Not supported, by decision. Serverless functions accept only HTTP; SSH would
 need an always-on host or a TCP-capable container platform, and SSH over
 WebSocket needs client-side configuration. Git uses HTTPS with tokens, made
-convenient by `git forge auth login` (credential helper, device flow).
+convenient by `git forge auth login` (credential helper, device flow, §8).
 
 ## 10. Mirror overview and verification
 
@@ -595,7 +671,7 @@ dev environments) need real machines, started on demand via API.
 | Live updates | Durable Objects with WebSockets, polling as fallback |
 | Search in issues | SQLite FTS5 |
 | Web UI | Astro SSR |
-| Releases, Pages | Bucket + CDN |
+| Releases, Pages | Bucket + CDN (release assets are LFS objects behind the media URL, §16) |
 | CI | Actions service emulating GHES for the official `actions/runner`; compute adapter starts one runner per job (§15) |
 
 Every building block is an interface; Cloudflare is the first implementation.
@@ -617,7 +693,7 @@ database.
 | Database | D1 / SQLite in Durable Objects | libSQL/Turso, SQLite file (Pi) |
 | Per-repository consistency | Durable Object | conditional writes (S3 CAS), single-writer process |
 | Scheduling, jobs | Cron Triggers, Queues (Workflows for long jobs) | `Deno.cron`, systemd timers, job table, in-process queue |
-| Email | Mail service via API | SMTP |
+| Email | Amazon SES v2 HTTP API (`@git-forge/ses`, SigV4 via `aws4fetch`, runs on Workers and Node) | SMTP for the Node deployment (later); a console adapter for development |
 | Compute for CI | Containers | external per-minute providers via the GHES API (WarpBuild, AWS CodeBuild, RunsOn), Fly Machines, a local process |
 
 **Jobs:** the core defines `JobQueue<J>` (`enqueue(job, { delaySeconds })`),
@@ -1029,7 +1105,7 @@ upload-pack supports `deepen <n>`, `deepen-relative` and `shallow` lines
 #### Check runs
 
 Every job leg writes a check run (`check_runs` in `@git-forge/accounts`,
-migration `0006`): name = job display name, `head_sha` = run SHA,
+migration `0008`): name = job display name, `head_sha` = run SHA,
 `status` queued → in_progress (first lock renewal) → completed, conclusion
 from the job (`timed_out` for timeouts), `external_id` = job ID,
 `details_url` = job URL. `commitCheckStates(db, owner, repo, sha)` returns
@@ -1139,7 +1215,7 @@ same functions (`reviewDeployment`).
 #### Data
 
 - SQLite, migrations `packages/accounts/migrations/0005_actions.sql` and
-  `0006_actions_workflows.sql`, applied by `wrangler d1 migrations apply`
+  `0008_actions_workflows.sql`, applied by `wrangler d1 migrations apply`
   like every other migration and shipped in the release's
   `migrations.tar.gz`: `actions_runners`, `actions_tokens`,
   `actions_sessions`, `actions_runs` (plus definition, attempt, trusted,
@@ -1147,7 +1223,7 @@ same functions (`reviewDeployment`).
   attempt, `expanded`, matrix, outputs, environment, approval,
   cancellation, launches, check run), `actions_timeline_records`,
   `actions_logs`, `actions_secrets`, `actions_environments`,
-  `actions_schedules`, `check_runs`. `0006` only adds columns and tables,
+  `actions_schedules`, `check_runs`. `0008` only adds columns and tables,
   so the previous release keeps working on the new schema.
 - Bucket, append-only, written with `If-None-Match: *`:
   `repos/<owner>/<repo>/actions/jobs/<jobId>/logs/<logId>/<chunk>`,
@@ -1278,3 +1354,153 @@ update themselves.
 `gamma`, each with its own D1 and R2. An E2E test runs all three locally and
 checks mirroring and federation across them (beta mirrors alpha, gamma mirrors
 beta).
+
+## 16. Notifications, webhooks, email and releases
+
+Packages: `@git-forge/notifications` (events, subscriptions, inbox, digests,
+webhooks), `@git-forge/releases`, `@git-forge/ses`; the email interface lives
+in the core (`packages/core/src/email.ts`). Tables come from migration
+`0007_notifications.sql`.
+
+### Events
+
+Every producer describes what happened as a `ForgeEvent` (version `v: 1`):
+the GitHub webhook event name and action, repository, actor, base URL, the
+GitHub-compatible payload *without* `repository`, `organization` and `sender`
+(those are rendered at delivery time), and optionally a notification
+`subject` (key, type, title, URLs) and an `audience` (author, participants,
+mentions, assignees, requested reviewers, CI actor, repository admins, which
+watchers). `emit(event)` appends it to `forge_events` (append-only, enforced
+by triggers like `audit_log`) and enqueues one `notification-event` job; the
+job fans out webhooks and notifications. Jobs carry ids only, so a retry
+re-reads the database.
+
+Builders in `events.ts` produce the events, so payloads look the same
+wherever they come from:
+
+| Producer | Event | Status |
+|---|---|---|
+| `receive-pack` (`onPush`) | `push`, `create`, `delete` | wired; commits are read from the object database (at most 20, oldest first, stopping at the old value or, for new branches, at other branch tips); `added`/`removed`/`modified` stay empty |
+| Mirror sync (`onSynced` in `MirrorContext`) | `mirror_alarm` (custom) on rewritten or deleted upstream refs | wired |
+| Actions (`onJobCompleted`) | `workflow_job` completed, `workflow_run` completed when the last job of the run completes | wired; CI part 2 may refine it |
+| Releases | `release` (`created`, `published`, `released`/`prereleased`, `edited`, `unpublished`, `deleted`) | wired |
+| Collaboration (issues, pull requests, reviews, comments) | `issues`, `issue_comment`, `pull_request`, `pull_request_review`, `pull_request_review_comment` | builders ready, emitted by the collaboration package |
+
+### Notifications
+
+GitHub's model, per user:
+
+- **Watching** a repository (`repository_watches`): `all`, `releases` or
+  `ignore`; without a row the user is only notified when participating.
+- **Participating** (`thread_subscriptions`): author, commenter, mentioned,
+  assigned or requested reviewer of a subject (`issue:12`, `pull:3`, …) are
+  subscribed to it and notified about later events on it. A thread can be
+  ignored.
+- **Fan-out** (`resolveRecipients`, pure): the strongest reason wins
+  (`review_requested` > `assign` > `mention` > … > `subscribed`); ignored
+  threads and ignored repositories receive nothing; the actor gets nothing
+  unless `own_activity` is on; every recipient must still be able to read the
+  repository, checked with the same `checkRepositoryAccess` as Git.
+- **Inbox:** one `notification_threads` row per user and subject, updated in
+  place (unread again, newest reason, `last_event_id`). Mirror alarms go to
+  repository admins with reason `security_alert`, CI results to the
+  triggering user with `ci_activity`.
+- **Settings** (`notification_settings`): email `off`, `instant`, `hourly` or
+  `daily`; email for participating and/or watching notifications; own
+  activity; an optional address overriding the account email.
+
+### Email
+
+`EmailSender.send(message)` is the adapter (`createMemoryEmailSender` for
+tests, `createConsoleEmailSender` for development, `createSesEmailSender` for
+production). SES uses the v2 `SendEmail` API with a simple message (subject,
+text, HTML, `List-Unsubscribe` and auto-reply suppression headers), signed
+with SigV4; `4xx` answers are permanent (`EmailRejectedError`), throttling
+and `5xx` are retried by the job queue. SMTP for the Node deployment is
+another adapter of the same interface, not built yet (Workers cannot open TCP
+connections to arbitrary SMTP servers without `connect()`, and SES covers
+the Cloudflare deployment).
+
+Digests: when a notification should be emailed, the user's
+`digest_due_at` is claimed by compare-and-swap (`… WHERE digest_due_at IS
+NULL`) and one `notification-digest` job is enqueued with the mode's delay
+(0, 1 h, 24 h). The job collects every unread thread updated since it was
+last emailed, sends one message, marks the threads, releases the claim and
+schedules the next digest if something arrived meanwhile. So a burst of
+events makes one email per user and period, and a lost job is picked up by
+the daily cron (`sweep`).
+
+### Webhooks
+
+GitHub-compatible, per repository and per organization (an organization hook
+receives the events of all its repositories):
+
+- REST under `/api/v3`: `…/hooks`, `…/hooks/{id}`, `…/hooks/{id}/config`,
+  `…/hooks/{id}/pings`, `…/hooks/{id}/deliveries[/{id}[/attempts]]`.
+  Managing repository hooks needs repository admin, organization hooks an
+  organization owner (instance admins may do both), with a token that has
+  `repo:admin`.
+- Requests: `POST` with `Content-Type` `application/json` or
+  `application/x-www-form-urlencoded` (`payload=…`), `User-Agent:
+  GitHub-Hookshot/git-forge`, `X-GitHub-Event`, `X-GitHub-Delivery` (a UUID),
+  `X-GitHub-Hook-ID`, `X-GitHub-Hook-Installation-Target-Type`/`-ID` and,
+  with a secret, `X-Hub-Signature-256` (HMAC-SHA256 of the body) and the
+  legacy `X-Hub-Signature` (SHA-1). Creating a hook sends a `ping`.
+- Delivery log (`webhook_deliveries`): the payload is rendered once per event
+  and hook and stored; each attempt records status code, duration, request
+  headers (without signatures) and up to 64 KiB of the response.
+  Redirects are not followed, the timeout is 10 s.
+- Retries: network errors, `408`, `429` and `5xx` are retried up to five
+  attempts with 30 s, 2 min, 8 min, 32 min; other answers fail at once. The
+  retry is a new delayed job, and a lease on the delivery row
+  (`next_attempt_at`) keeps a duplicate job or the cron sweep from sending
+  twice. Redelivery creates a new row with the same delivery id and
+  `redelivery: true`, as on GitHub.
+- URLs must be `https` and must not point to loopback, private, link-local
+  or `.local`/`.internal` hosts; `ALLOW_INSECURE_WEBHOOKS=true` lifts both
+  for tests. DNS is not resolved, so a public name pointing to a private
+  address is not caught (on Workers such requests cannot reach private
+  networks anyway; on a Node deployment, egress filtering is the operator's
+  job). `insecure_ssl` is stored but has no effect: Workers always verify
+  TLS.
+- Secrets are stored in plain text in the database, because signing needs
+  them; the API shows them as `********`.
+- Repository and user ids in payloads are the forge's string ids, not
+  integers.
+
+Without a job queue (a Node deployment without one) fan-out, deliveries and
+instant digests run inline in the request; retries and delayed digests then
+wait for the scheduled handler.
+
+### Releases
+
+- GitHub's REST API under `/api/v3/repos/{owner}/{repo}/releases`: list,
+  create, get, `latest`, `tags/{tag}`, update, delete; assets: list, upload,
+  get, update, delete; uploads also at
+  `/api/uploads/repos/{owner}/{repo}/releases/{id}/assets?name=&label=` (the
+  `upload_url` that `gh` and Octokit use).
+- Reading needs repository read access; drafts and all writes need write
+  access. Instance admins may write everywhere.
+- Publishing a release whose tag does not exist creates a lightweight tag at
+  `target_commitish` (branch or commit, default branch by default) with a
+  compare-and-swap on `refs.json`, then runs the push pipeline (mirror
+  notifications, CI, `create` and `push` events) as if the tag had been
+  pushed. Drafts never create tags.
+- **Assets are LFS objects.** An upload streams into
+  `lfs/objects/<sha256>` and is served by the immutable media URL
+  `/{owner}/{repo}/media/{oid}/{name}` (§7: `Range`, ETag, CDN friendly). The
+  key is the SHA-256 of the content, which is only known at the end of the
+  stream, and `put` needs the key first: a client that sends
+  `X-Content-SHA256` (hex) is stored directly and verified while streaming;
+  otherwise the upload is staged in `tmp/` while hashing (expired by the
+  bucket lifecycle rule like push staging) and then copied, unless the object
+  already exists. Assets are limited to `MAX_LFS_OBJECT_BYTES`, and the API
+  reports `digest: "sha256:…"` like GitHub.
+- `browser_download_url` (`/{owner}/{repo}/releases/download/{tag}/{name}`)
+  and `GET …/releases/assets/{id}` with `Accept: application/octet-stream`
+  answer `302` to the media URL and count the download. A draft's asset is
+  reachable through its media URL by anyone who can read the repository and
+  knows the hash.
+- Not implemented: `tarball_url`/`zipball_url` (no archive endpoint yet),
+  `generate_release_notes`, `make_latest` (the latest release is the newest
+  published non-prerelease).

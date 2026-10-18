@@ -1,5 +1,17 @@
 import { importSecretsKey, type SecretsKey } from '@git-forge/actions'
-import { importSigningKey, normalizeIssuer, type PrivateJwk, type SigningKey } from '@git-forge/accounts'
+import {
+  BreakGlassError,
+  DEFAULT_OIDC_SCOPES,
+  importSigningKey,
+  normalizeIssuer,
+  normalizeOidcIssuer,
+  type OidcClientConfig,
+  OidcError,
+  type OkpPublicJwk,
+  parseBreakGlassPublicKey,
+  type PrivateJwk,
+  type SigningKey,
+} from '@git-forge/accounts'
 
 export type ForgeVars = {
   readonly PUBLIC_URL?: string
@@ -19,6 +31,27 @@ export type ForgeVars = {
   readonly ACTIONS_GITHUB_FALLBACK?: string
   readonly MIRROR_DEEP_CHECK_DAYS?: string
   readonly MIRROR_UNIT_BYTES?: string
+  readonly ALLOW_INSECURE_WEBHOOKS?: string
+  readonly EMAIL_PROVIDER?: string
+  readonly EMAIL_FROM?: string
+  readonly SES_REGION?: string
+  readonly SES_ACCESS_KEY_ID?: string
+  readonly SES_SECRET_ACCESS_KEY?: string
+  readonly SES_ENDPOINT?: string
+  readonly SES_CONFIGURATION_SET?: string
+  readonly OIDC_ISSUER?: string
+  readonly OIDC_CLIENT_ID?: string
+  readonly OIDC_CLIENT_SECRET?: string
+  readonly OIDC_NAME?: string
+  readonly OIDC_SCOPES?: string
+  readonly SELF_SIGNUP?: string
+  readonly BREAK_GLASS_PUBLIC_KEY?: string
+}
+
+export type LoginSettings = {
+  readonly oidc: OidcClientConfig | undefined
+  readonly selfSignup: boolean
+  readonly breakGlassKey: OkpPublicJwk | undefined
 }
 
 export type ForgeSettings = {
@@ -33,7 +66,21 @@ export type ForgeSettings = {
   readonly allowInsecureFederation: boolean
   readonly deepCheckDays: number
   readonly mirrorUnitBytes: number
+  readonly allowInsecureWebhooks?: boolean
+  readonly login?: LoginSettings
 }
+
+export type EmailSettings =
+  | { readonly provider: 'console'; readonly from: string }
+  | {
+      readonly provider: 'ses'
+      readonly from: string
+      readonly region: string
+      readonly accessKeyId: string
+      readonly secretAccessKey: string
+      readonly endpoint?: string
+      readonly configurationSet?: string
+    }
 
 export type ActionsSettings = {
   readonly instanceId: string
@@ -131,6 +178,34 @@ export const parseInstanceKey = async (value: string | undefined): Promise<Signi
   }
 }
 
+export const parseOidcSettings = (vars: ForgeVars): OidcClientConfig | undefined => {
+  const issuer = present(vars.OIDC_ISSUER)
+  const clientId = present(vars.OIDC_CLIENT_ID)
+  if (!issuer && !clientId) return undefined
+  if (!issuer || !clientId) throw new ConfigurationError('OIDC_ISSUER and OIDC_CLIENT_ID must be set together')
+  let normalized: string
+  try {
+    normalized = normalizeOidcIssuer(issuer)
+  } catch (error) {
+    if (error instanceof OidcError) throw new ConfigurationError(error.message)
+    throw error
+  }
+  const scopes = present(vars.OIDC_SCOPES)?.split(/\s+/) ?? [...DEFAULT_OIDC_SCOPES]
+  return { issuer: normalized, clientId, clientSecret: present(vars.OIDC_CLIENT_SECRET), scopes, name: present(vars.OIDC_NAME) ?? 'single sign-on' }
+}
+
+export const parseLoginSettings = (vars: ForgeVars): LoginSettings => {
+  const breakGlass = present(vars.BREAK_GLASS_PUBLIC_KEY)
+  let breakGlassKey: OkpPublicJwk | undefined
+  try {
+    breakGlassKey = breakGlass ? parseBreakGlassPublicKey(breakGlass) : undefined
+  } catch (error) {
+    if (error instanceof BreakGlassError) throw new ConfigurationError(error.message)
+    throw error
+  }
+  return { oidc: parseOidcSettings(vars), selfSignup: vars.SELF_SIGNUP === 'true', breakGlassKey }
+}
+
 export const parseSettings = async (vars: ForgeVars): Promise<ForgeSettings> => {
   const publicUrl = present(vars.PUBLIC_URL)
   return {
@@ -145,7 +220,25 @@ export const parseSettings = async (vars: ForgeVars): Promise<ForgeSettings> => 
     allowInsecureFederation: vars.ALLOW_INSECURE_FEDERATION === 'true',
     deepCheckDays: positiveInteger(vars.MIRROR_DEEP_CHECK_DAYS, DEFAULT_DEEP_CHECK_DAYS, true),
     mirrorUnitBytes: positiveInteger(vars.MIRROR_UNIT_BYTES, 0, true),
+    allowInsecureWebhooks: vars.ALLOW_INSECURE_WEBHOOKS === 'true',
+    login: parseLoginSettings(vars),
   }
+}
+
+export const parseEmailSettings = (vars: ForgeVars): EmailSettings | undefined => {
+  const provider = present(vars.EMAIL_PROVIDER)
+  if (provider === undefined || provider === 'none') return undefined
+  const from = present(vars.EMAIL_FROM)
+  if (!from) throw new ConfigurationError('EMAIL_FROM is required when EMAIL_PROVIDER is set')
+  if (provider === 'console') return { provider, from }
+  if (provider !== 'ses') throw new ConfigurationError('EMAIL_PROVIDER must be none, console or ses')
+  const region = present(vars.SES_REGION)
+  const accessKeyId = present(vars.SES_ACCESS_KEY_ID)
+  const secretAccessKey = present(vars.SES_SECRET_ACCESS_KEY)
+  if (!region || !accessKeyId || !secretAccessKey) throw new ConfigurationError('EMAIL_PROVIDER=ses needs SES_REGION, SES_ACCESS_KEY_ID and SES_SECRET_ACCESS_KEY')
+  const endpoint = present(vars.SES_ENDPOINT)
+  const configurationSet = present(vars.SES_CONFIGURATION_SET)
+  return { provider, from, region, accessKeyId, secretAccessKey, ...(endpoint ? { endpoint } : {}), ...(configurationSet ? { configurationSet } : {}) }
 }
 
 export const parseActionsSettings = (vars: ForgeVars): ActionsSettings | undefined => {

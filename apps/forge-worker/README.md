@@ -21,9 +21,9 @@ tests and the benchmark, and as a deployment of its own without Cloudflare in
 |---|---|---|
 | `BUCKET` | R2 binding | Repository data in the bucket layout of `docs/design.md` (`repos/<owner>/<name>/…`). |
 | `DB` | D1 binding | Accounts, tokens, repository roles, branch protection, instance trust, audit log (`@git-forge/accounts`). Migrations come from `packages/accounts/migrations` (`migrations_dir`) and are applied with `wrangler d1 migrations apply`. |
-| `JOBS` | Queue binding, optional | Queue `git-forge-jobs` (`git-forge-<env>-jobs` per environment) for background jobs: mirror syncs, notification deliveries, subscription renewals, deep checks (`src/mirror-federation.ts`). One message per invocation (`max_batch_size: 1`), retried with exponential backoff. With `JOBS`, `INSTANCE_KEY` and `PUBLIC_URL` set, push notifications are on. |
+| `JOBS` | Queue binding, optional | Queue `git-forge-jobs` (`git-forge-<env>-jobs` per environment) for background jobs: mirror syncs, mirror notification deliveries, subscription renewals, deep checks (`src/mirror-federation.ts`), event fan-out, webhook deliveries and email digests (`@git-forge/notifications`). Without it, fan-out and deliveries run inline in the request. One message per invocation (`max_batch_size: 1`), retried with exponential backoff. With `JOBS`, `INSTANCE_KEY` and `PUBLIC_URL` set, push notifications are on. |
 | `IMPORTS` | Queue binding, optional | Queue `git-forge-imports` (`git-forge-<env>-imports` per environment), produced and consumed by this Worker. Each message is one step of a server-side import in its own invocation. Without it the import endpoint answers `503`. |
-| Cron `17 3 * * *` | trigger | Daily safety net: with `JOBS`, enqueues a sync (and a subscription renewal) for every due auto mirror and the periodic deep checks; without `JOBS`, syncs due mirrors inline. |
+| Cron `17 3 * * *` | trigger | Daily safety net: with `JOBS`, enqueues a sync (and a subscription renewal) for every due auto mirror and the periodic deep checks; without `JOBS`, syncs due mirrors inline. It also re-dispatches stuck webhook deliveries and due email digests. |
 | `BOOTSTRAP_TOKEN` | secret | Allows exactly one successful `POST /api/bootstrap`, which creates the first instance admin. |
 | `INSTANCE_KEY` | secret, optional | Ed25519 private JWK of this instance. Needed to mirror private repositories from other instances; also publishes `/.well-known/openid-configuration` and `/.well-known/jwks.json`. Generate with `pnpm --filter forge-worker instance-key`. |
 | `PUBLIC_URL` | var, optional | Base URL of the instance, used as its issuer (when minting) and audience (when verifying instance tokens). Defaults to the origin of the request; scheduled sync with instance tokens needs it set. |
@@ -35,12 +35,24 @@ tests and the benchmark, and as a deployment of its own without Cloudflare in
 | `MIRROR_UNIT_BYTES` | var | `0` (default): a mirror sync copies all new packs and LFS objects in one job. Otherwise a byte budget per invocation: one job per pack and per LFS object, a final job moves the refs, units above the budget stay pending (`docs/design.md` §12). For a mirror on the Workers Free plan. |
 | `MIRROR_DEEP_CHECK_DAYS` | var | Every how many days a mirror gets the full re-verification (re-hash every object, recompute every index), default 30, `0` = only on demand. |
 | `ALLOW_INSECURE_FEDERATION` | var | `true` lets the instance fetch other instances' JWKS over plain HTTP. Only for local tests. |
-| `ACTIONS` | var | `true` (default in every environment): CI is on. Pushes queue workflow runs, `/_services/actions` (Actions service for `actions/runner`) and `/api/v3` (GHES-style runner, run, job, secrets, environments, check-run and tarball API) are served. The CI tables come from `packages/accounts/migrations/0005_actions.sql` and `0006_actions_workflows.sql`. The `*/5 * * * *` cron runs scheduled workflows and the reaper (timeouts, dead runners, expired tokens); it needs `PUBLIC_URL` to launch runners. |
+| `ACTIONS` | var | `true` (default in every environment): CI is on. Pushes queue workflow runs, `/_services/actions` (Actions service for `actions/runner`) and `/api/v3` (GHES-style runner, run, job, secrets, environments, check-run and tarball API) are served. The CI tables come from `packages/accounts/migrations/0005_actions.sql` and `0008_actions_workflows.sql`. The `*/5 * * * *` cron runs scheduled workflows and the reaper (timeouts, dead runners, expired tokens); it needs `PUBLIC_URL` to launch runners. |
 | `ACTIONS_SECRETS` | secret, optional | JSON object of instance secrets for workflows, e.g. `{"CLOUDFLARE_API_TOKEN":"…"}`. Sent only to the runner of a job of a trusted run, as secret variables. |
 | `ACTIONS_SECRETS_KEY` | secret, optional | 32 random bytes, base64 or hex (`openssl rand -base64 32`). Encrypts repository and environment secrets in D1 (AES-256-GCM). Without it the secrets API answers `503`. Changing it makes stored secrets unreadable. |
 | `ACTIONS_REPOSITORIES` | var, optional | Where `uses: owner/repo@ref` is looked up on this forge, as JSON, e.g. `{"actions/*": "mirrors/*"}`. Without a mapping, `actions/checkout` is looked up as the repository `actions/checkout`. |
 | `ACTIONS_GITHUB_FALLBACK` | var, optional | `true` (or an API base URL): actions that have no repository on this forge are downloaded from `api.github.com` tarballs. Default: off, unresolved actions fail the job. |
 | `ACTIONS_INSTANCE_ID` | var, optional | Stable GUID reported by the Actions location service. |
+| `ALLOW_INSECURE_WEBHOOKS` | var | `true` allows webhook URLs over plain HTTP and to local or private hosts. Only for local tests. |
+| `EMAIL_PROVIDER` | var | `none` (default, no emails), `console` (logs each email as a JSON line; the default of the test environments) or `ses` (Amazon SES v2, `@git-forge/ses`). |
+| `EMAIL_FROM` | var | Sender address, e.g. `Forge <forge@example.org>`; required with a provider. |
+| `SES_REGION` | var | SES region, e.g. `eu-central-1`. |
+| `SES_ACCESS_KEY_ID`, `SES_SECRET_ACCESS_KEY` | secrets | IAM credentials with `ses:SendEmail`. |
+| `SES_ENDPOINT`, `SES_CONFIGURATION_SET` | var, optional | Override of `https://email.<region>.amazonaws.com` (tests) and a configuration set. |
+| `OIDC_ISSUER`, `OIDC_CLIENT_ID` | vars, optional | OIDC login (authorization code + PKCE) against this issuer, e.g. a ZITADEL project. Both or neither; `https` only (`http` only on loopback, for tests). Register `<PUBLIC_URL>/login/oidc/callback` as redirect URI at the provider. |
+| `OIDC_CLIENT_SECRET` | secret, optional | Client secret (`client_secret_basic`). Without it the instance is a public client and sends only `client_id` with the PKCE verifier. |
+| `OIDC_NAME` | var, optional | Name of the provider on the login page, e.g. `Dorf-ID`. |
+| `OIDC_SCOPES` | var, optional | Default `openid profile email`. |
+| `SELF_SIGNUP` | var | `true` lets unknown OIDC identities and new passkeys create accounts. Default `false`: an invite (`POST /api/admin/invites`) or an existing link is needed. |
+| `BREAK_GLASS_PUBLIC_KEY` | var, optional | Ed25519 public JWK of the offline break-glass key (see [Login](#login)). Empty: break-glass login is off. |
 | `RUNNER` | Durable Object + Container | `RunnerContainer` (`src/runner-container.ts`, image `runner/Dockerfile`): one container per CI job with the official `actions/runner` and a JIT config. Declared in every environment; without the binding, jobs wait for a runner registered by hand. |
 
 Repositories are **private by default**; visibility is set per repository.
@@ -56,7 +68,12 @@ There is no global "public read" switch any more.
 - **Other instances** present a short-lived EdDSA JWT. The core tells the
   authorizer whether a request is Git or LFS, so the token scopes `git:read`
   and `lfs:read` are checked separately.
-- **The JSON API** needs a token with `repo:admin`.
+- **The JSON API** needs a token with `repo:admin`, or a browser session
+  (cookie) plus the CSRF token from `GET /api/session` in `X-CSRF-Token` for
+  every state-changing request from the same origin.
+- **People** sign in interactively with OIDC, passkeys or the break-glass key;
+  the CLI gets a `repo:write` token through the device flow. See
+  [Login](#login).
 
 ## API
 
@@ -79,14 +96,90 @@ There is no global "public read" switch any more.
 | `POST /api/repos/{owner}/{name}/mirrors/{remote}/detach` | repository admin | Stops syncing. |
 | `POST /api/repos/{owner}/{name}/import` `{url, token?, username?, lfs?, lfsUrl?, commitsPerStep?, visibility?, defaultBranch?}` | repository admin or instance admin; for a new repository the owner or an instance admin | Imports from a Git URL (smart HTTP v2 or dumb HTTP) without a request body limit, creating the repository first if needed (as `POST /api/repos`). `token` is sent as HTTP Basic password with `username` (default `git`), travels only in the queue messages and is never stored. Refs land in `refs/heads/*` and `refs/tags/*`; rewritten refs are archived, local refs missing upstream are kept. `202` with the state and a `Location`, `409` while an import runs; an import without progress for 30 minutes (its worker or process died) is taken over and continues from its last step. |
 | `GET /api/repos/{owner}/{name}/import` | repository admin | Import state: `phase` (`discover`, `graph`, `fetch`, `lfs`, `refs`, `done`, `failed`), progress, ref updates, missing LFS objects, last error. Starting a failed import again with the same URL resumes it. |
+| `POST /api/admin/invites` `{login?, user?, email?, expiresInDays?}` | instance admin | Invite for a new account (`login` fixed or chosen by the invitee) or for an existing `user` (to add a passkey or link OIDC). Returns `{code, url, expiresAt}`; the URL is `/login/invite/{code}`, valid once, 7 days by default. |
+| `GET /api/user` | token or session | The authenticated user: `{id, login, admin, via, ceiling}`. |
 | `GET /api/health` | anyone | `{"ok": true}` |
 
 Instance admins count as admins of every repository.
+
+### Notifications, webhooks and releases
+
+GitHub-compatible endpoints under `/api/v3` (any user token for the user's
+own notifications; hooks need `repo:admin` and repository admin or
+organization owner; releases need read or write access):
+
+- Notifications: `GET|PUT /api/v3/notifications`,
+  `/api/v3/notifications/threads/{id}[/subscription]`,
+  `/api/v3/repos/{owner}/{name}/notifications`, watching with
+  `GET|PUT|DELETE /api/v3/repos/{owner}/{name}/subscription`, settings with
+  `GET|PATCH /api/v3/user/notification-settings`
+  (`packages/notifications/README.md`).
+- Webhooks: `/api/v3/repos/{owner}/{name}/hooks…` and
+  `/api/v3/orgs/{org}/hooks…` including deliveries and redelivery.
+- Releases: `/api/v3/repos/{owner}/{name}/releases…`, uploads at
+  `/api/uploads/repos/{owner}/{name}/releases/{id}/assets?name=`, downloads at
+  `/{owner}/{name}/releases/download/{tag}/{name}` (`packages/releases/README.md`).
+
+Pushes, mirror alarms, CI completions and releases are emitted as events
+(`docs/design.md` §16); links in payloads and emails use `PUBLIC_URL`, or the
+request origin when it is unset.
 
 Branch protection rules use the GitHub-style API of `@git-forge/accounts`
 (`GET /api/repos/{owner}/{name}/branch-protection`,
 `GET|PUT|DELETE /api/repos/{owner}/{name}/branches/{pattern}/protection`) and
 are enforced on every push.
+
+## Login
+
+Routes of `createLoginHandler` (`@git-forge/accounts`), mounted by
+`createForge` before the JSON API. Pages are minimal server-rendered HTML; the
+web UI replaces them through `createForge({ renderLoginPage })` and calls the
+same core functions.
+
+| Route | Purpose |
+|---|---|
+| `GET /login?return_to=/path` | Sign-in page: OIDC button, passkey sign-in, passkey sign-up (with `SELF_SIGNUP`), break-glass link. |
+| `GET /login/oidc?return_to=…&invite=…&link=1` | Starts OIDC: PKCE (S256), `state` and `nonce` stored as a one-time challenge, `state` also bound to the browser in a 10-minute cookie. `link=1` links the identity to the signed-in account. |
+| `GET /login/oidc/callback` | Checks the bound `state`, exchanges the code, verifies the ID token (JWKS, `RS256`/`ES256`/`EdDSA`, `iss`, `aud`, `azp`, `exp`, `iat`, `nonce`) and signs in, links, redeems an invite or (with `SELF_SIGNUP`) creates the account. |
+| `POST /login/passkey/options`, `POST /login/passkey` | WebAuthn authentication (discoverable credentials, user verification required). |
+| `POST /login/passkey/register/options` `{invite?, login?}`, `POST /login/passkey/register` `{handle, credential, name?}` | WebAuthn registration, attestation `none`. With a session (and CSRF token) it adds a passkey to that account; with an invite or `SELF_SIGNUP` it creates the account. |
+| `GET /login/invite/{code}` | Invite page (OIDC or passkey). |
+| `POST /login/device/code` `client_id=git-forge-cli&client_name=…` | RFC 8628 device authorization: `device_code`, `user_code` (`BCDF-GHJK`), `verification_uri`, 15 minutes, interval 5 s. |
+| `GET /login/device?user_code=…`, `POST /login/device` | The user-code page: requires a session, shows the client and scope, approve or deny with the CSRF token. |
+| `POST /login/device/token` | Polling: `authorization_pending`, `slow_down` (interval + 5 s), `access_denied`, `expired_token`, or a `repo:write` personal access token valid 90 days (`access_token`, `login`, `expires_in`). Each approval yields exactly one token. |
+| `GET\|POST /login/break-glass` | Paste a token signed with the offline break-glass key; opens a one-hour session for an instance admin. |
+| `POST /logout` | Revokes the session (CSRF token required). |
+| `GET /api/session` | `{login, userId, method, expiresAt, csrfToken, admin}` or `401`. |
+| `GET /api/user/passkeys`, `DELETE /api/user/passkeys/{id}` | The signed-in user's passkeys. |
+
+Session cookies are `HttpOnly`, `SameSite=Lax`, `Path=/`, 30 days (break-glass
+one hour), and on `https` origins `Secure` with the `__Host-` prefix
+(`__Host-gf_session`); on plain `http` (local development) the name is
+`gf_session`. Only the SHA-256 of the session id is stored. Every
+state-changing request under `/login`, `/logout` and the JSON API that relies
+on the cookie must come from the instance's own origin (`Origin` header) and
+carry the CSRF token, which is derived from the session id
+(`SHA-256("git-forge csrf\n" + id)`), so it needs no storage and is useless
+without the cookie.
+
+### Break-glass key
+
+Generate the key pair offline, keep the private key off the instance (e.g. on
+paper or a hardware-encrypted stick) and put only the public key into
+`wrangler.jsonc`:
+
+```sh
+pnpm --filter forge-worker break-glass keygen > break-glass.private.jwk
+# prints BREAK_GLASS_PUBLIC_KEY={"kty":"OKP","crv":"Ed25519","x":"…"} on stderr
+```
+
+When OIDC is down, sign a token for an existing instance admin (valid at most
+10 minutes, default 5, usable once) and paste it at `/login/break-glass`:
+
+```sh
+pnpm --filter forge-worker break-glass sign --key break-glass.private.jwk \
+  --url https://forge.example --login alice
+```
 
 ## Media and raw URLs
 
@@ -328,7 +421,35 @@ database (Miniflare), persisted under `.wrangler/`. `.dev.vars` is gitignored.
   defaults, visibility and collaborators, the LFS size limit, the import
   endpoint's authorization and validation, federation and
   scheduled sync between two in-process instances over real HTTP, and the
-  shape of the wrangler environments.
+  shape of the wrangler environments. `test/unit/login.test.ts` drives every
+  login flow through `createForge` with a software authenticator (ES256
+  passkeys built byte by byte) and the mock OIDC provider of
+  `@git-forge/accounts`: invite and self-signup, phishing origin, missing user
+  verification, replayed counters, CSRF and origin checks, OIDC without
+  invite, unbound and forged callbacks, the device flow (pending, slow_down,
+  approve, deny, one token per approval) and break-glass (replay, non-admin,
+  foreign key).
+- `test/e2e/login.e2e.test.ts` starts `wrangler dev` against a mock OIDC
+  provider (ES256) on a local HTTP server: an unknown identity is refused, an
+  invite links it to the bootstrapped admin, the session creates a
+  repository with its CSRF token; then the real CLI runs
+  `git forge auth login` (device flow, approved through the session), and
+  plain `git push` and `git clone` with an LFS file work through the
+  configured credential helper alone; a passkey-only account is created from
+  an invite and signs in again; the break-glass key opens an admin session
+  once.
+- `test/unit/events.test.ts` pushes with
+  the real `git` client into a forge without a job queue and checks the push
+  webhook (commits read from the object database), watcher notifications and
+  emails, a release that creates its tag through the push pipeline, and a
+  mirror alarm that reaches the mirror's admin.
+- `test/e2e/events.e2e.test.ts` runs `wrangler dev` with a local webhook
+  receiver and an HTTP mock of the SES API (`SES_ENDPOINT`): a signed `ping`
+  on hook creation, a signed push webhook after a real `git push`, an inbox
+  entry and a SigV4-signed `SendEmail` call for a watching collaborator, a
+  redelivery with the same delivery id, and a release whose asset is uploaded
+  to R2, redirected from `browser_download_url` and served by the media URL,
+  with the tag visible to `git ls-remote`.
 - `test/e2e/forge.e2e.test.ts` starts `wrangler dev` with a fresh local R2
   bucket and D1 database, bootstraps an admin, creates repositories, pushes a
   generated history of 120 commits with the real `git` client, clones it with

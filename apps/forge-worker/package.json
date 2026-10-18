@@ -18,13 +18,17 @@
     "test:e2e": "vitest run --config vitest.e2e.config.ts",
     "bench": "node --experimental-transform-types --no-warnings --expose-gc scripts/bench.ts",
     "instance-key": "node --experimental-transform-types --no-warnings scripts/instance-key.ts",
+    "break-glass": "node --experimental-transform-types --no-warnings scripts/break-glass.ts",
     "bench:mirror": "node --experimental-transform-types --no-warnings scripts/bench-mirror.ts"
   },
   "dependencies": {
     "@git-forge/accounts": "workspace:*",
     "@git-forge/actions": "workspace:*",
     "@git-forge/cloudflare": "workspace:*",
-    "@git-forge/core": "workspace:*"
+    "@git-forge/core": "workspace:*",
+    "@git-forge/notifications": "workspace:*",
+    "@git-forge/releases": "workspace:*",
+    "@git-forge/ses": "workspace:*"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "5.20261012.1",

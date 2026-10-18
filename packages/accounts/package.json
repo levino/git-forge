@@ -6,7 +6,8 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
-    "./migrations/*": "./migrations/*"
+    "./migrations/*": "./migrations/*",
+    "./test/*": "./test/*"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",

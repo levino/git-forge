@@ -6,9 +6,8 @@ import { openSqliteDatabase } from '@git-forge/accounts-node'
 import { continueImport, createMemoryJobQueue, type FetchFunction, type ImportJob, type JobOutcome, type MemoryJobQueue, type Storage } from '@git-forge/core'
 import { FsStorage, nodeDigests } from '@git-forge/node'
 import { S3Storage } from '@git-forge/s3'
-import { createForge, type Forge } from 'forge-worker/app'
+import { type AppJob, createForge, type Forge } from 'forge-worker/app'
 import { ConfigurationError, loadSecretsKey, parseActionsSettings, parseSettings } from 'forge-worker/config'
-import type { ForgeJob } from 'forge-worker/mirror-federation'
 import { type NodeConfig, type NodeVars, parseNodeConfig, type StorageConfig } from './config.ts'
 
 export type Log = (event: Record<string, unknown>) => void
@@ -18,7 +17,7 @@ export type NodeInstance = {
   readonly forge: Forge
   readonly storage: Storage
   readonly db: Database
-  readonly jobs: MemoryJobQueue<ForgeJob>
+  readonly jobs: MemoryJobQueue<AppJob>
   readonly imports: MemoryJobQueue<ImportJob>
   close(graceMs?: number): Promise<void>
 }
@@ -81,10 +80,10 @@ export const createInstance = async (vars: NodeVars, overrides: InstanceOverride
   }
   const storage = await openStorage(config.storage)
   let forge: Forge | undefined
-  const jobs = createMemoryJobQueue<ForgeJob>((job) => forge!.runJob(job), {
+  const jobs = createMemoryJobQueue<AppJob>((job) => forge!.runJob(job), {
     concurrency: config.jobConcurrency,
     keepHistory: false,
-    onOutcome: outcomeLog<ForgeJob>(log, 'job', (job) => ({ ...job })),
+    onOutcome: outcomeLog<AppJob>(log, 'job', (job) => ({ ...job })),
   })
   const imports: MemoryJobQueue<ImportJob> = createMemoryJobQueue<ImportJob>(
     async (job) => {

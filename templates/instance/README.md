@@ -107,6 +107,38 @@ collaborators, instance federation and mirrors are described in the
 To mirror private repositories of other instances, also set the secret
 `INSTANCE_KEY` and the var `PUBLIC_URL` (see there).
 
+## Login
+
+People sign in at `https://<your-instance>/login` with passkeys (built in),
+with an OIDC provider, or, as last resort, with the break-glass key. The
+command line uses `git forge auth login https://<your-instance>`, after which
+plain `git clone` and `git push` work without tokens in URLs. All settings are
+vars in `wrangler.jsonc`; only the OIDC client secret is a secret.
+
+| Var / secret | Value |
+|---|---|
+| `PUBLIC_URL` | `https://<your-instance>`: origin for passkeys, OIDC redirect URI and break-glass tokens. Set it when the instance has a custom domain. |
+| `OIDC_ISSUER`, `OIDC_CLIENT_ID` | Issuer URL and client id of the OIDC application, e.g. `https://dorf-id.example` (ZITADEL) and the app's client id. Empty: no OIDC. |
+| `OIDC_CLIENT_SECRET` (secret) | Only for a confidential client: `npx wrangler@4 secret put OIDC_CLIENT_SECRET`. A ZITADEL app with authentication method "PKCE" needs none. |
+| `OIDC_NAME` | Button label, e.g. `Dorf-ID`. |
+| `SELF_SIGNUP` | `true`: anyone who can sign in at the provider (or register a passkey) gets an account. `false` (default): only invited people. |
+| `BREAK_GLASS_PUBLIC_KEY` | Public half of the offline break-glass key, see the [forge-worker README](https://github.com/levino/git-forge/tree/main/apps/forge-worker#break-glass-key). |
+
+For ZITADEL create a **Web** application in a project with response type
+`code`, grant type authorization code, authentication method `PKCE` (or
+`Basic` with a client secret) and the redirect URI
+`https://<your-instance>/login/oidc/callback`. Then invite the people you
+want, or yourself (the bootstrap admin), with the admin token:
+
+```sh
+curl -X POST https://<your-instance>/api/admin/invites \
+  -H "Authorization: Bearer $TOKEN" -d '{"user":"alice"}'
+# {"code":"gfi_…","url":"https://<your-instance>/login/invite/gfi_…", …}
+```
+
+Opening the invite URL links the OIDC identity or registers a passkey for
+`alice`. `{"login":"bob"}` invites a new account instead.
+
 ## Imports
 
 `POST /api/repos/<owner>/<name>/import` creates or updates a repository by
@@ -114,6 +146,33 @@ pulling it from another Git server, without the request body limit of a push.
 Its steps run on the Cloudflare Queue `git-forge-imports`, declared in
 `wrangler.jsonc` and created by the first `wrangler deploy` like the bucket
 and the database.
+
+## Notifications, email and webhooks
+
+Notifications (`/api/v3/notifications`), webhooks
+(`/api/v3/repos/<owner>/<name>/hooks`) and releases
+(`/api/v3/repos/<owner>/<name>/releases`) work without further setup; their
+jobs run on the `git-forge-jobs` queue. Set the var `PUBLIC_URL` so links in
+payloads and emails point to your domain.
+
+Emails are off (`"EMAIL_PROVIDER": "none"`). To send them through Amazon SES,
+verify the sender address or domain in SES, create an IAM user with
+`ses:SendEmail`, and set in `wrangler.jsonc`
+
+```jsonc
+  "vars": { "…": "…", "EMAIL_PROVIDER": "ses", "EMAIL_FROM": "Forge <forge@example.org>", "SES_REGION": "eu-central-1" },
+```
+
+plus the two secrets:
+
+```sh
+npx wrangler@4 secret put SES_ACCESS_KEY_ID
+npx wrangler@4 secret put SES_SECRET_ACCESS_KEY
+```
+
+`"EMAIL_PROVIDER": "console"` writes each email to the Worker logs instead,
+which is handy for a first test. Users choose `instant`, `hourly`, `daily` or
+`off` with `PATCH /api/v3/user/notification-settings`.
 
 ## Update
 

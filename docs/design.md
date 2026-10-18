@@ -1552,13 +1552,28 @@ Issues, pull requests, reviews, commit statuses, check runs and discussions
   merge commit (parents base and head), squash (parent base), rebase
   (cherry-picks parents first, drops commits that become empty, refuses
   merge commits). Results are compared commit by commit with `git merge
-  --no-ff`, `git merge --squash` and `git rebase --force-rebase`. Rename
-  detection is not implemented; to stay safe, situations where git's rename
-  or directory-rename detection could change the outcome (a file deleted on
-  both sides while a similar file was added on one side, a directory removed
-  on one side while the other adds to it) are reported as conflicts. The
-  merge is therefore never clean where git conflicts, and identical where
-  both are clean.
+  --no-ff`, `git merge --squash` and `git rebase --force-rebase`. Renames
+  are detected like `merge-ort` does (`rename.ts`, a port of
+  `diffcore-rename`): per side, base→side deletions are rename sources and
+  additions destinations (empty files excluded); only sources whose other
+  side changed or removed the file are relevant; exact matches first, then
+  same-basename pairs at 75% similarity (with git's directory hint for
+  non-unique basenames), then the similarity matrix at 50% (git's span-hash
+  score, four candidates per destination, stable sort, greedy pairing,
+  rename limit 7000). A rename on one side with an edit on the other merges
+  the content at the new path; both sides renaming to the same path merge
+  there; rename/delete, rename/rename to different paths and rename/add are
+  conflicts. Similarity scores are checked against `git diff -M` and
+  randomized rename histories against `git merge`, `git merge --squash` and
+  `git rebase`. Where git's result could depend on its hash-map iteration or
+  traversal order (several identical files competing for one rename, tied
+  scores or tied directory hints) or the comparison budget (250 000 pairs) is
+  exceeded, the relevant sources are reported as conflicts instead.
+  Directory rename detection is not ported: a directory removed on one side
+  while the other side adds to it is a conflict (git reports these as
+  conflicts too when it finds a directory rename, and merges them when it
+  does not). The merge is therefore never clean where git conflicts, and
+  identical where both are clean.
 - **Branch protection on merge.** The merge calls the same
   `evaluateBranchUpdate(rule, actor, update, { via: 'pull-request', … })` as
   receive-pack, with approvals from reviewers with write access (the

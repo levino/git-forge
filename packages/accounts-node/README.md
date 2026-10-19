@@ -21,3 +21,8 @@ a D1-shaped fake, and an end-to-end run with the real `git` client against
 `handleGitRequest` with the accounts authorizer: private clones with and
 without tokens, Basic and Bearer credentials, push permissions, public
 repositories, and clones by a federated instance with a minted JWT.
+
+`pnpm test:libsql` runs the same suites (except the D1 fake) against a local
+`sqld` through `@git-forge/libsql` (see its README). `locked-storage.test.ts`
+runs the storage conformance suite through `lockedStorage` over a storage that
+ignores conditions, and over `S3Storage` when `S3_TEST_*` is set.

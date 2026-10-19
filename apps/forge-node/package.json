@@ -18,6 +18,7 @@
     "@git-forge/accounts": "workspace:*",
     "@git-forge/accounts-node": "workspace:*",
     "@git-forge/core": "workspace:*",
+    "@git-forge/libsql": "workspace:*",
     "@git-forge/node": "workspace:*",
     "@git-forge/s3": "workspace:*",
     "@git-forge/ses": "workspace:*",

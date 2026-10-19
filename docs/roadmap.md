@@ -78,6 +78,9 @@ discussions.
 - [x] Headless deployment on a Raspberry Pi: `apps/forge-node` serves the Worker's router over `node:http` with an SQLite file, `FsStorage` or `S3Storage`, an in-process job queue and a cron schedule; explicit `migrate` command; single executables for `linux-x64`/`linux-arm64` (Bun) in every release, Dockerfile, systemd units; E2E with a Worker under `wrangler dev` mirroring in both directions
 - [x] Publish the `apps/forge-node` image to a container registry (multi-arch) from the release workflow (`ghcr.io/levino/git-forge-node`, `linux/amd64` and `linux/arm64`)
 - [x] Durable jobs for Node deployments (job table in SQLite, migration `0021_jobs`, leases so a crash re-runs), so queued mirror jobs survive a restart instead of waiting for the next notification or scheduled run
+- [x] libSQL database adapter (`@git-forge/libsql`, Hrana over HTTP: Bunny Database, Turso, `sqld`); accounts suite and forge-node tested against a local `sqld` (`libsql` CI job); `DATABASE=libsql` in forge-node
+- [x] Conditional writes in the database for buckets without conditional `PutObject` (`lockedStorage`, migration `0062_storage_locks`, `CONDITIONAL_WRITES=database`)
+- [ ] Bunny instance (#13): Magic Containers + Bunny Storage S3 + Bunny Database, guide in `apps/forge-node/README.md`; needs an account for the conformance run, a large push and federation with forge.levinkeller.de
 
 ## M5a — Large pushes
 

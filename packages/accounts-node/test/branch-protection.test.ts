@@ -13,7 +13,7 @@ import {
 import { createRepository, handleGitRequest, MemoryStorage, readRefs } from '@git-forge/core'
 import { commitAll, gitEnv, initRepo, tempDir, writeFile } from '@git-forge/core/test/git-helpers.ts'
 import { type RunningServer, startServer } from '@git-forge/core/test/http-server.ts'
-import { openSqliteDatabase } from '../src/index.ts'
+import { testDatabase } from './database.ts'
 
 const run = promisify(execFile)
 
@@ -41,7 +41,7 @@ const tokens: Record<string, string> = {}
 
 beforeAll(async () => {
   storage = new MemoryStorage()
-  const { db } = openSqliteDatabase()
+  const db = await testDatabase()
   await applyMigrations(db, MIGRATIONS)
   store = createAccountsStore(db)
   const owner = await store.createUser({ login: 'olga' })

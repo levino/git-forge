@@ -149,7 +149,7 @@ Design: [design.md §18](design.md#18-web-ui).
 - [x] Blame, syntax highlighting in diffs and Markdown code blocks
 - [x] Explore and profile listings without one access check per repository (one SQL query, stored default branch and last commit time, sort and paging)
 - [x] Search box and results page (repositories, issues and pull requests, discussions, users)
-- [x] Page load performance: shared pack caches (isolate and Cache API), parallel ref, pack list and header reads, single-request R2 ranges, lazy highlighter grammars, one-read migration check on start, `Server-Timing`
+- [x] Page load performance: shared pack caches (isolate and Cache API), parallel ref, pack list and header reads, single-request R2 ranges, lazy highlighter grammars, one-read migration check on start, `Server-Timing`, class-based highlighting and compact code rows (about 75% less HTML for large files)
 - [ ] Issue/PR UI: labels, assignees, milestones, reviewer requests, suggested changes, `#N` autolinks in rendered Markdown
 
 ## M7 — Collaboration

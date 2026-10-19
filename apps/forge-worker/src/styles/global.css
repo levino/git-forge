@@ -127,16 +127,20 @@
   color: var(--color-base-content);
 }
 
-.code-line span,
-.hl span {
-  color: var(--shiki-light);
+.code-view {
+  @apply font-mono text-xs leading-5 w-full border-separate border-spacing-0;
 }
-
-@media (prefers-color-scheme: dark) {
-  .code-line span,
-  .hl span {
-    color: var(--shiki-dark);
-  }
+.code-view tr:target {
+  @apply bg-warning/20;
+}
+.code-view td:nth-last-child(2) {
+  @apply select-none text-right pr-3 pl-4 w-px text-base-content/50 align-top;
+}
+.code-view td:nth-last-child(2) a:hover {
+  @apply underline;
+}
+.code-view td:last-child {
+  @apply whitespace-pre pr-4;
 }
 
 .markdown-body {

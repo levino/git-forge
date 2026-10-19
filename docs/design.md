@@ -2706,11 +2706,17 @@ progress answers 409.
   directory.
 - Syntax highlighting is server-side with shiki's JavaScript regex engine (no
   WebAssembly) and a fixed set of grammars, each loaded on first use (Markdown
-  also loads the languages of its fences); tokens carry light and dark
-  colours as CSS variables. Files above 256 KiB or with unknown types are
-  shown unhighlighted. Diffs highlight the old and the new side of each hunk
-  separately. Fenced Markdown code blocks (`language-*`) are highlighted after
-  `rehype-sanitize`, so only highlighter spans carry styles.
+  also loads the languages of its fences). Token colours are classes
+  (`l<i>` light, `d<i>` dark) indexed into the two themes' palettes; their
+  rules (`HIGHLIGHT_CSS`) are appended to the stylesheet, tokens in the
+  default colour and adjacent tokens of one class are merged into plain text.
+  File rows and the code of blame and diff lines are built as strings (only
+  `&`, `<`, `>` escaped); file rows omit the optional `</td></tr>`, and
+  `.code-view` styles number and code cells instead of per-cell classes.
+  Files above 256 KiB or with unknown types are shown unhighlighted. Diffs highlight the old and
+  the new side of each hunk separately. Fenced Markdown code blocks
+  (`language-*`) are highlighted after `rehype-sanitize`, so only
+  highlighter spans carry these classes.
 - Markdown (README, `.md` files) goes through remark/rehype with GFM and
   `rehype-sanitize` (GitHub's schema); relative links point to the blob view,
   relative images to the raw endpoint.

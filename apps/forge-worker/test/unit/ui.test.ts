@@ -3,7 +3,7 @@ import { uiEnabled } from '../../src/config.ts'
 import { isCrossSiteWrite, isForgePath, isLoginPath } from '../../src/routing.ts'
 import { previewKind } from '../../src/ui/browse.ts'
 import { formatBytes, relativeTime } from '../../src/ui/format.ts'
-import { highlightHunks, highlightLines, languageFor } from '../../src/ui/highlight.ts'
+import { HIGHLIGHT_CSS, highlightHunks, highlightLines, languageFor } from '../../src/ui/highlight.ts'
 import { parsePage } from '../../src/ui/history.ts'
 import { renderMarkdown, resolveRelative } from '../../src/ui/markdown.ts'
 
@@ -111,15 +111,17 @@ describe('highlighting', () => {
     const lines = await highlightLines('const a = 1\n\nexport { a }\n', 'a.ts')
     expect(lines).toHaveLength(3)
     expect(lines[0]!.map((token) => token.content).join('')).toBe('const a = 1')
-    expect(lines[0]![0]!.style).toMatch(/--shiki-light:#[0-9A-F]{6};--shiki-dark:#[0-9A-F]{6}/i)
+    expect(lines[0]![0]).toEqual({ content: 'const', className: expect.stringMatching(/^l\d+ d\d+$/) })
+    expect(lines.flat().some((token) => token.className === '' && token.content.includes(' '))).toBe(true)
     expect(lines[1]).toEqual([])
-    expect(await highlightLines('<b>\n', 'notes')).toEqual([[{ content: '<b>', style: '' }]])
+    for (const name of lines.flat().flatMap((token) => token.className.split(' ').filter(Boolean))) expect(HIGHLIGHT_CSS).toMatch(new RegExp(`\\.${name}\\{color:#[0-9A-F]{6}\\}`))
+    expect(await highlightLines('<b>\n', 'notes')).toEqual([[{ content: '<b>', className: '' }]])
   })
 
   it('highlights fenced Markdown code after sanitizing and leaves unknown fences plain', async () => {
     const base = { blob: '/a/b/blob/main', raw: '/a/b/raw/main', directory: '' }
     const html = await renderMarkdown('```ts\nconst a = "<script>"\n```\n\n```nope\nx\n```\n\n<span style="color:red">y</span>', base)
-    expect(html).toMatch(/<pre class="hl"><code class="language-ts"><span style="--shiki-light:[^"]+">const<\/span>/)
+    expect(html).toMatch(/<pre class="hl"><code class="language-ts"><span class="l\d+ d\d+">const<\/span>/)
     expect(html).toContain('&#x3C;script>')
     expect(html).not.toContain('<script>')
     expect(html).toContain('<pre><code class="language-nope">x')
@@ -130,7 +132,7 @@ describe('highlighting', () => {
     const line = (kind: ' ' | '-' | '+', text: string) => ({ kind, text, oldLine: null, newLine: null, noNewline: false })
     const [hunk] = await highlightHunks([{ oldStart: 1, oldLines: 2, newStart: 1, newLines: 2, section: '', lines: [line(' ', 'let a = 1'), line('-', 'a = 2'), line('+', 'a = 3')] }], 'x.ts')
     expect(hunk!.map((tokens) => tokens.map((token) => token.content).join(''))).toEqual(['let a = 1', 'a = 2', 'a = 3'])
-    expect(hunk![0]![0]!.style).toContain('--shiki-light')
+    expect(hunk![0]![0]!.className).toMatch(/^l\d+ d\d+$/)
   })
 })
 

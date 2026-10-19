@@ -65,7 +65,7 @@ const highlightCodeBlocks = () => async (tree: HastNode) => {
       const lines = await highlightText(textOf(code), language)
       code.children = lines.flatMap((line, index) => [
         ...(index > 0 ? [{ type: 'text', value: '\n' }] : []),
-        ...line.map((token) => (token.style ? { type: 'element', tagName: 'span', properties: { style: token.style }, children: [{ type: 'text', value: token.content }] } : { type: 'text', value: token.content })),
+        ...line.map((token) => (token.className ? { type: 'element', tagName: 'span', properties: { className: token.className.split(' ') }, children: [{ type: 'text', value: token.content }] } : { type: 'text', value: token.content })),
       ])
       pre.properties = { ...pre.properties, className: ['hl'] }
     }),

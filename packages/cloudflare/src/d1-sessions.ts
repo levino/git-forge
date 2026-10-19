@@ -8,6 +8,7 @@ export type SessionOutcome<T> = { readonly value: T; readonly bookmark: string |
 
 export type D1Sessions = {
   readonly database: Database
+  readonly primary: Database
   readonly run: <T>(bookmark: string | null, callback: () => Promise<T>) => Promise<SessionOutcome<T>>
 }
 
@@ -31,6 +32,7 @@ export const d1Sessions = (d1: D1Database, context: ContextStorage<RequestSessio
       run: (statement) => (wrote(), inner.run(statement)),
       batch: (statements) => (wrote(), inner.batch(statements)),
     },
+    primary: d1Database(d1),
     run: async (bookmark, callback) => {
       if (!context) return { value: await callback(), bookmark: null, wrote: false }
       const state: RequestSession = { session: d1.withSession(bookmark !== null && BOOKMARK.test(bookmark) ? bookmark : 'first-unconstrained'), wrote: false }

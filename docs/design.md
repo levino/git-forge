@@ -318,6 +318,7 @@ the [accounts README](../packages/accounts/README.md#branch-protection).
   lfs/
     objects/<oid[0:2]>/<oid[2:4]>/<oid>   # LFS objects, release assets and Pages files
   pages/deployments/<sha256>.json   # immutable Pages manifest, keyed by its own hash (§20)
+  cache/last-commits/<commit>.json  # last commit per path from <commit>, derived, written once (§18)
   import/status.json                # progress of the last import
   import/commits.txt                # commit order of the last import
   import/blobs.txt                  # blobs of the commit an import is splitting
@@ -378,6 +379,9 @@ tmp/<repo>/<timestamp>-<uuid>/part/<nnnnn>  # its parts, 1-based, five digits
   a known id (browsing by SHA, raw downloads, pushes that reference an
   existing object) still resolve through the alternates, like GitHub's fork
   networks.
+- **Derived data** under `cache/` is a pure function of the key (a commit
+  id), written once with `ifNoneMatch: '*'` and never needed for
+  correctness: readers that miss it compute the same result themselves.
 - **Release assets** are content-addressed like LFS objects
   (`lfs/objects/…`, §16). Which asset belongs to which release lives only in
   the database; a deleted asset or release leaves its bytes in place.
@@ -2482,7 +2486,57 @@ everything derived from them is cached without invalidation:
 
 Only `refs.json`, `objects/info/packs` and `alternates` are read per request,
 in parallel; `openRepository` starts them together with the header's
-database reads (scope, open counts, forks), memoized per request. R2 range
+database reads (scope, open counts, forks), memoized per request.
+
+**Repository state cache.** `stateCachedStorage` (core) keeps these three
+keys of every repository (and of its alternates) in a `StateCache` adapter,
+so a page, `info/refs` or clone reads them with one database query instead of
+R2 round trips. `createStateCache` (`@git-forge/accounts`) implements it on
+the `storage_state` table (migration `0061`), on D1 and on the Node SQLite
+file alike. The bucket stays the source of truth; the cache sits below
+`locatedStorage` (physical keys, so renames need nothing) and holds the body,
+the bucket's etag, or "absent". Protocol per key, each step one SQL
+statement on a row with a version counter:
+- *read*: a row that is committed and not pending is served as is (with the
+  bucket's etag, so compare-and-swap works unchanged); otherwise the bucket
+  is read and the result *filled* only if the row's version is still the one
+  read (or the row does not exist yet) and no write is pending.
+- *write*: `begin` marks the row pending under a fresh token (readers fall
+  back to the bucket), then the bucket write runs; a successful conditional
+  write `commit`s the new body and etag if the token is still the row's,
+  anything else (failed CAS, unconditional write, error) `abort`s to a miss.
+  A commit whose token was replaced by a later writer leaves the row alone
+  while that writer is pending and invalidates a committed row otherwise.
+- a pending mark older than 60 s no longer blocks fills, so a writer that
+  died between `begin` and `commit` costs only bucket reads for a minute.
+  Every successful bucket CAS is preceded by a `begin`, so a committed row is
+  never older than the bucket; the only gap is a writer that stalls more than
+  60 s after `begin`, then succeeds and dies before its commit.
+- If the database is unavailable, reads fall back to the bucket and writes
+  fail (a write without `begin` could leave a stale row).
+
+D1 rather than a per-repository Durable Object: the template's instances
+update by changing the release pin only (§15), and a new Durable Object class
+needs a binding and a migration in every instance's `wrangler.toml`, while a
+table migrates itself; Node uses the same SQL. A D1 query from the Worker
+(Smart Placement next to D1 and R2) costs a few ms against tens for R2, and
+repositories are independent rows, so there is no hot object. The state
+must be read from the D1 primary: a read replica could return an old etag
+that makes every CAS fail, so `stateCache` gets `d1Sessions(…).primary`,
+the plain binding outside any session (sessionless queries go to the
+primary).
+
+**Last commits.** After a push (`last-commits` job, at most ten branches)
+`precomputeLastCommits` stores, for each new branch tip, the last commit of
+every path in its tree (`cache/last-commits/<commit>.json`, up to 20 000
+paths). It is the walk of `commitLog` (date order, at most 10 000 commits,
+a path is touched when it differs from every parent) done once for all
+paths; when the walk reaches the previous tip as its only frontier, the rest
+comes from that tip's map. Tree and blob pages of a branch tip take the
+latest commit of the path and of every entry (entry commits shown for up to
+1000 entries, only where the reader may see the path) from it; the commits
+page of a path skips the touch checks until the stored first match. Missing
+maps (tags, older commits, before the job ran) fall back to the walk. R2 range
 reads are one request (the head-then-get path is only the fallback). The
 Worker adds `Server-Timing: app;dur=<ms>` to every response.
 
@@ -2520,7 +2574,7 @@ without `Authorization` and without a session cookie (also an invalid one),
 after the access check found a public repository with full read access (no
 partial view). The key is a SHA-256 over the release version, the full URL,
 the repository record (visibility, description, topics, archive state), the
-ETag of `refs.json` and `repository_changes.counter`, which SQLite triggers
+ETag of `refs.json` (the bucket's, also when served from the state cache) and `repository_changes.counter`, which SQLite triggers
 (migration `0060_repository_changes`) increment on every insert, update or
 delete in the collaboration tables shown on these pages (issues, pull
 requests, comments, reviews, labels, milestones, events, statuses, checks,
@@ -2825,8 +2879,8 @@ only to objects that exist by the time they are copied.
 keyset by `rowid`, tables in creation order), `9999-indexes.sql` (indexes,
 FTS5 tables, the search index rebuild, triggers, views), then
 `manifest.json` when the run is complete. One statement per line (newlines
-in strings become `char(10)`). `backup_state`, `backup_objects`, FTS5
-virtual tables and their shadow tables are not dumped; the FTS5 tables are
+in strings become `char(10)`). `backup_state`, `backup_objects`,
+`storage_state` (the repository state cache, §18), FTS5 virtual tables and their shadow tables are not dumped; the FTS5 tables are
 recreated and rebuilt from their content after the data. The dump spans
 several steps, so it is not a single-instant snapshot.
 

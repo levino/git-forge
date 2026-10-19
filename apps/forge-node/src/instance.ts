@@ -1,7 +1,7 @@
 import { mkdir } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import type { DatabaseSync } from 'node:sqlite'
-import { applyMigrations, type Database, MIGRATIONS, pendingMigrations } from '@git-forge/accounts'
+import { applyMigrations, createStateCache, type Database, MIGRATIONS, pendingMigrations } from '@git-forge/accounts'
 import { openSqliteDatabase } from '@git-forge/accounts-node'
 import { continueImport, createConsoleEmailSender, type EmailSender, type FetchFunction, type ImportJob, type JobOutcome, type Storage, storagePublisher } from '@git-forge/core'
 import { CLIENT_ADDRESS_HEADER, FsStorage, nodeDigests } from '@git-forge/node'
@@ -167,6 +167,7 @@ export const createInstance = async (vars: NodeVars, overrides: InstanceOverride
     ...(email ? { email } : {}),
     storage,
     db,
+    stateCache: createStateCache(db),
     digests: nodeDigests,
     version: typeof GIT_FORGE_VERSION === 'string' ? GIT_FORGE_VERSION : 'dev',
     ...(secretsKey ? { secretsKey } : {}),

@@ -153,6 +153,8 @@ Design: [design.md §18](design.md#18-web-ui).
 - [x] Fewer D1 round trips per page: resolved repository and access reused by the collaboration scope, instance-admin flag read with the session, header and list queries in parallel; a page test counts queries per page (#63)
 - [x] D1 read replication through the Sessions API: one session per request, bookmark cookie after writes, `X-Forge-Bookmark` for API clients, unsafe methods start at the primary (#64; needs read replication enabled on the D1 database)
 - [x] Rendered HTML of public repository pages cached for anonymous visitors (Cache API), keyed by refs ETag, repository record and a trigger-maintained change counter (migration `0060_repository_changes`) (#65)
+- [x] Repository state cache: refs, pack list and alternates per repository in the database (`storage_state`, migration `0061`, D1 primary or SQLite), bucket stays the source of truth, safe under concurrent CAS writers (design §18)
+- [x] Last commit per path precomputed after a push (`last-commits` job, `cache/last-commits/<commit>.json`): latest commit per entry on tree pages, faster path history; fallback to the walk
 - [ ] Issue/PR UI: labels, assignees, milestones, reviewer requests, suggested changes, `#N` autolinks in rendered Markdown
 
 ## M7 — Collaboration

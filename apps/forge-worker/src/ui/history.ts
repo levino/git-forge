@@ -14,6 +14,7 @@ import {
   type RefTarget,
   resolveRefAndPath,
 } from '@git-forge/core'
+import { knownLastCommits } from './browse.ts'
 import { type HighlightedLine, highlightLines } from './highlight.ts'
 import { type OpenRepository, reachOf } from './repository.ts'
 
@@ -37,7 +38,8 @@ export const history = async (repo: OpenRepository, segments: readonly string[],
   if (segments.length === 0) return repo.defaultBranch ? history(repo, [repo.defaultBranch], page) : { kind: 'empty' }
   const target = await resolveRefAndPath(repo.odb, repo.refs, segments)
   if (!target || (await reachOf(repo, target.commit))(target.path.join('/')) !== 'inside') return { kind: 'not-found' }
-  const log = await commitLog(repo.odb, target.commit, { limit: COMMITS_PER_PAGE, skip: (page - 1) * COMMITS_PER_PAGE, path: target.path })
+  const first = target.path.length > 0 ? (await knownLastCommits(repo, target.commit))?.get(target.path.join('/')) : undefined
+  const log = await commitLog(repo.odb, target.commit, { limit: COMMITS_PER_PAGE, skip: (page - 1) * COMMITS_PER_PAGE, path: target.path, ...(first !== undefined ? { first } : {}) })
   return { kind: 'history', target, commits: log.commits, page, more: log.more }
 }
 

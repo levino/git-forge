@@ -1,4 +1,4 @@
-import { d1Database, MIGRATIONS, migrateOnStart } from '@git-forge/accounts'
+import { createStateCache, MIGRATIONS, migrateOnStart } from '@git-forge/accounts'
 import { cacheApiObjectCache, cacheApiPageCache, consumeJobs, type ContextStorage, createCloudflareEmailSender, type D1Sessions, d1Sessions, type RequestSession, digestStreams, QueueJobs, R2Storage } from '@git-forge/cloudflare'
 import { continueImport, createConsoleEmailSender, type EmailSender, type ImportJob, type ImportScheduler, storagePublisher } from '@git-forge/core'
 import { S3Storage } from '@git-forge/s3'
@@ -54,8 +54,8 @@ export const sessionsFor = (env: Env): Promise<D1Sessions> => (sessions ??= cont
 export const forgeFor = (env: Env): Promise<Forge> => {
   forge ??= parseSettings(env)
     .then(async (settings) => {
-      const { database } = await sessionsFor(env)
-      await migrateOnStart(d1Database(env.DB), MIGRATIONS)
+      const { database, primary } = await sessionsFor(env)
+      await migrateOnStart(primary, MIGRATIONS)
       const actions = parseActionsSettings(env)
       const secretsKey = await loadSecretsKey(actions, env)
       const idTokenKeys = await loadIdTokenKeys(actions, settings.instanceKey)
@@ -66,6 +66,7 @@ export const forgeFor = (env: Env): Promise<Forge> => {
         storage: new R2Storage(env.BUCKET),
         objectCache: cacheApiObjectCache(),
         pageCache: cacheApiPageCache(PAGE_CACHE_SECONDS),
+        stateCache: createStateCache(primary),
         db: database,
         digests: digestStreams,
         version: typeof GIT_FORGE_VERSION === 'string' ? GIT_FORGE_VERSION : 'dev',

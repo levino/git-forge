@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { env } from 'cloudflare:workers'
-import { sql } from '@git-forge/accounts'
+import { applyMigrations, createStateCache, MIGRATIONS, sql } from '@git-forge/accounts'
 import { describe, expect, it } from 'vitest'
 import { BOOKMARK_HEADER, type ContextStorage, d1Sessions, requestBookmark, sessionStart, withBookmark } from '../src/d1-sessions.ts'
 
@@ -46,6 +46,34 @@ describe('d1Sessions', () => {
     const sessions = d1Sessions(DB, null)
     expect(await sessions.run('anything', async () => (await sessions.database.all<{ one: number }>(sql('SELECT 1 AS one')))[0]!.one)).toEqual({ value: 1, bookmark: null, wrote: false })
     expect((await d1Sessions(DB, contextStorage()).database.all<{ one: number }>(sql('SELECT 1 AS one')))[0]!.one).toBe(1)
+  })
+
+  it('keeps the state cache on the primary inside a replica session', async () => {
+    const sessionQueries: string[] = []
+    const spied = new Proxy(DB, {
+      get: (target, key) =>
+        key === 'withSession'
+          ? (start?: string) => {
+              const session = target.withSession(start)
+              return new Proxy(session, {
+                get: (inner, name) => (name === 'prepare' ? (query: string) => (sessionQueries.push(query), inner.prepare(query)) : Reflect.get(inner, name).bind(inner)),
+              })
+            }
+          : Reflect.get(target, key).bind(target),
+    })
+    const sessions = d1Sessions(spied, contextStorage())
+    await applyMigrations(sessions.primary, MIGRATIONS)
+    const state = createStateCache(sessions.primary)
+    const key = 'repos/a/b/refs.json'
+    const { value } = await sessions.run('first-unconstrained', async () => {
+      await sessions.database.all(sql('SELECT 1 AS one'))
+      await state.fill(key, { etag: 'e1', text: '{}' }, null)
+      await state.begin(key, 't')
+      await state.commit(key, 't', { etag: 'e2', text: '{}' })
+      return (await state.get([key])).get(key)
+    })
+    expect(value).toMatchObject({ hit: true, value: { etag: 'e2' } })
+    expect(sessionQueries).toEqual(['SELECT 1 AS one'])
   })
 
   it('ignores malformed bookmarks', async () => {

@@ -168,6 +168,8 @@ import {
   MirrorExistsError,
   MirrorNotFoundError,
   ObjectDatabase,
+  type LastCommitsUpdate,
+  precomputeLastCommits,
   type PackfileUri,
   PermanentJobError,
   type Presigner,
@@ -190,6 +192,8 @@ import {
   withPresigner,
   locatedStorage,
   cachedStorage,
+  stateCachedStorage,
+  type StateCache,
   type ObjectCache,
   ZERO_ID,
 } from '@git-forge/core'
@@ -283,6 +287,7 @@ export type ForgeOptions = ForgeSettings & {
   readonly secretsKey?: SecretsKey
   readonly presigner?: Presigner
   readonly objectCache?: ObjectCache
+  readonly stateCache?: StateCache
   readonly scheduleImport?: ImportScheduler
   readonly email?: EmailSender
   readonly renderLoginPage?: LoginPageRenderer
@@ -313,7 +318,11 @@ export type GitHubMirrorJob = {
   readonly sealedToken?: SealedSecret
 }
 
-export type AppJob = ForgeJob | NotificationJob | PagesJob | LfsPublishJob | ImportLfsJob | GitHubMirrorJob | BackupJob | UsageScanJob
+export type LastCommitsJob = { readonly kind: 'last-commits'; readonly owner: string; readonly name: string; readonly updates: readonly LastCommitsUpdate[] }
+
+export const MAX_LAST_COMMIT_UPDATES = 10
+
+export type AppJob = ForgeJob | NotificationJob | PagesJob | LfsPublishJob | ImportLfsJob | GitHubMirrorJob | BackupJob | UsageScanJob | LastCommitsJob
 
 export const LFS_PUBLISH_BATCH = 100
 
@@ -592,7 +601,8 @@ export const createForge = (options: ForgeOptions): Forge => {
   const now = options.now ?? (() => new Date())
   const nowMs = () => now().getTime()
   const meter = createUsageMeter(options.db, nowMs)
-  const metered = options.objectCache ? cachedStorage(meter.storage(options.storage), options.objectCache) : meter.storage(options.storage)
+  const counted = options.objectCache ? cachedStorage(meter.storage(options.storage), options.objectCache) : meter.storage(options.storage)
+  const metered = options.stateCache ? stateCachedStorage(counted, options.stateCache) : counted
   const db = meter.database(options.db)
   const store: AccountsStore = createAccountsStore(db, { now: () => now().getTime() })
   const located = (raw: Storage): Storage => locatedStorage(raw, store.locateRepository, () => now().getTime())
@@ -820,6 +830,22 @@ export const createForge = (options: ForgeOptions): Forge => {
   const scheduleLfsPublish = async (job: LfsPublishJob): Promise<void> => {
     if (options.jobs) await options.jobs.enqueue(job)
     else await publishLfs(job)
+  }
+
+  const runLastCommits = async (job: LastCommitsJob): Promise<void> => {
+    const stored = await precomputeLastCommits(new ObjectDatabase(storage, { owner: job.owner, name: job.name }), job.updates)
+    console.log(JSON.stringify({ event: 'last-commits', repository: `${job.owner}/${job.name}`, stored }))
+  }
+
+  const scheduleLastCommits = async (repo: RepositoryName, outcome: PushOutcome): Promise<void> => {
+    const updates = outcome.results
+      .filter((result) => result.ok && result.name.startsWith('refs/heads/') && result.newId !== ZERO_ID)
+      .slice(0, MAX_LAST_COMMIT_UPDATES)
+      .map((result) => ({ id: result.newId, previous: result.oldId === ZERO_ID ? null : result.oldId }))
+    if (updates.length === 0) return
+    const job: LastCommitsJob = { kind: 'last-commits', owner: repo.owner, name: repo.name, updates }
+    if (options.jobs) await options.jobs.enqueue(job)
+    else await runLastCommits(job)
   }
 
   const publishAfterPush = async (repo: RepositoryName, outcome: PushOutcome): Promise<void> => {
@@ -1265,7 +1291,7 @@ export const createForge = (options: ForgeOptions): Forge => {
     const fresh = await store.storagePathClaimed(`${account.login}/${name}`)
     const path = { owner: account.login, name: fresh ? `${name.slice(0, 90)}.${crypto.randomUUID().slice(0, 8)}` : name }
     try {
-      await createRepository(options.storage, path, defaultBranch)
+      await createRepository(metered, path, defaultBranch)
     } catch (error) {
       if (!(error instanceof RepositoryExistsError) || fresh) throw error
     }
@@ -2108,7 +2134,7 @@ export const createForge = (options: ForgeOptions): Forge => {
         console.error(JSON.stringify({ event: 'ref-checksum-failed', repository: `${repo.owner}/${repo.name}`, error: String(error) })),
       )
     }
-    const published = Promise.all([pages.onPush(repo, outcome, principal), publishAfterPush(repo, outcome)]).catch((error: unknown) =>
+    const published = Promise.all([pages.onPush(repo, outcome, principal), publishAfterPush(repo, outcome), scheduleLastCommits(repo, outcome)]).catch((error: unknown) =>
       console.error(JSON.stringify({ event: 'pages-or-publish-failed', repository: `${repo.owner}/${repo.name}`, error: String(error) })),
     )
     if (waitUntil && !options.jobs) waitUntil(published)
@@ -2459,6 +2485,7 @@ export const createForge = (options: ForgeOptions): Forge => {
     if (isPagesJob(job)) return pages.runJob(job)
     if (job.kind === 'lfs-publish') return publishLfs(job)
     if (job.kind === 'backup') return runBackupJob()
+    if (job.kind === 'last-commits') return runLastCommits(job)
     if (job.kind === 'mirror-github') return adoptGitHubRepository(job)
     if (job.kind === 'usage-scan') return void (await meter.scan(options.storage, job))
     if (job.kind === 'import-lfs') return void (await importLfsObject(job, { storage, fetch: remoteFetch, ...(options.digests ? { digests: options.digests } : {}) }))

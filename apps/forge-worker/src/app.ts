@@ -1955,6 +1955,15 @@ export const createForge = (options: ForgeOptions): Forge => {
     return authorize(request, repo, access, ...rest)
   }
 
+  const withSessionLfs = (authorize: Authorize): Authorize => async (request, repo, access, surface) => {
+    if (surface === 'lfs' && !request.headers.has('Authorization')) {
+      const check = await checkSession(request, await loginOptions(request))
+      const result = check.kind === 'session' ? await repositoryAccess(sessionUserPrincipal(check.active.session), repo, access === 'write' ? 'write' : 'read') : null
+      if (result?.decision === 'allow') return null
+    }
+    return authorize(request, repo, access, surface)
+  }
+
   const emitRunEvents = async (serverUrl: string, job: JobRow): Promise<void> => {
     const run = await getRun(db, job.run_id)
     if (!run) return
@@ -2284,7 +2293,7 @@ export const createForge = (options: ForgeOptions): Forge => {
     if (content) return content
     const git = await handleGitRequest(request, {
       storage: presigningStorage,
-      authorize,
+      authorize: withSessionLfs(authorize),
       pushPolicy: access.pushPolicy,
       ...(options.maxPushBytes !== undefined ? { maxPushBytes: options.maxPushBytes } : {}),
       lfs: {

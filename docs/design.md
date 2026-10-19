@@ -2164,9 +2164,17 @@ Issues, pull requests, reviews, commit statuses, check runs and discussions
   branch's `.gitattributes` (the checked-in files from the root down,
   later lines and deeper files win) become LFS objects, streamed with
   SHA-256 verification and limited by `MAX_LFS_OBJECT_BYTES`, plus pointers;
-  other files are limited to 10 MiB. Browser uploads are multipart forms and
-  buffered by the platform (the request body limit applies); the CSRF token
-  is read from multipart forms too.
+  other files are limited to 10 MiB. Nothing large passes through the
+  form: a small script on the upload page asks the page which files are
+  LFS-tracked and which repository receives them (creating the fork for a
+  proposal), hashes each such file in the browser (WebCrypto), uploads it
+  through the LFS batch API (presigned PUT when the storage signs, which
+  needs CORS on the bucket, otherwise the streamed LFS PUT that hashes while
+  streaming, then verify; the LFS endpoints accept the session with the
+  `X-CSRF-Token` header) and submits only `oid size name`. The commit checks
+  that each object exists, as a push does. Forms above 10 MiB (by
+  `Content-Length`, before reading) are refused; the CSRF token is read from
+  multipart forms only up to 11 MiB.
 - **Conflict resolution in the browser.** `conflictLines` in `xdiff.ts`
   writes git's conflict markers (`merge`-style, including git's merging of
   conflicts at most three lines apart and the newline added before a

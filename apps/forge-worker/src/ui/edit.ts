@@ -1,5 +1,5 @@
-import { commitChanges, editPlan, type EditPlan, type FileInput, invalid, type Scope } from '@git-forge/collaboration'
-import { readBlobContent, resolveRefAndPath, resolveTarget } from '@git-forge/core'
+import { commitChanges, editPlan, type EditPlan, type FileInput, invalid, type Scope, uploadTarget } from '@git-forge/collaboration'
+import { MAX_WEB_FILE_BYTES, readBlobContent, resolveRefAndPath, resolveTarget } from '@git-forge/core'
 import { field } from './collaboration.ts'
 import { blobUrl, type OpenRepository, repoUrl, treeUrl } from './repository.ts'
 
@@ -16,6 +16,14 @@ export type EditView = {
   readonly crlf: boolean
   readonly plan: EditPlan | null
   readonly suggestedBranch: string
+}
+
+export const MAX_FORM_BYTES = MAX_WEB_FILE_BYTES + 256 * 1024
+
+export const oversizedForm = (request: Request): string | null => {
+  const length = request.headers.get('Content-Length')
+  if (length === null || !/^\d+$/.test(length)) return 'The upload has no Content-Length.'
+  return Number(length) > MAX_FORM_BYTES ? `Uploads of files that are not tracked by Git LFS are limited to ${MAX_WEB_FILE_BYTES / 1024 / 1024} MiB per commit; push larger files with git.` : null
 }
 
 export const editMode = (value: string | null): EditMode => (EDIT_MODES as readonly string[]).includes(value ?? '') ? (value as EditMode) : 'edit'
@@ -65,14 +73,26 @@ const filesOf = (view: EditView, form: FormData): FileInput[] => {
   if (view.mode === 'delete') return [{ path: current, content: null, sha }]
   if (view.mode === 'upload') {
     const files = form.getAll('files').filter((file): file is File => typeof file !== 'string' && file.name !== '')
-    if (files.length === 0) throw invalid('Choose at least one file to upload')
-    return files.map((file) => ({ path: [current, file.name].filter(Boolean).join('/'), content: file }))
+    const pointers = form.getAll('lfs').map((value) => String(value).split(' '))
+    if (files.length + pointers.length === 0) throw invalid('Choose at least one file to upload')
+    const at = (name: string) => [current, name].filter(Boolean).join('/')
+    return [
+      ...files.map((file) => ({ path: at(file.name), content: file })),
+      ...pointers.map(([oid = '', size = '', ...name]) => ({ path: at(name.join(' ')), content: { oid, size: Number(size) } })),
+    ]
   }
   const path = field(form, 'path').trim()
   if (path === '') throw invalid('A file name is required')
   const content = encoder.encode(textOf(form, view.crlf))
   if (view.mode === 'new') return [{ path, content, sha: null }]
   return path === current ? [{ path, content, sha }] : [{ path: current, content: null, sha }, { path, content, sha: null }]
+}
+
+export const prepareUpload = async (scope: Scope, view: EditView, form: FormData): Promise<{ readonly repository: string; readonly lfs: readonly string[] }> => {
+  const names = form.getAll('name').map(String)
+  const target = await uploadTarget(scope, view.branch, names.map((name) => [...view.path, name].join('/')))
+  const tracked = new Set(target.lfs)
+  return { repository: `${target.repository.owner}/${target.repository.name}`, lfs: names.filter((name) => tracked.has([...view.path, name].join('/'))) }
 }
 
 export const defaultMessage = (view: EditView): string => {

@@ -10,6 +10,7 @@ import Edit from '../../src/pages/[owner]/[repo]/edit/[...path].astro'
 import Issue from '../../src/pages/[owner]/[repo]/issues/[number].astro'
 import Conflicts from '../../src/pages/[owner]/[repo]/pull/[number]/conflicts.astro'
 import Pull from '../../src/pages/[owner]/[repo]/pull/[number]/index.astro'
+import { storeLfsObject, streamOf } from '@git-forge/core'
 import { git, tempDir } from '../e2e/history.ts'
 import { bootstrap, call, type NodeForge, nodeForge } from '../support/node-forge.ts'
 
@@ -33,9 +34,9 @@ const sessionOf = (principal: UserPrincipal): UiSession => ({ principal, csrf: '
 
 const render = async (page: Parameters<AstroContainer['renderToResponse']>[0], path: string, params: Record<string, string>, principal: Principal, body?: Record<string, string> | FormData) => {
   const session = principal.kind === 'user' ? sessionOf(principal) : null
-  const request = body
-    ? new Request(`${BASE}${path}`, body instanceof FormData ? { method: 'POST', body } : { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams(body) })
-    : new Request(`${BASE}${path}`)
+  const draft = body ? new Request(`${BASE}${path}`, { method: 'POST', body: body instanceof FormData ? body : new URLSearchParams(body) }) : null
+  const bytes = draft ? new Uint8Array(await draft.arrayBuffer()) : null
+  const request = draft && bytes ? new Request(draft.url, { method: 'POST', headers: { 'Content-Type': draft.headers.get('Content-Type')!, 'Content-Length': String(bytes.length) }, body: bytes }) : new Request(`${BASE}${path}`)
   const response = await container.renderToResponse(page, { request, params, locals: { forge: { ...forge.services, verifySessionWrite: async () => session }, principal, session }, partial: false })
   return { status: response.status, location: response.headers.get('Location'), html: await response.text() }
 }
@@ -105,6 +106,23 @@ describe('editing files in the browser', () => {
     expect(uploaded).toMatchObject({ status: 303, location: '/olivia/notes/tree/main' })
     expect(await contents('plain.txt')).toBe('plain\n')
     expect(await contents('data.bin')).toMatch(/^version https:\/\/git-lfs.github.com\/spec\/v1\noid sha256:[0-9a-f]{64}\nsize 3\n$/)
+    const object = new TextEncoder().encode('large object\n')
+    const oid = Buffer.from(await crypto.subtle.digest('SHA-256', object)).toString('hex')
+    const prepared = await render(Edit, '/olivia/notes/edit/main?mode=upload&prepare=1', tree, owner, { csrf: 'csrf-token', name: 'big.bin' })
+    expect(JSON.parse(prepared.html)).toEqual({ repository: 'olivia/notes', lfs: ['big.bin'] })
+    const pointer = new FormData()
+    pointer.set('csrf', 'csrf-token')
+    pointer.set('target', 'direct')
+    pointer.append('lfs', `${oid} ${object.length} big file.bin`)
+    expect((await render(Edit, '/olivia/notes/edit/main?mode=upload', tree, owner, pointer)).html).toContain('was not uploaded')
+    expect((await storeLfsObject(forge.storage, { owner: 'olivia', name: 'notes' }, { oid, size: object.length }, streamOf(object))).ok).toBe(true)
+    expect(await render(Edit, '/olivia/notes/edit/main?mode=upload', tree, owner, pointer)).toMatchObject({ status: 303 })
+    expect(await contents('big%20file.bin')).toBe(`version https://git-lfs.github.com/spec/v1\noid sha256:${oid}\nsize ${object.length}\n`)
+    const huge = new FormData()
+    huge.set('csrf', 'csrf-token')
+    huge.append('files', new File([new Uint8Array(11 * 1024 * 1024)], 'huge.txt'))
+    const refused = await render(Edit, '/olivia/notes/edit/main?mode=upload', tree, owner, huge)
+    expect(refused.status).toBe(413)
     const removed = await render(Edit, '/olivia/notes/edit/main/plain.txt?mode=delete', { owner: 'olivia', repo: 'notes', path: 'main/plain.txt' }, owner, { csrf: 'csrf-token', target: 'direct' })
     expect(removed).toMatchObject({ status: 303, location: '/olivia/notes/tree/main' })
     expect(await contents('plain.txt')).toBeNull()

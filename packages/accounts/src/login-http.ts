@@ -91,6 +91,8 @@ export type SessionCheck = { readonly kind: 'none' } | { readonly kind: 'session
 
 const MAX_BODY_BYTES = 64 * 1024
 
+export const MAX_MULTIPART_BYTES = 11 * 1024 * 1024
+
 const json = (status: number, body: unknown, headers: HeadersInit = {}) => {
   const response = new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } })
   for (const [key, value] of new Headers(headers)) response.headers.append(key, value)
@@ -117,6 +119,7 @@ const presentedCsrf = async (request: Request): Promise<string | null> => {
   if (header) return header
   const type = request.headers.get('Content-Type') ?? ''
   if (type.startsWith('multipart/form-data')) {
+    if (Number(request.headers.get('Content-Length') ?? Infinity) > MAX_MULTIPART_BYTES) return null
     const value = (await request.clone().formData().catch(() => null))?.get(CSRF_FIELD)
     return typeof value === 'string' ? value : null
   }

@@ -7,6 +7,10 @@ import {
   fileAt,
   type FileChange,
   hashStream,
+  hasLfsObject,
+  isLfsOid,
+  isLfsSize,
+  type LfsObjectSpec,
   isLfsTracked,
   lfsObjectKey,
   lfsPointerText,
@@ -80,7 +84,9 @@ const patchBranch = (state: RefsState): string => {
 
 export type FileContent = Uint8Array | Blob
 
-export type FileInput = { readonly path: string; readonly content: FileContent | null; readonly sha?: ObjectId | null }
+export type FileInput = { readonly path: string; readonly content: FileContent | LfsObjectSpec | null; readonly sha?: ObjectId | null }
+
+const isPointer = (content: FileContent | LfsObjectSpec): content is LfsObjectSpec => !(content instanceof Uint8Array) && !(content instanceof Blob)
 
 const sizeOf = (content: FileContent): number => (content instanceof Uint8Array ? content.length : content.size)
 
@@ -93,6 +99,12 @@ const prepare = async (scope: Scope, target: RepositoryName, odb: ObjectDatabase
     if (current !== file.sha) throw new CollaborationError(409, current === null ? `${path} does not exist` : file.sha === null ? `${path} already exists` : `${path} does not match ${file.sha}`)
   }
   if (file.content === null) return { path, content: null }
+  if (isPointer(file.content)) {
+    const object = file.content
+    if (!isLfsOid(object.oid) || !isLfsSize(object.size)) throw invalid(`${path}: invalid LFS object`)
+    if (!(await hasLfsObject(scope.storage, target, object))) throw invalid(`${path}: LFS object ${object.oid} was not uploaded`)
+    return { path, content: lfsPointerText(object) }
+  }
   const size = sizeOf(file.content)
   if (!(await isLfsTracked(odb, parent, path))) {
     if (size > MAX_WEB_FILE_BYTES) throw invalid(`${path} is larger than ${MAX_WEB_FILE_BYTES} bytes; push it with git`)
@@ -111,6 +123,20 @@ export const afterBranchUpdate = async (scope: Scope, ref: string, oldId: Object
   const system = await systemScope(scopeOptions(scope), scope.repo.owner, scope.repo.name)
   if (system) await handlePushedRefs(system, [{ name: ref, oldId, newId }], actor)
   await scope.onBranchUpdated?.({ repo: scope.repo, ref, oldId, newId, actor })
+}
+
+export const uploadTarget = async (scope: Scope, branch: string, paths: readonly string[]): Promise<{ readonly repository: RepositoryName; readonly lfs: readonly string[] }> => {
+  const plan = await editPlan(scope, branch)
+  if (!plan) throw new CollaborationError(403, 'Resource not accessible by integration')
+  const target = plan.mode === 'fork' ? await forkFor(scope) : scope
+  const odb = objectDatabase(scope)
+  const parent = branchTip(await currentRefs(scope), branch)
+  const lfs = await editErrors(async () => {
+    const tracked: string[] = []
+    for (const path of paths) if (await isLfsTracked(odb, parent, path)) tracked.push(path)
+    return tracked
+  })
+  return { repository: target.repo, lfs }
 }
 
 export type CommitInput = {

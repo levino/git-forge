@@ -180,8 +180,9 @@ Pushes to a fork refresh the open pull requests whose head lives there
 ## Commits from the browser
 
 `commitChanges(scope, { branch, message, files, newBranch?, propose?, pull? })`
-commits file changes (`{ path, content: Uint8Array | Blob | null, sha? }`,
-`null` deletes, `sha` is the expected blob, `null` for a new file) on top of
+commits file changes (`{ path, content: Uint8Array | Blob | { oid, size } | null, sha? }`,
+`{ oid, size }` commits a pointer to an already uploaded LFS object (it must
+exist in the target repository), `null` deletes, `sha` is the expected blob, `null` for a new file) on top of
 `branch`. `editPlan(scope, branch)` says how: `direct` for writers, `branch`
 when branch protection refuses a direct push (a `newBranch` is required and
 `pull` opens a pull request), `fork` for users without write access (only
@@ -192,7 +193,10 @@ session's user. Paths that `.gitattributes` of `branch` marks `filter=lfs`
 are stored as LFS objects (`lfs.maxObjectBytes`, hashed and verified while
 streaming) and committed as pointers; other files are limited to
 `MAX_WEB_FILE_BYTES` (10 MiB). After the ref moves, `handlePushedRefs` and
-`onBranchUpdated` run as for a push. `getContents`, `putContents` and
+`onBranchUpdated` run as for a push. `uploadTarget(scope, branch, paths)`
+returns the repository that receives the change (creating the fork for a
+proposal) and which paths are LFS-tracked, for clients that upload LFS
+objects first. `getContents`, `putContents` and
 `deleteContents` are the contents API on the same function (writers only).
 
 `pullConflicts(scope, n)` lists the conflicts of merging the base into the

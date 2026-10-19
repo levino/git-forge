@@ -246,6 +246,23 @@ describe('results service', () => {
     expect(((await (await api('/artifacts')).json()) as { total_count: number }).total_count).toBe(0)
   })
 
+  it('serves artifact blobs as sandboxed attachments whatever mime_type the uploader chose', async () => {
+    const h = await harness()
+    await h.push({ '.github/workflows/ci.yml': WORKFLOW })
+    const { job } = await h.start(0)
+    const ids = backendIds(job)
+    const created = await twirp(h.server, job, 'ArtifactService', 'CreateArtifact', { ...ids, name: 'page', version: 7, mime_type: 'text/html' })
+    const url = created.body['signed_upload_url'] as string
+    await fetch(url, { method: 'PUT', headers: { 'x-ms-blob-type': 'BlockBlob' }, body: '<script>1</script>' })
+    await twirp(h.server, job, 'ArtifactService', 'FinalizeArtifact', { ...ids, name: 'page', size: '18' })
+    const signed = await twirp(h.server, job, 'ArtifactService', 'GetSignedArtifactURL', { ...ids, name: 'page' })
+    const download = await fetch(signed.body['signed_url'])
+    expect(download.headers.get('content-disposition')).toMatch(/^attachment; filename="page/)
+    expect(download.headers.get('x-content-type-options')).toBe('nosniff')
+    expect(download.headers.get('content-security-policy')).toMatch(/sandbox$/)
+    expect(await download.text()).toBe('<script>1</script>')
+  })
+
   it('opens artifact.tar inside a stored artifact zip for Pages', async () => {
     const h = await harness()
     await h.push({ '.github/workflows/ci.yml': WORKFLOW })

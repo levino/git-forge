@@ -1,5 +1,5 @@
 import type { Database } from '@git-forge/accounts'
-import { archiveResponse, isValidName, ObjectDatabase, readAll, resolveCommitish, type Storage } from '@git-forge/core'
+import { archiveResponse, isValidName, SANDBOX_HEADERS, ObjectDatabase, readAll, resolveCommitish, type Storage } from '@git-forge/core'
 import { artifactFilename, type ArtifactRow, deleteArtifact, getArtifact, listArtifacts } from './artifacts.ts'
 import { blobUrl, issueBlobGrant } from './blobs.ts'
 import { type CacheEntryRow, cacheUsage, evictCacheEntries, getCacheEntry, listCaches } from './cache.ts'
@@ -344,7 +344,7 @@ export const readJobLog = async (db: Database, storage: Storage, run: RunRow, jo
 }
 
 const jobLogs = async (options: GhesApiOptions, run: RunRow, job: JobRow): Promise<Response> =>
-  new Response(new Blob((await readJobLog(options.db, options.storage, run, job)) as Uint8Array<ArrayBuffer>[]), { headers: { 'Content-Type': 'text/plain; charset=utf-8' } })
+  new Response(new Blob((await readJobLog(options.db, options.storage, run, job)) as Uint8Array<ArrayBuffer>[]), { headers: { 'Content-Type': 'text/plain; charset=utf-8', ...SANDBOX_HEADERS } })
 
 const runnerRegistration = async (options: GhesApiOptions, request: Request, now: number): Promise<Response> => {
   const header = request.headers.get('Authorization') ?? ''

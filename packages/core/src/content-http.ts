@@ -12,6 +12,7 @@ import {
   rangeApplies,
   refCacheControl,
   resolveRaw,
+  safetyHeaders,
   SNIFF_BYTES,
   sniffContentType,
 } from './content.ts'
@@ -33,13 +34,6 @@ const noCache = { 'Cache-Control': 'no-cache, max-age=0, must-revalidate' }
 
 const text = (status: number, body: string, headers: Record<string, string> = {}) =>
   new Response(body, { status, headers: { 'Content-Type': 'text/plain; charset=utf-8', ...noCache, ...headers } })
-
-const SANDBOX = "default-src 'none'; img-src 'self' data:; media-src 'self'; style-src 'unsafe-inline'; sandbox"
-
-const safetyHeaders = (contentType: string): Record<string, string> => ({
-  'X-Content-Type-Options': 'nosniff',
-  ...(contentType === 'application/pdf' ? {} : { 'Content-Security-Policy': SANDBOX }),
-})
 
 type Servable = {
   readonly size: number

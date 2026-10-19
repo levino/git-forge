@@ -660,9 +660,9 @@ there is no upload or publish step.
   `Content-Range: bytes */size`; multi-range requests get the full body),
   `If-Range`, `If-None-Match` (`304`) and `HEAD`.
 - Served content must not run script on the forge origin: every response
-  carries `X-Content-Type-Options: nosniff` and, except PDFs (browser PDF
-  viewers refuse sandboxed documents), `Content-Security-Policy: default-src
-  'none'; …; sandbox`. HTML is never labelled `text/html`; unknown types are
+  (also LFS downloads, job logs and diffs) carries `X-Content-Type-Options:
+  nosniff` and, except PDFs (browser PDF viewers refuse sandboxed documents),
+  `Content-Security-Policy: default-src 'none'; …; sandbox`. HTML is never labelled `text/html`; unknown types are
   `text/plain` if valid UTF-8, else `application/octet-stream`.
 - Permissions use the same `Authorize` callback as Git and LFS with access
   `read`: public repositories anonymously, private ones need a token. A CDN
@@ -1544,6 +1544,8 @@ v1 client builds its own URLs, so presigned R2 URLs (which sign the query
 and need size and SHA-256 up front) cannot be handed out. Blocks (8 MiB for
 artifacts, 32 MiB v1 chunks) stay below the Worker body limit; only v2
 single-shot uploads of 100–128 MiB, which occur on `*.localhost` only, exceed it.
+Downloads are `Content-Disposition: attachment` with `nosniff` and the
+sandbox CSP of raw content, whatever `mime_type` the uploader set.
 
 **Cache.** Entries are scoped per repository and ref; a restore searches
 the run's ref, the pull request base, then the default branch, each by

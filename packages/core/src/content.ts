@@ -259,10 +259,23 @@ export const IMMUTABLE_CACHE = 'public, max-age=31536000, immutable'
 
 export const refCacheControl = (immutable: boolean, maxAge: number): string => (immutable ? IMMUTABLE_CACHE : `public, max-age=${maxAge}`)
 
-export const contentDisposition = (filename: string): string => {
+export const contentDisposition = (filename: string, disposition: 'inline' | 'attachment' = 'inline'): string => {
   const fallback = filename.replace(/[^\x20-\x7e]|["\\]/g, '_')
-  return `inline; filename="${fallback}"; filename*=UTF-8''${encodeURIComponent(filename)}`
+  return `${disposition}; filename="${fallback}"; filename*=UTF-8''${encodeURIComponent(filename)}`
 }
+
+export const SANDBOX_HEADERS: Readonly<Record<string, string>> = {
+  'X-Content-Type-Options': 'nosniff',
+  'Content-Security-Policy': "default-src 'none'; img-src 'self' data:; media-src 'self'; style-src 'unsafe-inline'; sandbox",
+}
+
+export const safetyHeaders = (contentType: string): Record<string, string> =>
+  contentType === 'application/pdf' ? { 'X-Content-Type-Options': 'nosniff' } : { ...SANDBOX_HEADERS }
+
+export const downloadHeaders = (filename: string | null): Record<string, string> => ({
+  ...SANDBOX_HEADERS,
+  'Content-Disposition': filename ? contentDisposition(filename, 'attachment') : 'attachment',
+})
 
 export const mediaPath = (repo: RepositoryName, oid: string, filename?: string): string =>
   `/${repo.owner}/${repo.name}/media/${oid}${filename ? `/${encodeURIComponent(filename)}` : ''}`

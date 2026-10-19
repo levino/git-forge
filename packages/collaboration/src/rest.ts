@@ -1,5 +1,5 @@
 import { authenticateRequest, type InstanceVerifier, type Principal, type RepositoryDirectory } from '@git-forge/accounts'
-import { isValidName, MAX_WEB_FILE_BYTES, readAll, SizeLimitError } from '@git-forge/core'
+import { isValidName, MAX_WEB_FILE_BYTES, readAll, SANDBOX_HEADERS, SizeLimitError } from '@git-forge/core'
 import { type ContentItem, deleteContents, getContents, putContents } from './contents.ts'
 import { createReaction, deleteReaction, listReactions, type ReactionKind, type ReactionSubject } from './reactions.ts'
 import { CollaborationError, type CollaborationOptions, invalid, openRepository, type Scope, scopeOptions } from './context.ts'
@@ -250,7 +250,7 @@ const issueResponse = async (context: Context, number: number, status = 200): Pr
 
 const pullResponse = async (context: Context, number: number, status = 200): Promise<Response> => {
   const format = wantsDiff(context.request)
-  if (format) return new Response(await pullDiff(context.scope, number), { status: 200, headers: { 'Content-Type': `text/x-${format}; charset=utf-8`, 'Cache-Control': 'no-store' } })
+  if (format) return new Response(await pullDiff(context.scope, number), { status: 200, headers: { 'Content-Type': `text/x-${format}; charset=utf-8`, 'Cache-Control': 'no-store', ...SANDBOX_HEADERS } })
   const pull = await getPull(context.scope, number)
   const comments = (await listReviewComments(context.scope, number)).length
   return json(status, pullJson(context.urls, context.scope.repository, pull, comments))

@@ -1,5 +1,5 @@
 import { base64UrlEncode, type Database, first, randomBytes, sha256Hex, sql } from '@git-forge/accounts'
-import { type ByteRange, contentDisposition, exactLength, parseRange, readAll, type Storage } from '@git-forge/core'
+import { type ByteRange, downloadHeaders, exactLength, parseRange, readAll, type Storage } from '@git-forge/core'
 
 export type BlobRow = {
   readonly id: string
@@ -296,7 +296,7 @@ const readBlob = async (request: Request, db: Database, storage: Storage, blob: 
     'Last-Modified': new Date(blob.committed_at).toUTCString(),
     'x-ms-blob-type': 'BlockBlob',
     'Cache-Control': 'private, no-store',
-    ...(filename ? { 'Content-Disposition': contentDisposition(filename) } : {}),
+    ...downloadHeaders(filename),
   })
   if (range.kind === 'unsatisfiable') return new Response(null, { status: 416, headers: { ...headers, 'Content-Range': `bytes */${blob.size}` } })
   const partial = range.kind === 'partial' ? range.range : undefined

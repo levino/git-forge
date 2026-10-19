@@ -1,3 +1,4 @@
+import { SANDBOX_HEADERS } from '@git-forge/core'
 import type { APIRoute } from 'astro'
 import { jobState, logText } from '../../../../../../../../ui/actions.ts'
 import { parseNumber } from '../../../../../../../../ui/collaboration.ts'
@@ -12,7 +13,7 @@ export const GET: APIRoute = async ({ params, locals }) => {
     headers: {
       'Content-Type': 'text/plain; charset=utf-8',
       'Cache-Control': 'no-store',
-      'X-Content-Type-Options': 'nosniff',
+      ...SANDBOX_HEADERS,
       'X-Job-Done': jobState(found.job).done ? '1' : '0',
     },
   })

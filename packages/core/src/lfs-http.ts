@@ -1,4 +1,5 @@
 import { readAll, SizeLimitError, fromUtf8 } from './bytes.ts'
+import { SANDBOX_HEADERS } from './content.ts'
 import type { Authorize } from './http.ts'
 import {
   isLfsOid,
@@ -155,6 +156,7 @@ export const handleLfsRequest = async (request: Request, repo: RepositoryName, p
           'Content-Type': 'application/octet-stream',
           'Content-Length': String(stored.size),
           'Cache-Control': 'private, max-age=31536000, immutable',
+          ...SANDBOX_HEADERS,
         },
       })
     }

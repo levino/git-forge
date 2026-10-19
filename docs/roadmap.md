@@ -149,7 +149,7 @@ Design: [design.md §18](design.md#18-web-ui).
 - [x] Blame, syntax highlighting in diffs and Markdown code blocks
 - [x] Explore and profile listings without one access check per repository (one SQL query, stored default branch and last commit time, sort and paging)
 - [x] Search box and results page (repositories, issues and pull requests, discussions, users)
-- [x] Page load performance: shared pack caches (isolate and Cache API), parallel ref, pack list and header reads, single-request R2 ranges, lazy highlighter grammars, one-read migration check on start, `Server-Timing`
+- [x] Page load performance: shared pack caches (isolate and Cache API), parallel ref, pack list and header reads, single-request R2 ranges, lazy highlighter grammars, one-read migration check on start, `Server-Timing`, class-based highlighting and compact code rows (about 75% less HTML for large files)
 - [x] Fewer D1 round trips per page: resolved repository and access reused by the collaboration scope, instance-admin flag read with the session, header and list queries in parallel; a page test counts queries per page (#63)
 - [x] D1 read replication through the Sessions API: one session per request, bookmark cookie after writes, `X-Forge-Bookmark` for API clients, unsafe methods start at the primary (#64; needs read replication enabled on the D1 database)
 - [x] Rendered HTML of public repository pages cached for anonymous visitors (Cache API), keyed by refs ETag, repository record and a trigger-maintained change counter (migration `0060_repository_changes`) (#65)

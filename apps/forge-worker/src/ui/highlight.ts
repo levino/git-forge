@@ -1,4 +1,4 @@
-import { createHighlighterCore, type HighlighterCore, type LanguageRegistration, type ThemedToken } from 'shiki/core'
+import { createHighlighterCore, type HighlighterCore, type LanguageRegistration, type ThemedToken, type ThemeRegistration } from 'shiki/core'
 import { createJavaScriptRegexEngine } from 'shiki/engine/javascript'
 import type { Hunk } from '@git-forge/core'
 import githubDark from 'shiki/dist/themes/github-dark.mjs'
@@ -106,7 +106,7 @@ export const languageFor = (filename: string): string | null => {
   return EXTENSIONS[filename.slice(dot + 1).toLowerCase()] ?? null
 }
 
-export type Token = { readonly content: string; readonly style: string }
+export type Token = { readonly content: string; readonly className: string }
 
 export type HighlightedLine = readonly Token[]
 
@@ -135,12 +135,43 @@ const getHighlighter = async (text: string, lang: string): Promise<HighlighterCo
   return (await Promise.all([lang, ...new Set(fences)].map(load)))[0]!
 }
 
-const styleOf = (token: ThemedToken): string =>
-  Object.entries(token.htmlStyle ?? {})
-    .map(([key, value]) => `${key}:${value}`)
-    .join(';')
+const paletteOf = (theme: ThemeRegistration) => {
+  const fg = theme.colors!['editor.foreground']!.toUpperCase()
+  const colors = [...new Set((theme.tokenColors ?? []).flatMap((rule) => rule.settings.foreground?.toUpperCase() ?? []))].filter((color) => color !== fg)
+  return { fg, index: new Map(colors.map((color, i) => [color, i])) }
+}
 
-const plain = (text: string): HighlightedLine[] => text.split('\n').map((line) => (line === '' ? [] : [{ content: line, style: '' }]))
+const LIGHT = paletteOf(githubLight)
+const DARK = paletteOf(githubDark)
+
+const rules = (palette: typeof LIGHT, prefix: string, scope: string) => [...palette.index].map(([color, i]) => `${scope}.${prefix}${i}{color:${color}}`).join('')
+
+export const HIGHLIGHT_CSS = `.hl{color:${LIGHT.fg}}${rules(LIGHT, 'l', '')}@media (prefers-color-scheme:dark){.hl{color:${DARK.fg}}.hl span{color:inherit}${rules(DARK, 'd', '.hl ')}}`
+
+const classOf = (token: ThemedToken): string => {
+  const light = LIGHT.index.get(token.htmlStyle?.['--shiki-light']?.toUpperCase() ?? '')
+  const dark = DARK.index.get(token.htmlStyle?.['--shiki-dark']?.toUpperCase() ?? '')
+  return [light === undefined ? '' : `l${light}`, dark === undefined ? '' : `d${dark}`].join(' ').trim()
+}
+
+const merged = (tokens: readonly ThemedToken[]): Token[] =>
+  tokens.reduce<Token[]>((line, token) => {
+    const className = classOf(token)
+    const last = line.at(-1)
+    if (last?.className === className) line[line.length - 1] = { content: last.content + token.content, className }
+    else line.push({ content: token.content, className })
+    return line
+  }, [])
+
+const escape = (text: string): string => text.replace(/[&<>]/g, (char) => (char === '&' ? '&amp;' : char === '<' ? '&lt;' : '&gt;'))
+
+export const lineHtml = (line: HighlightedLine): string =>
+  line.map((token) => (token.className ? `<span class="${token.className}">${escape(token.content)}</span>` : escape(token.content))).join('')
+
+export const codeRows = (lines: readonly HighlightedLine[]): string =>
+  lines.map((line, index) => `<tr id="L${index + 1}"><td><a href="#L${index + 1}">${index + 1}</a><td>${lineHtml(line)}`).join('')
+
+const plain = (text: string): HighlightedLine[] => text.split('\n').map((line) => (line === '' ? [] : [{ content: line, className: '' }]))
 
 export const languageOfFence = (info: string): string | null => {
   const name = info.toLowerCase()
@@ -154,7 +185,7 @@ export const highlightText = async (text: string, lang: string | null): Promise<
   if (!lang || body.length > MAX_HIGHLIGHT_BYTES) return plain(body)
   try {
     const result = (await getHighlighter(body, lang)).codeToTokens(body, { lang, themes: { light: 'github-light', dark: 'github-dark' }, defaultColor: false })
-    return result.tokens.map((line) => line.map((token) => ({ content: token.content, style: styleOf(token) })))
+    return result.tokens.map(merged)
   } catch {
     return plain(body)
   }

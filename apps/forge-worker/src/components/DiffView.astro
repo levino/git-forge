@@ -1,6 +1,6 @@
 ---
 import type { FileDiff } from '@git-forge/core'
-import { highlightHunks } from '../ui/highlight.ts'
+import { highlightHunks, lineHtml } from '../ui/highlight.ts'
 import type { ReactionProps } from '../ui/collaboration.ts'
 import Reactions from './Reactions.astro'
 
@@ -82,7 +82,7 @@ const commentsAt = (side: 'LEFT' | 'RIGHT', line: number) => comments.filter((co
                           {line.kind}
                         </span>
                         <span class="sr-only">{spoken[line.kind]}</span>
-                        {tokens[h]?.[l]?.map((token) => (token.style ? <span style={token.style}>{token.content}</span> : token.content)) ?? line.text}
+                        {tokens[h]?.[l] ? <Fragment set:html={lineHtml(tokens[h][l])} /> : line.text}
                       </td>
                     </tr>
                     {here.length > 0 && (

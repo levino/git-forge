@@ -121,6 +121,7 @@ import {
   type EmailSender,
   type FetchFunction,
   GitHubApiError,
+  handleArchiveRequest,
   handleContentRequest,
   handleGitRequest,
   type JobQueue,
@@ -205,7 +206,7 @@ import {
   type ThreadRow,
 } from '@git-forge/notifications'
 import { type ArtifactSource, createPages, isPagesJob, type PagesJob } from '@git-forge/pages'
-import { type AssetRow, createReleaseStore, handleReleasesRequest, type ReleaseRow } from '@git-forge/releases'
+import { type AssetRow, createReleaseStore, handleReleasesRequest, type ReleaseOperations, releaseOperations, type ReleaseRow, type ReleasesOptions } from '@git-forge/releases'
 import { AdminError, type AdminOperations, createAdminOperations, readOidcSettings } from './admin/operations.ts'
 import { createJobFailures } from './admin/jobs.ts'
 import { createInstanceSettings, deriveSettingsKey } from './admin/settings.ts'
@@ -400,6 +401,8 @@ export type ReleaseReads = {
   readonly list: (repository: RepositorySubject, includeDrafts: boolean, limit: number, offset: number) => Promise<ReleaseRow[]>
   readonly byTag: (repository: RepositorySubject, tag: string, includeDrafts: boolean) => Promise<ReleaseRow | null>
   readonly assets: (releaseIds: readonly number[]) => Promise<AssetRow[]>
+  readonly latest: (repository: RepositorySubject) => Promise<ReleaseRow | null>
+  readonly write: (request: Request, principal: Principal) => ReleaseOperations
 }
 
 export type NewRepository = { readonly owner: string; readonly name: string; readonly visibility?: string; readonly defaultBranch?: string }
@@ -2222,6 +2225,20 @@ export const createForge = (options: ForgeOptions): Forge => {
     return (await authorize(anonymous, repo, 'read', 'git')) ? undefined : publicPackfileUris(options.packfileUriBase)(request, repo)
   }
 
+  const releasesOptions = (request: Request, waitUntil?: WaitUntil): ReleasesOptions => ({
+    db,
+    storage,
+    directory: store,
+    authenticate: apiPrincipal,
+    isInstanceAdmin: store.isInstanceAdmin,
+    baseUrl: issuerFor,
+    maxAssetBytes: options.maxLfsObjectBytes,
+    ...(options.digests ? { digests: options.digests } : {}),
+    now: () => now().getTime(),
+    emit,
+    onTagCreated: (repo, outcome, principal) => afterPush(request, repo, outcome, waitUntil, principal),
+  })
+
   const handle = async (request: Request, waitUntil?: WaitUntil): Promise<Response> => {
     const site = await pages.serve(request)
     if (site) return site
@@ -2241,6 +2258,8 @@ export const createForge = (options: ForgeOptions): Forge => {
     })(request)
     if (scim) return scim
     const authentication = authenticateOptions(request)
+    const archive = await handleArchiveRequest(request, { storage, authorize: withSessionReads(withJobTokens(createGitAccess(authentication).authorize)) })
+    if (archive) return archive
     const protection = await handleBranchProtectionRequest(request, { store, authenticate: apiPrincipal })
     if (protection) return protection
     const notificationsResponse = await handleNotificationsRequest(request, {
@@ -2254,19 +2273,7 @@ export const createForge = (options: ForgeOptions): Forge => {
     if (notificationsResponse) return notificationsResponse
     const appsResponse = await githubApps.handle(request)
     if (appsResponse) return appsResponse
-    const releases = await handleReleasesRequest(request, {
-      db,
-      storage,
-      directory: store,
-      authenticate: apiPrincipal,
-      isInstanceAdmin: store.isInstanceAdmin,
-      baseUrl: issuerFor,
-      maxAssetBytes: options.maxLfsObjectBytes,
-      ...(options.digests ? { digests: options.digests } : {}),
-      now: () => now().getTime(),
-      emit,
-      onTagCreated: (repo, outcome, principal) => afterPush(request, repo, outcome, waitUntil, principal),
-    })
+    const releases = await handleReleasesRequest(request, releasesOptions(request, waitUntil))
     if (releases) return releases
     const pagesApi = await pages.api(request)
     if (pagesApi) return pagesApi
@@ -2431,6 +2438,8 @@ export const createForge = (options: ForgeOptions): Forge => {
           return release && (includeDrafts || release.draft === 0) ? release : null
         },
         assets: (releaseIds) => releaseStore.assets(releaseIds),
+        latest: (repository) => releaseStore.latest(repository.id),
+        write: (request, principal) => releaseOperations(releasesOptions(request), principal, issuerFor(request)),
       },
     },
     scheduled: async (at = now()) => {

@@ -1,11 +1,11 @@
 ---
 import { formatBytes, isoTime, relativeTime } from '../ui/format.ts'
-import { assetUrl, type ReleaseView, releaseUrl } from '../ui/releases.ts'
+import { archiveUrl, assetUrl, editReleaseUrl, type ReleaseView, releaseUrl } from '../ui/releases.ts'
 import { commitsUrl, type OpenRepository, treeUrl } from '../ui/repository.ts'
 
-type Props = { repo: OpenRepository; view: ReleaseView; heading?: 'h1' | 'h2' }
+type Props = { repo: OpenRepository; view: ReleaseView; heading?: 'h1' | 'h2'; latest?: boolean }
 
-const { repo, view, heading = 'h2' } = Astro.props
+const { repo, view, heading = 'h2', latest = false } = Astro.props
 const { release } = view
 const now = Math.floor(Date.now() / 1000)
 const at = Math.floor((release.published_at ?? release.created_at) / 1000)
@@ -19,6 +19,8 @@ const Heading = heading
     </Heading>
     {release.draft === 1 && <span class="badge badge-warning badge-sm">Draft</span>}
     {release.prerelease === 1 && <span class="badge badge-info badge-sm">Pre-release</span>}
+    {latest && <span class="badge badge-success badge-sm">Latest</span>}
+    {repo.canWrite && <a href={editReleaseUrl(repo, release.tag_name)} class="btn btn-ghost btn-xs ml-auto">Edit</a>}
     <span class="text-sm text-base-content/70 w-full">
       <a href={treeUrl(repo.name, release.tag_name)} class="font-mono link link-hover">{release.tag_name}</a>
       {release.author_login && <> · {release.author_login}</>} · <time datetime={isoTime(at)}>{relativeTime(at, now)}</time> ·
@@ -27,7 +29,7 @@ const Heading = heading
   </header>
   {view.html !== null && <div class="markdown-body p-4 overflow-x-auto" set:html={view.html} />}
   {
-    view.assets.length > 0 && (
+    (view.assets.length > 0 || release.draft === 0) && (
       <section class="p-4 border-t border-base-300" aria-label="Assets">
         <h3 class="font-semibold mb-2">Assets</h3>
         <ul class="divide-y divide-base-300">
@@ -40,6 +42,14 @@ const Heading = heading
               <span class="ml-auto text-sm text-base-content/70">{formatBytes(asset.size)}</span>
             </li>
           ))}
+          {release.draft === 0 &&
+            (['zip', 'tar.gz'] as const).map((format) => (
+              <li class="py-2">
+                <a href={archiveUrl(repo, release.tag_name, format)} class="link link-hover">
+                  Source code ({format})
+                </a>
+              </li>
+            ))}
         </ul>
       </section>
     )

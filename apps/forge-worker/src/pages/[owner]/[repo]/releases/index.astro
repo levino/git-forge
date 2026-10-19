@@ -6,7 +6,7 @@ import RepoHeader from '../../../../components/RepoHeader.astro'
 import Layout from '../../../../layouts/Layout.astro'
 import { parsePage } from '../../../../ui/history.ts'
 import { listReleases } from '../../../../ui/releases.ts'
-import { openRepository } from '../../../../ui/repository.ts'
+import { openRepository, repoUrl } from '../../../../ui/repository.ts'
 
 const repo = await openRepository(Astro.locals.forge, Astro.locals.principal, Astro.params.owner!, Astro.params.repo!)
 const page = parsePage(Astro.url.searchParams.get('page'))
@@ -19,12 +19,17 @@ const list = repo.kind === 'ok' ? await listReleases(Astro.locals.forge, repo, p
   ) : (
     <Layout title={`Releases · ${repo.name.owner}/${repo.name.name}`}>
       <RepoHeader repo={repo} tab="releases" />
+      {repo.canWrite && Astro.locals.session && (
+        <div class="flex justify-end mb-4">
+          <a href={repoUrl(repo.name, 'releases', 'new')} class="btn btn-primary btn-sm">Draft a new release</a>
+        </div>
+      )}
       {list.releases.length === 0 ? (
         <EmptyState icon="release" title="No releases yet." />
       ) : (
         <div class="flex flex-col gap-6">
           {list.releases.map((view) => (
-            <ReleaseCard repo={repo} view={view} />
+            <ReleaseCard repo={repo} view={view} latest={view.release.id === list.latest} />
           ))}
         </div>
       )}

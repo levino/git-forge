@@ -1585,7 +1585,7 @@ Implemented for repositories: `POST …/actions/runners/generate-jitconfig`,
 …/actions/jobs/{id}/rerun`, `GET/POST …/actions/runs/{id}/pending_deployments`,
 `POST …/actions/workflows/{file}/dispatches`, `…/actions/secrets[/{name}]`,
 `…/environments[/{name}[/secrets[/{name}]]]`, `GET
-…/tarball/{ref}`, `GET /api/v3/meta`. Reading runs, jobs, logs
+…/tarball|zipball/{ref}`, `GET /api/v3/meta`. Reading runs, jobs, logs
 and tarballs needs read access, cancel/re-run/dispatch need write access,
 runners, secrets and environments need admin access. Pure functions for signed `workflow_job` webhooks
 (`X-Hub-Signature-256`) exist and GitHub Apps (JWT → installation token,
@@ -2078,9 +2078,29 @@ in `apps/forge-worker/src/github-apps.ts`). Every endpoint answers under
   answer `302` to the media URL and count the download. A draft's asset is
   reachable through its media URL by anyone who can read the repository and
   knows the hash.
-- Not implemented: `tarball_url`/`zipball_url` (no archive endpoint yet),
-  `generate_release_notes`, `make_latest` (the latest release is the newest
-  published non-prerelease).
+- Source archives (`@git-forge/core` `archive.ts`): `/{owner}/{repo}/archive/{ref}.tar.gz|zip`
+  (also `refs/tags/…`, `refs/heads/…`; prefix `{repo}-{ref without a leading v}/`) and
+  `GET …/tarball|zipball[/{ref}]` under `/api/v3` and `/api` (prefix
+  `{owner}-{repo}-{sha7}/`), which releases report as `tarball_url`/`zipball_url`.
+  Streamed one blob at a time like `git archive`: pax global header with the
+  commit id, zip with deflate (`CompressionStream('deflate-raw')`), unix modes
+  for executables and symlinks, UT timestamps and the commit id as comment.
+  LFS pointers stay pointers, as on GitHub. Read access as for raw files; a
+  partial read view must cover the whole tree of the commit, or the answer is
+  404. No zip64, so archives stay below 4 GiB.
+- `POST …/releases/generate-notes` and `generate_release_notes` on create:
+  pull requests whose merge commit lies between the previous release's tag
+  (`previous_tag_name`, else the newest published non-prerelease) and the
+  target, in GitHub's format (`## What's Changed`, `## New Contributors`,
+  `**Full Changelog**`), with `.github/release.yml` categories and exclusions
+  (`configuration_file_path`). Needs write access.
+- Web UI: list and tag pages with rendered notes, source archive links and a
+  *Latest* badge (also on the repository page); writers create, edit and
+  delete releases (`/releases/new`, `/releases/edit/{tag}`) through the same
+  functions as the API, generate notes, and upload or delete assets from the
+  browser against the upload API with the session's CSRF token.
+- Not implemented: `make_latest` (the latest release is the newest published
+  non-prerelease).
 
 ## 17. Collaboration
 

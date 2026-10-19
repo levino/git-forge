@@ -1,0 +1,38 @@
+---
+import type { ReleaseValues } from '../ui/releases.ts'
+import type { OpenRepository } from '../ui/repository.ts'
+
+type Props = { repo: OpenRepository; values: ReleaseValues; csrf: string; editing: boolean }
+
+const { repo, values, csrf, editing } = Astro.props
+---
+
+<form method="post" class="flex flex-col gap-3 max-w-3xl" aria-label={editing ? 'Edit release' : 'New release'}>
+  <input type="hidden" name="csrf" value={csrf} />
+  <div class="grid gap-3 sm:grid-cols-2">
+    <label class="flex flex-col gap-1">
+      <span class="text-sm font-semibold">Tag</span>
+      <input name="tag_name" class="input w-full font-mono" value={values.tag} list="release-tags" placeholder="v1.0.0" required />
+      <datalist id="release-tags">{repo.tags.map((tag) => <option value={tag.name} />)}</datalist>
+    </label>
+    <label class="flex flex-col gap-1">
+      <span class="text-sm font-semibold">Target</span>
+      <select name="target_commitish" class="select w-full">
+        {repo.branches.map((branch) => <option value={branch.name} selected={branch.name === (values.target || repo.defaultBranch)}>{branch.name}</option>)}
+        {values.target && !repo.branches.some((branch) => branch.name === values.target) && <option value={values.target} selected>{values.target}</option>}
+      </select>
+    </label>
+  </div>
+  <label class="text-sm font-semibold" for="release-name">Release title</label>
+  <input id="release-name" name="name" class="input w-full" value={values.title} />
+  <div class="flex items-center justify-between gap-2">
+    <label class="text-sm font-semibold" for="release-body">Notes</label>
+    <button class="btn btn-sm btn-ghost" name="intent" value="generate" formnovalidate>Generate release notes</button>
+  </div>
+  <textarea id="release-body" name="body" rows="14" class="textarea w-full font-mono" placeholder="Markdown is supported">{values.body}</textarea>
+  <label class="label gap-2"><input type="checkbox" name="prerelease" class="checkbox checkbox-sm" checked={values.prerelease} /> Set as a pre-release</label>
+  <label class="label gap-2"><input type="checkbox" name="draft" class="checkbox checkbox-sm" checked={values.draft} /> Save as draft</label>
+  <div class="flex gap-2">
+    <button class="btn btn-primary" name="intent" value="save">{editing ? 'Update release' : 'Publish release'}</button>
+  </div>
+</form>

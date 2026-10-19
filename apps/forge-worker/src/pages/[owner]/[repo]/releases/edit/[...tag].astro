@@ -1,0 +1,85 @@
+---
+import NotFound from '../../../../../components/NotFound.astro'
+import ReleaseForm from '../../../../../components/ReleaseForm.astro'
+import RepoHeader from '../../../../../components/RepoHeader.astro'
+import Layout from '../../../../../layouts/Layout.astro'
+import { formatBytes } from '../../../../../ui/format.ts'
+import { releaseByTag, releaseValues, type ReleaseFormResult, runReleaseForm } from '../../../../../ui/releases.ts'
+import { openRepository } from '../../../../../ui/repository.ts'
+
+const { forge, principal, session } = Astro.locals
+const repo = await openRepository(forge, principal, Astro.params.owner!, Astro.params.repo!)
+if (repo.kind === 'ok' && !session) return Astro.redirect(`/login?return_to=${encodeURIComponent(Astro.url.pathname)}`)
+const view = repo.kind === 'ok' && repo.canWrite && Astro.params.tag ? await releaseByTag(forge, repo, Astro.params.tag) : null
+let result: ReleaseFormResult | null = view ? { outcome: null, values: releaseValues(view.release) } : null
+if (repo.kind === 'ok' && view && Astro.request.method === 'POST') {
+  result = await runReleaseForm(forge, Astro.request, repo, view.release)
+  if (result.outcome?.kind === 'redirect') return Astro.redirect(result.outcome.location, 303)
+  if (result.outcome) Astro.response.status = result.outcome.status
+}
+const api = repo.kind === 'ok' && view ? `/api/v3/repos/${encodeURIComponent(repo.name.owner)}/${encodeURIComponent(repo.name.name)}/releases` : ''
+---
+
+{
+  repo.kind !== 'ok' || !session || !view || !result ? (
+    <NotFound />
+  ) : (
+    <Layout title={`Edit ${view.title} · ${repo.name.owner}/${repo.name.name}`}>
+      <RepoHeader repo={repo} tab="releases" />
+      <h1 class="text-xl font-semibold mb-4">Edit release</h1>
+      {result.outcome?.kind === 'error' && <div role="alert" class="alert alert-error mb-4">{result.outcome.message}</div>}
+      <ReleaseForm repo={repo} values={result.values} csrf={session.csrf} editing={true} />
+      <section class="mt-8 max-w-3xl flex flex-col gap-3" aria-labelledby="assets-title">
+        <h2 id="assets-title" class="font-semibold">Assets</h2>
+        <ul class="divide-y divide-base-300 border border-base-300 rounded-box empty:hidden">
+          {view.assets.map((asset) => (
+            <li class="flex flex-wrap items-center gap-2 p-2">
+              <span class="font-mono break-all">{asset.name}</span>
+              <span class="ml-auto text-sm text-base-content/70">{formatBytes(asset.size)}</span>
+              <button type="button" class="btn btn-xs btn-ghost text-error" data-delete-asset={`${api}/assets/${asset.id}`} data-csrf={session.csrf}>
+                Delete
+              </button>
+            </li>
+          ))}
+        </ul>
+        <form class="flex flex-wrap items-center gap-2" data-upload={`/api/uploads/repos/${encodeURIComponent(repo.name.owner)}/${encodeURIComponent(repo.name.name)}/releases/${view.release.id}/assets`} data-csrf={session.csrf} aria-label="Upload assets">
+          <input type="file" name="files" class="file-input file-input-sm" multiple required />
+          <button class="btn btn-sm">Upload</button>
+          <p class="text-sm text-base-content/70 w-full" data-status role="status" />
+        </form>
+      </section>
+      <form method="post" class="mt-8" aria-label="Delete release">
+        <input type="hidden" name="csrf" value={session.csrf} />
+        <input type="hidden" name="tag_name" value={view.release.tag_name} />
+        <button class="btn btn-error btn-outline btn-sm" name="intent" value="delete">Delete this release</button>
+      </form>
+      <script is:inline>
+        document.querySelectorAll('form[data-upload]').forEach((form) =>
+          form.addEventListener('submit', async (event) => {
+            event.preventDefault()
+            const status = form.querySelector('[data-status]')
+            for (const file of form.querySelector('input[type=file]').files) {
+              status.textContent = `Uploading ${file.name}…`
+              const response = await fetch(`${form.dataset.upload}?name=${encodeURIComponent(file.name)}`, {
+                method: 'POST',
+                headers: { 'X-CSRF-Token': form.dataset.csrf, 'Content-Type': file.type || 'application/octet-stream' },
+                body: file,
+              })
+              if (!response.ok) {
+                status.textContent = `${file.name}: ${(await response.json().catch(() => ({}))).message ?? response.status}`
+                return
+              }
+            }
+            location.reload()
+          }),
+        )
+        document.querySelectorAll('[data-delete-asset]').forEach((button) =>
+          button.addEventListener('click', async () => {
+            const response = await fetch(button.dataset.deleteAsset, { method: 'DELETE', headers: { 'X-CSRF-Token': button.dataset.csrf } })
+            if (response.ok) location.reload()
+          }),
+        )
+      </script>
+    </Layout>
+  )
+}

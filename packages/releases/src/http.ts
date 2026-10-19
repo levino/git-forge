@@ -2,6 +2,7 @@ import { atLeast, checkRepositoryAccess, type Database, type Principal, type Rep
 import { type DigestFactory, isLfsOid, isValidName, mediaPath, type PushOutcome, type RepositoryName, type Storage } from '@git-forge/core'
 import { ApiError, apiUrl, type EventActor, type ForgeEvent, htmlUrl, json, empty, linkHeader, pagination, readJson, releaseEvent, type ReleaseAction, userObject } from '@git-forge/notifications'
 import { AssetUploadError, createTag, defaultBranchOf, isValidTagName, storeAsset, tagExists, TargetError } from './git.ts'
+import { buildReleaseNotes, collectReleaseNotes } from './notes.ts'
 import { type AssetRow, type Author, createReleaseStore, ReleaseConflictError, type ReleaseInput, type ReleaseRow, type ReleaseStore } from './store.ts'
 
 export type ReleasesOptions = {
@@ -20,6 +21,7 @@ export type ReleasesOptions = {
 
 type Context = {
   readonly request: Request
+  readonly authenticate: () => Promise<Principal | null>
   readonly url: URL
   readonly options: ReleasesOptions
   readonly store: ReleaseStore
@@ -54,7 +56,7 @@ const actorOf = (principal: Principal): EventActor => {
 
 const access = async (context: Context, owner: string, name: string, required: 'read' | 'write'): Promise<Access> => {
   if (!isValidName(owner) || !isValidName(name)) throw new ApiError(404, 'Not Found')
-  const principal = await context.options.authenticate(context.request)
+  const principal = await context.authenticate()
   if (!principal) throw new ApiError(401, 'Bad credentials', { 'WWW-Authenticate': 'Bearer' })
   const check = await checkRepositoryAccess(context.options.directory, principal, { owner, name }, 'read')
   const instanceAdmin = principal.kind === 'user' && atLeast(principal.limits?.ceiling ?? 'admin', 'write') && (await context.options.isInstanceAdmin(principal.id))
@@ -99,8 +101,8 @@ export const releaseJson = (baseUrl: string, repository: RepositorySubject, rele
     html_url: htmlUrl(baseUrl, `/${path}/releases/tag/${encodeURIComponent(release.tag_name)}`),
     assets_url: apiUrl(baseUrl, `/repos/${path}/releases/${release.id}/assets`),
     upload_url: `${baseUrl}/api/uploads/repos/${path}/releases/${release.id}/assets{?name,label}`,
-    tarball_url: null,
-    zipball_url: null,
+    tarball_url: release.draft === 1 ? null : apiUrl(baseUrl, `/repos/${path}/tarball/${encodeURIComponent(release.tag_name)}`),
+    zipball_url: release.draft === 1 ? null : apiUrl(baseUrl, `/repos/${path}/zipball/${encodeURIComponent(release.tag_name)}`),
     id: release.id,
     node_id: String(release.id),
     tag_name: release.tag_name,
@@ -155,16 +157,52 @@ const ensureTag = async (context: Context, access: Access, input: ReleaseInput):
 
 const publishedActions = (release: ReleaseRow): ReleaseAction[] => ['published', release.prerelease === 1 ? 'prereleased' : 'released']
 
-const createRelease = async (context: Context, params: string[]): Promise<Response> => {
-  const granted = await access(context, params[0]!, params[1]!, 'write')
-  const body = await readJson(context.request)
+const notesFor = async (context: Context, granted: Access, body: Record<string, unknown>): Promise<{ readonly name: string; readonly body: string }> => {
   const tagName = optionalText(body, 'tag_name')
   if (!tagName || !isValidTagName(tagName)) throw new ApiError(422, 'tag_name is missing or not a valid tag name')
+  const repo = repoOf(granted.repository)
+  const current = await context.store.byTag(granted.repository.id, tagName)
+  const previousTagName =
+    optionalText(body, 'previous_tag_name') ??
+    (await context.store.list(granted.repository.id, false, 50, 0)).find(
+      (release) => release.tag_name !== tagName && release.prerelease === 0 && (current?.published_at == null || (release.published_at ?? 0) < current.published_at),
+    )?.tag_name ??
+    null
+  const range = await collectReleaseNotes(context.options.db, context.options.storage, repo, granted.repository.id, {
+    tagName,
+    targetCommitish: optionalText(body, 'target_commitish') ?? (await defaultBranchOf(context.options.storage, repo)),
+    previousTagName,
+    configurationFilePath: optionalText(body, 'configuration_file_path') ?? null,
+  })
+  if (!range) throw new ApiError(422, 'Validation Failed: target_commitish does not resolve to a commit')
+  const path = `/${repo.owner}/${repo.name}`
+  return {
+    name: tagName,
+    body: buildReleaseNotes({
+      pulls: range.pulls,
+      config: range.config,
+      pullUrl: (number) => htmlUrl(context.baseUrl, `${path}/pull/${number}`),
+      changelogUrl: htmlUrl(context.baseUrl, previousTagName ? `${path}/compare/${previousTagName}...${tagName}` : `${path}/commits/${tagName}`),
+    }),
+  }
+}
+
+const generateNotes = async (context: Context, params: string[]): Promise<Response> => {
+  const granted = await access(context, params[0]!, params[1]!, 'write')
+  return json(200, await notesFor(context, granted, await readJson(context.request)))
+}
+
+const createWith = async (context: Context, granted: Access, body: Record<string, unknown>): Promise<ReleaseRow> => {
+  const tagName = optionalText(body, 'tag_name')
+  if (!tagName || !isValidTagName(tagName)) throw new ApiError(422, 'tag_name is missing or not a valid tag name')
+  const targetCommitish = optionalText(body, 'target_commitish') ?? (await defaultBranchOf(context.options.storage, repoOf(granted.repository)))
+  const generated = optionalBool(body, 'generate_release_notes') ? await notesFor(context, granted, { ...body, target_commitish: targetCommitish }) : null
+  const text = optionalText(body, 'body') ?? null
   const input: ReleaseInput = {
     tagName,
-    targetCommitish: optionalText(body, 'target_commitish') ?? (await defaultBranchOf(context.options.storage, repoOf(granted.repository))),
-    name: optionalText(body, 'name') ?? null,
-    body: optionalText(body, 'body') ?? null,
+    targetCommitish,
+    name: optionalText(body, 'name') || generated?.name || null,
+    body: generated ? (text ? `${text}\n\n${generated.body}` : generated.body) : text,
     draft: optionalBool(body, 'draft') ?? false,
     prerelease: optionalBool(body, 'prerelease') ?? false,
   }
@@ -179,6 +217,12 @@ const createRelease = async (context: Context, params: string[]): Promise<Respon
   }
   await emit(context, granted, 'created', release)
   if (!input.draft) for (const action of publishedActions(release)) await emit(context, granted, action, release)
+  return release
+}
+
+const createRelease = async (context: Context, params: string[]): Promise<Response> => {
+  const granted = await access(context, params[0]!, params[1]!, 'write')
+  const release = await createWith(context, granted, await readJson(context.request))
   return json(201, await withAssets(context, granted.repository, release), { Location: apiUrl(context.baseUrl, `/repos/${granted.repository.owner}/${granted.repository.name}/releases/${release.id}`) })
 }
 
@@ -223,10 +267,7 @@ const releaseByTag = async (context: Context, params: string[]): Promise<Respons
   return json(200, await withAssets(context, granted.repository, release))
 }
 
-const updateRelease = async (context: Context, params: string[]): Promise<Response> => {
-  const granted = await access(context, params[0]!, params[1]!, 'write')
-  const release = await releaseById(context, granted, params[2])
-  const body = await readJson(context.request)
+const updateWith = async (context: Context, granted: Access, release: ReleaseRow, body: Record<string, unknown>): Promise<ReleaseRow> => {
   const tagName = optionalText(body, 'tag_name') ?? release.tag_name
   if (!isValidTagName(tagName)) throw new ApiError(422, 'tag_name is not a valid tag name')
   const input: ReleaseInput = {
@@ -249,15 +290,23 @@ const updateRelease = async (context: Context, params: string[]): Promise<Respon
   const unpublished = release.draft === 0 && updated.draft === 1
   if (published) for (const action of publishedActions(updated)) await emit(context, granted, action, updated)
   else await emit(context, granted, unpublished ? 'unpublished' : 'edited', updated)
+  return updated
+}
+
+const updateRelease = async (context: Context, params: string[]): Promise<Response> => {
+  const granted = await access(context, params[0]!, params[1]!, 'write')
+  const updated = await updateWith(context, granted, await releaseById(context, granted, params[2]), await readJson(context.request))
   return json(200, await withAssets(context, granted.repository, updated))
+}
+
+const deleteWith = async (context: Context, granted: Access, release: ReleaseRow): Promise<void> => {
+  await context.store.delete(release.id)
+  await emit(context, granted, 'deleted', release)
 }
 
 const deleteRelease = async (context: Context, params: string[]): Promise<Response> => {
   const granted = await access(context, params[0]!, params[1]!, 'write')
-  const release = await releaseById(context, granted, params[2])
-  const payload = release
-  await context.store.delete(release.id)
-  await emit(context, granted, 'deleted', payload)
+  await deleteWith(context, granted, await releaseById(context, granted, params[2]))
   return empty(204)
 }
 
@@ -360,6 +409,44 @@ const deleteAsset = async (context: Context, params: string[]): Promise<Response
   return empty(204)
 }
 
+export const releaseOperations = (options: ReleasesOptions, principal: Principal, baseUrl: string) => {
+  const granted = async (owner: string, name: string) => {
+    const context: Context = {
+      request: new Request(baseUrl),
+      authenticate: async () => principal,
+      url: new URL(baseUrl),
+      options,
+      store: createReleaseStore(options.db, options.now),
+      baseUrl,
+    }
+    return { context, access: await access(context, owner, name, 'write') }
+  }
+  const byId = async (owner: string, name: string, id: number) => {
+    const { context, access: writer } = await granted(owner, name)
+    return { context, writer, release: await releaseById(context, writer, String(id)) }
+  }
+  return {
+    create: async (owner: string, name: string, body: Record<string, unknown>): Promise<ReleaseRow> => {
+      const { context, access: writer } = await granted(owner, name)
+      return createWith(context, writer, body)
+    },
+    update: async (owner: string, name: string, id: number, body: Record<string, unknown>): Promise<ReleaseRow> => {
+      const { context, writer, release } = await byId(owner, name, id)
+      return updateWith(context, writer, release, body)
+    },
+    remove: async (owner: string, name: string, id: number): Promise<void> => {
+      const { context, writer, release } = await byId(owner, name, id)
+      await deleteWith(context, writer, release)
+    },
+    generateNotes: async (owner: string, name: string, body: Record<string, unknown>) => {
+      const { context, access: writer } = await granted(owner, name)
+      return notesFor(context, writer, body)
+    },
+  }
+}
+
+export type ReleaseOperations = ReturnType<typeof releaseOperations>
+
 const download = async (context: Context, params: string[]): Promise<Response> => {
   const granted = await access(context, params[0]!, params[1]!, 'read')
   const release = visibleRelease(granted, await context.store.byTag(granted.repository.id, params[2]!))
@@ -376,6 +463,7 @@ const API = `^/api/v3/repos/${SEGMENT}/${SEGMENT}/releases`
 const ROUTES: { readonly pattern: RegExp; readonly methods: Readonly<Record<string, Handler>> }[] = [
   { pattern: new RegExp(`${API}$`), methods: { GET: listReleases, POST: createRelease } },
   { pattern: new RegExp(`${API}/latest$`), methods: { GET: latestRelease } },
+  { pattern: new RegExp(`${API}/generate-notes$`), methods: { POST: generateNotes } },
   { pattern: new RegExp(`${API}/tags/(.+)$`), methods: { GET: releaseByTag } },
   { pattern: new RegExp(`${API}/assets/(\\d+)$`), methods: { GET: getAsset, PATCH: updateAsset, DELETE: deleteAsset } },
   { pattern: new RegExp(`${API}/(\\d+)$`), methods: { GET: getRelease, PATCH: updateRelease, DELETE: deleteRelease } },
@@ -391,7 +479,7 @@ export const handleReleasesRequest = async (request: Request, options: ReleasesO
     if (!match) continue
     const handler = route.methods[request.method]
     if (!handler) return json(405, { message: 'Method Not Allowed' }, { Allow: Object.keys(route.methods).join(', ') })
-    const context: Context = { request, url, options, store: createReleaseStore(options.db, options.now), baseUrl: options.baseUrl(request) }
+    const context: Context = { request, authenticate: () => options.authenticate(request), url, options, store: createReleaseStore(options.db, options.now), baseUrl: options.baseUrl(request) }
     try {
       return await handler(context, match.slice(1).map(decodeURIComponent))
     } catch (error) {

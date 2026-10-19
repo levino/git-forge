@@ -188,7 +188,7 @@ Design: [design.md §17](design.md#17-collaboration).
 - [x] GitHub Apps: registration (settings UI, manifest flow), RS256 app JWTs, installations on users/organizations with repository selection, installation tokens through the role layer, `installation`/`installation_repositories` webhooks, events per subscription (design §16)
 - [ ] GitHub Apps: per-permission enforcement beyond the role ceiling, OAuth user-to-server tokens
 - [x] Releases: GitHub-compatible REST API, tags created on publish, assets stored as LFS objects behind the media URL, download redirects
-- [ ] Releases: source archives (`tarball_url`, `zipball_url`), generated release notes, web UI
+- [x] Releases: source archives (`tarball_url`, `zipball_url`, `/archive/…tar.gz|zip`), generated release notes, web UI (create, edit, delete, assets, latest release on the repository page)
 - [x] Built-in backups (design §19): scheduled bounded `backup` jobs copy a database dump and every object into a write-once `BACKUP` target (R2 bucket lock, S3 Object Lock) with SHA-256 verification; admin panel and API (status, run now, verify); `git-forge-node restore`, `restore-sql`, `backup-verify` (migration `0029_backups`)
 - [x] Partial visibility: refs (Git, LFS, raw, UI, mirrors) and paths (UI, raw, media, LFS) for a public, user, team or instance audience, respected by listing and search (design §8, migration `0017_partial_visibility`)
 - [x] External mirror verification: ref checksums, signed attestations, byte-range spot checks of packs and LFS objects, signed overview (design §10)

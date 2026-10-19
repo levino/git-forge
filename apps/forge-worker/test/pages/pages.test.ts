@@ -22,6 +22,8 @@ import Search from '../../src/pages/search.astro'
 import Blame from '../../src/pages/[owner]/[repo]/blame/[...path].astro'
 import Releases from '../../src/pages/[owner]/[repo]/releases/index.astro'
 import ReleaseTag from '../../src/pages/[owner]/[repo]/releases/tag/[...tag].astro'
+import NewRelease from '../../src/pages/[owner]/[repo]/releases/new.astro'
+import EditRelease from '../../src/pages/[owner]/[repo]/releases/edit/[...tag].astro'
 import { type LoginPage, sql, type UserPrincipal } from '@git-forge/accounts'
 import type { UiSession } from '../../src/app.ts'
 import { git, tempDir } from '../e2e/history.ts'
@@ -487,6 +489,58 @@ describe('releases and notifications', () => {
     const tag = await render(ReleaseTag, '/alice/site/releases/tag/v1.0', { owner: 'alice', repo: 'site', tag: 'v1.0' })
     expect(tag.status).toBe(200)
     expect(tag.html).toContain('<title>First release · alice/site</title>')
+  })
+
+  it('links source archives, the latest release and release editing for writers', async () => {
+    const home = await render(RepoHome, '/alice/site', { owner: 'alice', repo: 'site' })
+    expect(home.html).toMatch(/href="\/alice\/site\/releases\/tag\/v1.0"[^>]*aria-label="Latest release"/)
+    const list = await render(Releases, '/alice/site/releases', { owner: 'alice', repo: 'site' })
+    expect(list.html).toContain('href="/alice/site/archive/refs/tags/v1.0.zip"')
+    expect(list.html).toContain('href="/alice/site/archive/refs/tags/v1.0.tar.gz"')
+    expect(list.html).toContain('Latest')
+    expect(list.html).not.toContain('Draft a new release')
+    expect(list.html).not.toContain('/alice/site/releases/edit/')
+    const session: UiSession = { principal: admin as UserPrincipal, csrf: 'csrf-token', sessionId: 'session-1' }
+    const writer = await render(Releases, '/alice/site/releases', { owner: 'alice', repo: 'site' }, admin, { session })
+    expect(writer.html).toContain('href="/alice/site/releases/new"')
+    expect(writer.html).toContain('href="/alice/site/releases/edit/v1.0"')
+    const zip = await forge.fetch(new Request(`${BASE}/alice/site/archive/refs/tags/v1.0.zip`))
+    expect(zip.status).toBe(200)
+    expect(zip.headers.get('Content-Type')).toBe('application/zip')
+    expect((await forge.fetch(new Request(`${BASE}/alice/secret/archive/refs/tags/v1.0.tar.gz`))).status).toBe(401)
+  })
+
+  it('creates, generates notes for, edits and deletes releases through the forms', async () => {
+    const session: UiSession = { principal: admin as UserPrincipal, csrf: 'csrf-token', sessionId: 'session-1' }
+    const post = (path: string, form: Record<string, string>) => ({
+      session,
+      request: new Request(`${BASE}${path}`, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams(form) }),
+      services: { verifySessionWrite: async () => session },
+    })
+    expect((await render(NewRelease, '/alice/site/releases/new', { owner: 'alice', repo: 'site' })).location).toBe('/login?return_to=%2Falice%2Fsite%2Freleases%2Fnew')
+    const blank = await render(NewRelease, '/alice/site/releases/new', { owner: 'alice', repo: 'site' }, admin, { session })
+    expect(blank.html).toContain('Generate release notes')
+    expect(blank.html).toContain('<option value="main" selected')
+    const generated = await render(NewRelease, '/alice/site/releases/new', { owner: 'alice', repo: 'site' }, admin, post('/alice/site/releases/new', { csrf: 'x', tag_name: 'v3.0', target_commitish: 'main', name: '', body: '', intent: 'generate' }))
+    expect(generated.status).toBe(200)
+    expect(generated.html).toContain('**Full Changelog**: https://forge.example/alice/site/compare/v1.0...v3.0')
+    const created = await render(NewRelease, '/alice/site/releases/new', { owner: 'alice', repo: 'site' }, admin, post('/alice/site/releases/new', { csrf: 'x', tag_name: 'v3.0', target_commitish: 'main', name: 'Third', body: 'Notes', intent: 'save', prerelease: 'on' }))
+    expect(created.status).toBe(303)
+    expect(created.location).toBe('/alice/site/releases/tag/v3.0')
+    const duplicate = await render(NewRelease, '/alice/site/releases/new', { owner: 'alice', repo: 'site' }, admin, post('/alice/site/releases/new', { csrf: 'x', tag_name: 'v3.0', intent: 'save' }))
+    expect(duplicate.status).toBe(422)
+    expect(duplicate.html).toContain('a release for tag v3.0 already exists')
+    const edit = await render(EditRelease, '/alice/site/releases/edit/v3.0', { owner: 'alice', repo: 'site', tag: 'v3.0' }, admin, { session })
+    expect(edit.html).toContain('value="Third"')
+    expect(edit.html).toContain('data-upload="/api/uploads/repos/alice/site/releases/')
+    const updated = await render(EditRelease, '/alice/site/releases/edit/v3.0', { owner: 'alice', repo: 'site', tag: 'v3.0' }, admin, post('/alice/site/releases/edit/v3.0', { csrf: 'x', tag_name: 'v3.0', target_commitish: 'main', name: 'Third, renamed', body: 'Notes', intent: 'save' }))
+    expect(updated.location).toBe('/alice/site/releases/tag/v3.0')
+    const tag = await render(ReleaseTag, '/alice/site/releases/tag/v3.0', { owner: 'alice', repo: 'site', tag: 'v3.0' })
+    expect(tag.html).toContain('Third, renamed')
+    expect(tag.html).not.toContain('Pre-release')
+    const removed = await render(EditRelease, '/alice/site/releases/edit/v3.0', { owner: 'alice', repo: 'site', tag: 'v3.0' }, admin, post('/alice/site/releases/edit/v3.0', { csrf: 'x', tag_name: 'v3.0', intent: 'delete' }))
+    expect(removed.location).toBe('/alice/site/releases')
+    expect((await render(ReleaseTag, '/alice/site/releases/tag/v3.0', { owner: 'alice', repo: 'site', tag: 'v3.0' })).status).toBe(404)
   })
 
   it('shows the inbox of the session user and applies its actions', async () => {

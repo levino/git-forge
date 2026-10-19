@@ -108,6 +108,7 @@ import {
   type LoginStore,
   type OidcProvider,
   sql,
+  first,
   type BranchProtectionRule,
   type NamedAllowances,
   validateBranchPattern,
@@ -235,6 +236,7 @@ import { createJobFailures } from './admin/jobs.ts'
 import { createInstanceSettings, deriveSettingsKey } from './admin/settings.ts'
 import type { Location } from './admin/setup.ts'
 import { createUsageMeter, type UsageScanJob } from './admin/usage.ts'
+import type { PageCache } from './ui/page-cache.ts'
 import { activityEvent } from './collaboration-events.ts'
 import { parseSearchRequest, repositoryJson, runSearch, type SearchRequest, searchResponseJson } from './search.ts'
 import { type GithubProgress, githubImportStep, githubRepository } from './github-import.ts'
@@ -289,6 +291,7 @@ export type ForgeOptions = ForgeSettings & {
   readonly location?: (request: Request) => Promise<Location>
   readonly backup?: Storage
   readonly backupBudget?: CopyBudget
+  readonly pageCache?: PageCache
 }
 
 export type LfsPublishJob = { readonly kind: 'lfs-publish'; readonly owner: string; readonly name: string; readonly oids: readonly string[] | null }
@@ -325,6 +328,9 @@ export const RAISE_LIMIT_HINT = 'the instance admin can raise MAX_LFS_OBJECT_BYT
 
 export type ForgeServices = {
   readonly storage: Storage
+  readonly version: string
+  readonly pageCache?: PageCache
+  readonly repositoryChanges: (repo: RepositoryName) => Promise<number | null>
   readonly store: AccountsStore
   readonly authenticate: (request: Request) => Promise<Principal | null>
   readonly issuer: (request: Request) => string
@@ -2473,6 +2479,15 @@ export const createForge = (options: ForgeOptions): Forge => {
     isPagesRequest: pages.isPagesRequest,
     services: {
       storage,
+      version: options.version ?? 'dev',
+      ...(options.pageCache ? { pageCache: options.pageCache } : {}),
+      repositoryChanges: async (repo) =>
+        (
+          await first<{ counter: number }>(
+            db,
+            sql('SELECT c.counter FROM repository_changes c JOIN repositories r ON r.id = c.repository_id JOIN accounts a ON a.id = r.owner_id WHERE a.login = ? AND r.name = ?', repo.owner, repo.name),
+          )
+        )?.counter ?? null,
       store,
       authenticate,
       renameAccount,

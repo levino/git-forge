@@ -36,6 +36,14 @@ keeps pack indexes, pack heads and pack ranges up to 1 MiB in the colo's cache
 under a private host. Pack files are content-addressed, so entries never go
 stale.
 
+## `cacheApiPageCache`
+
+Page cache of the Worker UI over the Cache API: `cacheApiPageCache(300)` stores
+responses under a private host with `Cache-Control: public, max-age=300`
+(the original `Cache-Control` travels in `X-Forge-Cache-Control` and is
+restored on a hit), drops `Vary`, and never stores a response with
+`Set-Cookie`. Which pages may be cached is decided by the caller (design §18).
+
 ## `d1Sessions`
 
 `Database` (of `@git-forge/accounts`) over a D1 binding with the Sessions API:

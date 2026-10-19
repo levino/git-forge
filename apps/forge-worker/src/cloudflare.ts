@@ -1,5 +1,5 @@
 import { d1Database, MIGRATIONS, migrateOnStart } from '@git-forge/accounts'
-import { cacheApiObjectCache, consumeJobs, type ContextStorage, createCloudflareEmailSender, type D1Sessions, d1Sessions, type RequestSession, digestStreams, QueueJobs, R2Storage } from '@git-forge/cloudflare'
+import { cacheApiObjectCache, cacheApiPageCache, consumeJobs, type ContextStorage, createCloudflareEmailSender, type D1Sessions, d1Sessions, type RequestSession, digestStreams, QueueJobs, R2Storage } from '@git-forge/cloudflare'
 import { continueImport, createConsoleEmailSender, type EmailSender, type ImportJob, type ImportScheduler, storagePublisher } from '@git-forge/core'
 import { S3Storage } from '@git-forge/s3'
 import { createSesEmailSender } from '@git-forge/ses'
@@ -7,6 +7,7 @@ import { type AppJob, createForge, type Forge } from './app.ts'
 import { ACTIONS_CRON, type EmailSettings, type ForgeVars, loadIdTokenKeys, loadSecretsKey, parseActionsSettings, parseEmailSettings, parseR2Signing, parseSettings, uiEnabled } from './config.ts'
 import { containerLauncher } from './runner-launcher.ts'
 import { captureLoginPage } from './ui/login-pages.ts'
+import { PAGE_CACHE_SECONDS } from './ui/page-cache.ts'
 
 export type Env = ForgeVars & {
   readonly BUCKET: R2Bucket
@@ -64,6 +65,7 @@ export const forgeFor = (env: Env): Promise<Forge> => {
         ...settings,
         storage: new R2Storage(env.BUCKET),
         objectCache: cacheApiObjectCache(),
+        pageCache: cacheApiPageCache(PAGE_CACHE_SECONDS),
         db: database,
         digests: digestStreams,
         version: typeof GIT_FORGE_VERSION === 'string' ? GIT_FORGE_VERSION : 'dev',

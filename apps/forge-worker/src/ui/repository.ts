@@ -72,7 +72,7 @@ export const headerData = (forge: ForgeServices, request: Request, principal: Pr
     return scope ? { scope, ...header } : { scope, fork: null, forks: [] }
   })
 
-const accessFor = (forge: ForgeServices, request: Request | undefined, principal: Principal, repo: RepositoryName) =>
+export const accessFor = (forge: ForgeServices, request: Request | undefined, principal: Principal, repo: RepositoryName) =>
   request ? perRequest(request, principal, `access:${repo.owner}/${repo.name}`, () => forge.repositoryAccess(principal, repo, 'read')) : forge.repositoryAccess(principal, repo, 'read')
 
 export const openRepository = async (forge: ForgeServices, principal: Principal, owner: string, name: string, options: OpenOptions = {}): Promise<RepositoryResult> => {

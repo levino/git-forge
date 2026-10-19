@@ -67,6 +67,13 @@ import {
   sessionUserPrincipal,
   normalizeIssuer,
   parseAuthorization,
+  type AppPermissions,
+  grantsNeed,
+  installationNeeds,
+  isLfsBatchPath,
+  missingPermission,
+  tokenKindOf,
+  workflowCheck,
   type Principal,
   type RepositorySubject,
   type Role,
@@ -2239,7 +2246,34 @@ export const createForge = (options: ForgeOptions): Forge => {
     onTagCreated: (repo, outcome, principal) => afterPush(request, repo, outcome, waitUntil, principal),
   })
 
+  const installationPermissions = async (request: Request): Promise<AppPermissions | null> => {
+    const credential = parseAuthorization(request.headers.get('Authorization'))
+    if (credential.kind !== 'secret' || tokenKindOf(credential.secret) !== 'app') return null
+    const principal = await store.authenticateToken(credential.secret)
+    return principal?.kind === 'app' && principal.permissions ? (principal.permissions as AppPermissions) : null
+  }
+
+  const lfsOperation = async (request: Request): Promise<string | null> => {
+    try {
+      return String(((await request.clone().json()) as { operation?: unknown }).operation ?? '')
+    } catch {
+      return null
+    }
+  }
+
+  const installationGate = async (request: Request): Promise<Response | null> => {
+    const permissions = await installationPermissions(request)
+    if (!permissions) return null
+    const url = new URL(request.url)
+    const operation = request.method === 'POST' && isLfsBatchPath(url.pathname) ? await lfsOperation(request) : null
+    const problem = missingPermission(permissions, installationNeeds(request.method, url, operation))
+    if (!problem) return null
+    return url.pathname.startsWith('/api/') ? json(403, { message: `Resource not accessible by integration: ${problem}` }) : new Response(`${problem}\n`, { status: 403, headers: { 'Content-Type': 'text/plain; charset=utf-8' } })
+  }
+
   const handle = async (request: Request, waitUntil?: WaitUntil): Promise<Response> => {
+    const gated = await installationGate(request)
+    if (gated) return gated
     const site = await pages.serve(request)
     if (site) return site
     const wellKnown = options.instanceKey ? handleWellKnownRequest(request, { issuer: issuerFor(request), keys: [options.instanceKey.publicJwk] }) : null
@@ -2305,6 +2339,14 @@ export const createForge = (options: ForgeOptions): Forge => {
       storage: presigningStorage,
       authorize,
       pushPolicy: access.pushPolicy,
+      pushCheck: async (incoming, repo) => {
+        const permissions = await installationPermissions(incoming)
+        if (!permissions || grantsNeed(permissions, ['workflows', 'write'])) return null
+        return workflowCheck(new ObjectDatabase(storage, repo), async () => {
+          const refs = await readRefs(storage, repo)
+          return refs ? (refs.state.refs[refs.state.head] ?? null) : null
+        })
+      },
       ...(options.maxPushBytes !== undefined ? { maxPushBytes: options.maxPushBytes } : {}),
       lfs: {
         maxObjectBytes: options.maxLfsObjectBytes,
@@ -2348,7 +2390,8 @@ export const createForge = (options: ForgeOptions): Forge => {
       const active = await readActiveSession(request, (await loginOptions(request)))
       if (active) return sessionUserPrincipal(active.session)
     }
-    return authenticateRequest(request, authenticateOptions(request))
+    const principal = await authenticateRequest(request, authenticateOptions(request))
+    return principal?.kind === 'app' && principal.installationId !== undefined ? null : principal
   }
 
   return {

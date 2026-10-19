@@ -189,6 +189,18 @@ describe('releases API', () => {
     expect(fixture.events.at(-1)!.action).toBe('deleted')
   })
 
+  it('honors make_latest', async () => {
+    const latest = async () => ((await (await fixture.call('GET', '/api/v3/repos/alice/engine/releases/latest', fixture.tokens.bob)).json()) as Release).tag_name
+    await fixture.call('POST', '/api/v3/repos/alice/engine/releases', fixture.tokens.alice, { tag_name: 'v1' })
+    const second = (await (await fixture.call('POST', '/api/v3/repos/alice/engine/releases', fixture.tokens.alice, { tag_name: 'v2', make_latest: 'false' })).json()) as Release
+    expect(await latest()).toBe('v1')
+    await fixture.call('PATCH', `/api/v3/repos/alice/engine/releases/${second.id}`, fixture.tokens.alice, { make_latest: 'true' })
+    expect(await latest()).toBe('v2')
+    await fixture.call('POST', '/api/v3/repos/alice/engine/releases', fixture.tokens.alice, { tag_name: 'v3', make_latest: 'legacy' })
+    expect(await latest()).toBe('v2')
+    expect((await fixture.call('POST', '/api/v3/repos/alice/engine/releases', fixture.tokens.alice, { tag_name: 'v4', make_latest: 'yes' })).status).toBe(422)
+  })
+
   it('stores uploaded assets as LFS objects and redirects downloads to the immutable media URL', async () => {
     const release = (await (await fixture.call('POST', '/api/v3/repos/alice/engine/releases', fixture.tokens.alice, { tag_name: 'v1' })).json()) as Release
     const bytes = new Uint8Array(70_000).map((_, i) => (i * 7) % 251)

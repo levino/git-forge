@@ -1,6 +1,6 @@
 import { readAll, SizeLimitError } from './bytes.ts'
 import { parseRange } from './content.ts'
-import { advertiseReceivePack, type PushOutcome, receivePack, type ReceiveOptions, type RefPolicy } from './receive-pack.ts'
+import { advertiseReceivePack, type PushOutcome, receivePack, type ReceiveOptions, type RefCheck, type RefPolicy } from './receive-pack.ts'
 import { handleLfsRequest, type LfsHttpOptions } from './lfs-http.ts'
 import { lfsPushCheck } from './lfs.ts'
 import { handleUploadRequest, type UploadHttpOptions, uploadLimits } from './pack-upload-http.ts'
@@ -17,10 +17,13 @@ export type Authorize = (request: Request, repo: RepositoryName, access: Access,
 
 export type PushPolicy = (request: Request, repo: RepositoryName) => Promise<RefPolicy | null>
 
+export type PushCheck = (request: Request, repo: RepositoryName) => Promise<RefCheck | null>
+
 export type GitHttpOptions = {
   readonly storage: Storage
   readonly authorize?: Authorize
   readonly pushPolicy?: PushPolicy
+  readonly pushCheck?: PushCheck
   readonly maxRequestBytes?: number
   readonly maxPushBytes?: number
   readonly receive?: Omit<ReceiveOptions, 'storage' | 'repo'>
@@ -138,6 +141,11 @@ const withLfsCheck = (options: GitHttpOptions, repo: RepositoryName): NonNullabl
   return async (objects, commands) => (await lfs?.(objects)) ?? (await custom?.(objects, commands)) ?? null
 }
 
+const withCheck = async (options: GitHttpOptions, request: Request, repo: RepositoryName): Promise<{ check?: RefCheck }> => {
+  const check = (await options.pushCheck?.(request, repo)) ?? options.receive?.check
+  return check ? { check } : {}
+}
+
 export const combinePolicies =
   (...policies: readonly (RefPolicy | null | undefined)[]): RefPolicy =>
   (command) => {
@@ -175,6 +183,7 @@ export const handleGitRequest = async (request: Request, options: GitHttpOptions
         storage,
         repo,
         policy: combinePolicies(options.receive?.policy, await options.pushPolicy?.(incoming, repo)),
+        ...(await withCheck(options, incoming, repo)),
         beforeUpdate: withLfsCheck(options, repo),
       }),
       ...(options.onPush ? { onPush: options.onPush } : {}),
@@ -243,7 +252,7 @@ export const handleGitRequest = async (request: Request, options: GitHttpOptions
     let received: Awaited<ReturnType<typeof receivePack>>
     try {
       received = await receivePack(
-        { ...options.receive, storage, repo, policy, beforeUpdate: withLfsCheck(options, repo) },
+        { ...options.receive, storage, repo, policy, ...(await withCheck(options, request, repo)), beforeUpdate: withLfsCheck(options, repo) },
         limited(bodyStream(request), pushLimit),
       )
     } catch (error) {

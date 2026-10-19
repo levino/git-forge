@@ -51,6 +51,7 @@ export type ReleaseValues = {
   readonly body: string
   readonly draft: boolean
   readonly prerelease: boolean
+  readonly latest: boolean
 }
 
 export const releaseValues = (release: ReleaseRow | null, defaults: Partial<ReleaseValues> = {}): ReleaseValues => ({
@@ -60,6 +61,7 @@ export const releaseValues = (release: ReleaseRow | null, defaults: Partial<Rele
   body: release?.body ?? '',
   draft: release ? release.draft === 1 : false,
   prerelease: release ? release.prerelease === 1 : false,
+  latest: release ? release.make_latest !== 'false' : true,
 })
 
 export type ReleaseFormResult = { readonly outcome: FormOutcome | null; readonly values: ReleaseValues }
@@ -67,12 +69,12 @@ export type ReleaseFormResult = { readonly outcome: FormOutcome | null; readonly
 export const runReleaseForm = async (forge: ForgeServices, request: Request, repo: OpenRepository, release: ReleaseRow | null): Promise<ReleaseFormResult> => {
   const form = await request.formData()
   const text = (name: string) => String(form.get(name) ?? '')
-  const values: ReleaseValues = { tag: text('tag_name').trim(), target: text('target_commitish').trim(), title: text('name'), body: text('body'), draft: form.has('draft'), prerelease: form.has('prerelease') }
+  const values: ReleaseValues = { tag: text('tag_name').trim(), target: text('target_commitish').trim(), title: text('name'), body: text('body'), draft: form.has('draft'), prerelease: form.has('prerelease'), latest: form.has('make_latest') }
   const session = await forge.verifySessionWrite(request)
   if (!session) return { values, outcome: { kind: 'error', status: 403, message: 'The form expired or you are not signed in. Reload the page and try again.' } }
   const operations = forge.releases.write(request, session.principal)
   const { owner, name } = repo.name
-  const input = { tag_name: values.tag, target_commitish: values.target || undefined, name: values.title || null, body: values.body || null, draft: values.draft, prerelease: values.prerelease }
+  const input = { tag_name: values.tag, target_commitish: values.target || undefined, name: values.title || null, body: values.body || null, draft: values.draft, prerelease: values.prerelease, ...(release && values.latest === (release.make_latest !== 'false') ? {} : { make_latest: values.latest && !values.prerelease ? 'true' : 'false' }) }
   try {
     switch (text('intent')) {
       case 'generate': {

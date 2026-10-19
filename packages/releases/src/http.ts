@@ -3,7 +3,7 @@ import { type DigestFactory, isLfsOid, isValidName, mediaPath, type PushOutcome,
 import { ApiError, apiUrl, type EventActor, type ForgeEvent, htmlUrl, json, empty, linkHeader, pagination, readJson, releaseEvent, type ReleaseAction, userObject } from '@git-forge/notifications'
 import { AssetUploadError, createTag, defaultBranchOf, isValidTagName, storeAsset, tagExists, TargetError } from './git.ts'
 import { buildReleaseNotes, collectReleaseNotes } from './notes.ts'
-import { type AssetRow, type Author, createReleaseStore, ReleaseConflictError, type ReleaseInput, type ReleaseRow, type ReleaseStore } from './store.ts'
+import { type AssetRow, type Author, createReleaseStore, type MakeLatest, ReleaseConflictError, type ReleaseInput, type ReleaseRow, type ReleaseStore } from './store.ts'
 
 export type ReleasesOptions = {
   readonly db: Database
@@ -129,6 +129,13 @@ const optionalText = (body: Record<string, unknown>, key: string): string | null
   return value
 }
 
+const makeLatest = (body: Record<string, unknown>): MakeLatest | undefined => {
+  const value = body.make_latest
+  if (value === undefined || value === null) return undefined
+  if (value !== 'true' && value !== 'false' && value !== 'legacy') throw new ApiError(422, 'make_latest must be true, false or legacy')
+  return value
+}
+
 const optionalBool = (body: Record<string, unknown>, key: string): boolean | undefined => {
   const value = body[key]
   if (value === undefined || value === null) return undefined
@@ -206,11 +213,12 @@ const createWith = async (context: Context, granted: Access, body: Record<string
     draft: optionalBool(body, 'draft') ?? false,
     prerelease: optionalBool(body, 'prerelease') ?? false,
   }
+  const latest = makeLatest(body) ?? 'true'
   if (await context.store.byTag(granted.repository.id, tagName)) throw new ApiError(422, `Validation Failed: a release for tag ${tagName} already exists`)
   if (!input.draft) await ensureTag(context, granted, input)
   let release: ReleaseRow
   try {
-    release = await context.store.create(granted.repository.id, input, authorOf(granted.principal))
+    release = await context.store.setLatest(await context.store.create(granted.repository.id, input, authorOf(granted.principal)), latest)
   } catch (error) {
     if (error instanceof ReleaseConflictError) throw new ApiError(422, `Validation Failed: ${error.message}`)
     throw error
@@ -278,6 +286,7 @@ const updateWith = async (context: Context, granted: Access, release: ReleaseRow
     draft: optionalBool(body, 'draft') ?? release.draft === 1,
     prerelease: optionalBool(body, 'prerelease') ?? release.prerelease === 1,
   }
+  const latest = makeLatest(body)
   if (!input.draft) await ensureTag(context, granted, input)
   let updated: ReleaseRow
   try {
@@ -287,6 +296,8 @@ const updateWith = async (context: Context, granted: Access, release: ReleaseRow
     throw error
   }
   const published = release.draft === 1 && updated.draft === 0
+  const mode = latest ?? (published && updated.make_latest === 'true' ? 'true' : undefined)
+  if (mode) updated = await context.store.setLatest(updated, mode)
   const unpublished = release.draft === 0 && updated.draft === 1
   if (published) for (const action of publishedActions(updated)) await emit(context, granted, action, updated)
   else await emit(context, granted, unpublished ? 'unpublished' : 'edited', updated)

@@ -1,10 +1,10 @@
 import { base64UrlEncode, sql, type UserPrincipal } from '@git-forge/accounts'
 import { importSecretsKey } from '@git-forge/actions'
 import { verifySignature } from '@git-forge/notifications'
-import { initRepo, sampleHistory } from '@git-forge/core/test/git-helpers.ts'
+import { commitAll, initRepo, sampleHistory, writeFile } from '@git-forge/core/test/git-helpers.ts'
 import { type RunningServer, startServer } from '@git-forge/core/test/http-server.ts'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { git } from '../e2e/history.ts'
+import { git, gitFails } from '../e2e/history.ts'
 import { bootstrap, call, type NodeForge, nodeForge } from '../support/node-forge.ts'
 
 type Hook = { path: string; event: string | null; signature: string | null; target: string | null; raw: string; body: Record<string, unknown> }
@@ -127,6 +127,18 @@ describe('webhook tests, sealed secrets and GitHub Apps', () => {
     expect((await call(forge, server.url, 'POST', '/api/v3/repos/admin/engine/issues', token, { title: 'From the bot' })).status).toBe(201)
     expect((await call(forge, server.url, 'POST', '/api/v3/repos/admin/other/issues', token, { title: 'Nope' })).status).toBe(404)
     expect((await call(forge, server.url, 'DELETE', '/api/v3/repos/admin/engine', token)).status).toBeGreaterThanOrEqual(403)
+    const remote = server.url.replace('://', `://x-access-token:${token}@`)
+    const clone = initRepo()
+    expect(await git(clone, ['ls-remote', `${remote}/admin/engine.git`])).toContain('refs/heads/main')
+    await git(clone, ['fetch', '-q', `${remote}/admin/engine.git`, 'main'])
+    await git(clone, ['checkout', '-q', '-B', 'main', 'FETCH_HEAD'])
+    writeFile(clone, 'bot.txt', 'from the bot\n')
+    commitAll(clone, 'Bot change')
+    expect(await gitFails(clone, ['push', '-q', `${remote}/admin/engine.git`, 'main'])).toContain('contents: write')
+    expect((await call(forge, server.url, 'PUT', '/api/v3/repos/admin/engine/contents/bot.txt', token, { message: 'x', content: btoa('x') })).status).toBe(403)
+    expect((await call(forge, server.url, 'PUT', '/api/v3/repos/admin/engine/hooks', token, {})).status).toBe(403)
+    expect((await call(forge, server.url, 'GET', '/api/v3/repos/admin/engine/subscription', token)).status).toBe(403)
+    expect((await call(forge, server.url, 'GET', '/api/v3/repos/admin/engine/pulls', token)).status).toBe(403)
     const issueHook = received.find((hook) => hook.path === '/app' && hook.event === 'issues')!
     expect(issueHook.body).toMatchObject({ action: 'opened', installation: { id: installation.id }, repository: { full_name: 'admin/engine' } })
 
@@ -137,6 +149,27 @@ describe('webhook tests, sealed secrets and GitHub Apps', () => {
     await apps.uninstall(user, installation.id, server.url)
     expect((await call(forge, server.url, 'GET', '/api/v3/installation/repositories', token)).status).toBe(401)
     expect(received.filter((hook) => hook.event === 'installation').map((hook) => hook.body.action)).toEqual(['created', 'deleted'])
+  })
+
+  it('lets contents:write push, but not workflow changes without workflows:write', async () => {
+    const apps = forge.services.githubApps
+    const app = await apps.createApp(user, 'admin', { name: 'Pusher', permissions: { contents: 'write' } })
+    const key = await apps.generateKey(user, app.slug)
+    const { installation } = await apps.install(user, app.slug, 'admin', 'all', [], server.url)
+    const issued = await call(forge, server.url, 'POST', `/api/v3/app/installations/${installation.id}/access_tokens`, await sign(key.pem, app.id), {})
+    const { token } = await json<{ token: string }>(issued)
+    const remote = `${server.url.replace('://', `://x-access-token:${token}@`)}/admin/engine.git`
+    const clone = initRepo()
+    await git(clone, ['fetch', '-q', remote, 'main'])
+    await git(clone, ['checkout', '-q', '-B', 'main', 'FETCH_HEAD'])
+    writeFile(clone, 'notes.txt', 'pushed by an app\n')
+    commitAll(clone, 'App change')
+    await git(clone, ['push', '-q', remote, 'main'])
+    writeFile(clone, '.github/workflows/ci.yml', 'on: push\n')
+    commitAll(clone, 'Add a workflow')
+    expect(await gitFails(clone, ['push', '-q', remote, 'main'])).toContain('workflows permission')
+    expect(await gitFails(clone, ['push', '-q', remote, 'main:refs/heads/sneaky'])).toContain('workflows permission')
+    expect((await call(forge, server.url, 'POST', '/api/v3/repos/admin/engine/issues', token, { title: 'No issues permission' })).status).toBe(403)
   })
 
   it('converts a manifest code once into credentials', async () => {

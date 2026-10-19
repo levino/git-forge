@@ -2034,11 +2034,24 @@ in `apps/forge-worker/src/github-apps.ts`). Every endpoint answers under
   mints a one-hour app token (`tokens.installation_id`, `permissions`).
   Authorization stays the existing role layer: `grantsFor` gives the app the
   installation's role on covered repositories only, and the token's scope
-  ceiling and repository list apply on top. Permissions collapse to a role:
-  `administration`, `repository_hooks` or `secrets` write → admin, any other
-  write → write, else read. Finer per-permission checks (for example
-  `contents: read` with `issues: write` still allows a push) are not
-  enforced yet. `GET /installation/repositories`, `DELETE
+  ceiling and repository list apply on top (`administration`,
+  `repository_hooks` or `secrets` write → admin, any other write → write,
+  else read). On top of that, every request with an installation token passes
+  one gate before any handler: `installationNeeds(method, url)` in
+  `packages/accounts/src/app-permissions.ts` maps the route or Git/LFS
+  surface to the permissions it needs, and anything unmapped is refused.
+  `contents` covers Git fetch and push, LFS (batch by its `operation`),
+  contents, git data, commits, branches, tags, archives, raw/media and
+  releases including assets; `issues` covers issues, comments, labels,
+  milestones; `pull_requests` covers pulls, reviews and review comments, and
+  merging also needs `contents: write`; `metadata: read` is implicit; then
+  `administration`, `actions`, `secrets`, `variables`, `checks`,
+  `statuses`, `deployments`, `pages`, `discussions`, `repository_hooks`,
+  `members`, `organization_hooks`. Pushes that change `.github/workflows`
+  (compared with the old tip, or the default branch for new refs) need
+  `workflows: write`, checked by a `pushCheck` on receive-pack once the pack
+  is readable. Web UI pages treat installation tokens as anonymous.
+  `GET /installation/repositories`, `DELETE
   /installation/token`. Suspending, uninstalling or accepting new
   permissions revokes the installation's tokens.
 - **Webhooks:** the app's webhook is a `webhooks` row with `app_id`
@@ -2099,8 +2112,10 @@ in `apps/forge-worker/src/github-apps.ts`). Every endpoint answers under
   delete releases (`/releases/new`, `/releases/edit/{tag}`) through the same
   functions as the API, generate notes, and upload or delete assets from the
   browser against the upload API with the session's CSRF token.
-- Not implemented: `make_latest` (the latest release is the newest published
-  non-prerelease).
+- `make_latest` (`true` by default on create, `false`, `legacy`; columns
+  `make_latest`, `latest_at`, migration `0031`): the latest release is the
+  published non-prerelease with the newest `latest_at`, else the newest
+  published one, never one marked `false`.
 
 ## 17. Collaboration
 

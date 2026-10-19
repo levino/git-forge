@@ -31,6 +31,7 @@ const { repo, values, csrf, editing } = Astro.props
   </div>
   <textarea id="release-body" name="body" rows="14" class="textarea w-full font-mono" placeholder="Markdown is supported">{values.body}</textarea>
   <label class="label gap-2"><input type="checkbox" name="prerelease" class="checkbox checkbox-sm" checked={values.prerelease} /> Set as a pre-release</label>
+  <label class="label gap-2"><input type="checkbox" name="make_latest" class="checkbox checkbox-sm" checked={values.latest} /> Set as the latest release</label>
   <label class="label gap-2"><input type="checkbox" name="draft" class="checkbox checkbox-sm" checked={values.draft} /> Save as draft</label>
   <div class="flex gap-2">
     <button class="btn btn-primary" name="intent" value="save">{editing ? 'Update release' : 'Publish release'}</button>

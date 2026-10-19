@@ -484,6 +484,10 @@ export const issueChanges = (before: Issue, after: Issue): { readonly action: st
   if (logins(after).some((login) => !logins(before).includes(login))) out.push({ action: 'assigned' })
   if (logins(before).some((login) => !logins(after).includes(login))) out.push({ action: 'unassigned' })
   if (before.locked !== after.locked && !after.isPull) out.push({ action: after.locked ? 'locked' : 'unlocked' })
+  if (before.milestone?.number !== after.milestone?.number) {
+    if (before.milestone) out.push({ action: 'demilestoned', changes: { milestone: { number: before.milestone.number, title: before.milestone.title } } })
+    if (after.milestone) out.push({ action: 'milestoned' })
+  }
   return out
 }
 
@@ -681,16 +685,16 @@ export const listComments = async (scope: Scope, number: number | null, options:
   return { items: await hydrateComments(scope.db, rows), total }
 }
 
-const commentRow = async (scope: Scope, id: number): Promise<CommentRow & { locked: number }> => {
+const commentRow = async (scope: Scope, id: number, includeDeleted = false): Promise<CommentRow & { locked: number }> => {
   const row = await first<CommentRow & { locked: number }>(
     scope.db,
-    sql(`${COMMENT_SELECT.replace('SELECT ', 'SELECT i.locked, ')} WHERE c.id = ? AND i.repository_id = ? AND c.deleted_at IS NULL`, id, scope.repository.id),
+    sql(`${COMMENT_SELECT.replace('SELECT ', 'SELECT i.locked, ')} WHERE c.id = ? AND i.repository_id = ?${includeDeleted ? '' : ' AND c.deleted_at IS NULL'}`, id, scope.repository.id),
   )
   if (!row) throw notFound()
   return row
 }
 
-export const getComment = async (scope: Scope, id: number): Promise<IssueComment> => (await hydrateComments(scope.db, [await commentRow(scope, id)]))[0]!
+export const getComment = async (scope: Scope, id: number, includeDeleted = false): Promise<IssueComment> => (await hydrateComments(scope.db, [await commentRow(scope, id, includeDeleted)]))[0]!
 
 export const createComment = async (scope: Scope, number: number, body: unknown): Promise<IssueComment> => {
   const row = await issueRow(scope, number)
@@ -725,12 +729,13 @@ export const updateComment = async (scope: Scope, id: number, body: unknown): Pr
 
 export const deleteComment = async (scope: Scope, id: number): Promise<void> => {
   const row = await commentRow(scope, id)
-  requirePermission(scope, 'comment:edit', { author: refFromColumns(row.author_kind, row.author_id) })
+  const actor = requirePermission(scope, 'comment:edit', { author: refFromColumns(row.author_kind, row.author_id) })
   const at = scope.now()
   await scope.db.batch([
     sql('UPDATE issue_comments SET deleted_at = ?, updated_at = ? WHERE id = ?', at, at, id),
     sql('UPDATE issues SET comment_count = comment_count - 1 WHERE id = ?', row.issue_id),
   ])
+  await emitActivity(scope, { kind: 'issue_comment', action: 'deleted', number: row.number, actor, commentId: id, deleted: true })
 }
 
 const LABEL_COLOR = /^[0-9a-fA-F]{6}$/

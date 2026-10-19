@@ -69,6 +69,7 @@ export type Activity = {
   readonly requestedReviewer?: string
   readonly before?: string
   readonly after?: string
+  readonly deleted?: boolean
 }
 
 export type ActivityHandler = (scope: Scope, activity: Activity) => Promise<void>

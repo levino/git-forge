@@ -3,7 +3,7 @@ import { type EmailSender, EmailRejectedError, type JobQueue, readRefs, type Sto
 import { renderDigest } from './digest.ts'
 import { type ForgeEvent, userObject } from './events.ts'
 import { DIGEST_DELAY_SECONDS, directCandidates, hookWants, resolveRecipients, wantsEmail } from './fanout.ts'
-import { createNotificationStore, type HookRow, type NotificationStore, type RepositoryRow } from './store.ts'
+import { createNotificationStore, type HookRow, type NotificationStore, type RepositoryRow, type WebhookSecrets } from './store.ts'
 import {
   buildDeliveryRequest,
   hookEvents,
@@ -34,6 +34,7 @@ export type NotificationsOptions = {
   readonly email?: EmailSender
   readonly fetch?: (request: Request) => Promise<Response>
   readonly allowInsecureWebhooks?: boolean
+  readonly secrets?: WebhookSecrets
   readonly baseUrl?: string
   readonly now?: () => number
   readonly log?: (entry: Record<string, unknown>) => void
@@ -54,7 +55,7 @@ const userPrincipal = (id: string, login: string): UserPrincipal => ({ kind: 'us
 
 export const createNotifications = (options: NotificationsOptions) => {
   const now = options.now ?? Date.now
-  const store: NotificationStore = createNotificationStore(options.db, now)
+  const store: NotificationStore = createNotificationStore(options.db, now, options.secrets)
   const log = options.log ?? ((entry: Record<string, unknown>) => console.log(JSON.stringify(entry)))
   const fetcher = options.fetch ?? ((request: Request) => fetch(request))
 
@@ -89,7 +90,7 @@ export const createNotifications = (options: NotificationsOptions) => {
     if (hook.active !== 1 && delivery.event !== 'ping') return void (await fail('webhook is inactive'))
     const invalid = validateWebhookUrl(hook.url, { allowInsecure: options.allowInsecureWebhooks ?? false })
     if (invalid) return void (await fail(invalid))
-    const request = await buildDeliveryRequest(hook, delivery)
+    const request = await buildDeliveryRequest(hook, delivery, await store.hookSecret(hook))
     const outcome = await sendDelivery(request, fetcher, now)
     const attempt = delivery.attempts + 1
     const retry = !outcome.ok && outcome.retryable && attempt < WEBHOOK_MAX_ATTEMPTS
@@ -112,37 +113,56 @@ export const createNotifications = (options: NotificationsOptions) => {
     if (!(await schedule({ kind: 'webhook-delivery', deliveryId }))) await deliver(deliveryId)
   }
 
-  const webhookPayload = async (event: ForgeEvent, repository: RepositoryRow): Promise<string> => {
+  const webhookPayload = async (event: ForgeEvent, repository: RepositoryRow): Promise<Record<string, unknown>> => {
     const organization = organizationObject(event.baseUrl, repository)
-    return JSON.stringify({
+    return {
       ...event.payload,
       repository: repositoryObject(event.baseUrl, repository, await defaultBranch(repository)),
       ...(organization ? { organization } : {}),
       sender: userObject(event.baseUrl, event.actor.login, event.actor.id),
-    })
+    }
   }
 
-  const fanOutWebhooks = async (eventId: number, event: ForgeEvent, repository: RepositoryRow): Promise<number> => {
-    const hooks = (await store.hooksFor(repository)).filter((hook) => hookWants(hookEvents(hook), event.name))
-    if (hooks.length === 0) return 0
-    const payload = await webhookPayload(event, repository)
+  const createDeliveries = async (
+    targets: readonly { readonly hook: HookRow; readonly payload: string }[],
+    event: { readonly name: ForgeEvent['name'] | 'ping'; readonly action: string | null; readonly eventId: number | null; readonly repositoryId: string | null },
+  ): Promise<number[]> => {
     const created: number[] = []
-    for (const hook of hooks) {
-      const id = await store.insertDelivery({
-        hookId: hook.id,
-        guid: crypto.randomUUID(),
-        event: event.name,
-        action: event.action ?? null,
-        eventId,
-        repositoryId: repository.id,
-        url: hook.url,
-        payload,
-        redelivery: false,
-      })
+    for (const { hook, payload } of targets) {
+      const id = await store.insertDelivery({ hookId: hook.id, guid: crypto.randomUUID(), event: event.name, action: event.action, eventId: event.eventId, repositoryId: event.repositoryId, url: hook.url, payload, redelivery: false })
       if (id !== null) created.push(id)
     }
     for (const id of created) await dispatchDelivery(id)
-    return created.length
+    return created
+  }
+
+  const fanOutWebhooks = async (eventId: number, event: ForgeEvent, repository: RepositoryRow, only?: number): Promise<number> => {
+    const hooks = (await store.hooksFor(repository)).filter((hook) => (only === undefined ? hookWants(hookEvents(hook), event.name) : hook.id === only))
+    const appHooks = only === undefined ? (await store.appHooksFor(repository)).filter((hook) => hookWants(JSON.parse(hook.installation_events) as string[], event.name)) : []
+    if (hooks.length === 0 && appHooks.length === 0) return 0
+    const payload = await webhookPayload(event, repository)
+    const text = JSON.stringify(payload)
+    const targets = [
+      ...hooks.map((hook) => ({ hook, payload: text })),
+      ...appHooks.map((hook) => ({ hook, payload: JSON.stringify({ ...payload, installation: { id: hook.installation_id, node_id: `MDIz${hook.installation_id}` } }) })),
+    ]
+    return (await createDeliveries(targets, { name: event.name, action: event.action ?? null, eventId: only === undefined ? eventId : null, repositoryId: repository.id })).length
+  }
+
+  const emitToApp = async (appId: string, name: 'installation' | 'installation_repositories', action: string, payload: Record<string, unknown>, sender: { readonly id: string; readonly login: string }, baseUrl: string): Promise<number> => {
+    const [hook] = await store.listHooks({ kind: 'app', id: appId })
+    if (!hook || hook.active !== 1) return 0
+    const body = JSON.stringify({ action, ...payload, sender: userObject(baseUrl, sender.login, sender.id) })
+    return (await createDeliveries([{ hook, payload: body }], { name, action, eventId: null, repositoryId: null })).length
+  }
+
+  const test = async (hook: HookRow): Promise<number> => {
+    if (!hook.repository_id || !hookWants(hookEvents(hook), 'push')) return 0
+    const eventId = await store.latestPushEvent(hook.repository_id)
+    const stored = eventId === null ? null : await store.getEvent(eventId)
+    const repository = await store.repositoryById(hook.repository_id)
+    if (!stored || !repository) return 0
+    return fanOutWebhooks(stored.id, stored.event, repository, hook.id)
   }
 
   const scheduleDigest = async (userId: string, delaySeconds: number): Promise<void> => {
@@ -255,27 +275,16 @@ export const createNotifications = (options: NotificationsOptions) => {
 
   const ping = async (hook: HookRow, baseUrl: string, sender: { readonly id: string; readonly login: string }, scopePath: string): Promise<number> => {
     const repository = hook.repository_id ? await store.repositoryById(hook.repository_id) : null
+    const organization = repository ? organizationObject(baseUrl, repository) : null
     const payload = {
       zen: pingZen(hook.id),
       hook_id: hook.id,
       hook: hookObject(baseUrl, hook, scopePath),
       ...(repository ? { repository: repositoryObject(baseUrl, repository, await defaultBranch(repository)) } : {}),
-      ...(repository && organizationObject(baseUrl, repository) ? { organization: organizationObject(baseUrl, repository) } : {}),
+      ...(organization ? { organization } : {}),
       sender: userObject(baseUrl, sender.login, sender.id),
     }
-    const id = (await store.insertDelivery({
-      hookId: hook.id,
-      guid: crypto.randomUUID(),
-      event: 'ping',
-      action: null,
-      eventId: null,
-      repositoryId: hook.repository_id,
-      url: hook.url,
-      payload: JSON.stringify(payload),
-      redelivery: false,
-    }))!
-    await dispatchDelivery(id)
-    return id
+    return (await createDeliveries([{ hook, payload: JSON.stringify(payload) }], { name: 'ping', action: null, eventId: null, repositoryId: hook.repository_id }))[0]!
   }
 
   const redeliver = async (deliveryId: number): Promise<number | null> => {
@@ -315,7 +324,7 @@ export const createNotifications = (options: NotificationsOptions) => {
     return { deliveries: deliveries.length, digests: digests.length }
   }
 
-  return { store, emit, runJob, sweep, ping, redeliver, processEvent }
+  return { store, emit, emitToApp, runJob, sweep, ping, test, redeliver, processEvent }
 }
 
 export type Notifications = ReturnType<typeof createNotifications>

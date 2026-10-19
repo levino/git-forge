@@ -50,15 +50,29 @@ export type ThreadRow = {
   readonly repository_name: string
 }
 
-export type HookScope = { readonly kind: 'repository'; readonly id: string } | { readonly kind: 'organization'; readonly id: string }
+export type HookScope = { readonly kind: 'repository'; readonly id: string } | { readonly kind: 'organization'; readonly id: string } | { readonly kind: 'app'; readonly id: string }
+
+const SCOPE_COLUMN = { repository: 'repository_id', organization: 'organization_id', app: 'app_id' } as const
+
+export type SealedValue = { readonly keyId: string; readonly iv: string; readonly ciphertext: string }
+
+export type WebhookSecrets = {
+  readonly seal: (context: readonly string[], value: string) => Promise<SealedValue>
+  readonly open: (context: readonly string[], sealed: SealedValue) => Promise<string>
+}
+
+const SECRET_CONTEXT = ['git-forge-webhook-secret']
 
 export type HookRow = {
   readonly id: number
   readonly repository_id: string | null
   readonly organization_id: string | null
+  readonly app_id: string | null
   readonly url: string
   readonly content_type: 'json' | 'form'
   readonly secret: string | null
+  readonly secret_key_id: string | null
+  readonly secret_iv: string | null
   readonly insecure_ssl: number
   readonly events: string
   readonly active: number
@@ -70,7 +84,7 @@ export type HookRow = {
 export type HookInput = {
   readonly url: string
   readonly contentType: 'json' | 'form'
-  readonly secret: string | null
+  readonly secret: string | null | undefined
   readonly insecureSsl: boolean
   readonly events: readonly string[]
   readonly active: boolean
@@ -134,9 +148,20 @@ const settingsOf = (row: SettingsRow | null): NotificationSettings =>
       }
     : DEFAULT_SETTINGS
 
-export const createNotificationStore = (db: Database, now: () => number = Date.now) => {
+export const createNotificationStore = (db: Database, now: () => number = Date.now, secrets?: WebhookSecrets) => {
+  const secretColumns = async (secret: string | null): Promise<[string | null, string | null, string | null]> => {
+    if (secret === null || !secrets) return [secret, null, null]
+    const sealed = await secrets.seal(SECRET_CONTEXT, secret)
+    return [sealed.ciphertext, sealed.keyId, sealed.iv]
+  }
   const store = {
     db,
+
+    hookSecret: async (hook: HookRow): Promise<string | null> => {
+      if (hook.secret === null || hook.secret_key_id === null || hook.secret_iv === null) return hook.secret
+      if (!secrets) throw new Error('webhook secret is sealed but ACTIONS_SECRETS_KEY is missing')
+      return secrets.open(SECRET_CONTEXT, { keyId: hook.secret_key_id, iv: hook.secret_iv, ciphertext: hook.secret })
+    },
 
     insertEvent: async (event: ForgeEvent, repositoryId: string | null): Promise<number> => {
       const rows = await db.all<{ id: number }>(
@@ -162,6 +187,9 @@ export const createNotificationStore = (db: Database, now: () => number = Date.n
       )
       return row ? { id: row.id, event: JSON.parse(row.data) as ForgeEvent, repositoryId: row.repository_id, createdAt: row.created_at } : null
     },
+
+    latestPushEvent: async (repositoryId: string): Promise<number | null> =>
+      (await first<{ id: number }>(db, sql("SELECT id FROM forge_events WHERE repository_id = ? AND name = 'push' ORDER BY id DESC LIMIT 1", repositoryId)))?.id ?? null,
 
     repositoryById: (id: string): Promise<RepositoryRow | null> =>
       first<RepositoryRow>(
@@ -439,11 +467,23 @@ export const createNotificationStore = (db: Database, now: () => number = Date.n
         ),
       ),
 
-    listHooks: (scope: HookScope): Promise<HookRow[]> =>
-      db.all<HookRow>(sql(`SELECT * FROM webhooks WHERE ${scope.kind === 'repository' ? 'repository_id' : 'organization_id'} = ? ORDER BY id`, scope.id)),
+    appHooksFor: (repository: RepositoryRow): Promise<(HookRow & { installation_id: number; installation_events: string })[]> =>
+      db.all<HookRow & { installation_id: number; installation_events: string }>(
+        sql(
+          `SELECT w.*, i.id AS installation_id, i.events AS installation_events FROM app_installations i
+           JOIN apps a ON a.id = i.app_id AND a.disabled_at IS NULL
+           JOIN webhooks w ON w.app_id = i.app_id AND w.active = 1
+           WHERE i.account_id = ? AND i.deleted_at IS NULL AND i.suspended_at IS NULL
+             AND (i.repository_selection = 'all' OR EXISTS (SELECT 1 FROM app_installation_repositories r WHERE r.installation_id = i.id AND r.repository_id = ?))
+           ORDER BY w.id`,
+          repository.owner_id,
+          repository.id,
+        ),
+      ),
 
-    hook: (scope: HookScope, id: number): Promise<HookRow | null> =>
-      first<HookRow>(db, sql(`SELECT * FROM webhooks WHERE id = ? AND ${scope.kind === 'repository' ? 'repository_id' : 'organization_id'} = ?`, id, scope.id)),
+    listHooks: (scope: HookScope): Promise<HookRow[]> => db.all<HookRow>(sql(`SELECT * FROM webhooks WHERE ${SCOPE_COLUMN[scope.kind]} = ? ORDER BY id`, scope.id)),
+
+    hook: (scope: HookScope, id: number): Promise<HookRow | null> => first<HookRow>(db, sql(`SELECT * FROM webhooks WHERE id = ? AND ${SCOPE_COLUMN[scope.kind]} = ?`, id, scope.id)),
 
     hookById: (id: number): Promise<HookRow | null> => first<HookRow>(db, sql('SELECT * FROM webhooks WHERE id = ?', id)),
 
@@ -451,12 +491,13 @@ export const createNotificationStore = (db: Database, now: () => number = Date.n
       const at = now()
       const rows = await db.all<HookRow>(
         sql(
-          'INSERT INTO webhooks (repository_id, organization_id, url, content_type, secret, insecure_ssl, events, active, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *',
+          'INSERT INTO webhooks (repository_id, organization_id, app_id, url, content_type, secret, secret_key_id, secret_iv, insecure_ssl, events, active, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *',
           scope.kind === 'repository' ? scope.id : null,
           scope.kind === 'organization' ? scope.id : null,
+          scope.kind === 'app' ? scope.id : null,
           input.url,
           input.contentType,
-          input.secret,
+          ...(await secretColumns(input.secret ?? null)),
           input.insecureSsl ? 1 : 0,
           JSON.stringify(input.events),
           input.active ? 1 : 0,
@@ -469,12 +510,13 @@ export const createNotificationStore = (db: Database, now: () => number = Date.n
     },
 
     updateHook: async (id: number, input: HookInput): Promise<void> => {
+      const secret = input.secret === undefined ? [] : await secretColumns(input.secret)
       await db.run(
         sql(
-          'UPDATE webhooks SET url = ?, content_type = ?, secret = ?, insecure_ssl = ?, events = ?, active = ?, updated_at = ? WHERE id = ?',
+          `UPDATE webhooks SET url = ?, content_type = ?, ${secret.length > 0 ? 'secret = ?, secret_key_id = ?, secret_iv = ?, ' : ''}insecure_ssl = ?, events = ?, active = ?, updated_at = ? WHERE id = ?`,
           input.url,
           input.contentType,
-          input.secret,
+          ...secret,
           input.insecureSsl ? 1 : 0,
           JSON.stringify(input.events),
           input.active ? 1 : 0,

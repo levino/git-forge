@@ -1,0 +1,52 @@
+---
+import Layout from '../../../layouts/Layout.astro'
+
+const { forge, session } = Astro.locals
+if (!session) return Astro.redirect(`/login?return_to=${encodeURIComponent('/settings/apps')}`)
+Astro.response.headers.set('Cache-Control', 'no-store')
+const [apps, installations] = await Promise.all([forge.githubApps.appsOf(session.principal), forge.githubApps.installationsOf(session.principal)])
+---
+
+<Layout title="GitHub Apps" narrow>
+  <div class="flex flex-wrap items-center gap-3 mb-5">
+    <h1 class="text-xl font-semibold">GitHub Apps</h1>
+    <a class="btn btn-primary btn-sm ml-auto" href="/settings/apps/new">New GitHub App</a>
+  </div>
+  <section class="panel" aria-labelledby="owned">
+    <h2 id="owned" class="panel-title">Apps you manage</h2>
+    {
+      apps.length === 0 ? (
+        <p class="text-base-content/70">No apps yet.</p>
+      ) : (
+        <ul class="border border-base-300 rounded-box divide-y divide-base-300">
+          {apps.map((app) => (
+            <li class="flex flex-wrap items-center gap-3 px-4 py-3">
+              <a class="link link-hover font-semibold" href={`/settings/apps/${app.slug}`}>{app.name}</a>
+              <span class="text-sm text-base-content/70">owned by {app.owner_login}</span>
+              <a class="btn btn-xs ml-auto" href={`/apps/${app.slug}`}>Public page</a>
+            </li>
+          ))}
+        </ul>
+      )
+    }
+  </section>
+  <section class="panel" aria-labelledby="installed">
+    <h2 id="installed" class="panel-title">Installed apps</h2>
+    {
+      installations.length === 0 ? (
+        <p class="text-base-content/70">No apps are installed on your accounts.</p>
+      ) : (
+        <ul class="border border-base-300 rounded-box divide-y divide-base-300">
+          {installations.map((installation) => (
+            <li class="flex flex-wrap items-center gap-3 px-4 py-3">
+              <span class="font-semibold">{installation.app_slug}</span>
+              <span class="text-sm text-base-content/70">on {installation.account_login}</span>
+              {installation.suspended_at !== null && <span class="badge badge-warning badge-sm">suspended</span>}
+              <a class="btn btn-xs ml-auto" href={`/settings/installations/${installation.id}`}>Configure</a>
+            </li>
+          ))}
+        </ul>
+      )
+    }
+  </section>
+</Layout>

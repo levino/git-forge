@@ -1,0 +1,68 @@
+---
+import Layout from '../../../layouts/Layout.astro'
+import NotFound from '../../../components/NotFound.astro'
+import RepositoryAccess from '../../../components/RepositoryAccess.astro'
+import { type AppOutcome, handleAppPost } from '../../../ui/github-apps.ts'
+
+const { forge, session } = Astro.locals
+const id = Number(Astro.params.id)
+if (!session) return Astro.redirect(`/login?return_to=${encodeURIComponent(Astro.url.pathname)}`)
+let outcome: AppOutcome | null = null
+if (Astro.request.method === 'POST') {
+  outcome = await handleAppPost(forge, Astro.request, { installation: id })
+  if (outcome.kind === 'redirect') return Astro.redirect(outcome.location, 303)
+  if (outcome.kind === 'error') Astro.response.status = outcome.status
+}
+Astro.response.headers.set('Cache-Control', 'no-store')
+const view = await forge.githubApps.installationView(session.principal, id).catch(() => null)
+const repositories = view ? (await forge.listRepositories(session.principal, { owner: view.installation.account_login, perPage: 100, sort: 'name' })).items : []
+---
+
+{!view && <NotFound />}
+{
+  view && (
+    <Layout title={`${view.installation.app_slug} on ${view.installation.account_login}`} narrow>
+      <h1 class="text-xl font-semibold mb-5">
+        {view.installation.app_slug} on {view.installation.account_login}
+      </h1>
+      {outcome?.kind === 'error' && <div role="alert" class="alert alert-error mb-4">{outcome.message}</div>}
+      {outcome?.kind === 'ok' && <div role="status" class="alert alert-success mb-4">{outcome.message}</div>}
+      {view.pendingPermissions && (
+        <form method="post" class="alert alert-warning mb-4 flex flex-wrap" aria-label="Accept new permissions">
+          <input type="hidden" name="csrf" value={session.csrf} />
+          <input type="hidden" name="action" value="accept" />
+          <span>The app requests new permissions or events.</span>
+          <button class="btn btn-sm ml-auto">Review and accept</button>
+        </form>
+      )}
+      <section class="panel" aria-labelledby="granted">
+        <h2 id="granted" class="panel-title">Permissions</h2>
+        <ul class="text-sm list-disc pl-5">
+          {Object.entries(view.permissions).map(([name, level]) => (
+            <li>
+              <span class="capitalize">{name.replace(/_/g, ' ')}</span>: {level === 'read' ? 'read-only' : 'read and write'}
+            </li>
+          ))}
+        </ul>
+      </section>
+      <form method="post" class="panel" aria-label="Repository access">
+        <input type="hidden" name="csrf" value={session.csrf} />
+        <input type="hidden" name="action" value="repositories" />
+        <RepositoryAccess selection={view.installation.repository_selection} repositories={repositories} chosen={view.installation.repository_selection === 'selected' ? view.repositoryIds : []} />
+        <button class="btn btn-primary self-start">Save</button>
+      </form>
+      <section class="mb-10 flex flex-wrap gap-2" aria-label="Danger zone">
+        <form method="post">
+          <input type="hidden" name="csrf" value={session.csrf} />
+          <input type="hidden" name="action" value={view.installation.suspended_at === null ? 'suspend' : 'unsuspend'} />
+          <button class="btn btn-sm btn-warning btn-outline">{view.installation.suspended_at === null ? 'Suspend' : 'Unsuspend'}</button>
+        </form>
+        <form method="post">
+          <input type="hidden" name="csrf" value={session.csrf} />
+          <input type="hidden" name="action" value="uninstall" />
+          <button class="btn btn-sm btn-error btn-outline">Uninstall</button>
+        </form>
+      </section>
+    </Layout>
+  )
+}

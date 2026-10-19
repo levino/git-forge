@@ -1,0 +1,65 @@
+---
+import AppFields from './AppFields.astro'
+import Layout from '../layouts/Layout.astro'
+import type { NewAppState } from '../ui/github-apps.ts'
+
+type Props = { readonly owner?: string; readonly state: NewAppState }
+const { forge, session } = Astro.locals
+const preset = Astro.props.owner ?? null
+const { outcome, manifest, manifestName } = Astro.props.state
+const state = Astro.url.searchParams.get('state') ?? ''
+const owners = session ? await forge.githubApps.managedAccounts(session.principal) : []
+---
+
+<Layout title="New GitHub App" narrow>
+  <h1 class="text-xl font-semibold mb-5">New GitHub App</h1>
+  {outcome?.kind === 'error' && <div role="alert" class="alert alert-error mb-4">{outcome.message}</div>}
+  {
+    manifest !== null && !session && (
+      <form method="post" class="panel max-w-2xl" aria-label="Continue">
+        <input type="hidden" name="manifest" value={manifest} />
+        <p>
+          A site asks to create the app <strong>{manifestName}</strong>. Continue, and sign in if asked.
+        </p>
+        <button class="btn btn-primary self-start">Continue</button>
+        <a class="link" href={`/login?return_to=${encodeURIComponent(Astro.url.pathname)}`}>Sign in</a>
+      </form>
+    )
+  }
+  {
+    manifest !== null && session && (
+      <form method="post" class="panel max-w-2xl" aria-label="Create app from manifest">
+        <input type="hidden" name="csrf" value={session.csrf} />
+        <input type="hidden" name="action" value="manifest" />
+        <input type="hidden" name="manifest" value={manifest} />
+        <input type="hidden" name="state" value={state} />
+        <p>
+          Create the app <strong>{manifestName}</strong> from the manifest you were sent here with.
+        </p>
+        <label class="text-sm font-semibold" for="manifest-owner">Owner</label>
+        <select id="manifest-owner" name="owner" class="select w-full">
+          {owners.map((account) => <option value={account.login} selected={account.login === preset}>{account.login}</option>)}
+        </select>
+        <details>
+          <summary class="cursor-pointer text-sm">Manifest</summary>
+          <pre class="text-xs whitespace-pre-wrap break-all">{manifest}</pre>
+        </details>
+        <button class="btn btn-primary self-start">Create GitHub App for {preset ?? 'the chosen owner'}</button>
+      </form>
+    )
+  }
+  {
+    manifest === null && session && (
+      <form method="post" class="panel max-w-2xl" aria-label="New GitHub App">
+        <input type="hidden" name="csrf" value={session.csrf} />
+        <input type="hidden" name="action" value="create" />
+        <label class="text-sm font-semibold" for="app-owner">Owner</label>
+        <select id="app-owner" name="owner" class="select w-full">
+          {owners.map((account) => <option value={account.login} selected={account.login === preset}>{account.login}</option>)}
+        </select>
+        <AppFields />
+        <button class="btn btn-primary self-start">Create GitHub App</button>
+      </form>
+    )
+  }
+</Layout>

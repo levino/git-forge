@@ -44,6 +44,7 @@ import {
   checkRepositoryAccess,
   checkSession,
   createAccountsStore,
+  createAppsStore,
   createMirrorVerificationStore,
   createLoginHandler,
   createLoginStore,
@@ -228,6 +229,7 @@ import {
 import { type BackupJob, type BackupStatus, backupStatus, backupStep, startBackup, verifyBackup } from './backup.ts'
 import { MirrorAuthError, type MirrorContext, runMirrorSync, type ScheduledMirrorRun, syncDueMirrors } from './mirrors.ts'
 import { receiveGitHubWebhook, setUpGitHubWebhook } from './github-mirrors.ts'
+import { createGitHubApps, type GitHubApps } from './github-apps.ts'
 import { createMirrorSecrets, MirrorSecretsUnavailableError } from './mirror-secrets.ts'
 
 export type ActionsOptions = {
@@ -320,6 +322,7 @@ export type ForgeServices = {
   readonly redirect: (request: Request, principal: Principal) => Promise<string | null>
   readonly listRepositories: (principal: Principal, options: RepositoryListOptions) => Promise<Page<RepositoryListing>>
   readonly search: (principal: Principal, request: SearchRequest) => Promise<SearchResults>
+  readonly githubApps: GitHubApps['ui']
 }
 
 export type MirrorOverviewEntry = { readonly repository: RepositoryName; readonly config: MirrorConfig; readonly status: MirrorStatus | null }
@@ -793,8 +796,18 @@ export const createForge = (options: ForgeOptions): Forge => {
     ...(options.email ? { email: options.email } : {}),
     ...(options.fetch ? { fetch: options.fetch } : {}),
     allowInsecureWebhooks: options.allowInsecureWebhooks ?? false,
+    ...(mirrorSecrets.available ? { secrets: mirrorSecrets } : {}),
     ...(options.publicUrl ? { baseUrl: options.publicUrl } : {}),
     now: () => now().getTime(),
+  })
+
+  const githubApps = createGitHubApps({
+    apps: createAppsStore(db, store, () => now().getTime()),
+    accounts: store,
+    notifications,
+    principal: apiPrincipal,
+    baseUrl: issuerFor,
+    allowInsecureWebhooks: options.allowInsecureWebhooks ?? false,
   })
 
   const emit = async (event: ForgeEvent): Promise<void> => {
@@ -2239,6 +2252,8 @@ export const createForge = (options: ForgeOptions): Forge => {
       allowInsecureWebhooks: options.allowInsecureWebhooks ?? false,
     })
     if (notificationsResponse) return notificationsResponse
+    const appsResponse = await githubApps.handle(request)
+    if (appsResponse) return appsResponse
     const releases = await handleReleasesRequest(request, {
       db,
       storage,
@@ -2398,6 +2413,7 @@ export const createForge = (options: ForgeOptions): Forge => {
         markDone: (user, id) => notifications.store.markThreadDone(user.id, id),
         markAllRead: (user) => notifications.store.markAllRead(user.id, now().getTime()),
       },
+      githubApps: githubApps.ui,
       collaboration: async (request, principal, owner, name) => {
         try {
           return await openCollaborationRepository(collaborationOptions(request), principal, owner, name)

@@ -31,7 +31,10 @@ const configJson = JSON.stringify({ returnTo: '/settings', csrf: session.csrf })
 ---
 
 <Layout title="Settings" narrow>
-  <h1 class="text-xl font-semibold mb-5">Settings for {user.login}</h1>
+  <div class="flex flex-wrap items-center gap-3 mb-5">
+    <h1 class="text-xl font-semibold">Settings for {user.login}</h1>
+    <a class="btn btn-sm ml-auto" href="/settings/apps">GitHub Apps</a>
+  </div>
   {
     result?.kind === 'token-created' && (
       <div role="status" class="alert alert-success mb-6 flex-col items-start">

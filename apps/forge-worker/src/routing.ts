@@ -17,8 +17,11 @@ export const isForgePath = (pathname: string): boolean => {
 
 const FORM_TYPES = ['application/x-www-form-urlencoded', 'multipart/form-data', 'text/plain']
 
+const MANIFEST_PAGE = /^\/(organizations\/[^/]+\/)?settings\/apps\/new$/
+
 export const isCrossSiteWrite = (request: Request): boolean => {
   if (request.method === 'GET' || request.method === 'HEAD' || request.method === 'OPTIONS') return false
+  if (MANIFEST_PAGE.test(new URL(request.url).pathname)) return false
   const origin = request.headers.get('Origin')
   if (origin !== null) return origin !== new URL(request.url).origin
   const site = request.headers.get('Sec-Fetch-Site')

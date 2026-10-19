@@ -222,7 +222,7 @@ const settingsJson = (settings: NotificationSettings) => ({
   email_address: settings.emailAddress,
 })
 
-const parseHookInput = (body: Record<string, unknown>, existing: HookRow | null, options: NotificationsHttpOptions): HookInput => {
+export const parseHookInput = (body: Record<string, unknown>, existing: HookRow | null, options: { readonly allowInsecureWebhooks?: boolean }): HookInput => {
   const config = body.config === undefined ? {} : body.config
   if (typeof config !== 'object' || config === null || Array.isArray(config)) throw new ApiError(422, 'config must be an object')
   const values = config as Record<string, unknown>
@@ -232,8 +232,8 @@ const parseHookInput = (body: Record<string, unknown>, existing: HookRow | null,
   if (invalid) throw new ApiError(422, `config.url: ${invalid}`)
   const contentType = values.content_type ?? existing?.content_type ?? 'form'
   if (contentType !== 'json' && contentType !== 'form') throw new ApiError(422, 'config.content_type must be json or form')
-  const secret = values.secret === undefined ? (existing?.secret ?? null) : values.secret === null || values.secret === '' ? null : values.secret
-  if (secret !== null && typeof secret !== 'string') throw new ApiError(422, 'config.secret must be a string')
+  const secret = values.secret === undefined ? (existing ? undefined : null) : values.secret === null || values.secret === '' ? null : values.secret
+  if (secret !== null && secret !== undefined && typeof secret !== 'string') throw new ApiError(422, 'config.secret must be a string')
   const insecure = values.insecure_ssl ?? (existing ? String(existing.insecure_ssl) : '0')
   if (insecure !== '0' && insecure !== '1' && insecure !== 0 && insecure !== 1) throw new ApiError(422, 'config.insecure_ssl must be "0" or "1"')
   const requested: unknown = body.events ?? (existing ? hookEvents(existing) : ['push'])
@@ -246,13 +246,21 @@ const parseHookInput = (body: Record<string, unknown>, existing: HookRow | null,
   return { url: urlValue, contentType, secret, insecureSsl: String(insecure) === '1', events: [...new Set(events as string[])], active }
 }
 
+const installationOf = (row: DeliveryRow): number | null => {
+  try {
+    return (JSON.parse(row.payload) as { installation?: { id?: number } }).installation?.id ?? null
+  } catch {
+    return null
+  }
+}
+
 const deliveryStatus = (row: DeliveryRow): string => {
   if (row.status === 'pending') return row.attempts === 0 ? 'pending' : `retrying: ${row.error ?? 'failed'}`
   if (row.status === 'delivered') return 'OK'
   return row.status_code ? `Invalid HTTP Response: ${row.status_code}` : (row.error ?? 'failed')
 }
 
-const deliveryJson = (row: DeliveryRow) => ({
+export const deliveryJson = (row: DeliveryRow) => ({
   id: row.id,
   guid: row.guid,
   delivered_at: iso(row.delivered_at ?? row.created_at),
@@ -262,7 +270,7 @@ const deliveryJson = (row: DeliveryRow) => ({
   status_code: row.status_code ?? 0,
   event: row.event,
   action: row.action,
-  installation_id: null,
+  installation_id: installationOf(row),
   repository_id: row.repository_id,
   attempts: row.attempts,
   state: row.status,
@@ -342,6 +350,19 @@ const hookRoutes = (kind: 'repository' | 'organization', prefix: string): Route[
         },
       },
     },
+    ...(kind === 'repository'
+      ? [
+          {
+            pattern: new RegExp(`^${prefix}/hooks/${SEGMENT}/tests$`),
+            methods: {
+              POST: async (request: Request, _url: URL, options: NotificationsHttpOptions, params: string[]) => {
+                await options.notifications.test(await hookOf(await target(request, options, params), options, hookParam(params)))
+                return empty(204)
+              },
+            },
+          },
+        ]
+      : []),
     {
       pattern: new RegExp(`^${prefix}/hooks/${SEGMENT}/deliveries$`),
       methods: {

@@ -1,0 +1,48 @@
+---
+import Layout from '../../../../layouts/Layout.astro'
+import NotFound from '../../../../components/NotFound.astro'
+import RepositoryAccess from '../../../../components/RepositoryAccess.astro'
+import { type AppOutcome, handleAppPost } from '../../../../ui/github-apps.ts'
+
+const { forge, session } = Astro.locals
+const slug = Astro.params.slug!
+if (!session) return Astro.redirect(`/login?return_to=${encodeURIComponent(Astro.url.pathname)}`)
+let outcome: AppOutcome | null = null
+if (Astro.request.method === 'POST') {
+  outcome = await handleAppPost(forge, Astro.request, { slug })
+  if (outcome.kind === 'redirect') return Astro.redirect(outcome.location, 303)
+  if (outcome.kind === 'error') Astro.response.status = outcome.status
+}
+Astro.response.headers.set('Cache-Control', 'no-store')
+const app = await forge.githubApps.publicApp(slug, session.principal)
+const accounts = await forge.githubApps.managedAccounts(session.principal)
+const account = accounts.find((candidate) => candidate.login === Astro.url.searchParams.get('account')) ?? accounts[0]!
+const repositories = app ? (await forge.listRepositories(session.principal, { owner: account.login, perPage: 100, sort: 'name' })).items : []
+---
+
+{!app && <NotFound />}
+{
+  app && (
+    <Layout title={`Install ${app.name}`} narrow>
+      <h1 class="text-xl font-semibold mb-5">Install {app.name}</h1>
+      {outcome?.kind === 'error' && <div role="alert" class="alert alert-error mb-4">{outcome.message}</div>}
+      <form method="get" class="flex flex-wrap items-end gap-2 mb-4" aria-label="Choose account">
+        <label class="flex flex-col gap-1 text-sm">
+          Account
+          <select name="account" class="select select-sm">
+            {accounts.map((candidate) => <option value={candidate.login} selected={candidate.id === account.id}>{candidate.login}</option>)}
+          </select>
+        </label>
+        <button class="btn btn-sm">Choose</button>
+      </form>
+      <form method="post" class="panel" aria-label="Install app">
+        <input type="hidden" name="csrf" value={session.csrf} />
+        <input type="hidden" name="action" value="install" />
+        <input type="hidden" name="account" value={account.login} />
+        <p>Install on <strong>{account.login}</strong></p>
+        <RepositoryAccess selection="all" repositories={repositories} chosen={[]} />
+        <button class="btn btn-primary self-start">Install</button>
+      </form>
+    </Layout>
+  )
+}

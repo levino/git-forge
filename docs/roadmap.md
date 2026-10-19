@@ -113,7 +113,7 @@ Design: [design.md §15](design.md#ci).
 - [ ] Official artifact actions v4 on non-`*.localhost` hosts (client-side GHES check in `@actions/artifact`), artifacts v3
 - [ ] Verify ID token trust against real AWS / Google Cloud accounts
 - [ ] Broker and run service (v2 flow), message encryption (not needed so far)
-- [ ] External providers: signed `workflow_job` webhook delivery, GitHub App auth (JWT → installation token, manifest flow) and PATs on `/api/v3`, org-level runners; try WarpBuild Enterprise, AWS CodeBuild, RunsOn
+- [ ] External providers: signed `workflow_job` webhook delivery to GitHub Apps (App auth, manifest flow and installation tokens exist, design §16), org-level runners; try WarpBuild Enterprise, AWS CodeBuild, RunsOn
 - [ ] `container:` and `services:` (Docker-in-Docker in the runner container)
 - [x] Web UI for runs and live logs (runs per workflow, jobs, log polling, cancel, re-run all, failed or one job)
 - [x] "Deploy to Cloudflare" button in the README pointing at the instance template; template wired to accounts (`BOOTSTRAP_TOKEN`)
@@ -184,7 +184,9 @@ Design: [design.md §17](design.md#17-collaboration).
 - [x] Event producers: push, create/delete, mirror alarms, CI job and run completion, releases
 - [x] Event producers: issues, pull requests, reviews, comments, discussions and discussion comments (emitted by the collaboration package, mapped in the Worker)
 - [x] Webhooks per repository and organization: GitHub-compatible payloads and headers, signatures, delivery log, retries, redelivery, ping
-- [ ] Webhooks: `POST …/hooks/{id}/tests`, GitHub App installations, encrypted secrets
+- [x] Webhooks: `POST …/hooks/{id}/tests`, encrypted secrets (migration `0030`), event producers on every collaboration mutation
+- [x] GitHub Apps: registration (settings UI, manifest flow), RS256 app JWTs, installations on users/organizations with repository selection, installation tokens through the role layer, `installation`/`installation_repositories` webhooks, events per subscription (design §16)
+- [ ] GitHub Apps: per-permission enforcement beyond the role ceiling, OAuth user-to-server tokens
 - [x] Releases: GitHub-compatible REST API, tags created on publish, assets stored as LFS objects behind the media URL, download redirects
 - [ ] Releases: source archives (`tarball_url`, `zipball_url`), generated release notes, web UI
 - [x] Built-in backups (design §19): scheduled bounded `backup` jobs copy a database dump and every object into a write-once `BACKUP` target (R2 bucket lock, S3 Object Lock) with SHA-256 verification; admin panel and API (status, run now, verify); `git-forge-node restore`, `restore-sql`, `backup-verify` (migration `0029_backups`)

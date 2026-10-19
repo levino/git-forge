@@ -4,6 +4,7 @@ import { CLI_OOB_REDIRECT, cleanClientText, cliRequestPath, isClientState, isPkc
 import { DEVICE_CLIENT_ID, DEVICE_TOKEN_TTL_MS, normalizeUserCode } from './device.ts'
 import { base64UrlDecode, base64UrlEncode, randomBytes, randomId } from './encoding.ts'
 import type { LoginStore, PendingCliRequest, PendingDevice } from './login-store.ts'
+import { DEFAULT_GROUPS_CLAIM, groupValues, type MembershipSource, syncMemberships } from './memberships.ts'
 import {
   authorizationUrl,
   createPkce,
@@ -64,6 +65,8 @@ export type LoginContext = {
   readonly selfSignup: boolean
   readonly breakGlassKey: OkpPublicJwk | null
   readonly passkeys?: boolean
+  readonly membershipSource?: MembershipSource
+  readonly groupsClaim?: string
   readonly fetch: FetchLike
   readonly now: () => number
 }
@@ -153,13 +156,22 @@ export const beginOidcLogin = async (context: LoginContext, input: { readonly re
 
 export type OidcCompletion = LoggedInUser & { readonly returnTo: string; readonly linked: boolean }
 
+const groupsClaimOf = (context: LoginContext): string => context.groupsClaim ?? DEFAULT_GROUPS_CLAIM
+
 const claimIdentities = (identity: { readonly subject: string; readonly email: string | null }): readonly string[] =>
   identity.email === null ? [identity.subject] : [identity.subject, identity.email]
 
 const resolveOidcUser = async (
   context: LoginContext,
   intent: OidcIntent,
-  identity: { readonly issuer: string; readonly subject: string; readonly email: string | null; readonly candidates: readonly string[]; readonly displayName: string | null },
+  identity: {
+    readonly issuer: string
+    readonly subject: string
+    readonly email: string | null
+    readonly username: string | null
+    readonly candidates: readonly string[]
+    readonly displayName: string | null
+  },
 ): Promise<LoggedInUser & { readonly linked: boolean }> => {
   const existing = await context.store.findUserByExternalIdentity(identity.issuer, identity.subject)
   const link = { issuer: identity.issuer, subject: identity.subject, ...(identity.email ? { email: identity.email } : {}) }
@@ -171,6 +183,11 @@ const resolveOidcUser = async (
     return { userId: user.id, login: user.login, created: false, linked: !existing }
   }
   if (existing) return { userId: existing.id, login: existing.login, created: false, linked: false }
+  const provisioned = context.membershipSource === 'idp' ? await context.store.findProvisionedUser(identity) : null
+  if (provisioned) {
+    await context.store.linkExternalIdentity(provisioned.id, link, { kind: 'user', id: provisioned.id })
+    return { userId: provisioned.id, login: provisioned.login, created: false, linked: true }
+  }
   if (intent.kind === 'invite') {
     const invite = await context.logins.findInvite(intent.code)
     if (!invite) throw new LoginError('expired', 'this invite is invalid, used or expired')
@@ -236,7 +253,8 @@ export const completeOidcLogin = async (
       context.fetch,
     )
     claims = await verifyIdTokenWith(provider, tokens.idToken, { nonce: String(data.nonce), now: context.now() })
-    if (needsUserinfo(claims) && tokens.accessToken && metadata.userinfoEndpoint) {
+    const missingGroups = context.membershipSource === 'idp' && claims.raw?.[groupsClaimOf(context)] === undefined
+    if ((needsUserinfo(claims) || missingGroups) && tokens.accessToken && metadata.userinfoEndpoint) {
       claims = mergeUserinfo(claims, await fetchUserinfo(metadata, tokens.accessToken, context.fetch))
     }
   } catch (error) {
@@ -250,7 +268,8 @@ export const completeOidcLogin = async (
     candidates: loginCandidates(claims),
     displayName: claims.name,
   }
-  const user = await resolveOidcUser(context, intentOf(data.intent), identity)
+  const user = await resolveOidcUser(context, intentOf(data.intent), { ...identity, username: claims.preferredUsername })
+  if (context.membershipSource === 'idp') await syncMemberships(context.store, user.userId, groupValues(claims.raw?.[groupsClaimOf(context)]))
   await context.store.redeemInstanceAdminClaim(user.userId, claimIdentities(identity))
   await context.logins.touchExternalIdentity(provider.config.issuer, claims.sub)
   return { ...user, returnTo: typeof data.returnTo === 'string' ? data.returnTo : '/' }

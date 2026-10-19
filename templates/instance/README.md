@@ -245,6 +245,8 @@ OIDC_NAME = "Example ID"
 | `OIDC_NAME` | | Button label, e.g. `Dorf-ID`. |
 | `OIDC_SCOPES` | `openid profile email` | Requested scopes. |
 | `SELF_SIGNUP` | `false` | `true`: anyone who can sign in at the provider (or register a passkey) gets an account. `false`: only invited people. |
+| `MEMBERSHIP_SOURCE` | `forge` | `idp`: organization and team memberships come only from the identity provider (claim below, SCIM at `/scim/v2` with a token from `POST /api/admin/scim/tokens`). |
+| `OIDC_GROUPS_CLAIM` | `groups` | Claim with `org`, `org:owner`, `org/team` values; for ZITADEL `urn:zitadel:iam:org:project:roles`. |
 | `PASSKEYS` | `true` | `false`: passkey sign-in and registration are off (OIDC-only instance; break-glass keeps working). |
 | `BREAK_GLASS_PUBLIC_KEY` | | Public half of the offline break-glass key, see the [forge-worker README](https://github.com/levino/git-forge/tree/main/apps/forge-worker#break-glass-key). |
 | `UI` | `true` | `false` for a headless instance (for example a backup mirror): Git, LFS and the API only. |

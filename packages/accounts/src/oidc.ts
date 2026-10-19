@@ -173,6 +173,7 @@ export type IdTokenClaims = {
   readonly emailVerified: boolean
   readonly preferredUsername: string | null
   readonly name: string | null
+  readonly raw?: Readonly<Record<string, unknown>>
 }
 
 export type IdTokenExpectations = {
@@ -218,6 +219,7 @@ export const checkIdTokenClaims = (claims: Record<string, unknown>, expected: Id
     emailVerified: claims.email_verified === true,
     preferredUsername: optionalString(claims.preferred_username),
     name: optionalString(claims.name),
+    raw: claims,
   }
 }
 
@@ -243,6 +245,7 @@ export const mergeUserinfo = (claims: IdTokenClaims, userinfo: unknown): IdToken
     emailVerified: claims.email ? claims.emailVerified : value.email_verified === true,
     preferredUsername: claims.preferredUsername ?? optionalString(value.preferred_username),
     name: claims.name ?? optionalString(value.name),
+    raw: { ...value, ...claims.raw },
   }
 }
 

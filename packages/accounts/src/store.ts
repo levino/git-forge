@@ -743,11 +743,11 @@ export const createAccountsStore = (db: Database, options: AccountsStoreOptions 
     },
 
     forkInfo: async (repositoryId: string): Promise<{ readonly parent: RepositorySubject; readonly root: RepositorySubject } | null> => {
-      const row = await first<{ parent_id: string; root_id: string }>(db, sql('SELECT parent_id, root_id FROM repository_forks WHERE repository_id = ?', repositoryId))
-      if (!row) return null
-      const rows = await db.all<RepositoryRow>(sql(`${REPOSITORY_SELECT} WHERE r.id IN (?, ?)`, row.parent_id, row.root_id))
-      const parent = rows.find((candidate) => candidate.id === row.parent_id)
-      const root = rows.find((candidate) => candidate.id === row.root_id)
+      const rows = await db.all<RepositoryRow & { parent_id: string; root_id: string }>(
+        sql(`${REPOSITORY_SELECT.replace('SELECT ', 'SELECT f.parent_id, f.root_id, ')} JOIN repository_forks f ON r.id IN (f.parent_id, f.root_id) WHERE f.repository_id = ?`, repositoryId),
+      )
+      const parent = rows.find((candidate) => candidate.id === candidate.parent_id)
+      const root = rows.find((candidate) => candidate.id === candidate.root_id)
       return parent && root ? { parent: toSubject(parent), root: toSubject(root) } : null
     },
 

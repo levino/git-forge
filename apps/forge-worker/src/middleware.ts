@@ -2,16 +2,17 @@ import { env } from 'cloudflare:workers'
 import { defineMiddleware } from 'astro/middleware'
 import { type Env, forgeFor } from './cloudflare.ts'
 import { isCrossSiteWrite, isForgePath, isLoginPath } from './routing.ts'
+import { signIn } from './ui/sign-in.ts'
 import { LOGIN_PAGE_ROUTE, takeLoginPage } from './ui/login-pages.ts'
 
 export const onRequest = defineMiddleware(async (context, next) => {
   const forge = await forgeFor(env as unknown as Env)
-  const signIn = async () => {
+  const setLocals = async () => {
     context.locals.forge = forge.services
-    const session = await forge.services.session(context.request)
-    context.locals.session = session
-    if (session) context.locals.instanceAdmin = forge.services.instance.isAdministrator(session.principal).catch(() => false)
-    context.locals.principal = session?.principal ?? (await forge.services.authenticate(context.request)) ?? { kind: 'anonymous' }
+    const signed = await signIn(forge.services, context.request)
+    context.locals.session = signed.session
+    context.locals.principal = signed.principal
+    if (signed.instanceAdmin) context.locals.instanceAdmin = signed.instanceAdmin
   }
   if (isForgePath(context.url.pathname)) {
     const execution = context.locals.cfContext
@@ -19,12 +20,12 @@ export const onRequest = defineMiddleware(async (context, next) => {
     const response = await forge.fetch(request, execution ? (promise) => execution.waitUntil(promise) : undefined)
     const page = takeLoginPage(request, response)
     if (!page) return response
-    await signIn()
+    await setLocals()
     context.locals.loginPage = page
     return next(LOGIN_PAGE_ROUTE)
   }
   if (isCrossSiteWrite(context.request)) return new Response('cross-site request refused\n', { status: 403, headers: { 'Content-Type': 'text/plain; charset=utf-8' } })
-  await signIn()
+  await setLocals()
   const response = await next()
   const execution = context.locals.cfContext
   await forge.services.observe(execution ? (promise) => execution.waitUntil(promise) : undefined)

@@ -74,6 +74,8 @@ import {
   type LoginPageRenderer,
   relyingParty,
   sessionUserPrincipal,
+  type Session,
+  canAdministerInstance,
   normalizeIssuer,
   parseAuthorization,
   type AppPermissions,
@@ -196,6 +198,9 @@ import {
   type Scope as CollaborationScope,
   getPullSummary,
   openRepository as openCollaborationRepository,
+  type KnownRepository,
+  type RepositoryHeader,
+  repositoryHeader,
   handleCollaborationApi,
   maintainerPushBranches,
   handlePushedRefs,
@@ -333,7 +338,8 @@ export type ForgeServices = {
   readonly repositories: RepositoryOperations
   readonly inbox: InboxOperations
   readonly releases: ReleaseReads
-  readonly collaboration: (request: Request, principal: Principal, owner: string, name: string) => Promise<CollaborationScope | null>
+  readonly collaboration: (request: Request, principal: Principal, owner: string, name: string, known?: KnownRepository) => Promise<CollaborationScope | null>
+  readonly repositoryHeader: (principal: Principal, repository: RepositorySubject) => Promise<RepositoryHeader>
   readonly actions: ActionsOperations
   readonly settings: RepositorySettingsOperations
   readonly organizations: OrganizationOperations
@@ -646,7 +652,7 @@ export const createForge = (options: ForgeOptions): Forge => {
     if (!request.headers.has('Authorization')) {
       const check = await checkSession(request, (await loginOptions(request)))
       if (check.kind === 'csrf-failed') throw new HttpError(403, 'missing or invalid CSRF token')
-      if (check.kind === 'session') return sessionUserPrincipal(check.active.session)
+      if (check.kind === 'session') return sessionPrincipal(check.active.session)
     }
     const principal = await authenticateRequest(request, authenticateOptions(request))
     if (!principal) throw new HttpError(401, 'invalid credentials', { 'WWW-Authenticate': 'Bearer' })
@@ -657,7 +663,7 @@ export const createForge = (options: ForgeOptions): Forge => {
     if (!request.headers.has('Authorization')) {
       const check = await checkSession(request, (await loginOptions(request)))
       if (check.kind === 'csrf-failed') return null
-      if (check.kind === 'session') return sessionUserPrincipal(check.active.session)
+      if (check.kind === 'session') return sessionPrincipal(check.active.session)
     }
     return authenticateRequest(request, authenticateOptions(request))
   }
@@ -678,10 +684,18 @@ export const createForge = (options: ForgeOptions): Forge => {
     return principal
   }
 
+  const admins = new WeakMap<UserPrincipal, Promise<boolean>>()
+  const isAdmin = (principal: UserPrincipal): Promise<boolean> => admins.get(principal) ?? admins.set(principal, store.isInstanceAdmin(principal.id)).get(principal)!
+  const sessionPrincipal = (session: Session): UserPrincipal => {
+    const principal = sessionUserPrincipal(session)
+    if (session.instanceAdmin !== undefined) admins.set(principal, Promise.resolve(session.instanceAdmin))
+    return principal
+  }
+
   const repositoryAccess = async (principal: Principal, repo: RepositoryName, required: Role): Promise<RepositoryAccess> => {
-    const check = await checkRepositoryAccess(store, principal, repo, required)
+    const [check, admin] = await Promise.all([checkRepositoryAccess(store, principal, repo, required), principal.kind === 'user' ? isAdmin(principal) : false])
     if (!check.repository) return { decision: check.decision === 'allow' ? 'not-found' : check.decision, access: 'none', repository: null }
-    if (principal.kind === 'user' && (await store.isInstanceAdmin(principal.id))) {
+    if (principal.kind === 'user' && admin) {
       const ceiling = principal.limits?.ceiling ?? 'admin'
       const scoped = principal.limits?.repositoryIds ?? null
       if (scoped === null || scoped.includes(check.repository.id)) {
@@ -759,7 +773,7 @@ export const createForge = (options: ForgeOptions): Forge => {
     authenticateToken: (request) => authenticateRequest(request, authenticateOptions(request)),
     sessionUser: async (request) => {
       const active = await readActiveSession(request, (await loginOptions(request)))
-      return active ? sessionUserPrincipal(active.session) : null
+      return active ? sessionPrincipal(active.session) : null
     },
     isInstanceAdmin: store.isInstanceAdmin,
     jobTokenRepository,
@@ -1009,6 +1023,7 @@ export const createForge = (options: ForgeOptions): Forge => {
   const instance: InstanceOperations = {
     ...instanceAdministration,
     ...admin,
+    isAdministrator: async (principal) => principal.kind === 'user' && canAdministerInstance(principal, await isAdmin(principal)),
     mirrors: async (principal) => {
       await instanceAdministration.view(principal)
       const overview: MirrorOverviewEntry[] = []
@@ -2013,7 +2028,7 @@ export const createForge = (options: ForgeOptions): Forge => {
   const withSessionReads = (authorize: Authorize): Authorize => async (request, repo, access, ...rest) => {
     if (access === 'read' && !request.headers.has('Authorization') && !isUnsafeMethod(request.method)) {
       const active = await readActiveSession(request, (await loginOptions(request)))
-      const check = active ? await repositoryAccess(sessionUserPrincipal(active.session), repo, 'read') : null
+      const check = active ? await repositoryAccess(sessionPrincipal(active.session), repo, 'read') : null
       if (check?.decision === 'allow') return null
       if (check?.view) return check.view
     }
@@ -2023,7 +2038,7 @@ export const createForge = (options: ForgeOptions): Forge => {
   const withSessionLfs = (authorize: Authorize): Authorize => async (request, repo, access, surface) => {
     if (surface === 'lfs' && !request.headers.has('Authorization')) {
       const check = await checkSession(request, await loginOptions(request))
-      const result = check.kind === 'session' ? await repositoryAccess(sessionUserPrincipal(check.active.session), repo, access === 'write' ? 'write' : 'read') : null
+      const result = check.kind === 'session' ? await repositoryAccess(sessionPrincipal(check.active.session), repo, access === 'write' ? 'write' : 'read') : null
       if (result?.decision === 'allow') return null
     }
     return authorize(request, repo, access, surface)
@@ -2438,7 +2453,7 @@ export const createForge = (options: ForgeOptions): Forge => {
   const authenticate = async (request: Request): Promise<Principal | null> => {
     if (!request.headers.has('Authorization')) {
       const active = await readActiveSession(request, (await loginOptions(request)))
-      if (active) return sessionUserPrincipal(active.session)
+      if (active) return sessionPrincipal(active.session)
     }
     const principal = await authenticateRequest(request, authenticateOptions(request))
     return principal?.kind === 'app' && principal.installationId !== undefined ? null : principal
@@ -2467,11 +2482,11 @@ export const createForge = (options: ForgeOptions): Forge => {
       isInstanceAdmin: async (principal) => principal.kind === 'user' && (await store.isInstanceAdmin(principal.id)),
       session: async (request) => {
         const active = await readActiveSession(request, (await loginOptions(request)))
-        return active ? { principal: sessionUserPrincipal(active.session), csrf: active.csrf, sessionId: active.session.id } : null
+        return active ? { principal: sessionPrincipal(active.session), csrf: active.csrf, sessionId: active.session.id } : null
       },
       verifySessionWrite: async (request) => {
         const check = await checkSession(request, (await loginOptions(request)))
-        return check.kind === 'session' ? { principal: sessionUserPrincipal(check.active.session), csrf: check.active.csrf, sessionId: check.active.session.id } : null
+        return check.kind === 'session' ? { principal: sessionPrincipal(check.active.session), csrf: check.active.csrf, sessionId: check.active.session.id } : null
       },
       loginMethods: async () => ({ oidcName: (await oidcProvider())?.config.name ?? null, passkeys: options.login?.passkeys ?? true }),
       observe,
@@ -2514,14 +2529,15 @@ export const createForge = (options: ForgeOptions): Forge => {
         markAllRead: (user) => notifications.store.markAllRead(user.id, now().getTime()),
       },
       githubApps: githubApps.ui,
-      collaboration: async (request, principal, owner, name) => {
+      collaboration: async (request, principal, owner, name, known) => {
         try {
-          return await openCollaborationRepository(collaborationOptions(request), principal, owner, name)
+          return await openCollaborationRepository(collaborationOptions(request), principal, owner, name, known)
         } catch (error) {
           if (error instanceof CollaborationError && error.status === 404) return null
           throw error
         }
       },
+      repositoryHeader: (principal, repository) => repositoryHeader({ db, accounts: store }, principal, repository),
       settings,
       actions,
       releases: {

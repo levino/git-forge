@@ -56,32 +56,43 @@ const perRequest = <T>(request: Request, principal: Principal, key: string, load
   return loaded
 }
 
-export const scopeFor = (forge: ForgeServices, request: Request, principal: Principal, repo: { readonly name: RepositoryName }): Promise<Scope | null> =>
-  perRequest(request, principal, `scope:${repo.name.owner}/${repo.name.name}`, () => forge.collaboration(request, principal, repo.name.owner, repo.name.name))
+const resolvedFor = new WeakMap<object, { readonly principal: Principal; readonly subject: RepositorySubject; readonly access: Access }>()
 
-export const headerData = (forge: ForgeServices, request: Request, principal: Principal, repo: { readonly name: RepositoryName; readonly view: ReadView | null }): Promise<HeaderData> =>
-  perRequest(request, principal, `header:${repo.name.owner}/${repo.name.name}`, async () => {
-    const scope = repo.view ? null : await scopeFor(forge, request, principal, repo)
-    if (!scope) return { scope, fork: null, forks: [] }
-    const [counts, fork, forks] = await Promise.all([openCounts(scope), forkInfo(scope), listForks(scope)])
-    return { scope, ...counts, fork, forks }
+export const scopeFor = (forge: ForgeServices, request: Request, principal: Principal, repo: { readonly name: RepositoryName }): Promise<Scope | null> =>
+  perRequest(request, principal, `scope:${repo.name.owner}/${repo.name.name}`, () => {
+    const resolved = resolvedFor.get(repo)
+    const known = resolved?.principal === principal ? { repository: resolved.subject, access: resolved.access } : undefined
+    return forge.collaboration(request, principal, repo.name.owner, repo.name.name, known)
   })
+
+export const headerData = (forge: ForgeServices, request: Request, principal: Principal, repo: { readonly name: RepositoryName; readonly view: ReadView | null; readonly subject: RepositorySubject }): Promise<HeaderData> =>
+  perRequest(request, principal, `header:${repo.name.owner}/${repo.name.name}`, async () => {
+    if (repo.view) return { scope: null, fork: null, forks: [] }
+    const [scope, header] = await Promise.all([scopeFor(forge, request, principal, repo), forge.repositoryHeader(principal, repo.subject)])
+    return scope ? { scope, ...header } : { scope, fork: null, forks: [] }
+  })
+
+const accessFor = (forge: ForgeServices, request: Request | undefined, principal: Principal, repo: RepositoryName) =>
+  request ? perRequest(request, principal, `access:${repo.owner}/${repo.name}`, () => forge.repositoryAccess(principal, repo, 'read')) : forge.repositoryAccess(principal, repo, 'read')
 
 export const openRepository = async (forge: ForgeServices, principal: Principal, owner: string, name: string, options: OpenOptions = {}): Promise<RepositoryResult> => {
   if (!isValidName(owner) || !isValidName(name)) return { kind: 'denied', decision: 'not-found' }
-  const check = await forge.repositoryAccess(principal, { owner, name }, 'read')
+  const check = await accessFor(forge, options.request, principal, { owner, name })
   const view = check.decision !== 'allow' && options.partial ? (check.view ?? null) : null
   if ((check.decision !== 'allow' && !view) || !check.repository) return { kind: 'denied', decision: check.decision === 'allow' ? 'not-found' : check.decision }
   const repo = { owner: check.repository.owner, name: check.repository.name }
   const odb = new ObjectDatabase(forge.storage, repo)
+  const resolved = { principal, subject: check.repository, access: check.access }
   if (options.request?.method === 'GET') {
     odb.packs().catch(() => {})
-    headerData(forge, options.request, principal, { name: repo, view }).catch(() => {})
+    const early = { name: repo, view, subject: check.repository }
+    resolvedFor.set(early, resolved)
+    headerData(forge, options.request, principal, early).catch(() => {})
   }
   const [stored, mirrors] = await Promise.all([readRefs(forge.storage, repo), view ? [] : listMirrors(forge.storage, repo)])
   const refs: RefsState = view ? visibleRefs(stored?.state ?? EMPTY_REFS, view) : (stored?.state ?? EMPTY_REFS)
   const named = namedRefs(refs)
-  return {
+  const opened: OpenRepository = {
     kind: 'ok',
     name: repo,
     subject: check.repository,
@@ -96,6 +107,8 @@ export const openRepository = async (forge: ForgeServices, principal: Principal,
     canWrite: atLeast(check.access, 'write'),
     view,
   }
+  resolvedFor.set(opened, resolved)
+  return opened
 }
 
 const EMPTY_REFS: RefsState = { head: 'refs/heads/main', refs: {} }

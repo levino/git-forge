@@ -53,13 +53,20 @@ if (repo.kind === 'ok' && scope && number !== null && !pull) {
   const issue = await unlessMissing(getIssue(scope, number))
   if (issue && !issue.isPull) return Astro.redirect(repoUrl(repo.name, 'issues', String(number)))
 }
-const entries = scope && pull ? await timeline(scope, pull.number) : []
-const items = repo.kind === 'ok' ? await renderTimeline(repo, entries) : []
 const csrf = session?.csrf ?? null
-const commentReactions = scope && pull ? await reactionsFor(scope, 'issue_comment', entries.flatMap((entry) => (entry.kind === 'comment' ? [{ id: entry.comment.id, subject: entry.comment.id, reactions: entry.comment.reactions }] : [])), csrf, pull.locked) : new Map()
-const ownReactions = scope && pull ? (await reactionsFor(scope, 'issue', [{ id: pull.id, subject: pull.number, reactions: pull.reactions }], csrf, pull.locked)).get(pull.id) : undefined
-const body = repo.kind === 'ok' && pull ? await renderBody(repo, pull.body) : null
-const checks = scope && pull ? await checksFor(scope, pull.headSha) : null
+const [entries, ownReactions, body, checks] =
+  scope && pull && repo.kind === 'ok'
+    ? await Promise.all([
+        timeline(scope, pull.number),
+        reactionsFor(scope, 'issue', [{ id: pull.id, subject: pull.number, reactions: pull.reactions }], csrf, pull.locked).then((mine) => mine.get(pull.id)),
+        renderBody(repo, pull.body),
+        checksFor(scope, pull.headSha),
+      ])
+    : [[], undefined, null, null]
+const [items, commentReactions] = await Promise.all([
+  repo.kind === 'ok' ? renderTimeline(repo, entries) : [],
+  scope && pull ? reactionsFor(scope, 'issue_comment', entries.flatMap((entry) => (entry.kind === 'comment' ? [{ id: entry.comment.id, subject: entry.comment.id, reactions: entry.comment.reactions }] : [])), csrf, pull.locked) : new Map(),
+])
 const canComment = scope && pull ? can(scope, 'comment:create', { locked: pull.locked }) : false
 const canClose = scope && pull ? can(scope, 'pull:close', { author: pull.authorRef }) : false
 const canReview = scope && pull ? can(scope, 'review:submit', { locked: pull.locked }) && !pull.merged && pull.state === 'open' : false

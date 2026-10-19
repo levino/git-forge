@@ -1,3 +1,4 @@
+import { sql } from '@git-forge/accounts'
 import { ObjectDatabase, readRefs, streamOf, updateRefs, ZERO_ID } from '@git-forge/core'
 import { commitAll, git, gitBytes, writeFile } from '@git-forge/core/test/git-helpers.ts'
 import { describe, expect, it } from 'vitest'
@@ -86,5 +87,26 @@ describe('forks', () => {
     const message = new TextDecoder().decode((await odb.read(merged.sha))!.data)
     expect(message).toContain('Merge pull request #1 from carol/fix')
     expect((await readRefs(fixture.storage, { owner: 'alice', name: 'site' }))!.state.refs['refs/heads/main']).toBe(merged.sha)
+  })
+
+  it('grants maintainer edits only while the author can push to the head repository', async () => {
+    const fixture = await createFixture()
+    const fork = await createFork(await fixture.scope('carol'), {})
+    const root = (await fixture.store.findRepository('alice', 'site'))!
+    const carolFork = await openRepository(fixture.options, fixture.users.carol.principal, 'carol', 'site')
+    const refused = await caught(createPull(carolFork, { title: 'Take over', head: 'alice:feature', base: 'main', maintainerCanModify: true }))
+    expect(refused.status).toBe(422)
+    const plain = await createPull(carolFork, { title: 'Take over', head: 'alice:feature', base: 'main' })
+    expect(plain.maintainerCanModify).toBe(false)
+    expect((await caught(updatePull(carolFork, plain.number, { maintainerCanModify: true }))).status).toBe(422)
+    await fixture.options.db.batch([sql('UPDATE pull_requests SET maintainer_can_modify = 1')])
+    expect(await maintainerPushBranches(fixture.options, fixture.users.carol.principal, root)).toEqual([])
+
+    await fixture.store.setCollaborator(fork.id, fixture.users.dave.id, 'write')
+    const pull = await createPull(await fixture.scope('dave'), { title: 'Feature', head: 'carol:feature', base: 'main', maintainerCanModify: true })
+    expect(pull.maintainerCanModify).toBe(true)
+    expect(await maintainerPushBranches(fixture.options, fixture.users.bob.principal, fork)).toEqual(['refs/heads/feature'])
+    await fixture.store.removeCollaborator(fork.id, fixture.users.dave.id)
+    expect(await maintainerPushBranches(fixture.options, fixture.users.bob.principal, fork)).toEqual([])
   })
 })

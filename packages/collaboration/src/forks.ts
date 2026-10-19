@@ -1,6 +1,6 @@
 import { atLeast, type Principal, type RepositorySubject, sql } from '@git-forge/accounts'
 import { forkRepository, isValidName, RepositoryExistsError } from '@git-forge/core'
-import { type AccountsDirectory, CollaborationError, invalid, resolveActor, type Scope } from './context.ts'
+import { type AccountsDirectory, type ActorRef, CollaborationError, invalid, refFromColumns, resolveActor, type Scope } from './context.ts'
 
 export type ForkInput = { readonly organization?: unknown; readonly name?: unknown; readonly defaultBranchOnly?: unknown }
 
@@ -75,28 +75,35 @@ export const forkNetwork = async (scope: Scope): Promise<ForkNetwork> => {
   return { root, forks: await filterReadable(scope, network.forks) }
 }
 
+export const authorCanPushHead = async (accounts: AccountsDirectory, author: ActorRef | null, head: RepositorySubject): Promise<boolean> =>
+  author?.kind === 'user' && atLeast((await resolveActor(accounts, { kind: 'user', id: author.id, login: '', limits: null, tokenId: null }, head)).access, 'write')
+
 export const maintainerPushBranches = async (
   options: { readonly db: Scope['db']; readonly accounts: AccountsDirectory },
   principal: Principal,
   repository: RepositorySubject,
 ): Promise<string[]> => {
   if (principal.kind !== 'user' && principal.kind !== 'app') return []
-  const rows = await options.db.all<{ head_ref: string; base_id: string }>(
+  const rows = await options.db.all<{ head_ref: string; base_id: string; author_kind: string; author_id: string }>(
     sql(
-      `SELECT p.head_ref, i.repository_id AS base_id FROM pull_requests p JOIN issues i ON i.id = p.issue_id
-       WHERE p.head_repository_id = ? AND p.maintainer_can_modify = 1 AND i.state = 'open'`,
+      `SELECT p.head_ref, i.repository_id AS base_id, i.author_kind, i.author_id FROM pull_requests p JOIN issues i ON i.id = p.issue_id
+       WHERE p.head_repository_id = ? AND i.repository_id <> ? AND p.maintainer_can_modify = 1 AND i.state = 'open' AND p.merged_at IS NULL`,
+      repository.id,
       repository.id,
     ),
   )
   const branches = new Set<string>()
   const access = new Map<string, boolean>()
+  const authors = new Map<string, boolean>()
   for (const row of rows) {
+    const key = `${row.author_kind}:${row.author_id}`
+    if (!authors.has(key)) authors.set(key, await authorCanPushHead(options.accounts, refFromColumns(row.author_kind, row.author_id), repository))
     if (!access.has(row.base_id)) {
       const base = await options.accounts.findRepositoryById(row.base_id)
       const actor = base ? await resolveActor(options.accounts, principal, base) : null
       access.set(row.base_id, actor !== null && actor.writable && atLeast(actor.access, 'write'))
     }
-    if (access.get(row.base_id)) branches.add(row.head_ref)
+    if (access.get(row.base_id) && authors.get(key)) branches.add(row.head_ref)
   }
   return [...branches]
 }

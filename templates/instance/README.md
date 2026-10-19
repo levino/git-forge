@@ -440,7 +440,7 @@ prints the `S` to pin (any `V` works); then
 CI (GitHub Actions compatible, running the official `actions/runner`) is off
 by default, because it makes every deploy pull the runner image (a few
 minutes; Workers Builds has Docker, so nothing else is needed). Each release
-publishes the image as `ghcr.io/levino/git-forge-runner:0.9.3@sha256:78ffad62740d78648ea501ce5b33d1ae0f81b6deaed9ed23451d200f61fcd2a5
+publishes the image as `ghcr.io/levino/git-forge-runner:0.10.0@sha256:c2fac71b7b761d237b5456cca63e66498ec4fc2fbf981b2cc551525a8a8841dc
 `ghcr.io/actions/actions-runner` image plus Git, Node.js and a container hook
 for `container:` and `services:`); `RUNNER_IMAGE` pins it by digest. To enable
 CI, add to `wrangler.toml`:
@@ -456,7 +456,7 @@ crons = ["17 3 * * *", "*/5 * * * *"]
 [[containers]]
 class_name = "RunnerContainer"
 image = "./runner/Dockerfile"
-image_vars = { RUNNER_IMAGE = "ghcr.io/levino/git-forge-runner:0.9.3@sha256:78ffad62740d78648ea501ce5b33d1ae0f81b6deaed9ed23451d200f61fcd2a5" }
+image_vars = { RUNNER_IMAGE = "ghcr.io/levino/git-forge-runner:0.10.0@sha256:c2fac71b7b761d237b5456cca63e66498ec4fc2fbf981b2cc551525a8a8841dc" }
 instance_type = "basic"
 max_instances = 2
 
@@ -495,7 +495,7 @@ bigger instance, add a second class (the image is built once more):
 [[containers]]
 class_name = "DockerRunnerContainer"
 image = "./runner/Dockerfile"
-image_vars = { RUNNER_IMAGE = "ghcr.io/levino/git-forge-runner:0.9.3@sha256:78ffad62740d78648ea501ce5b33d1ae0f81b6deaed9ed23451d200f61fcd2a5" }
+image_vars = { RUNNER_IMAGE = "ghcr.io/levino/git-forge-runner:0.10.0@sha256:c2fac71b7b761d237b5456cca63e66498ec4fc2fbf981b2cc551525a8a8841dc" }
 instance_type = "standard-2"
 max_instances = 2
 

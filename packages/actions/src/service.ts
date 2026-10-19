@@ -2,7 +2,7 @@ import type { Database } from '@git-forge/accounts'
 import { readAll, repositoryPrefix, type Storage } from '@git-forge/core'
 import { type ActionReference, type ActionSources, resolveActionDownloads } from './actions-download.ts'
 import { jobDefinitionOf, runContextOf, runDefinitionOf } from './definitions.ts'
-import { type CheckRunSink, recordCheck } from './dispatch.ts'
+import { type CheckRunSink, type JobEventSink, recordCheck } from './dispatch.ts'
 import { buildJobMessage, JOB_REQUEST_MESSAGE_TYPE } from './job-message.ts'
 import { verifyClientAssertion } from './keys.ts'
 import { idTokenAllowed, idTokenRequestUrl } from './oidc.ts'
@@ -20,6 +20,7 @@ import {
   createSession,
   getJob,
   getJobById,
+  ranJob,
   getLog,
   getRun,
   getRunner,
@@ -63,6 +64,7 @@ export type ActionsServiceOptions = {
   readonly messageWaitMs?: number
   readonly pollIntervalMs?: number
   readonly onJobCompleted?: (job: JobRow) => Promise<void>
+  readonly onJobEvent?: JobEventSink
   readonly results?: ResultsAdvertisement
 }
 
@@ -401,6 +403,7 @@ const agentRequestRoute = async (context: Context, runner: Runner, requestId: nu
   if (job.status !== 'in_progress' && renewed.status === 'in_progress') {
     const run = await getRun(db, renewed.run_id)
     if (run) await recordCheck(db, context.options.checks, context.serverUrl, run, renewed)
+    await context.options.onJobEvent?.('in_progress', renewed)
   }
   return json(200, jobRequestJson(renewed, runner))
 }
@@ -421,6 +424,7 @@ const finish = async (context: Context, job: JobRow, result: TaskResult): Promis
   if (await completeJob(db, job.request_id, conclusionOf(result), context.now)) {
     await revokeJobTokens(db, job.id, context.now)
     const completed = await getJob(db, job.request_id)
+    if (completed) await context.options.onJobEvent?.('completed', completed)
     if (completed && context.options.onJobCompleted) await context.options.onJobCompleted(completed)
   }
 }
@@ -555,6 +559,7 @@ const POOLS = { count: 1, value: [{ id: POOL_ID, name: POOL_NAME, isHosted: fals
 type TaskAgentBody = {
   readonly name?: unknown
   readonly ephemeral?: unknown
+  readonly disableUpdate?: unknown
   readonly labels?: readonly { readonly name?: unknown }[]
   readonly authorization?: { readonly publicKey?: { readonly exponent?: unknown; readonly modulus?: unknown } }
 }
@@ -563,16 +568,22 @@ const registrationRoutes = async (context: Context, area: string, tail: readonly
   const token = bearer(context.request)
   if (!token) return null
   const grant = await verifyToken(context.options.db, token, 'registration', context.now)
-  if (!grant?.owner || !grant.repo) return null
+  if (!grant?.owner || grant.repo === null) return null
   if (area === 'agentpools') return json(200, POOLS)
-  if (tail[0] !== String(POOL_ID)) return notFound('pool')
+  if (tail[0] !== String(POOL_ID) && tail[0] !== '0') return notFound('pool')
   const method = context.request.method
   if (method === 'GET' && tail.length === 1) {
     const name = context.url.searchParams.get('agentName') ?? undefined
     const runners = await listRunners(context.options.db, grant.owner, grant.repo, name)
     return json(200, { count: runners.length, value: runners.map(agentJson) })
   }
-  if (method !== 'POST' || tail.length !== 1) return vssError(405, 'System.NotSupportedException', 'only adding runners is supported with a registration token')
+  if (method === 'DELETE' && tail.length === 2) {
+    const runner = /^\d+$/.test(tail[1]!) ? await getRunner(context.options.db, Number(tail[1])) : null
+    if (!runner || runner.owner !== grant.owner || runner.repo !== grant.repo) return notFound('agent')
+    await removeRunner(context.options.db, runner.id, context.now)
+    return empty(204)
+  }
+  if (method !== 'POST' || tail.length !== 1) return vssError(405, 'System.NotSupportedException', 'only adding and removing runners is supported with a registration token')
   const body = await readJson<TaskAgentBody>(context.request)
   const key = body?.authorization?.publicKey
   if (typeof body?.name !== 'string' || typeof key?.exponent !== 'string' || typeof key.modulus !== 'string') {
@@ -592,7 +603,7 @@ const registrationRoutes = async (context: Context, area: string, tail: readonly
       },
       context.now,
     )
-    return json(200, { ...agentJson(runner), authorization: { ...agentJson(runner).authorization, authorizationUrl: authorizationUrl(context.serviceUrl) } })
+    return json(200, { ...agentJson(runner), disableUpdate: body.disableUpdate === true, authorization: { ...agentJson(runner).authorization, authorizationUrl: authorizationUrl(context.serviceUrl) } })
   } catch (error) {
     if (error instanceof RunnerExistsError) return vssError(409, 'GitHub.DistributedTask.WebApi.TaskAgentExistsException', `a runner named ${body.name} already exists`)
     throw error
@@ -611,7 +622,7 @@ const runnerRoutes = async (context: Context, segments: readonly string[]): Prom
   const runner = await authenticateRunner(context)
   if (!runner) return unauthorized()
   if (area === 'agentpools') return json(200, POOLS)
-  if (tail[0] !== String(POOL_ID)) return notFound('pool')
+  if (tail[0] !== String(POOL_ID) && tail[0] !== '0') return notFound('pool')
   if (area === 'agent') {
     if (tail.length === 1) return json(200, { count: 1, value: [agentJson(runner)] })
     if (tail[1] !== String(runner.id)) return notFound('agent')
@@ -622,7 +633,7 @@ const runnerRoutes = async (context: Context, segments: readonly string[]): Prom
     if (method === 'POST' && tail.length === 1) return createSessionRoute(context, runner)
     if (method === 'DELETE' && tail.length === 2) {
       await closeSession(context.options.db, tail[1]!, runner.id, context.now)
-      if (runner.ephemeral && runner.jobId && (await getJobById(context.options.db, runner.jobId))?.status === 'completed') {
+      if (runner.ephemeral && (runner.jobId ? (await getJobById(context.options.db, runner.jobId))?.status === 'completed' : await ranJob(context.options.db, runner.id))) {
         await removeRunner(context.options.db, runner.id, context.now)
       }
       return empty(204)

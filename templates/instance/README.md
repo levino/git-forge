@@ -9,7 +9,7 @@ configures one instance.
 |---|---|
 | `wrangler.toml` | The whole instance: Worker name, the pinned release in the `[build]` command, R2 bucket, D1 database, queues, cron, vars, domain. |
 | `.dev.vars.example` | The secret the Deploy button asks for (`BOOTSTRAP_TOKEN`), and the template for `.dev.vars` in local development. |
-| `runner/Dockerfile` | Image for CI jobs, used only when [CI is enabled](#ci-opt-in): the official `ghcr.io/actions/actions-runner` image plus Git and Node.js. |
+| `runner/Dockerfile`, `runner/hook.js` | Image for CI jobs, used only when [CI is enabled](#ci-opt-in): the official `ghcr.io/actions/actions-runner` image plus Git, Node.js and a container hook for `container:` and `services:`. |
 | `.github/workflows/update-git-forge.yml` | Optional: opens a pull request with the new pin when a release comes out (see [Update](#update)). Delete it if you do not want it. |
 
 There is no `package.json`, no lockfile and no script. Nothing from npm ends
@@ -463,7 +463,36 @@ it runs.
 |---|---|
 | `instance_type` | Size of each job's container: `basic` (1/4 vCPU, 1 GiB, 4 GB disk, the cheapest that holds the image), `standard-1` (1/2 vCPU, 4 GiB, 8 GB), `standard-2` (1 vCPU, 6 GiB), `standard-3` (2 vCPU, 8 GiB), `standard-4` (4 vCPU, 12 GiB). |
 | `max_instances` | Jobs that run at the same time; further jobs wait. |
+| `ACTIONS_RUNNER_LABELS` | Comma-separated labels the container serves, e.g. `self-hosted,linux,ubuntu-latest`; jobs with other `runs-on` labels wait for your own runners or a provider. Default: all labels. |
 | `ACTIONS_GITHUB_FALLBACK` | `true`: `uses:` actions without a repository on the instance (for example `actions/checkout`) are downloaded from github.com. Without it, mirror them on the instance, e.g. a mirror of `github.com/actions/checkout` named `actions/checkout` (`ACTIONS_REPOSITORIES` maps other names). |
+
+Jobs with `container:`, `services:` or `docker://` steps start Docker in the
+runner container; all containers share its network (no iptables on Cloudflare),
+so services answer on their own ports under their names. To give these jobs a
+bigger instance, add a second class (the image is built once more):
+
+```toml
+[[containers]]
+class_name = "DockerRunnerContainer"
+image = "./runner/Dockerfile"
+instance_type = "standard-2"
+max_instances = 2
+
+[[durable_objects.bindings]]
+name = "RUNNER_DOCKER"
+class_name = "DockerRunnerContainer"
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["DockerRunnerContainer"]
+```
+
+Jobs whose `runs-on` labels match a runner you registered (`config.sh --url
+https://<your domain>/<owner>[/<repo>] --token …`, token from
+`POST /api/v3/repos/…/actions/runners/registration-token` or `/api/v3/orgs/…`)
+go to it instead of a container. External providers subscribe to the
+`workflow_job` webhook of a repository or organization and call
+`generate-jitconfig`.
 
 With `ACTIONS` set but without the container entries, workflows are queued
 and picked up by runners you register yourself

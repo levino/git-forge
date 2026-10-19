@@ -49,6 +49,7 @@ read functions of `@git-forge/core` and check access with the same
 | `ACTIONS_SECRETS_KEY` | secret, optional | 32 random bytes, base64 or hex (`openssl rand -base64 32`). Encrypts repository and environment secrets in D1 (AES-256-GCM). Without it the secrets API answers `503`. Changing it makes stored secrets unreadable. |
 | `ACTIONS_REPOSITORIES` | var, optional | Where `uses: owner/repo@ref` is looked up on this forge, as JSON, e.g. `{"actions/*": "mirrors/*"}`. Without a mapping, `actions/checkout` is looked up as the repository `actions/checkout`. |
 | `ACTIONS_GITHUB_FALLBACK` | var, optional | `true` (or an API base URL): actions that have no repository on this forge are downloaded from `api.github.com` tarballs. Default: off, unresolved actions fail the job. |
+| `ACTIONS_RUNNER_LABELS` | var, optional | Comma-separated labels the runner containers serve; jobs with other labels wait for registered runners or providers. Default: all. |
 | `ACTIONS_INSTANCE_ID` | var, optional | Stable GUID reported by the Actions location service. |
 | `ACTIONS_OIDC_KEY` | secret, optional | P-256 private JWK (`git-forge-node oidc-key`) signing ES256 ID tokens; issuer `PUBLIC_URL/_services/token`. Without it: EdDSA with `INSTANCE_KEY` (not accepted by AWS STS). |
 | `ACTIONS_ID_TOKENS` | var, optional | `false` turns ID tokens off. |
@@ -80,6 +81,7 @@ read functions of `@git-forge/core` and check access with the same
 | `LFS_PUBLISH_PREFIX` | var, optional | Key prefix inside `CDN_BUCKET`, e.g. `lfs/`. Default: none. |
 | `BACKUP` | R2 binding, optional | Backup target: each cron run copies a database dump and every object into it (design §19). Give it a bucket lock rule. |
 | `RUNNER` | Durable Object + Container | `RunnerContainer` (`src/runner-container.ts`, image `runner/Dockerfile`): one container per CI job with the official `actions/runner` and a JIT config. Declared in every environment; without the binding, jobs wait for a runner registered by hand. |
+| `RUNNER_DOCKER` | Durable Object + Container, optional | `DockerRunnerContainer`, same image on a bigger instance type, for jobs with `container:`, `services:` or `docker://` steps. Without it they use `RUNNER`. |
 
 Repositories are **private by default**; visibility is set per repository.
 There is no global "public read" switch any more.
@@ -524,6 +526,17 @@ is ephemeral and the container stops after its job. The instance type is
 `basic` (1/4 vCPU, 1 GiB, 4 GB disk); the image does not fit `lite`. Pin
 `RUNNER_VERSION` in the Dockerfile to a runner release you have tested.
 `wrangler dev` runs with `dev.enable_containers: false`.
+
+`container:` and `services:` run through the container hook `runner/hook.js`
+(`ACTIONS_RUNNER_CONTAINER_HOOKS`): it starts `dockerd` on first use
+(`--iptables=false`, `vfs` on an overlay root), runs every container with
+`--network=host`, maps service names and their `--network-alias` options to
+`127.0.0.1` in the job container and waits for health checks. Ports are not
+remapped. `ACTIONS_RUNNER_LABELS` limits the labels the containers serve.
+Runners registered with `config.sh` (repository or organization, `--url
+https://forge.example/acme[/site]`) get matching jobs instead of a container;
+`workflow_job` webhooks (`queued`, `in_progress`, `completed`) go to repository
+and organization hooks.
 
 ## Several instances: `alpha`, `beta`, `gamma`
 

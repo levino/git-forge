@@ -72,6 +72,8 @@ export type WorkflowJob = {
   readonly timeoutMinutes: number
   readonly permissions?: Permissions
   readonly concurrency?: Concurrency
+  readonly container?: YamlValue
+  readonly services?: Readonly<Record<string, YamlValue>>
   readonly steps: readonly WorkflowStep[]
 }
 
@@ -130,7 +132,9 @@ const DEFAULT_TIMEOUT_MINUTES = 360
 
 const WORKFLOW_KEYS = new Set(['name', 'on', 'env', 'defaults', 'concurrency', 'jobs', 'permissions'])
 
-const JOB_KEYS = new Set(['name', 'if', 'runs-on', 'needs', 'env', 'defaults', 'outputs', 'strategy', 'environment', 'continue-on-error', 'timeout-minutes', 'steps', 'permissions', 'concurrency'])
+const JOB_KEYS = new Set(['name', 'if', 'runs-on', 'needs', 'env', 'defaults', 'outputs', 'strategy', 'environment', 'continue-on-error', 'timeout-minutes', 'steps', 'permissions', 'concurrency', 'container', 'services'])
+
+const CONTAINER_KEYS = new Set(['image', 'credentials', 'env', 'ports', 'volumes', 'options'])
 
 const STRATEGY_KEYS = new Set(['matrix', 'fail-fast', 'max-parallel'])
 
@@ -398,8 +402,37 @@ const parseJob = (id: string, value: YamlValue, c: Collector): WorkflowJob | nul
     timeoutMinutes: c.positiveNumber(value['timeout-minutes'], `${path}.timeout-minutes`) ?? DEFAULT_TIMEOUT_MINUTES,
     ...optional('permissions', parsePermissions(value['permissions'], `${path}.permissions`, c)),
     ...optional('concurrency', parseConcurrency(value['concurrency'], `${path}.concurrency`, c)),
+    ...optional('container', parseContainer(value['container'], `${path}.container`, c)),
+    ...optional('services', parseServices(value['services'], `${path}.services`, c)),
     steps: steps.flatMap((step, index) => parseStep(step, `${path}.steps[${index}]`, c) ?? []),
   }
+}
+
+const parseContainer = (value: YamlValue | undefined, path: string, c: Collector): YamlValue | undefined => {
+  if (value === undefined || value === null) return undefined
+  if (typeof value === 'string') return value
+  if (!isMapping(value)) {
+    c.fail(path, 'expected an image or a mapping')
+    return undefined
+  }
+  c.unsupported(value, CONTAINER_KEYS, path)
+  if (value['image'] === undefined) c.fail(`${path}.image`, 'is required')
+  return value
+}
+
+const parseServices = (value: YamlValue | undefined, path: string, c: Collector): Record<string, YamlValue> | undefined => {
+  if (value === undefined || value === null) return undefined
+  if (!isMapping(value)) {
+    c.fail(path, 'expected a mapping')
+    return undefined
+  }
+  const services: Record<string, YamlValue> = {}
+  for (const [name, service] of Object.entries(value)) {
+    if (!JOB_ID.test(name)) c.fail(`${path}.${name}`, 'service names must start with a letter or "_" and contain only letters, digits, "-" and "_"')
+    const parsed = parseContainer(service, `${path}.${name}`, c)
+    if (parsed !== undefined) services[name] = parsed
+  }
+  return services
 }
 
 const isExpression = (value: YamlValue | undefined): boolean => typeof value === 'string' && /^\s*\$\{\{[\s\S]*\}\}\s*$/.test(value)

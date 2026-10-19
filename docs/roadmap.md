@@ -113,8 +113,10 @@ Design: [design.md §15](design.md#ci).
 - [ ] Official artifact actions v4 on non-`*.localhost` hosts (client-side GHES check in `@actions/artifact`), artifacts v3
 - [ ] Verify ID token trust against real AWS / Google Cloud accounts
 - [ ] Broker and run service (v2 flow), message encryption (not needed so far)
-- [ ] External providers: signed `workflow_job` webhook delivery to GitHub Apps (App auth, manifest flow and installation tokens exist, design §16), org-level runners; try WarpBuild Enterprise, AWS CodeBuild, RunsOn
-- [ ] `container:` and `services:` (Docker-in-Docker in the runner container)
+- [x] Self-hosted runners and providers: `config.sh` registration (repository and organization), remove tokens, org-level runners, labels, the default runner group, label routing (`ACTIONS_RUNNER_LABELS`), signed `workflow_job` webhooks (`queued`, `in_progress`, `completed`) to repository and organization hooks
+- [ ] External providers against real accounts: WarpBuild Enterprise, AWS CodeBuild, RunsOn (App auth: design §16)
+- [x] `container:` and `services:` through a container hook (host networking, service names in `/etc/hosts`, health checks, registry credentials), optional bigger instance type for Docker jobs (`RUNNER_DOCKER`)
+- [ ] Verify Docker-in-Docker jobs on Cloudflare Containers
 - [x] Web UI for runs and live logs (runs per workflow, jobs, log polling, cancel, re-run all, failed or one job)
 - [x] "Deploy to Cloudflare" button in the README pointing at the instance template; template wired to accounts (`BOOTSTRAP_TOKEN`)
 - [x] Release artifact (bundled worker + migrations + checksums) and instance template with pinned version

@@ -11,3 +11,5 @@ RUN apt-get update \
 
 USER runner
 WORKDIR /home/runner
+COPY --chown=runner:docker hook.js /home/runner/hook.js
+ENV ACTIONS_RUNNER_CONTAINER_HOOKS=/home/runner/hook.js

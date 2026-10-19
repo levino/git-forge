@@ -4,7 +4,7 @@ import { backgroundHandlers, type Env, forgeFor } from './cloudflare.ts'
 import { uiEnabled } from './config.ts'
 import type { AppJob } from './app.ts'
 
-export { RunnerContainer } from './runner-container.ts'
+export { DockerRunnerContainer, RunnerContainer } from './runner-container.ts'
 
 export default {
   async fetch(request, env, context): Promise<Response> {

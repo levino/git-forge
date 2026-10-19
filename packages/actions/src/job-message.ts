@@ -1,5 +1,5 @@
-import type { ExpressionValue, RunDefaults, RunStep, UsesStep, WorkflowEnv, WorkflowJob, WorkflowStep } from '@git-forge/core'
-import { expressionToken, mappingToken, stepCondition, type TemplateToken, toContextData } from './template.ts'
+import type { ExpressionValue, RunDefaults, YamlValue, RunStep, UsesStep, WorkflowEnv, WorkflowJob, WorkflowStep } from '@git-forge/core'
+import { expressionToken, mappingToken, stepCondition, stringsToken, type TemplateToken, toContextData } from './template.ts'
 
 export type RunContext = {
   readonly id: number
@@ -172,6 +172,19 @@ const defaultsToken = (defaults: RunDefaults | undefined): TemplateToken | null 
   })
 }
 
+export const SERVICE_LABEL = 'git-forge-service'
+
+const servicesToken = (services: Readonly<Record<string, YamlValue>>): TemplateToken =>
+  mappingToken(
+    Object.fromEntries(
+      Object.entries(services).map(([name, service]) => {
+        const spec: Readonly<Record<string, YamlValue>> = typeof service === 'object' && service !== null && !Array.isArray(service) ? service : { image: service }
+        const options = [spec['options'], `--label=${SERVICE_LABEL}=${name}`].filter((option) => option !== undefined && option !== null && option !== '').join(' ')
+        return [name, stringsToken({ ...spec, options })]
+      }),
+    ),
+  )
+
 const secret = (value: string) => ({ value, isSecret: true })
 
 export const buildJobMessage = (input: JobMessageInput) => {
@@ -221,12 +234,15 @@ export const buildJobMessage = (input: JobMessageInput) => {
     mask: [],
     environmentVariables: [envToken(input.run.workflowEnv), envToken(input.job.env)].filter((token) => typeof token === 'object' && token !== null && 'map' in token),
     defaults: [defaultsToken(input.run.workflowDefaults), defaultsToken(input.job.defaults)].filter((token) => token !== null),
+    ...(input.job.container !== undefined ? { jobContainer: stringsToken(input.job.container) } : {}),
+    ...(input.job.services !== undefined ? { jobServiceContainers: servicesToken(input.job.services) } : {}),
     ...(Object.keys(input.job.outputs ?? {}).length > 0 ? { jobOutputs: envToken(input.job.outputs) } : {}),
     variables: {
       'system.github.token': secret(input.githubToken),
       github_token: secret(input.githubToken),
       'system.github.job': { value: input.job.id },
       'system.runner.lowdiskspacethreshold': { value: '100' },
+      'DistributedTask.AllowRunnerContainerHooks': { value: 'true' },
       ...Object.fromEntries(Object.entries(input.variables ?? {}).map(([name, value]) => [name, { value }])),
       ...Object.fromEntries(Object.entries(input.secrets).map(([name, value]) => [name, secret(value)])),
     },

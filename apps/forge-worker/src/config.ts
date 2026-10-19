@@ -41,6 +41,7 @@ export type ForgeVars = {
   readonly ACTIONS_CACHE_LIMIT_BYTES?: string
   readonly ACTIONS_CACHE_UNUSED_DAYS?: string
   readonly ACTIONS_CACHE_MAX_DAYS?: string
+  readonly ACTIONS_RUNNER_LABELS?: string
   readonly MIRROR_DEEP_CHECK_DAYS?: string
   readonly MIRROR_UNIT_BYTES?: string
   readonly UI?: string
@@ -133,6 +134,7 @@ export type ActionsSettings = {
   readonly idTokens: boolean
   readonly artifactRetentionDays: number
   readonly cacheLimits: CacheLimits
+  readonly runnerLabels: readonly string[] | undefined
 }
 
 export const ACTIONS_CRON = '*/5 * * * *'
@@ -348,6 +350,10 @@ export const parseActionsSettings = (vars: ForgeVars): ActionsSettings | undefin
       unusedDays: positiveInteger(vars.ACTIONS_CACHE_UNUSED_DAYS, DEFAULT_CACHE_LIMITS.unusedDays),
       maxDays: positiveInteger(vars.ACTIONS_CACHE_MAX_DAYS, DEFAULT_CACHE_LIMITS.maxDays),
     },
+    runnerLabels: present(vars.ACTIONS_RUNNER_LABELS)
+      ?.split(',')
+      .map((label) => label.trim())
+      .filter((label) => label !== ''),
   }
 }
 

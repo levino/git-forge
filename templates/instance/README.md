@@ -46,10 +46,13 @@ CPU of the Free plan, and `limits.cpu_ms` cannot be set on Free).
 
 ### Region
 
-Automatically provisioned resources land wherever Cloudflare puts them (often
-another continent), and every request then pays the round trip. Create them
-with the names from `wrangler.toml` before the first deploy, here in Western
-Europe:
+Resources without a location land wherever Cloudflare puts them (often
+another continent), and every request then pays the round trip. A resource
+cannot be moved later, only recreated under a new name. With the Deploy
+button, set the location of the database and the bucket (e.g. Western
+Europe) and the jurisdiction of both queues (e.g. EU) on the deploy page. By
+hand, create them before the first deploy with the names from
+`wrangler.toml`:
 
 ```sh
 npx wrangler@4 d1 create git-forge --location weur
@@ -64,9 +67,7 @@ syncs, notifications) may run on another continent. `[placement] mode =
 "smart"` moves requests next to the data once it has seen some traffic; after
 the first deploy (Cloudflare refuses it on the one that creates the Worker)
 add `hint = "weur"` (your location) for immediate effect; Cloudflare refuses
-the hint on Workers with a runner container (`ACTIONS`). A resource cannot
-be moved later, only recreated under a new name. With the Deploy button,
-create them under the names you are going to enter.
+the hint on Workers with a runner container (`ACTIONS`).
 
 ### With the Deploy button
 
@@ -74,7 +75,8 @@ create them under the names you are going to enter.
 
 The button copies this directory into a new repository in your GitHub or
 GitLab account (this directory becomes its root), lets you rename the Worker,
-the database, the bucket and the queues, asks for `BOOTSTRAP_TOKEN`, connects
+the database, the bucket and the queues (set their [region](#region); the jobs
+queue must end in `-jobs`), asks for `BOOTSTRAP_TOKEN`, connects
 the repository to Workers Builds and deploys it. Every later push to the
 default branch deploys again. Leave the build command of Workers Builds empty
 and the deploy command at `npx wrangler deploy`; the `[build]` command in

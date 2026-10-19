@@ -236,23 +236,22 @@ const hydrateMilestones = async (db: Database, rows: readonly MilestoneRow[], us
 export const hydrateIssues = async (db: Database, rows: readonly IssueRow[]): Promise<Issue[]> => {
   if (rows.length === 0) return []
   const ids = rows.map((row) => row.id)
-  const labels = await allIn<LabelRow & { issue_id: number }>(
-    db,
-    (marks) => `SELECT il.issue_id, l.id, l.node_id, l.name, l.color, l.description FROM issue_labels il JOIN labels l ON l.id = il.label_id WHERE il.issue_id IN (${marks}) ORDER BY l.name`,
-    ids,
-  )
-  const assignees = await allIn<{ issue_id: number; user_id: string }>(
-    db,
-    (marks) => `SELECT issue_id, user_id FROM issue_assignees WHERE issue_id IN (${marks}) ORDER BY created_at, rowid`,
-    ids,
-  )
-  const external = await allIn<{ node_id: string; assignees: string }>(
-    db,
-    (marks) => `SELECT node_id, assignees FROM imported_items WHERE node_id IN (${marks}) AND assignees != '[]'`,
-    rows.map((row) => row.node_id),
-  )
   const milestoneIds = rows.map((row) => row.milestone_id).filter((id): id is number => id !== null)
-  const milestoneRows = await allIn<MilestoneRow>(db, (marks) => `SELECT * FROM milestones WHERE id IN (${marks})`, milestoneIds)
+  const [labels, assignees, external, milestoneRows, reactions] = await Promise.all([
+    allIn<LabelRow & { issue_id: number }>(
+      db,
+      (marks) => `SELECT il.issue_id, l.id, l.node_id, l.name, l.color, l.description FROM issue_labels il JOIN labels l ON l.id = il.label_id WHERE il.issue_id IN (${marks}) ORDER BY l.name`,
+      ids,
+    ),
+    allIn<{ issue_id: number; user_id: string }>(db, (marks) => `SELECT issue_id, user_id FROM issue_assignees WHERE issue_id IN (${marks}) ORDER BY created_at, rowid`, ids),
+    allIn<{ node_id: string; assignees: string }>(
+      db,
+      (marks) => `SELECT node_id, assignees FROM imported_items WHERE node_id IN (${marks}) AND assignees != '[]'`,
+      rows.map((row) => row.node_id),
+    ),
+    allIn<MilestoneRow>(db, (marks) => `SELECT * FROM milestones WHERE id IN (${marks})`, milestoneIds),
+    reactionRollups(db, 'issue', ids),
+  ])
   const users = await loadUsers(db, [
     ...rows.flatMap((row) => [
       { kind: row.author_kind, id: row.author_id },
@@ -262,7 +261,6 @@ export const hydrateIssues = async (db: Database, rows: readonly IssueRow[]): Pr
     ...milestoneRows.map((row) => ({ kind: row.creator_kind, id: row.creator_id })),
   ])
   const milestones = await hydrateMilestones(db, milestoneRows, users)
-  const reactions = await reactionRollups(db, 'issue', ids)
   return rows.map((row) => ({
     id: row.id,
     nodeId: row.node_id,
@@ -359,19 +357,29 @@ export const listIssues = async (scope: Scope, filters: IssueFilters = {}, page:
   const column = filters.sort === 'updated' ? 'i.updated_at' : filters.sort === 'comments' ? 'i.comment_count' : 'i.created_at'
   const direction = filters.direction === 'asc' ? 'ASC' : 'DESC'
   const clause = where.join(' AND ')
-  const total = (await first<{ count: number }>(scope.db, sql(`SELECT COUNT(*) AS count FROM issues i WHERE ${clause}`, ...params)))?.count ?? 0
-  const rows = await scope.db.all<IssueRow>(
-    sql(`SELECT i.* FROM issues i WHERE ${clause} ORDER BY ${column} ${direction}, i.number ${direction} LIMIT ? OFFSET ?`, ...params, page.perPage, offset(page)),
-  )
-  return { items: await hydrateIssues(scope.db, rows), total }
+  const [counted, rows] = await Promise.all([
+    first<{ count: number }>(scope.db, sql(`SELECT COUNT(*) AS count FROM issues i WHERE ${clause}`, ...params)),
+    scope.db.all<IssueRow>(sql(`SELECT i.* FROM issues i WHERE ${clause} ORDER BY ${column} ${direction}, i.number ${direction} LIMIT ? OFFSET ?`, ...params, page.perPage, offset(page))),
+  ])
+  return { items: await hydrateIssues(scope.db, rows), total: counted?.count ?? 0 }
 }
 
-export const openCounts = async (scope: Scope): Promise<{ readonly issues: number; readonly pulls: number }> => {
+export const openCountsOf = async (db: Database, repositoryId: string): Promise<{ readonly issues: number; readonly pulls: number }> => {
   const row = await first<{ issues: number | null; pulls: number | null }>(
-    scope.db,
-    sql("SELECT SUM(is_pull = 0) AS issues, SUM(is_pull = 1) AS pulls FROM issues WHERE repository_id = ? AND state = 'open'", scope.repository.id),
+    db,
+    sql("SELECT SUM(is_pull = 0) AS issues, SUM(is_pull = 1) AS pulls FROM issues WHERE repository_id = ? AND state = 'open'", repositoryId),
   )
   return { issues: row?.issues ?? 0, pulls: row?.pulls ?? 0 }
+}
+
+export const openCounts = (scope: Scope): Promise<{ readonly issues: number; readonly pulls: number }> => openCountsOf(scope.db, scope.repository.id)
+
+export const stateCounts = async (scope: Scope, kind: 'issue' | 'pull'): Promise<{ readonly open: number; readonly closed: number }> => {
+  const row = await first<{ open: number | null; closed: number | null }>(
+    scope.db,
+    sql("SELECT SUM(state = 'open') AS open, SUM(state = 'closed') AS closed FROM issues WHERE repository_id = ? AND is_pull = ?", scope.repository.id, kind === 'pull' ? 1 : 0),
+  )
+  return { open: row?.open ?? 0, closed: row?.closed ?? 0 }
 }
 
 const labelsByName = async (scope: Scope, names: readonly string[], create: boolean): Promise<LabelRow[]> => {
@@ -683,10 +691,14 @@ const hydrateComments = async (db: Database, rows: readonly CommentRow[]): Promi
 }
 
 export const listComments = async (scope: Scope, number: number | null, options: { readonly since?: number } = {}, page: Page = DEFAULT_PAGE): Promise<Paged<IssueComment>> => {
+  if (number !== null) await issueRow(scope, number)
+  return commentsPage(scope, number, options, page)
+}
+
+export const commentsPage = async (scope: Scope, number: number | null, options: { readonly since?: number } = {}, page: Page = DEFAULT_PAGE): Promise<Paged<IssueComment>> => {
   const where = ['i.repository_id = ?', 'c.deleted_at IS NULL']
   const params: (string | number)[] = [scope.repository.id]
   if (number !== null) {
-    await issueRow(scope, number)
     where.push('i.number = ?')
     params.push(number)
   }
@@ -695,9 +707,11 @@ export const listComments = async (scope: Scope, number: number | null, options:
     params.push(options.since)
   }
   const clause = where.join(' AND ')
-  const total = (await first<{ count: number }>(scope.db, sql(`SELECT COUNT(*) AS count FROM issue_comments c JOIN issues i ON i.id = c.issue_id WHERE ${clause}`, ...params)))?.count ?? 0
-  const rows = await scope.db.all<CommentRow>(sql(`${COMMENT_SELECT} WHERE ${clause} ORDER BY c.id LIMIT ? OFFSET ?`, ...params, page.perPage, offset(page)))
-  return { items: await hydrateComments(scope.db, rows), total }
+  const [counted, rows] = await Promise.all([
+    first<{ count: number }>(scope.db, sql(`SELECT COUNT(*) AS count FROM issue_comments c JOIN issues i ON i.id = c.issue_id WHERE ${clause}`, ...params)),
+    scope.db.all<CommentRow>(sql(`${COMMENT_SELECT} WHERE ${clause} ORDER BY c.id LIMIT ? OFFSET ?`, ...params, page.perPage, offset(page))),
+  ])
+  return { items: await hydrateComments(scope.db, rows), total: counted?.count ?? 0 }
 }
 
 const commentRow = async (scope: Scope, id: number, includeDeleted = false): Promise<CommentRow & { locked: number }> => {
@@ -970,8 +984,9 @@ export const hydrateEvents = async (db: Database, rows: readonly EventRow[]): Pr
   }))
 }
 
-export const listEvents = async (scope: Scope, number: number): Promise<IssueEvent[]> => {
-  const row = await issueRow(scope, number)
+export const listEvents = async (scope: Scope, number: number): Promise<IssueEvent[]> => eventsOf(scope, await issueRow(scope, number))
+
+export const eventsOf = async (scope: Scope, row: IssueRow): Promise<IssueEvent[]> => {
   const rows = await scope.db.all<EventRow>(
     sql('SELECT e.id, e.node_id, i.number, e.actor_kind, e.actor_id, e.event, e.data, e.created_at FROM issue_events e JOIN issues i ON i.id = e.issue_id WHERE e.issue_id = ? ORDER BY e.id', row.id),
   )

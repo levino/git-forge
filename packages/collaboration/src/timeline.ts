@@ -1,4 +1,4 @@
-import { type IssueComment, type IssueEvent, issueRow, listComments, listEvents } from './issues.ts'
+import { commentsPage, eventsOf, type IssueComment, type IssueEvent, issueRow } from './issues.ts'
 import { listReviews, type Review } from './reviews.ts'
 import type { Scope } from './context.ts'
 
@@ -9,14 +9,19 @@ export type TimelineItem =
 
 export const timeline = async (scope: Scope, number: number): Promise<TimelineItem[]> => {
   const row = await issueRow(scope, number)
-  const events = await listEvents(scope, number)
-  const comments: IssueComment[] = []
-  for (let page = 1; ; page++) {
-    const batch = await listComments(scope, number, {}, { page, perPage: 100 })
-    comments.push(...batch.items)
-    if (batch.items.length < 100) break
+  const allComments = async () => {
+    const comments: IssueComment[] = []
+    for (let page = 1; ; page++) {
+      const batch = await commentsPage(scope, number, {}, { page, perPage: 100 })
+      comments.push(...batch.items)
+      if (batch.items.length < 100) return comments
+    }
   }
-  const reviews = row.is_pull === 1 ? (await listReviews(scope, number)).filter((review) => review.state !== 'PENDING') : []
+  const [events, comments, reviews] = await Promise.all([
+    eventsOf(scope, row),
+    allComments(),
+    row.is_pull === 1 ? listReviews(scope, number).then((all) => all.filter((review) => review.state !== 'PENDING')) : [],
+  ])
   const items: TimelineItem[] = [
     ...events.filter((event) => event.event !== 'reviewed').map((event) => ({ kind: 'event' as const, at: event.createdAt, event })),
     ...comments.map((comment) => ({ kind: 'comment' as const, at: comment.createdAt, comment })),

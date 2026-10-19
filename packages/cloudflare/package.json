@@ -12,6 +12,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@git-forge/accounts": "workspace:*",
     "@git-forge/core": "workspace:*"
   },
   "devDependencies": {

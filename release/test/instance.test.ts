@@ -140,7 +140,7 @@ describe('release bundle', () => {
     expect(bundle).toMatch(/export\s*\{[^}]*\bas default\b/)
     const imports = [...bundle.matchAll(/^import\s[^;]*?["']([^"']+)["']/gm)].map((match) => match[1])
     expect(imports.filter((specifier) => !specifier!.startsWith('cloudflare:'))).toEqual([])
-    expect(bundle).not.toMatch(/\bimport\(\s*["'](?!cloudflare:)/)
+    expect([...bundle.matchAll(/\bimport\(\s*["']([^"']+)["']/g)].map((match) => match[1]).filter((specifier) => !specifier!.startsWith('cloudflare:'))).toEqual(['node:async_hooks'])
     const { stdout } = await run('tar', ['-tzf', join(release, 'migrations.tar.gz')])
     expect(stdout.split('\n')).toContain('migrations/0001_initial.sql')
   })

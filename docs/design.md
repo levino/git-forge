@@ -1060,6 +1060,7 @@ database.
 | Scheduling, jobs | Cron Triggers, Queues (Workflows for long jobs) | `Deno.cron`, systemd timers, job table, in-process queue |
 | Public LFS bucket (`LfsPublisher`) | second R2 bucket (`CDN_BUCKET`) | any `Storage`: S3 bucket, local directory (`LFS_PUBLISH_DIR`) |
 | Backup target (§19) | second R2 bucket (`BACKUP`) with a bucket lock | any `Storage` (`BACKUP_STORAGE`): S3 bucket with Object Lock, local directory |
+| Read replicas, page cache | D1 Sessions API (`d1Sessions`), Cache API (`cacheApiPageCache`) | none (Node reads one SQLite file) |
 | Email | Cloudflare Email Service (`send_email` binding, `@git-forge/cloudflare`); Amazon SES v2 HTTP API (`@git-forge/ses`, SigV4 via `aws4fetch`, runs on Workers and Node) | SMTP for the Node deployment (`@git-forge/smtp`); a console adapter for development |
 | Compute for CI | Containers | external per-minute providers via the GHES API (WarpBuild, AWS CodeBuild, RunsOn), Fly Machines, a local process |
 
@@ -2484,6 +2485,52 @@ in parallel; `openRepository` starts them together with the header's
 database reads (scope, open counts, forks), memoized per request. R2 range
 reads are one request (the head-then-get path is only the fallback). The
 Worker adds `Server-Timing: app;dur=<ms>` to every response.
+
+**Database round trips.** `openRepository` (UI) memoizes the access check per
+request and hands the resolved repository and access to the collaboration
+scope (`openRepository(…, known)` in the collaboration package skips the
+lookup only for the same principal object). Instance-admin checks are
+memoized per principal object; the session query returns the flag. The header
+(`repositoryHeader`: open counts, fork parent and forks) runs in parallel with
+the scope; issue and pull lists count both states in one query; hydration,
+list counts and the timeline query in parallel. `test/pages/queries.test.ts`
+counts queries per page (anonymous and signed in) against a budget.
+
+**Read replicas.** On Workers the database is `d1Sessions` (§11,
+`@git-forge/cloudflare`): every request runs in its own D1 session, found
+through `AsyncLocalStorage` (`nodejs_als`; without it every query uses the
+binding, i.e. the primary). Unsafe methods start with `first-primary`, so
+read-then-write logic sees current data; other requests start at the
+client's bookmark (`X-Forge-Bookmark`, else the `gf_bookmark` cookie) or
+`first-unconstrained`. After writes of an unsafe request the response sets
+the cookie (5 minutes, HttpOnly), so the user's next pages read at least
+their own writes; clients that send the header get the latest bookmark back
+in it. Other users' changes may appear seconds late. Cron, queue and
+migration work uses the binding. Replicas only serve reads once read
+replication is enabled on the D1 database (dashboard *Settings → Enable Read
+Replication*, or the REST API `read_replication.mode = "auto"`); until then
+sessions go to the primary.
+
+**Page cache.** Rendered HTML of public repository pages (home, tree, blob,
+blame, commits, commit, branches, tags, forks, releases, issues, pulls, pull,
+discussions; not `new`/`edit` forms, settings or actions) is cached for
+anonymous visitors through a `PageCache` adapter (`cacheApiPageCache`, the
+colo's Cache API under a private host, 5 minutes). It is used only for `GET`
+without `Authorization` and without a session cookie (also an invalid one),
+after the access check found a public repository with full read access (no
+partial view). The key is a SHA-256 over the release version, the full URL,
+the repository record (visibility, description, topics, archive state), the
+ETag of `refs.json` and `repository_changes.counter`, which SQLite triggers
+(migration `0060_repository_changes`) increment on every insert, update or
+delete in the collaboration tables shown on these pages (issues, pull
+requests, comments, reviews, labels, milestones, events, statuses, checks,
+discussions, releases and assets, reactions, forks, settings, branch
+protection). Pushes and collaboration changes therefore miss at once;
+anything else (account names, mirror state, relative times) is at most five
+minutes old. Only `200` HTML responses without `Set-Cookie` and without
+`private`/`no-store` are stored; the stored copy keeps the original
+`Cache-Control`, and served pages carry `Vary: Cookie, Authorization` and
+`X-Forge-Cache: hit|miss`.
 
 Blame (`/{owner}/{repo}/blame/{ref}/{path}`) is `blame` in core: newest
 commit first, lines unchanged against a parent pass to it (the first parent

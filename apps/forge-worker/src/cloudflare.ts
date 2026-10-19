@@ -1,5 +1,5 @@
 import { d1Database, MIGRATIONS, migrateOnStart } from '@git-forge/accounts'
-import { cacheApiObjectCache, consumeJobs, createCloudflareEmailSender, digestStreams, QueueJobs, R2Storage } from '@git-forge/cloudflare'
+import { cacheApiObjectCache, cacheApiPageCache, consumeJobs, type ContextStorage, createCloudflareEmailSender, type D1Sessions, d1Sessions, type RequestSession, digestStreams, QueueJobs, R2Storage } from '@git-forge/cloudflare'
 import { continueImport, createConsoleEmailSender, type EmailSender, type ImportJob, type ImportScheduler, storagePublisher } from '@git-forge/core'
 import { S3Storage } from '@git-forge/s3'
 import { createSesEmailSender } from '@git-forge/ses'
@@ -7,6 +7,7 @@ import { type AppJob, createForge, type Forge } from './app.ts'
 import { ACTIONS_CRON, type EmailSettings, type ForgeVars, loadIdTokenKeys, loadSecretsKey, parseActionsSettings, parseEmailSettings, parseR2Signing, parseSettings, uiEnabled } from './config.ts'
 import { containerLauncher } from './runner-launcher.ts'
 import { captureLoginPage } from './ui/login-pages.ts'
+import { PAGE_CACHE_SECONDS } from './ui/page-cache.ts'
 
 export type Env = ForgeVars & {
   readonly BUCKET: R2Bucket
@@ -37,9 +38,23 @@ declare const GIT_FORGE_VERSION: string | undefined
 
 let forge: Promise<Forge> | undefined
 
+let sessions: Promise<D1Sessions> | undefined
+
+const contextStorage = async (): Promise<ContextStorage<RequestSession> | null> => {
+  try {
+    const { AsyncLocalStorage } = (await import('node:async_hooks')) as { AsyncLocalStorage: new <T>() => ContextStorage<T> }
+    return new AsyncLocalStorage<RequestSession>()
+  } catch {
+    return null
+  }
+}
+
+export const sessionsFor = (env: Env): Promise<D1Sessions> => (sessions ??= contextStorage().then((context) => d1Sessions(env.DB, context)))
+
 export const forgeFor = (env: Env): Promise<Forge> => {
   forge ??= parseSettings(env)
     .then(async (settings) => {
+      const { database } = await sessionsFor(env)
       await migrateOnStart(d1Database(env.DB), MIGRATIONS)
       const actions = parseActionsSettings(env)
       const secretsKey = await loadSecretsKey(actions, env)
@@ -50,7 +65,8 @@ export const forgeFor = (env: Env): Promise<Forge> => {
         ...settings,
         storage: new R2Storage(env.BUCKET),
         objectCache: cacheApiObjectCache(),
-        db: d1Database(env.DB),
+        pageCache: cacheApiPageCache(PAGE_CACHE_SECONDS),
+        db: database,
         digests: digestStreams,
         version: typeof GIT_FORGE_VERSION === 'string' ? GIT_FORGE_VERSION : 'dev',
         location: async (request) => {

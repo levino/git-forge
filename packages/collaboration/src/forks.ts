@@ -1,6 +1,7 @@
 import { atLeast, type Principal, type RepositorySubject, sql } from '@git-forge/accounts'
 import { forkRepository, isValidName, RepositoryExistsError } from '@git-forge/core'
-import { type AccountsDirectory, type ActorRef, CollaborationError, invalid, refFromColumns, resolveActor, type Scope } from './context.ts'
+import { openCountsOf } from './issues.ts'
+import { type AccountsDirectory, type ActorRef, CollaborationError, type CollaborationOptions, invalid, refFromColumns, resolveActor, type Scope } from './context.ts'
 
 export type ForkInput = { readonly organization?: unknown; readonly name?: unknown; readonly defaultBranchOnly?: unknown }
 
@@ -9,10 +10,9 @@ export type ForkInfo = { readonly parent: RepositorySubject; readonly source: Re
 const readable = async (accounts: AccountsDirectory, principal: Principal, repository: RepositorySubject): Promise<boolean> =>
   atLeast((await resolveActor(accounts, principal, repository)).access, 'read')
 
-const filterReadable = async <T extends RepositorySubject>(scope: Scope, repositories: readonly T[]): Promise<T[]> => {
-  const visible: T[] = []
-  for (const repository of repositories) if (await readable(scope.accounts, scope.actor.principal, repository)) visible.push(repository)
-  return visible
+const filterReadable = async <T extends RepositorySubject>(accounts: AccountsDirectory, principal: Principal, repositories: readonly T[]): Promise<T[]> => {
+  const readability = await Promise.all(repositories.map((repository) => readable(accounts, principal, repository)))
+  return repositories.filter((_, index) => readability[index])
 }
 
 export const createFork = async (scope: Scope, input: ForkInput): Promise<RepositorySubject> => {
@@ -54,17 +54,23 @@ export const createFork = async (scope: Scope, input: ForkInput): Promise<Reposi
   return created
 }
 
-export const forkInfo = async (scope: Scope): Promise<ForkInfo | null> => {
-  const info = await scope.accounts.forkInfo(scope.repository.id)
+const readableFork = async (accounts: AccountsDirectory, principal: Principal, info: { readonly parent: RepositorySubject; readonly root: RepositorySubject } | null): Promise<ForkInfo | null> => {
   if (!info) return null
-  const [parent, source] = await Promise.all([
-    readable(scope.accounts, scope.actor.principal, info.parent),
-    readable(scope.accounts, scope.actor.principal, info.root),
-  ])
+  const [parent, source] = await Promise.all([readable(accounts, principal, info.parent), readable(accounts, principal, info.root)])
   return parent && source ? { parent: info.parent, source: info.root } : null
 }
 
-export const listForks = async (scope: Scope): Promise<RepositorySubject[]> => filterReadable(scope, await scope.accounts.listForks(scope.repository.id))
+export const forkInfo = async (scope: Scope): Promise<ForkInfo | null> => readableFork(scope.accounts, scope.actor.principal, await scope.accounts.forkInfo(scope.repository.id))
+
+export const listForks = async (scope: Scope): Promise<RepositorySubject[]> => filterReadable(scope.accounts, scope.actor.principal, await scope.accounts.listForks(scope.repository.id))
+
+export type RepositoryHeader = { readonly issues: number; readonly pulls: number; readonly fork: ForkInfo | null; readonly forks: readonly RepositorySubject[] }
+
+export const repositoryHeader = async (options: Pick<CollaborationOptions, 'db' | 'accounts'>, principal: Principal, repository: RepositorySubject): Promise<RepositoryHeader> => {
+  const [counts, info, forks] = await Promise.all([openCountsOf(options.db, repository.id), options.accounts.forkInfo(repository.id), options.accounts.listForks(repository.id)])
+  const [fork, visible] = await Promise.all([readableFork(options.accounts, principal, info), filterReadable(options.accounts, principal, forks)])
+  return { ...counts, fork, forks: visible }
+}
 
 export type ForkNetwork = { readonly root: RepositorySubject | null; readonly forks: readonly (RepositorySubject & { readonly parentId: string })[] }
 
@@ -72,7 +78,7 @@ export const forkNetwork = async (scope: Scope): Promise<ForkNetwork> => {
   const network = await scope.accounts.forkNetwork(scope.repository.id)
   if (!network) return { root: null, forks: [] }
   const root = (await readable(scope.accounts, scope.actor.principal, network.root)) ? network.root : null
-  return { root, forks: await filterReadable(scope, network.forks) }
+  return { root, forks: await filterReadable(scope.accounts, scope.actor.principal, network.forks) }
 }
 
 export const authorCanPushHead = async (accounts: AccountsDirectory, author: ActorRef | null, head: RepositorySubject): Promise<boolean> =>

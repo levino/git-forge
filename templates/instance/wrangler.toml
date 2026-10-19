@@ -2,6 +2,7 @@ name = "git-forge"
 main = "dist/git-forge-worker.mjs"
 no_bundle = true
 compatibility_date = "2026-10-01"
+compatibility_flags = ["nodejs_als"]
 workers_dev = true
 
 [build]

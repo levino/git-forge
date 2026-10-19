@@ -270,17 +270,17 @@ export const listPulls = async (scope: Scope, filters: PullFilters = {}, page: P
   const column = filters.sort === 'updated' ? 'i.updated_at' : 'i.created_at'
   const direction = filters.direction === 'asc' ? 'ASC' : 'DESC'
   const clause = where.join(' AND ')
-  const total =
-    (
-      await first<{ count: number }>(
-        scope.db,
-        sql(
-          `SELECT COUNT(*) AS count FROM issues i JOIN pull_requests p ON p.issue_id = i.id LEFT JOIN repositories hr ON hr.id = p.head_repository_id LEFT JOIN accounts ha ON ha.id = hr.owner_id WHERE ${clause}`,
-          ...params,
-        ),
-      )
-    )?.count ?? 0
-  const rows = await scope.db.all<PullRow>(sql(`${PULL_SELECT} WHERE ${clause} ORDER BY ${column} ${direction}, i.number ${direction} LIMIT ? OFFSET ?`, ...params, page.perPage, offset(page)))
+  const [counted, rows] = await Promise.all([
+    first<{ count: number }>(
+      scope.db,
+      sql(
+        `SELECT COUNT(*) AS count FROM issues i JOIN pull_requests p ON p.issue_id = i.id LEFT JOIN repositories hr ON hr.id = p.head_repository_id LEFT JOIN accounts ha ON ha.id = hr.owner_id WHERE ${clause}`,
+        ...params,
+      ),
+    ),
+    scope.db.all<PullRow>(sql(`${PULL_SELECT} WHERE ${clause} ORDER BY ${column} ${direction}, i.number ${direction} LIMIT ? OFFSET ?`, ...params, page.perPage, offset(page))),
+  ])
+  const total = counted?.count ?? 0
   return { items: await hydratePulls(scope, rows), total }
 }
 

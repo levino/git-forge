@@ -37,12 +37,19 @@ if (repo.kind === 'ok' && number !== null && Astro.request.method === 'POST') {
 const scope = repo.kind === 'ok' ? await scopeFor(forge, Astro.request, principal, repo) : null
 const issue = scope && number !== null ? await unlessMissing(getIssue(scope, number)) : null
 if (repo.kind === 'ok' && issue?.isPull) return Astro.redirect(repoUrl(repo.name, 'pull', String(issue.number)))
-const entries = scope && issue ? await timeline(scope, issue.number) : []
-const items = repo.kind === 'ok' ? await renderTimeline(repo, entries) : []
 const csrf = session?.csrf ?? null
-const commentReactions = scope && issue ? await reactionsFor(scope, 'issue_comment', entries.flatMap((entry) => (entry.kind === 'comment' ? [{ id: entry.comment.id, subject: entry.comment.id, reactions: entry.comment.reactions }] : [])), csrf, issue.locked) : new Map()
-const ownReactions = scope && issue ? (await reactionsFor(scope, 'issue', [{ id: issue.id, subject: issue.number, reactions: issue.reactions }], csrf, issue.locked)).get(issue.id) : undefined
-const body = repo.kind === 'ok' && issue ? await renderBody(repo, issue.body) : null
+const [entries, ownReactions, body] =
+  scope && issue && repo.kind === 'ok'
+    ? await Promise.all([
+        timeline(scope, issue.number),
+        reactionsFor(scope, 'issue', [{ id: issue.id, subject: issue.number, reactions: issue.reactions }], csrf, issue.locked).then((mine) => mine.get(issue.id)),
+        renderBody(repo, issue.body),
+      ])
+    : [[], undefined, null]
+const [items, commentReactions] = await Promise.all([
+  repo.kind === 'ok' ? renderTimeline(repo, entries) : [],
+  scope && issue ? reactionsFor(scope, 'issue_comment', entries.flatMap((entry) => (entry.kind === 'comment' ? [{ id: entry.comment.id, subject: entry.comment.id, reactions: entry.comment.reactions }] : [])), csrf, issue.locked) : new Map(),
+])
 const canComment = scope && issue ? can(scope, 'comment:create', { locked: issue.locked }) : false
 const canClose = scope && issue ? can(scope, 'issue:close', { author: issue.authorRef }) : false
 ---

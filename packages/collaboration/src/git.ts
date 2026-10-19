@@ -1,5 +1,6 @@
-import { advertisedRefs, isObjectId, type ObjectId, ObjectDatabase, parseTag, readRefs, type RefsState } from '@git-forge/core'
-import { notFound, type Scope } from './context.ts'
+import { workflowGuard } from '@git-forge/accounts'
+import { advertisedRefs, isObjectId, type ObjectId, ObjectDatabase, parseTag, type RefChange, type RefUpdateResult, readRefs, type RefsState, type RepositoryName, updateRefs } from '@git-forge/core'
+import { CollaborationError, notFound, type Scope } from './context.ts'
 
 export const objectDatabase = (scope: Pick<Scope, 'storage' | 'repo'>): ObjectDatabase => new ObjectDatabase(scope.storage, scope.repo)
 
@@ -41,4 +42,13 @@ export const resolveCommitish = async (scope: Pick<Scope, 'storage' | 'repo'>, r
         ? state.refs[ref]
         : (state.refs[`refs/tags/${ref}`] ?? state.refs[`refs/heads/${ref}`])
   return id ? peelToCommit(odb, id) : null
+}
+
+export const updateBranches = async (scope: Scope, repo: RepositoryName, updates: readonly RefChange[], odb: ObjectDatabase): Promise<RefUpdateResult> => {
+  const check = workflowGuard(scope.actor.principal, scope.storage, repo, odb)
+  for (const update of updates) {
+    const problem = check ? await check({ ...update, fastForward: true }) : null
+    if (problem) throw new CollaborationError(403, problem)
+  }
+  return updateRefs(scope.storage, repo, updates, odb)
 }

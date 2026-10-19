@@ -1,5 +1,6 @@
-import { type ObjectDatabase, type ObjectId, pathIdAt, type RefCheck, ZERO_ID } from '@git-forge/core'
+import { ObjectDatabase, type ObjectId, pathIdAt, readRefs, type RefCheck, type RepositoryName, type Storage, ZERO_ID } from '@git-forge/core'
 import type { AppPermissions, PermissionLevel } from './apps.ts'
+import type { Principal } from './permissions.ts'
 
 export type PermissionNeed = readonly [permission: string, level: 'read' | 'write']
 
@@ -103,3 +104,14 @@ export const workflowCheck =
     const prior = before ? await pathIdAt(odb, before, WORKFLOWS) : null
     return (await pathIdAt(odb, command.newId, WORKFLOWS)) === prior ? null : WORKFLOWS_REFUSAL
   }
+
+export const restrictsWorkflows = (permissions: AppPermissions | null | undefined): boolean => !!permissions && !grantsNeed(permissions, ['workflows', 'write'])
+
+export const repositoryWorkflowCheck = (storage: Storage, repo: RepositoryName, odb = new ObjectDatabase(storage, repo)): RefCheck =>
+  workflowCheck(odb, async () => {
+    const refs = await readRefs(storage, repo)
+    return refs ? (refs.state.refs[refs.state.head] ?? null) : null
+  })
+
+export const workflowGuard = (principal: Principal, storage: Storage, repo: RepositoryName, odb?: ObjectDatabase): RefCheck | null =>
+  principal.kind === 'app' && restrictsWorkflows(principal.permissions as AppPermissions | undefined) ? repositoryWorkflowCheck(storage, repo, odb) : null

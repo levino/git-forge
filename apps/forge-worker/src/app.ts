@@ -70,12 +70,12 @@ import {
   normalizeIssuer,
   parseAuthorization,
   type AppPermissions,
-  grantsNeed,
   installationNeeds,
   isLfsBatchPath,
   missingPermission,
   tokenKindOf,
-  workflowCheck,
+  repositoryWorkflowCheck,
+  restrictsWorkflows,
   type Principal,
   type RepositorySubject,
   type Role,
@@ -2374,11 +2374,8 @@ export const createForge = (options: ForgeOptions): Forge => {
       pushPolicy: access.pushPolicy,
       pushCheck: async (incoming, repo) => {
         const permissions = await installationPermissions(incoming)
-        if (!permissions || grantsNeed(permissions, ['workflows', 'write'])) return null
-        return workflowCheck(new ObjectDatabase(storage, repo), async () => {
-          const refs = await readRefs(storage, repo)
-          return refs ? (refs.state.refs[refs.state.head] ?? null) : null
-        })
+        if (!restrictsWorkflows(permissions)) return null
+        return repositoryWorkflowCheck(storage, repo)
       },
       ...(options.maxPushBytes !== undefined ? { maxPushBytes: options.maxPushBytes } : {}),
       lfs: {

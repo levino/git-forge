@@ -30,7 +30,6 @@ import {
   type Signature,
   signatureAt,
   storeObjects,
-  updateRefs,
   ZERO_ID,
 } from '@git-forge/core'
 import { actorColumns, loadUsers, type UserSummary } from './actors.ts'
@@ -52,7 +51,7 @@ import {
   scopeOptions,
   SYSTEM_ACTOR,
 } from './context.ts'
-import { branchName, branchRef, branchTip, currentRefs, defaultBranch, objectDatabase } from './git.ts'
+import { branchName, branchRef, branchTip, currentRefs, defaultBranch, objectDatabase, updateBranches } from './git.ts'
 import {
   allIn,
   chunked,
@@ -546,7 +545,7 @@ export const mergePull = async (scope: Scope, number: number, input: MergeInput 
     const problems = await protectionProblems(scope, row, base, head, upToDate, outcome.commit)
     if (problems.length > 0) throw new CollaborationError(405, `Repository rule violations found: ${problems.join('; ')}`, problems)
     await storeObjects(odb, outcome.objects)
-    const update = await updateRefs(scope.storage, scope.repo, [{ name: row.base_ref, oldId: base, newId: outcome.commit }], odb)
+    const update = await updateBranches(scope, scope.repo, [{ name: row.base_ref, oldId: base, newId: outcome.commit }], odb)
     if (!update.ok) {
       if (update.reason === 'stale') continue
       throw notFound()

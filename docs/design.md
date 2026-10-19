@@ -2103,7 +2103,9 @@ in `apps/forge-worker/src/github-apps.ts`). Every endpoint answers under
   `members`, `organization_hooks`. Pushes that change `.github/workflows`
   (compared with the old tip, or the default branch for new refs) need
   `workflows: write`, checked by a `pushCheck` on receive-pack once the pack
-  is readable. Web UI pages treat installation tokens as anonymous.
+  is readable, and by the same `workflowGuard` on every server-side ref
+  update (contents API, web edits, merges, conflict resolution, release
+  tags). Web UI pages treat installation tokens as anonymous.
   `GET /installation/repositories`, `DELETE
   /installation/token`. Suspending, uninstalling or accepting new
   permissions revokes the installation's tokens.

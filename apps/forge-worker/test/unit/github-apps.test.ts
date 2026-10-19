@@ -172,6 +172,37 @@ describe('webhook tests, sealed secrets and GitHub Apps', () => {
     expect((await call(forge, server.url, 'POST', '/api/v3/repos/admin/engine/issues', token, { title: 'No issues permission' })).status).toBe(403)
   })
 
+  it('requires workflows:write for workflow changes made through the API', async () => {
+    const apps = forge.services.githubApps
+    const tokenFor = async (name: string, permissions: Record<string, 'read' | 'write'>): Promise<string> => {
+      const app = await apps.createApp(user, 'admin', { name, permissions })
+      const key = await apps.generateKey(user, app.slug)
+      const { installation } = await apps.install(user, app.slug, 'admin', 'all', [], server.url)
+      return (await json<{ token: string }>(await call(forge, server.url, 'POST', `/api/v3/app/installations/${installation.id}/access_tokens`, await sign(key.pem, app.id), {}))).token
+    }
+    const writer = await tokenFor('Writer', { contents: 'write', pull_requests: 'write' })
+    const maintainer = await tokenFor('Maintainer', { contents: 'write', workflows: 'write' })
+    const put = (token: string, path: string, branch = 'main') => call(forge, server.url, 'PUT', `/api/v3/repos/admin/engine/contents/${path}`, token, { message: path, content: btoa('on: push\n'), branch })
+
+    const refused = await put(writer, '.github/workflows/api.yml')
+    expect(refused.status).toBe(403)
+    expect(await json<{ message: string }>(refused)).toMatchObject({ message: expect.stringContaining('workflows permission') })
+    expect((await put(writer, 'docs/api.yml')).status).toBe(201)
+    expect((await put(maintainer, '.github/workflows/api.yml')).status).toBe(201)
+
+    const remote = `${server.url.replace('://', `://x-access-token:${maintainer}@`)}/admin/engine.git`
+    const clone = initRepo()
+    await git(clone, ['fetch', '-q', remote, 'main'])
+    await git(clone, ['checkout', '-q', '-B', 'main', 'FETCH_HEAD'])
+    writeFile(clone, '.github/workflows/release.yml', 'on: push\n')
+    commitAll(clone, 'Add a release workflow')
+    await git(clone, ['push', '-q', remote, 'main:refs/heads/workflow-change'])
+    const pull = await json<{ number: number }>(await call(forge, server.url, 'POST', '/api/v3/repos/admin/engine/pulls', admin, { title: 'Workflow', head: 'workflow-change', base: 'main' }))
+    const merge = await call(forge, server.url, 'PUT', `/api/v3/repos/admin/engine/pulls/${pull.number}/merge`, writer, {})
+    expect(merge.status).toBe(403)
+    expect((await call(forge, server.url, 'POST', '/api/v3/repos/admin/engine/releases', writer, { tag_name: 'v-workflow', target_commitish: 'workflow-change' })).status).toBe(403)
+  })
+
   it('converts a manifest code once into credentials', async () => {
     const { app, code } = await forge.services.githubApps.createFromManifest(user, 'admin', {
       name: 'Manifest App',

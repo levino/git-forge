@@ -1,7 +1,7 @@
 import { commitAll, initRepo, writeFile } from '@git-forge/core/test/git-helpers.ts'
 import { type RunningServer, startServer } from '@git-forge/core/test/http-server.ts'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { generateEs256Key, importEs256Key } from '@git-forge/actions'
+import { generateEs256Key, importEs256Key, issueToken } from '@git-forge/actions'
 import { git } from '../e2e/history.ts'
 import { isForgePath } from '../../src/routing.ts'
 import { bootstrap, call, type NodeForge, nodeForge } from '../support/node-forge.ts'
@@ -60,6 +60,43 @@ describe('CI with collaboration', () => {
     expect(opened.status, await opened.clone().text()).toBe(201)
     const runs = await json<{ workflow_runs: { event: string; head_sha: string; head_branch: string }[] }>(await call(forge, server.url, 'GET', '/api/v3/repos/admin/ci/actions/runs', admin))
     expect(runs.workflow_runs).toContainEqual(expect.objectContaining({ event: 'pull_request', head_sha: head, head_branch: 'refs/pull/2/head' }))
+  })
+
+  it('lets jobs use private actions of the same owner only from trusted runs after the action repository opted in', async () => {
+    const push = async (name: string, files: Record<string, string>) => {
+      expect((await call(forge, server.url, 'POST', '/api/repos', admin, { owner: 'admin', name })).status).toBe(201)
+      const source = initRepo()
+      for (const [path, content] of Object.entries(files)) writeFile(source, path, content)
+      const sha = commitAll(source, name)
+      await git(source, ['-c', `http.extraHeader=Authorization: Bearer ${admin}`, 'push', '-q', `${server.url}/admin/${name}.git`, 'main'])
+      return sha
+    }
+    const actionSha = await push('tool', { 'action.yml': 'name: tool\nruns:\n  using: node20\n  main: index.js\n' })
+    await push('app', { '.github/workflows/ci.yml': 'on: push\njobs:\n  a:\n    runs-on: self-hosted\n    steps:\n      - uses: admin/tool@main\n' })
+    const job = (await forge.db.all<{ id: string; plan_id: string }>({ sql: "SELECT j.id, j.plan_id FROM actions_jobs j JOIN actions_runs r ON r.id = j.run_id WHERE r.repo = 'app'", params: [] }))[0]!
+    const runtime = await issueToken(forge.db, { kind: 'runtime', jobId: job.id, owner: 'admin', repo: 'app', ttlMs: 60_000 }, Date.now())
+    const info = () =>
+      forge.fetch(
+        new Request(`${server.url}/_services/actions/_apis/v1/ActionDownloadInfo/s/actions/${job.plan_id}`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${runtime}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ actions: [{ nameWithOwner: 'admin/tool', ref: 'main' }] }),
+        }),
+      )
+    expect((await info()).status).toBe(404)
+    expect((await call(forge, server.url, 'PUT', '/api/v3/repos/admin/tool/actions/permissions/access', admin, { access_level: 'user' })).status).toBe(204)
+    const resolved = await info()
+    expect(resolved.status).toBe(200)
+    const { tarballUrl, authentication } = (await json<{ actions: Record<string, { tarballUrl: string; authentication: { token: string } }> }>(resolved)).actions['admin/tool@main']!
+    const basic = { Authorization: `Basic ${btoa(`x-access-token:${authentication.token}`)}` }
+    expect((await forge.fetch(new Request(tarballUrl, { headers: basic }))).status).toBe(200)
+    expect((await forge.fetch(new Request(`${server.url}/api/v3/repos/admin/tool/zipball/${actionSha}`, { headers: basic }))).status).toBe(200)
+    for (const path of ['/api/v3/repos/admin/tool/tarball/main', '/admin/tool/archive/main.tar.gz', '/admin/tool.git/info/refs?service=git-upload-pack', '/api/v3/repos/admin/tool/actions/runs', '/api/v3/repos/admin/app/tarball/main']) {
+      expect((await forge.fetch(new Request(`${server.url}${path}`, { headers: basic }))).status, path).toBeGreaterThanOrEqual(400)
+    }
+    await expect(git(initRepo(), ['clone', '-q', `${server.url.replace('://', `://x-access-token:${authentication.token}@`)}/admin/tool.git`, 'clone'])).rejects.toThrow()
+    await forge.db.run({ sql: "UPDATE actions_runs SET trusted = 0 WHERE repo = 'app'", params: [] })
+    expect((await info()).status).toBe(404)
   })
 
   it('mounts the results service: twirp, cache, blob URLs and the ID token issuer', async () => {

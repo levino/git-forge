@@ -1,6 +1,6 @@
-import type { Database } from '@git-forge/accounts'
+import { type Database, first, sql } from '@git-forge/accounts'
 import { isValidName, type RepositoryName, readRefs, resolveCommitish, type Storage } from '@git-forge/core'
-import { issueToken } from './store.ts'
+import { issueToken, type TokenRow } from './store.ts'
 
 export type ActionReference = {
   readonly nameWithOwner: string
@@ -21,7 +21,7 @@ export type ActionDownloadInfo = {
 export type ActionSources = {
   readonly repositories?: Readonly<Record<string, string>>
   readonly githubFallback?: string | null
-  readonly canUse?: (job: RepositoryName, action: RepositoryName) => Promise<boolean>
+  readonly canUse?: (job: ActionJob, action: RepositoryName) => Promise<boolean>
 }
 
 export type ActionJob = {
@@ -29,6 +29,34 @@ export type ActionJob = {
   readonly repo: string
   readonly jobId: string
   readonly expiresAt: number
+  readonly trusted: boolean
+}
+
+const ACCESS_LEVELS = ['none', 'user', 'organization'] as const
+
+export type AccessLevel = (typeof ACCESS_LEVELS)[number]
+
+export const isAccessLevel = (value: unknown): value is AccessLevel => ACCESS_LEVELS.includes(value as AccessLevel)
+
+export const getActionsAccess = async (db: Database, repo: RepositoryName): Promise<AccessLevel> =>
+  (await first<{ access_level: AccessLevel }>(db, sql('SELECT access_level FROM actions_access WHERE owner = ? AND repo = ?', repo.owner, repo.name)))?.access_level ?? 'none'
+
+export const setActionsAccess = async (db: Database, repo: RepositoryName, level: AccessLevel): Promise<void> => {
+  await db.run(sql('INSERT INTO actions_access (owner, repo, access_level) VALUES (?, ?, ?) ON CONFLICT (owner, repo) DO UPDATE SET access_level = excluded.access_level', repo.owner, repo.name, level))
+}
+
+const same = (a: string, b: string): boolean => a.toLowerCase() === b.toLowerCase()
+
+export const mayUseAction = (job: ActionJob, action: RepositoryName, visibility: string, access: AccessLevel): boolean =>
+  visibility === 'public' || (same(job.owner, action.owner) && (same(job.repo, action.name) || (job.trusted && access !== 'none')))
+
+const archiveScope = (sha: string): string => `archive:${sha}`
+
+export const githubTokenAllows = (grant: TokenRow, repo: RepositoryName, pathname: string): boolean => {
+  if (grant.owner !== repo.owner || grant.repo !== repo.name) return false
+  if (grant.scope === null) return true
+  const sha = grant.scope.startsWith('archive:') ? grant.scope.slice('archive:'.length) : null
+  return sha !== null && ['tarball', 'zipball'].some((kind) => pathname === `/api/v3/repos/${repo.owner}/${repo.name}/${kind}/${sha}`)
 }
 
 export type ActionResolution = {
@@ -80,10 +108,10 @@ export const resolveActionDownloads = async (
     const allowed =
       local !== null &&
       (await readRefs(storage, local)) !== null &&
-      (sources.canUse ? await sources.canUse({ owner: job.owner, name: job.repo }, local) : local.owner === job.owner || isMappedTarget(local, sources.repositories))
+      (sources.canUse ? await sources.canUse(job, local) : isMappedTarget(local, sources.repositories) || mayUseAction(job, local, 'private', await getActionsAccess(db, local)))
     const sha = allowed && local ? await resolveCommitish(storage, local, reference.ref) : null
     if (local && sha) {
-      const token = await issueToken(db, { kind: 'github', jobId: job.jobId, owner: local.owner, repo: local.name, ttlMs: Math.max(60_000, job.expiresAt - now) }, now)
+      const token = await issueToken(db, { kind: 'github', jobId: job.jobId, owner: local.owner, repo: local.name, scope: archiveScope(sha), ttlMs: Math.max(60_000, job.expiresAt - now) }, now)
       const base = `${serverUrl}/api/v3/repos/${local.owner}/${local.name}`
       resolved[key] = {
         nameWithOwner: reference.nameWithOwner,

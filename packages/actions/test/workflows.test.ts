@@ -542,6 +542,35 @@ jobs:
     expect(((await missing.json()) as { message: string }).message).toContain('actions/missing@v1')
   })
 
+  it('serves private actions of the same owner only to trusted runs after the action repository opted in, with an archive-only token', async () => {
+    const h = await harness()
+    await createRepository(h.forge.storage, { owner: 'acme', name: 'tool' })
+    const action = initRepo()
+    writeFile(action, 'action.yml', 'name: tool\nruns:\n  using: node20\n  main: index.js\n')
+    const actionSha = commitAll(action, 'action')
+    await run('git', ['push', '-q', `${h.server.url.replace('://', `://admin:${ADMIN_TOKEN}@`)}/acme/tool.git`, 'main'], { cwd: action, env: { ...process.env, ...gitEnv } })
+    await h.push({ '.github/workflows/ci.yml': 'on: push\njobs:\n  a:\n    runs-on: x\n    steps:\n      - uses: acme/tool@main\n' })
+    const job = await (await h.runner(0)).take()
+    const info = () =>
+      fetch(job.planPath('ActionDownloadInfo'), { method: 'POST', headers: { Authorization: `Bearer ${job.runtimeToken}` }, body: JSON.stringify({ actions: [{ nameWithOwner: 'acme/tool', ref: 'main' }] }) })
+    const access = (level?: string) => h.api('/repos/acme/tool/actions/permissions/access', level ? { method: 'PUT', body: JSON.stringify({ access_level: level }) } : {})
+    expect(await (await access()).json()).toEqual({ access_level: 'none' })
+    expect((await info()).status).toBe(404)
+    expect((await access('everyone')).status).toBe(422)
+    expect((await access('organization')).status).toBe(204)
+    expect(await (await access()).json()).toEqual({ access_level: 'organization' })
+    const response = await info()
+    expect(response.status).toBe(200)
+    const { token } = ((await response.json()) as { actions: Record<string, { authentication: { token: string } }> }).actions['acme/tool@main']!.authentication
+    const basic = { Authorization: `Basic ${btoa(`x-access-token:${token}`)}` }
+    expect((await fetch(`${h.server.url}/api/v3/repos/acme/tool/tarball/${actionSha}`, { headers: basic })).status).toBe(200)
+    expect((await fetch(`${h.server.url}/api/v3/repos/acme/tool/tarball/main`, { headers: basic })).status).toBe(404)
+    expect((await fetch(`${h.server.url}/acme/tool.git/info/refs?service=git-upload-pack`, { headers: basic })).status).toBe(401)
+    await expect(run('git', ['clone', '-q', `${h.server.url.replace('://', `://x-access-token:${token}@`)}/acme/tool.git`, initRepo() + '/clone'], { env: { ...process.env, ...gitEnv } })).rejects.toThrow()
+    await h.forge.db.run({ sql: 'UPDATE actions_runs SET trusted = 0', params: [] })
+    expect((await info()).status).toBe(404)
+  })
+
   it('falls back to github.com tarballs when configured', async () => {
     const h = await harness({ actionSources: { githubFallback: 'https://api.github.com' } })
     await h.push({ '.github/workflows/ci.yml': 'on: push\njobs:\n  a:\n    runs-on: x\n    steps:\n      - uses: actions/checkout@v4\n' })

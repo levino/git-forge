@@ -71,6 +71,9 @@ export const settingsAction = async (forge: ForgeServices, session: UiSession, r
       case 'remove-protection':
         await settings.deleteBranchProtection(principal, repo, text(form, 'pattern'))
         return { kind: 'ok', message: `Protection for ${text(form, 'pattern')} removed.` }
+      case 'actions-access':
+        await settings.setActionsAccess(principal, repo, text(form, 'access_level'))
+        return { kind: 'ok', message: 'Actions access saved.' }
       case 'grant-instance':
         await settings.grantInstance(principal, repo, text(form, 'issuer'))
         return { kind: 'ok', message: `${text(form, 'issuer')} may now read this repository.` }

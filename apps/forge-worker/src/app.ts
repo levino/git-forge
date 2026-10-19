@@ -18,8 +18,15 @@ import {
   queueRunsForPush,
   type RunnerLauncher,
   type SecretsProvider,
+  type AccessLevel,
+  type ActionJob,
+  getActionsAccess,
   GITHUB_TOKEN_PREFIX,
+  githubTokenAllows,
   getJobById,
+  isAccessLevel,
+  mayUseAction,
+  setActionsAccess,
   getRun,
   getRunnerIncludingRemoved,
   type JobEventSink,
@@ -362,10 +369,12 @@ export type RepositorySettings = {
   readonly collaborators: readonly { readonly id: string; readonly login: string; readonly role: Role }[]
   readonly instances: readonly { readonly issuer: string; readonly role: string }[]
   readonly mirrors: readonly { readonly config: MirrorConfig; readonly status: MirrorStatus | null }[]
+  readonly actionsAccess: AccessLevel
 }
 
 export type RepositorySettingsOperations = {
   readonly read: (principal: Principal, repo: RepositoryName) => Promise<RepositorySettings>
+  readonly setActionsAccess: (principal: Principal, repo: RepositoryName, level: string) => Promise<void>
   readonly setVisibility: (principal: Principal, repo: RepositoryName, visibility: string) => Promise<{ readonly owner: string; readonly name: string; readonly visibility: string }>
   readonly setCollaborator: (principal: Principal, repo: RepositoryName, login: string, role: string) => Promise<{ readonly login: string; readonly role: Role }>
   readonly removeCollaborator: (principal: Principal, repo: RepositoryName, login: string) => Promise<void>
@@ -1344,7 +1353,13 @@ export const createForge = (options: ForgeOptions): Forge => {
         collaborators: await store.listCollaborators(repository.id),
         instances: await store.listInstanceGrants(repository.id),
         mirrors: await Promise.all(mirrors.map(async (config) => ({ config, status: await readMirrorStatus(storage, name, config.remote) }))),
+        actionsAccess: await getActionsAccess(db, name),
       }
+    },
+    setActionsAccess: async (principal, repo, level) => {
+      const { repository } = await adminOf(principal, repo)
+      if (!isAccessLevel(level)) throw new HttpError(400, 'access level must be none, user or organization')
+      await setActionsAccess(db, { owner: repository.owner, name: repository.name }, level)
     },
     setVisibility: async (principal, repo, visibility) => {
       const admin = await adminOf(principal, repo)
@@ -1918,9 +1933,9 @@ export const createForge = (options: ForgeOptions): Forge => {
     return principal?.kind === 'user' ? principal.login : null
   }
 
-  const canUseAction = async (job: RepositoryName, action: RepositoryName): Promise<boolean> => {
-    if (job.owner === action.owner) return true
-    return (await store.findRepository(action.owner, action.name))?.visibility === 'public'
+  const canUseAction = async (job: ActionJob, action: RepositoryName): Promise<boolean> => {
+    const repository = await store.findRepository(action.owner, action.name)
+    return repository !== null && mayUseAction(job, action, repository.visibility, await getActionsAccess(db, action))
   }
 
   const actionsRoute = async (request: Request): Promise<Response | null> => {
@@ -1986,7 +2001,7 @@ export const createForge = (options: ForgeOptions): Forge => {
       const secret = credential.kind === 'secret' ? credential.secret : null
       if (access === 'read' && secret?.startsWith(GITHUB_TOKEN_PREFIX)) {
         const grant = await verifyToken(db, secret, 'github', now().getTime())
-        if (grant && grant.owner === repo.owner && grant.repo === repo.name) return null
+        if (grant && githubTokenAllows(grant, repo, new URL(request.url).pathname)) return null
       }
       return authorize(request, repo, access, ...rest)
     }

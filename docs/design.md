@@ -1488,9 +1488,15 @@ repository on the forge (`ACTIONS_REPOSITORIES`, e.g. `{"actions/*":
 "mirrors/*"}`, identity by default), resolves the ref there (SHA, tag,
 branch; for mirrors through the read-side view or `refs/upstream/*`) and
 answers `tarballUrl = /api/v3/repos/{o}/{r}/tarball/{sha}` with a `github`
-token scoped to that repository and the job (revoked with the job's other
-tokens). The runner downloads with `Authorization: Basic x-access-token:…`.
-A job may use repositories of its own owner and public ones (`canUse`).
+token scoped to the tarball and zipball of that commit (`actions_tokens.scope
+= archive:{sha}`, migration `0051`; no Git, content or REST reads; revoked
+with the job's other tokens). The runner downloads with `Authorization: Basic
+x-access-token:…`. Like GitHub, a job may use public repositories, its own
+repository, and private repositories of the same owner whose Actions access
+level (`actions_access`, `GET/PUT …/actions/permissions/access`,
+`access_level` `none` (default), `user` or `organization`, admin; also on the
+settings page) is not `none`, and the latter only in trusted runs, never
+from forks (`mayUseAction`).
 Without a repository on the forge the action either fails the job (default)
 or, with `ACTIONS_GITHUB_FALLBACK`, is downloaded from `api.github.com`.
 Tarballs are built while streaming (`commitTarball`: ustar with pax headers
@@ -1590,7 +1596,7 @@ Implemented for repositories: `POST …/actions/runners/generate-jitconfig`,
 …/actions/runs[/{id}[/jobs]]`, `GET …/actions/jobs/{id}[/logs]`, `POST
 …/actions/runs/{id}/cancel|force-cancel|rerun|rerun-failed-jobs`, `POST
 …/actions/jobs/{id}/rerun`, `GET/POST …/actions/runs/{id}/pending_deployments`,
-`POST …/actions/workflows/{file}/dispatches`, `…/actions/secrets[/{name}]`,
+`POST …/actions/workflows/{file}/dispatches`, `GET/PUT …/actions/permissions/access`, `…/actions/secrets[/{name}]`,
 `…/environments[/{name}[/secrets[/{name}]]]`, `GET
 …/tarball|zipball/{ref}`, `GET /api/v3/meta`. Reading runs, jobs, logs
 and tarballs needs read access, cancel/re-run/dispatch need write access,
@@ -1636,7 +1642,7 @@ All CI credentials are random opaque tokens, stored only as SHA-256 hashes in
 | `registration` | `config.sh` | Register one runner for one repository (1 h). |
 | `runner` | Runner listener | Its own sessions, messages and job requests (1 h, renewed via OAuth). |
 | `runtime` | Runner worker (`SystemVssConnection`), steps (`ACTIONS_RUNTIME_TOKEN`) | Timeline, logs and completion of exactly one job (plan id checked on every call); the results service (cache, artifacts, ID tokens) for that job. JWT-shaped with an `Actions.Results` scope, still verified only by hash. Revoked when the job completes. |
-| `github` | Steps (`GITHUB_TOKEN`); action downloads | Read access to the job's repository over Git HTTP, or, for an action, to that action's repository (Git HTTP and tarball). Revoked when the job completes. |
+| `github` | Steps (`GITHUB_TOKEN`); action downloads | Read access to the job's repository over Git HTTP, or, for an action, only the tarball and zipball of the resolved commit (`githubTokenAllows`). Revoked when the job completes. |
 
 The forge never trusts IDs from the runner: the runner is derived from the
 token, a session must belong to that runner, a job request must be assigned to

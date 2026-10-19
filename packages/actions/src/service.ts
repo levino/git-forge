@@ -538,7 +538,7 @@ const actionDownloadInfo = async (context: Context, job: JobRow): Promise<Respon
     storage,
     context.serverUrl,
     context.options.actionSources ?? {},
-    { owner: run.owner, repo: run.repo, jobId: job.id, expiresAt: context.now + jobTtlMs(job) },
+    { owner: run.owner, repo: run.repo, jobId: job.id, expiresAt: context.now + jobTtlMs(job), trusted: run.trusted === 1 },
     references,
     context.now,
   )

@@ -2,7 +2,7 @@
 
 git-forge without Cloudflare: one process that serves the same router as the
 Worker (`createForge` from `apps/forge-worker/src/app.ts`) over `node:http`,
-with an SQLite file for accounts, a local directory or any S3 bucket for
+with an SQLite file or libSQL (Bunny Database, Turso) for accounts, a local directory or any S3 bucket for
 repository data, a job runner whose queue lives in the SQLite file, SMTP for
 email and a cron schedule for the mirror safety net. Made for a backup mirror on a Raspberry Pi, but it is a full
 instance: push, clone, LFS, federation, imports and the JSON API all work as
@@ -58,12 +58,15 @@ Only for this app:
 | `HOST` | `0.0.0.0` | Listening address. Use `127.0.0.1` behind a reverse proxy on the same host. |
 | `TRUST_PROXY` | `false` | `true` takes the request origin from `X-Forwarded-Proto` and `X-Forwarded-Host` and the client address for login rate limits from the last `X-Forwarded-For` hop (otherwise the socket address). Only behind a proxy that sets them. |
 | `DATA_DIR` | `./data` | Base directory for the defaults below. |
-| `DATABASE_PATH` | `$DATA_DIR/git-forge.sqlite` | SQLite file (WAL mode). |
+| `DATABASE` | `sqlite` | `sqlite` (a file) or `libsql` (Bunny Database, Turso, `sqld`; `@git-forge/libsql`). |
+| `DATABASE_PATH` | `$DATA_DIR/git-forge.sqlite` | SQLite file (WAL mode) for `DATABASE=sqlite`. |
+| `LIBSQL_URL`, `LIBSQL_AUTH_TOKEN` | none | Database URL (`libsql://…`, `https://…`) and token for `DATABASE=libsql`. |
 | `STORAGE` | `fs` | `fs` (local directory, `FsStorage`) or `s3` (`S3Storage`). |
 | `STORAGE_DIR` | `$DATA_DIR/objects` | Directory for `STORAGE=fs`. |
 | `S3_ENDPOINT`, `S3_REGION`, `S3_BUCKET`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY` | region `us-east-1` | Bucket for `STORAGE=s3`. |
 | `S3_PREFIX` | none | Key prefix inside the bucket, e.g. `git-forge/`. |
 | `S3_FORCE_PATH_STYLE` | `false` | `true` for `https://host/bucket/key` URLs (most self-hosted S3 servers). |
+| `CONDITIONAL_WRITES` | `storage` | `database` for buckets without conditional `PutObject`: `If-Match`/`If-None-Match` writes (refs, mirror state) are serialized by a per-key lease in the database (`lockedStorage`, `packages/accounts/README.md`) instead. Every process writing the bucket must use the same database. |
 | `SCHEDULE` | `17 3 * * *` | Cron expression (five fields, UTC; `@hourly`, `@daily` also work) for the safety-net run: enqueues a sync for every auto mirror whose last run is older than `MIRROR_INTERVAL_MINUTES`, plus the periodic deep checks. Same as the Worker's Cron Trigger. |
 | `JOB_CONCURRENCY` | `2` | Background jobs (mirror syncs, notifications, deep checks, Pages deployments, LFS publish) running at once. Imports run one step at a time. |
 | `LFS_PUBLISH_DIR` | none | Directory that receives the LFS objects of public repositories on push, one file per oid (`LFS_PUBLISH_PREFIX` prepends a path), for a web server or CDN to serve. The Worker's `CDN_BUCKET` counterpart. |
@@ -94,7 +97,7 @@ BACKUP_STORAGE=s3 BACKUP_S3_ENDPOINT=… BACKUP_S3_BUCKET=forge-backup … DATA_
 Jobs run in the process, with the same handler, retry policy (exponential
 backoff from 10 s, at most 8 attempts, `PermanentJobError` stops at once)
 and job format as the Worker's Queue consumer. Jobs live in the `jobs` table
-of the SQLite file and survive restarts; a job interrupted by a crash runs
+of the database and survive restarts; a job interrupted by a crash runs
 again once its 60 s lease has expired.
 
 ## Email
@@ -148,8 +151,9 @@ notifications; without that it still catches up on the schedule.
 
    With S3 the Pi only holds the SQLite file; repository data and LFS objects
    live in the bucket, and LFS clients upload and download directly from it
-   through presigned URLs, as do `git-remote-forge` pack parts. The bucket must honour `If-None-Match: *` and
-   `If-Match` on `PutObject`, since refs are updated by compare-and-swap. Run
+   through presigned URLs, as do `git-remote-forge` pack parts. Refs are updated by compare-and-swap:
+   the bucket must honour `If-None-Match: *` and `If-Match` on `PutObject`,
+   or the instance runs with `CONDITIONAL_WRITES=database`. Run
    the conformance suite against it once (`packages/s3/README.md`) before
    relying on a provider. Expire `tmp/` with a lifecycle rule (a day or more).
 
@@ -204,6 +208,88 @@ git-forge-node-migrate`, start the service.
 **Backups of the Pi itself:** the SQLite file holds accounts,
 tokens and trust; copy it with `sqlite3 git-forge.sqlite ".backup …"` while
 running. Repository data in the bucket or directory is append-only.
+
+## Bunny Magic Containers
+
+A long-running container with Bunny Storage (S3 API) and Bunny Database
+(libSQL). **Untested:** no Bunny account was available when this was written;
+every step below is from Bunny's documentation and the local tests (sqld,
+versitygw, a storage that ignores conditions), and needs the verification at
+the end.
+
+1. **Storage zone** with S3 enabled (only possible when creating the zone;
+   S3 is in public preview). Pick an EU region (`de`, `se`, `uk`). Access key
+   = zone name, secret = zone password. Bunny documents no conditional
+   `PutObject`, no Object Lock and 500 requests/s per zone.
+2. **Database** (Edge Platform → Database): URL `libsql://<id>.lite.bunnydb.net`
+   and a Full Access token. Apply the migrations once from any machine:
+
+   ```sh
+   DATABASE=libsql LIBSQL_URL=libsql://<id>.lite.bunnydb.net LIBSQL_AUTH_TOKEN=… \
+     docker run --rm -e DATABASE -e LIBSQL_URL -e LIBSQL_AUTH_TOKEN ghcr.io/levino/git-forge-node:<version> migrate
+   ```
+
+3. **Magic Containers app** from `ghcr.io/levino/git-forge-node:<version>`,
+   port 8080, one region, min and max replicas 1 (the schedule and the job
+   pollers run in the process; more replicas share the database safely but are
+   untested). Environment:
+
+   ```sh
+   PUBLIC_URL=https://git.example.org
+   INSTANCE_KEY='{"kty":"OKP",…}'       # git-forge-node instance-key
+   BOOTSTRAP_TOKEN=<long random>
+   TRUST_PROXY=true                      # if Bunny's edge sets X-Forwarded-Proto/-Host
+   DATABASE=libsql
+   LIBSQL_URL=libsql://<id>.lite.bunnydb.net
+   LIBSQL_AUTH_TOKEN=<full access token>
+   STORAGE=s3
+   S3_ENDPOINT=https://de-s3.storage.bunnycdn.com
+   S3_REGION=de
+   S3_BUCKET=<zone name>
+   S3_ACCESS_KEY_ID=<zone name>
+   S3_SECRET_ACCESS_KEY=<zone password>
+   S3_FORCE_PATH_STYLE=true
+   CONDITIONAL_WRITES=database           # unless the conformance run shows native conditional writes
+   ```
+
+   No volume is needed: the container is stateless. (Alternative: SQLite on a
+   persistent volume with `DATABASE_PATH`, which Bunny binds to one pod.)
+   `BACKUP_STORAGE` must point elsewhere for write-once backups (no Object
+   Lock on Bunny).
+4. **Custom domain** on the app's endpoint (DNS CNAME to it), TLS by Bunny;
+   `PUBLIC_URL` must be that URL. Check that the endpoint does not limit
+   request bodies or time out long pushes.
+5. **Bootstrap and federation** with another instance: the `curl` calls of
+   step 5 above, with this instance in place of the Pi.
+
+The cron schedule (`SCHEDULE`, plus the five-minute CI tick) is a timer in
+the `serve` process, so it fires as long as the container runs; that is why
+the minimum replica count must not be 0.
+
+**Verification once an account exists:**
+
+```sh
+export S3_TEST_ENDPOINT=https://de-s3.storage.bunnycdn.com S3_TEST_REGION=de \
+  S3_TEST_BUCKET=<zone> S3_TEST_ACCESS_KEY_ID=<zone> S3_TEST_SECRET_ACCESS_KEY=<password>
+pnpm --filter @git-forge/s3 test:s3
+pnpm --filter @git-forge/accounts-node exec vitest run test/locked-storage.test.ts
+```
+
+- `test:s3`: storage conformance via `S3Storage` (ranges, atomic puts,
+  listing order across pages, conditional writes), presigned PUT with wrong
+  length, forged same-length content, missing or replaced checksum header and
+  expiry, and a 3 MiB `git-lfs` push through presigned URLs. If only the
+  conditional-write tests fail, use `CONDITIONAL_WRITES=database`; the second
+  command must then pass (conformance through `lockedStorage` on the zone). If
+  the length or checksum tests fail, presigned LFS uploads are not safe on
+  Bunny.
+- `git-forge-node migrate` and `serve` against Bunny Database (the libSQL
+  adapter is tested only against `sqld`).
+- A large push (a 1 GB repository, a 500 MB LFS object) through the custom
+  domain, then clone and `git fsck`.
+- Federation with forge.levinkeller.de in both directions: mirror, push
+  notification, scheduled run in the logs (`"event":"scheduled"`), and a
+  container restart that keeps queued jobs.
 
 ## Container image
 

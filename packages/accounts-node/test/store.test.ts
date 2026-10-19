@@ -16,18 +16,19 @@ import {
   sql,
 } from '@git-forge/accounts'
 import { nodeSqliteDatabase, openSqliteDatabase } from '../src/index.ts'
+import { testDatabase } from './database.ts'
 
 const fresh = async (clock: { now: number } = { now: Date.UTC(2026, 9, 18) }) => {
-  const { db, handle } = openSqliteDatabase()
+  const db = await testDatabase()
   await applyMigrations(db, MIGRATIONS)
-  return { db, handle, clock, store: createAccountsStore(db, { now: () => clock.now }) }
+  return { db, clock, store: createAccountsStore(db, { now: () => clock.now }) }
 }
 
 const tables = (db: Database) => db.all<{ name: string }>(sql("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name"))
 
 describe('migrations on node:sqlite', () => {
   it('pins existing repositories to their current storage prefix', async () => {
-    const { db } = openSqliteDatabase()
+    const db = await testDatabase()
     await applyMigrations(db, MIGRATIONS.filter((migration) => migration.name < '0024'))
     await db.run(sql("INSERT INTO accounts (id, kind, login, created_at) VALUES ('a1', 'organization', 'Village', 0)"))
     await db.run(sql("INSERT INTO repositories (id, owner_id, name, visibility, created_at) VALUES ('r1', 'a1', 'Archive', 'public', 0)"))
@@ -38,8 +39,8 @@ describe('migrations on node:sqlite', () => {
   })
 
   it('creates the schema once and is idempotent', async () => {
-    const { db } = openSqliteDatabase()
-    expect(await applyMigrations(db, MIGRATIONS)).toEqual(['0001_initial', '0002_branch_protection', '0003_instance_admins', '0004_mirror_subscriptions', '0005_actions', '0006_login', '0007_notifications', '0008_collaboration', '0009_actions_workflows', '0010_instance_admin_claims', '0011_forks', '0012_pages', '0013_actions_results', '0014_mirror_verification', '0017_partial_visibility', '0021_jobs', '0022_cli_login', '0023_imports', '0024_repository_lifecycle', '0025_admin_ops', '0026_search', '0027_mirror_secrets', '0028_search_repository_metadata', '0029_backups', '0030_github_apps', '0031_release_latest', '0040_scim', '0050_reactions', '0051_actions_access'])
+    const db = await testDatabase()
+    expect(await applyMigrations(db, MIGRATIONS)).toEqual(['0001_initial', '0002_branch_protection', '0003_instance_admins', '0004_mirror_subscriptions', '0005_actions', '0006_login', '0007_notifications', '0008_collaboration', '0009_actions_workflows', '0010_instance_admin_claims', '0011_forks', '0012_pages', '0013_actions_results', '0014_mirror_verification', '0017_partial_visibility', '0021_jobs', '0022_cli_login', '0023_imports', '0024_repository_lifecycle', '0025_admin_ops', '0026_search', '0027_mirror_secrets', '0028_search_repository_metadata', '0029_backups', '0030_github_apps', '0031_release_latest', '0040_scim', '0050_reactions', '0051_actions_access', '0060_storage_locks'])
     expect(await applyMigrations(db, MIGRATIONS)).toEqual([])
     expect((await tables(db)).map((row) => row.name)).toEqual(
       expect.arrayContaining([
@@ -81,7 +82,7 @@ describe('migrations on node:sqlite', () => {
 
 
   it('refuses to run when an applied migration was edited or is unknown', async () => {
-    const { db } = openSqliteDatabase()
+    const db = await testDatabase()
     await applyMigrations(db, MIGRATIONS)
     const edited = MIGRATIONS.map((migration) => ({ ...migration, sql: `${migration.sql}\n` }))
     await expect(applyMigrations(db, edited)).rejects.toThrow(/was modified/)
@@ -89,7 +90,7 @@ describe('migrations on node:sqlite', () => {
   })
 
   it('lists pending migrations without touching the database', async () => {
-    const { db } = openSqliteDatabase()
+    const db = await testDatabase()
     expect(await pendingMigrations(db, MIGRATIONS)).toEqual(MIGRATIONS.map((migration) => migration.name))
     expect(await tables(db)).toEqual([])
     await applyMigrations(db, MIGRATIONS.slice(0, 2))
@@ -100,7 +101,7 @@ describe('migrations on node:sqlite', () => {
   })
 
   it('applies new migrations in order and rolls back a failing one completely', async () => {
-    const { db } = openSqliteDatabase()
+    const db = await testDatabase()
     await applyMigrations(db, MIGRATIONS)
     const broken = [...MIGRATIONS, { name: '9998_broken', sql: 'CREATE TABLE extra (x);\n--> statement-breakpoint\nNOT VALID SQL' }]
     await expect(applyMigrations(db, broken)).rejects.toThrow()
@@ -111,7 +112,7 @@ describe('migrations on node:sqlite', () => {
   })
 
   it('checks an up-to-date database on start with one read', async () => {
-    const { db } = openSqliteDatabase()
+    const db = await testDatabase()
     expect(await migrateOnStart(db, MIGRATIONS)).toEqual(MIGRATIONS.map((migration) => migration.name))
     const statements: string[] = []
     const counted: Database = { all: (s) => (statements.push(s.sql), db.all(s)), run: (s) => (statements.push(s.sql), db.run(s)), batch: (s) => (statements.push('batch'), db.batch(s)) }
@@ -376,7 +377,7 @@ describe('D1 adapter', () => {
     const handle = new DatabaseSync(':memory:')
     handle.exec('PRAGMA foreign_keys = ON')
     const db = d1Database(fakeD1(handle))
-    expect(await applyMigrations(db, MIGRATIONS)).toEqual(['0001_initial', '0002_branch_protection', '0003_instance_admins', '0004_mirror_subscriptions', '0005_actions', '0006_login', '0007_notifications', '0008_collaboration', '0009_actions_workflows', '0010_instance_admin_claims', '0011_forks', '0012_pages', '0013_actions_results', '0014_mirror_verification', '0017_partial_visibility', '0021_jobs', '0022_cli_login', '0023_imports', '0024_repository_lifecycle', '0025_admin_ops', '0026_search', '0027_mirror_secrets', '0028_search_repository_metadata', '0029_backups', '0030_github_apps', '0031_release_latest', '0040_scim', '0050_reactions', '0051_actions_access'])
+    expect(await applyMigrations(db, MIGRATIONS)).toEqual(['0001_initial', '0002_branch_protection', '0003_instance_admins', '0004_mirror_subscriptions', '0005_actions', '0006_login', '0007_notifications', '0008_collaboration', '0009_actions_workflows', '0010_instance_admin_claims', '0011_forks', '0012_pages', '0013_actions_results', '0014_mirror_verification', '0017_partial_visibility', '0021_jobs', '0022_cli_login', '0023_imports', '0024_repository_lifecycle', '0025_admin_ops', '0026_search', '0027_mirror_secrets', '0028_search_repository_metadata', '0029_backups', '0030_github_apps', '0031_release_latest', '0040_scim', '0050_reactions', '0051_actions_access', '0060_storage_locks'])
     const store = createAccountsStore(db)
     const { alice } = await seed(store)
     const { token } = await store.createPersonalAccessToken(alice.id, { name: 'd1', scopes: ['repo:admin'], expiresAt: null })

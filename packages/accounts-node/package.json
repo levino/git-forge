@@ -9,13 +9,16 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:libsql": "ACCOUNTS_TEST_DATABASE=libsql vitest run"
   },
   "dependencies": {
     "@git-forge/accounts": "workspace:*",
     "@git-forge/core": "workspace:*"
   },
   "devDependencies": {
+    "@git-forge/libsql": "workspace:*",
+    "@git-forge/s3": "workspace:*",
     "@types/node": "22.20.5",
     "typescript": "6.0.3",
     "vitest": "4.1.11"

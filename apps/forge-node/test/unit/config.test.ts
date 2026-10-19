@@ -8,7 +8,8 @@ describe('node configuration', () => {
       port: 8080,
       host: '0.0.0.0',
       trustProxy: false,
-      databasePath: './data/git-forge.sqlite',
+      database: { kind: 'sqlite', path: './data/git-forge.sqlite' },
+      conditionalWrites: 'storage',
       storage: { kind: 'fs', dir: './data/objects' },
       jobConcurrency: DEFAULT_JOB_CONCURRENCY,
     })
@@ -16,11 +17,23 @@ describe('node configuration', () => {
   })
 
   it('derives paths from DATA_DIR unless set explicitly', () => {
-    expect(parseNodeConfig({ DATA_DIR: '/srv/forge/' })).toMatchObject({ databasePath: '/srv/forge/git-forge.sqlite', storage: { dir: '/srv/forge/objects' } })
+    expect(parseNodeConfig({ DATA_DIR: '/srv/forge/' })).toMatchObject({ database: { path: '/srv/forge/git-forge.sqlite' }, storage: { dir: '/srv/forge/objects' } })
     expect(parseNodeConfig({ DATA_DIR: '/srv/forge', DATABASE_PATH: '/var/db.sqlite', STORAGE_DIR: '/mnt/ssd' })).toMatchObject({
-      databasePath: '/var/db.sqlite',
+      database: { kind: 'sqlite', path: '/var/db.sqlite' },
       storage: { kind: 'fs', dir: '/mnt/ssd' },
     })
+  })
+
+  it('selects libSQL and database-backed conditional writes', () => {
+    expect(parseNodeConfig({ DATABASE: 'libsql', LIBSQL_URL: 'libsql://forge.example', LIBSQL_AUTH_TOKEN: 'token', CONDITIONAL_WRITES: 'database' })).toMatchObject({
+      database: { kind: 'libsql', url: 'libsql://forge.example', authToken: 'token' },
+      conditionalWrites: 'database',
+    })
+    expect(parseNodeConfig({ DATABASE: 'libsql', LIBSQL_URL: 'https://db.example' }).database).toEqual({ kind: 'libsql', url: 'https://db.example' })
+    expect(() => parseNodeConfig({ DATABASE: 'libsql' })).toThrow('LIBSQL_URL is required with DATABASE=libsql')
+    expect(() => parseNodeConfig({ DATABASE: 'libsql', LIBSQL_URL: 'forge.db' })).toThrow('LIBSQL_URL must be')
+    expect(() => parseNodeConfig({ DATABASE: 'postgres' })).toThrow('DATABASE must be sqlite or libsql')
+    expect(() => parseNodeConfig({ CONDITIONAL_WRITES: 'none' })).toThrow('CONDITIONAL_WRITES must be storage or database')
   })
 
   it('configures S3 storage from S3_* variables', () => {

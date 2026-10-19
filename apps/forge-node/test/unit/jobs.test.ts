@@ -15,12 +15,12 @@ afterAll(() => rm(root, { recursive: true, force: true }))
 
 const database = async () => {
   const path = join(root, `jobs-${++counter}.sqlite`)
-  const opened = await openDatabase(path)
+  const opened = await openDatabase({ kind: 'sqlite', path })
   await applyMigrations(opened.db, MIGRATIONS)
   return { ...opened, path }
 }
 
-const reopen = (path: string) => openDatabase(path)
+const reopen = (path: string) => openDatabase({ kind: 'sqlite', path })
 
 const waitFor = async (check: () => boolean | Promise<boolean>, timeoutMs = 5000) => {
   const until = Date.now() + timeoutMs
@@ -40,7 +40,7 @@ const queue = (db: Database, handler: SqliteJobQueueOptions<Job>['handler'], opt
 
 describe('SQLite job queue', () => {
   it('runs jobs in order of due time, honours delays and deletes finished jobs', async () => {
-    const { db, handle } = await database()
+    const { db, close } = await database()
     const ran: number[] = []
     const { jobs, outcomes } = queue(db, async (job) => void ran.push(job.n))
     jobs.start()
@@ -51,16 +51,16 @@ describe('SQLite job queue', () => {
     expect(outcomes.map((outcome) => outcome.outcome)).toEqual(['done', 'done'])
     expect(await jobs.pending()).toBe(0)
     await jobs.stop()
-    handle.close()
+    close()
   })
 
   it('keeps queued and delayed jobs across a restart', async () => {
-    const { db, handle, path } = await database()
+    const { db, close, path } = await database()
     const before = queue(db, async () => undefined)
     await before.jobs.enqueue({ n: 1 })
     await before.jobs.enqueue({ n: 2 }, { delaySeconds: 30 })
     await before.jobs.stop()
-    handle.close()
+    close()
     const reopened = await reopen(path)
     const ran: number[] = []
     const after = queue(reopened.db, async (job) => void ran.push(job.n))
@@ -69,11 +69,11 @@ describe('SQLite job queue', () => {
     await waitFor(() => ran.length === 2)
     expect(ran).toEqual([1, 2])
     await after.jobs.stop()
-    reopened.handle.close()
+    reopened.close()
   })
 
   it('retries with backoff, stops at maxAttempts and on PermanentJobError', async () => {
-    const { db, handle } = await database()
+    const { db, close } = await database()
     const attempts: [number, number][] = []
     const { jobs, outcomes } = queue(
       db,
@@ -97,11 +97,11 @@ describe('SQLite job queue', () => {
     expect(outcomes.filter((outcome) => outcome.job.n === 1 && outcome.outcome === 'retry').map((outcome) => 'error' in outcome && outcome.error)).toEqual(['flaky 1', 'flaky 2'])
     expect(await jobs.pending()).toBe(0)
     await jobs.stop()
-    handle.close()
+    close()
   })
 
   it('schedules a retry with jobRetryDelaySeconds and records the error', async () => {
-    const { db, handle } = await database()
+    const { db, close } = await database()
     const now = 1_000_000
     const { jobs } = queue(
       db,
@@ -116,11 +116,11 @@ describe('SQLite job queue', () => {
     const [row] = await db.all<{ attempts: number; run_at: number; lease_until: number | null; last_error: string }>(sql('SELECT attempts, run_at, lease_until, last_error FROM jobs'))
     expect(row).toEqual({ attempts: 1, run_at: now + 10_000, lease_until: null, last_error: 'down' })
     await jobs.stop()
-    handle.close()
+    close()
   })
 
   it('re-runs a job whose lease expired because the process died', async () => {
-    const { db, handle } = await database()
+    const { db, close } = await database()
     const started: number[] = []
     const crashed = queue(db, async (_job, attempt) => {
       started.push(attempt)
@@ -140,11 +140,11 @@ describe('SQLite job queue', () => {
     expect(started).toEqual([1])
     await waitFor(async () => (await recovered.jobs.pending()) === 0)
     await recovered.jobs.stop()
-    handle.close()
+    close()
   })
 
   it('renews the lease of a long job so it is not run twice', async () => {
-    const { db, handle } = await database()
+    const { db, close } = await database()
     let release!: () => void
     const runs: number[] = []
     const first = queue(db, async (_job, attempt) => {
@@ -165,11 +165,11 @@ describe('SQLite job queue', () => {
     expect(first.outcomes).toEqual([{ job: { n: 1 }, attempts: 1, outcome: 'done' }])
     expect(await first.jobs.pending()).toBe(0)
     await Promise.all([first.jobs.stop(), second.jobs.stop()])
-    handle.close()
+    close()
   })
 
   it('gives up on a job that crashed the process on its last attempt', async () => {
-    const { db, handle } = await database()
+    const { db, close } = await database()
     await db.run(sql("INSERT INTO jobs (id, queue, payload, attempts, run_at, lease_until, created_at) VALUES ('j', 'test', '{\"n\":1}', 2, 0, 1, 0)"))
     const ran: number[] = []
     const { jobs, outcomes } = queue(db, async (job) => void ran.push(job.n), { maxAttempts: 2 })
@@ -179,11 +179,11 @@ describe('SQLite job queue', () => {
     expect(outcomes[0]).toMatchObject({ job: { n: 1 }, attempts: 3, outcome: 'failed' })
     expect(await jobs.pending()).toBe(0)
     await jobs.stop()
-    handle.close()
+    close()
   })
 
   it('waits instead of polling while all slots are busy', async () => {
-    const { db, handle } = await database()
+    const { db, close } = await database()
     let queries = 0
     const counting: Database = { ...db, all: <T extends Row>(statement: Statement) => (queries++, db.all<T>(statement)) }
     let release!: () => void
@@ -199,11 +199,11 @@ describe('SQLite job queue', () => {
     await jobs.idle()
     expect(await jobs.pending()).toBe(0)
     await jobs.stop()
-    handle.close()
+    close()
   })
 
   it('limits concurrency and keeps queues apart', async () => {
-    const { db, handle } = await database()
+    const { db, close } = await database()
     let active = 0
     let peak = 0
     const { jobs } = queue(
@@ -225,6 +225,6 @@ describe('SQLite job queue', () => {
     expect(await jobs.pending()).toBe(0)
     expect(await other.pending()).toBe(1)
     await jobs.stop()
-    handle.close()
+    close()
   })
 })

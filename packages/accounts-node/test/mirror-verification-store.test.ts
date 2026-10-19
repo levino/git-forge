@@ -1,6 +1,6 @@
 import { applyMigrations, createMirrorVerificationStore, MIGRATIONS } from '@git-forge/accounts'
 import { describe, expect, it } from 'vitest'
-import { openSqliteDatabase } from '../src/index.ts'
+import { testDatabase } from './database.ts'
 
 const MIRROR = 'https://beta.example'
 const NOW = Date.UTC(2026, 9, 18, 12, 0, 0)
@@ -19,7 +19,7 @@ const claims = {
 
 describe('mirror verification store', () => {
   it('are stored as the latest per mirror, next to the upstream checksum history', async () => {
-    const { db } = openSqliteDatabase(':memory:')
+    const db = await testDatabase()
     await applyMigrations(db, MIGRATIONS)
     let clock = NOW
     const store = createMirrorVerificationStore(db, { now: () => clock })

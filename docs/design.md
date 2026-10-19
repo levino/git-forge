@@ -1046,9 +1046,9 @@ database.
 | Building block | Cloudflare | Others |
 |---|---|---|
 | Functions | Workers | Bunny Edge Scripting, Deno Deploy, Lambda, self-hosted Node/Bun |
-| Object storage | R2 | any S3 with conditional writes: Hetzner, B2, OVH, IONOS, self-hosted (versitygw, RustFS); a local directory |
-| Database | D1 / SQLite in Durable Objects | libSQL/Turso, SQLite file (Pi) |
-| Per-repository consistency | Durable Object | conditional writes (S3 CAS), single-writer process |
+| Object storage | R2 | any S3 with conditional writes: Hetzner, B2, OVH, IONOS, self-hosted (versitygw, RustFS); S3 without them (Bunny Storage) through `lockedStorage`; a local directory |
+| Database | D1 / SQLite in Durable Objects | libSQL over Hrana HTTP (`@git-forge/libsql`: Bunny Database, Turso, `sqld`), SQLite file (Pi) |
+| Per-repository consistency | Durable Object | conditional writes (S3 CAS), per-key leases in the database (`lockedStorage`), single-writer process |
 | Scheduling, jobs | Cron Triggers, Queues (Workflows for long jobs) | `Deno.cron`, systemd timers, job table, in-process queue |
 | Public LFS bucket (`LfsPublisher`) | second R2 bucket (`CDN_BUCKET`) | any `Storage`: S3 bucket, local directory (`LFS_PUBLISH_DIR`) |
 | Backup target (§19) | second R2 bucket (`BACKUP`) with a bucket lock | any `Storage` (`BACKUP_STORAGE`): S3 bucket with Object Lock, local directory |
@@ -1078,14 +1078,18 @@ again (at least once delivery); the lost run counts as an attempt.
 `forge-worker/app`; it contains no Cloudflare types) in one process: `serve`
 from `@git-forge/node` adapts it to `node:http` with streaming request and
 response bodies; `FsStorage` or `S3Storage` hold repository data; the SQLite
-file is opened with `@git-forge/accounts-node` (`node:sqlite`, WAL);
+file is opened with `@git-forge/accounts-node` (`node:sqlite`, WAL), or
+`DATABASE=libsql` uses `@git-forge/libsql`; `CONDITIONAL_WRITES=database`
+wraps the storage in `lockedStorage` for buckets without conditional
+`PutObject` (Bunny Storage);
 `nodeDigests` hashes with `node:crypto`; background jobs and import steps run
 in two durable SQLite job queues (above) with the Worker's job handler and
 retry policy; email goes out through the configured `EmailSender` (SMTP, SES
 or console);
 a cron scheduler (five-field expressions in UTC) calls the same `scheduled`
 as the Worker's Cron Trigger. Configuration uses the Worker's variable names
-plus `PORT`, `HOST`, `TRUST_PROXY`, `DATA_DIR`, `DATABASE_PATH`, `STORAGE`,
+plus `PORT`, `HOST`, `TRUST_PROXY`, `DATA_DIR`, `DATABASE`, `DATABASE_PATH`,
+`LIBSQL_URL`, `LIBSQL_AUTH_TOKEN`, `CONDITIONAL_WRITES`, `STORAGE`,
 `STORAGE_DIR`, `S3_*`, `SCHEDULE`, `JOB_CONCURRENCY` and `SMTP_*`
 (`EMAIL_PROVIDER=smtp`). Like the Worker it
 never migrates implicitly: `git-forge-node migrate` applies the bundled
@@ -1135,7 +1139,13 @@ Contract every adapter must meet, checked by the shared conformance suite
 Adapters: `MemoryStorage` (core, tests), `FsStorage` (`@git-forge/node`, a
 plain directory per key, lock files for conditional writes), `R2Storage`
 (`@git-forge/cloudflare`, binding, no presigning) and `S3Storage`
-(`@git-forge/s3`, any S3 API including R2's, with presigning). Presigned LFS
+(`@git-forge/s3`, any S3 API including R2's, with presigning).
+`lockedStorage(storage, db)` (`@git-forge/accounts`) is the fallback for a
+bucket that ignores conditions: a conditional write takes a renewed per-key
+lease in `storage_locks`, checks the condition with `head` and writes
+unconditionally. It needs read-after-write consistent `head` and one
+database shared by all writers; it passes the conformance suite over a
+storage that ignores conditions and over `S3Storage` on versitygw. Presigned LFS
 uploads bind `Content-Length` and `x-amz-checksum-sha256` into the signature,
 so the bucket rejects any other content.
 
@@ -1264,7 +1274,9 @@ What was done about it:
 ## 13. Open questions
 
 - Conditional writes on B2, Hetzner, Bunny — supported? (Run the S3 conformance
-  suite against them; see `packages/s3/README.md`.)
+  suite against them; see `packages/s3/README.md`.) Bunny documents none for
+  `PutObject` (October 2026), so the Bunny deployment
+  (`apps/forge-node/README.md`) defaults to `CONDITIONAL_WRITES=database`.
 - Signed append-only log of ref/pack/LFS changes (e.g. C2SP tlog-tiles with
   cosigning instances as witnesses): still useful as audit trail, format open.
 - Name.

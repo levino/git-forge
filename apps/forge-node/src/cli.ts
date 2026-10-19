@@ -61,7 +61,8 @@ const runServe = async (env: Env, log: Log): Promise<number> => {
     host: config.host,
     port: (server.server.address() as { port: number }).port,
     storage: config.storage.kind,
-    database: config.databasePath,
+    database: config.database.kind === 'sqlite' ? config.database.path : config.database.url,
+    conditionalWrites: config.conditionalWrites,
     schedule: config.schedule.source,
     nextScheduledRun: scheduler.next()?.toISOString(),
   })

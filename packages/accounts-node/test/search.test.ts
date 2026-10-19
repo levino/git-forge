@@ -15,7 +15,7 @@ import {
   setRepositoryStats,
   sql,
 } from '@git-forge/accounts'
-import { openSqliteDatabase } from '../src/index.ts'
+import { testDatabase } from './database.ts'
 
 const ISSUER = 'https://peer.example'
 
@@ -63,7 +63,7 @@ const seed = async (store: AccountsStore) => {
 }
 
 const fresh = async () => {
-  const { db } = openSqliteDatabase()
+  const db = await testDatabase()
   await applyMigrations(db, MIGRATIONS)
   const store = createAccountsStore(db)
   return { db, store, ...(await seed(store)) }
@@ -191,7 +191,7 @@ describe('full-text search', () => {
   })
 
   it('backfills existing data when the migration runs and rebuilds on demand', async () => {
-    const { db } = openSqliteDatabase()
+    const db = await testDatabase()
     await applyMigrations(db, MIGRATIONS.filter((migration) => migration.name < '0026'))
     const store = createAccountsStore(db)
     const { repos, principals } = await seed(store)

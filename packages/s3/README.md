@@ -46,7 +46,10 @@ the S3 error `code`.
 
 The server must support conditional writes on `PutObject` and
 `x-amz-checksum-sha256`; refs rely on the former, LFS uploads on the latter.
-Servers that silently ignore `If-Match`/`If-None-Match` are not safe to use.
+Servers that silently ignore `If-Match`/`If-None-Match` are not safe to use
+on their own; wrap them in `lockedStorage` from `@git-forge/accounts`
+(`CONDITIONAL_WRITES=database` in forge-node), which serializes conditional
+writes through the database.
 Cloudflare R2's S3 API can be used through this adapter when presigned URLs
 are needed (the `R2Storage` binding adapter cannot sign); the Worker uses it
 only as presigner (`withPresigner`).

@@ -44,6 +44,9 @@ CPU of the Free plan, and `limits.cpu_ms` cannot be set on Free).
 
 ## Create an instance
 
+Requires Workers Paid ($5/month) and R2 enabled (card on file); typical
+small instances stay at $5/month.
+
 ### Region
 
 Resources without a location land wherever Cloudflare puts them (often

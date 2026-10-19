@@ -39,6 +39,7 @@ const GLOBAL_RULES: readonly Rule[] = [
   [/^\/users\/[^/]+$/, 'metadata', null],
   [/^\/orgs\/[^/]+$/, 'metadata', 'organization_administration'],
   [/^\/orgs\/[^/]+\/hooks(\/.*)?$/, 'organization_hooks'],
+  [/^\/orgs\/[^/]+\/actions\/(runners|runner-groups)(\/.*)?$/, 'organization_self_hosted_runners'],
   [/^\/orgs\/[^/]+\/(members|memberships|teams|outside_collaborators)(\/.*)?$/, 'members'],
   [/^\/uploads\/repos\/[^/]+\/[^/]+\/releases\/\d+\/assets$/, 'contents', 'contents'],
 ]

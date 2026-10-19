@@ -14,6 +14,8 @@ describe('installation permission table', () => {
     expect(needs('GET', '/o/r.git/info/refs?service=git-receive-pack')).toEqual([['contents', 'write']])
     expect(needs('POST', '/o/r.git/git-upload-pack')).toEqual([['contents', 'read']])
     expect(needs('POST', '/o/r.git/info/lfs/objects/batch', 'upload')).toEqual([['contents', 'write']])
+    expect(needs('POST', '/api/v3/repos/o/r/actions/runners/generate-jitconfig')).toEqual([['administration', 'write']])
+    expect(needs('POST', '/api/v3/orgs/o/actions/runners/registration-token')).toEqual([['organization_self_hosted_runners', 'write']])
     expect(needs('GET', '/api/v3/installation/repositories')).toEqual([])
     expect(needs('GET', '/api/v3/repos/o/r/subscription')).toBeNull()
     expect(needs('GET', '/o/r/issues')).toBeNull()

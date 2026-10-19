@@ -221,6 +221,20 @@ Astro.response.headers.set('Cache-Control', 'no-store')
         </form>
       </section>
 
+      <section class="panel" aria-labelledby="actions-access">
+        <h2 id="actions-access" class="panel-title">Actions access</h2>
+        <p class="text-base-content/70">Lets workflows in other repositories of {data.repository.owner} use actions from this repository while it is private. Runs from forks never can.</p>
+        <form method="post" class="flex flex-wrap items-center gap-2">
+          <input type="hidden" name="csrf" value={session.csrf} />
+          <input type="hidden" name="action" value="actions-access" />
+          <select name="access_level" class="select select-sm w-auto" aria-label="Actions access">
+            <option value="none" selected={data.actionsAccess === 'none'}>Not accessible</option>
+            <option value={data.repository.ownerKind === 'organization' ? 'organization' : 'user'} selected={data.actionsAccess !== 'none'}>Accessible from repositories of {data.repository.owner}</option>
+          </select>
+          <button class="btn btn-sm">Save</button>
+        </form>
+      </section>
+
       <section class="panel" aria-labelledby="federation">
         <h2 id="federation" class="panel-title">Federation</h2>
         <p class="text-base-content/70">Trusted instances listed here may read this repository (Git and Git LFS), for example to mirror it.</p>

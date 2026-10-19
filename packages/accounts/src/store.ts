@@ -226,7 +226,7 @@ const LIVE = 'r.deleted_at IS NULL AND a.disabled_at IS NULL'
 
 const STORAGE_PATH = "COALESCE(r.storage_path, a.login || '/' || r.name)"
 
-const ACTIONS_TABLES = ['actions_runs', 'actions_runners', 'actions_tokens', 'actions_secrets', 'actions_environments', 'actions_schedules']
+const ACTIONS_TABLES = ['actions_runs', 'actions_runners', 'actions_tokens', 'actions_secrets', 'actions_environments', 'actions_schedules', 'actions_access']
 
 const MIRROR_TABLES = ['mirror_subscriptions', 'mirror_attestations', 'ref_checksums', 'mirror_spot_checks']
 

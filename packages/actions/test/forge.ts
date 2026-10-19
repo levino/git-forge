@@ -6,6 +6,7 @@ import {
   advanceRun,
   type CheckRunReport,
   type CheckRunSink,
+  githubTokenAllows,
   type DispatchOptions,
   handleActionsService,
   handleGhesApi,
@@ -97,7 +98,7 @@ export const createTestForge = async (options: TestForgeOptions = {}): Promise<T
     const token = presented(incoming)
     if (token === ADMIN_TOKEN || token === REVIEWER_TOKEN) return true
     const grant = token ? await verifyToken(db, token, 'github', Date.now()) : null
-    return grant !== null && grant.owner === owner && grant.repo === name
+    return grant !== null && githubTokenAllows(grant, { owner, name }, new URL(incoming.url).pathname)
   }
   const handler = async (request: Request): Promise<Response> => {
     const urls = urlsFor(request)
@@ -154,7 +155,7 @@ export const createTestForge = async (options: TestForgeOptions = {}): Promise<T
         const token = presented(incoming)
         if (token === ADMIN_TOKEN) return null
         const grant = token ? await verifyToken(db, token, 'github', Date.now()) : null
-        if (access === 'read' && grant && grant.owner === repo.owner && grant.repo === repo.name) return null
+        if (access === 'read' && grant && githubTokenAllows(grant, repo, new URL(incoming.url).pathname)) return null
         return new Response('authentication required\n', { status: 401, headers: { 'WWW-Authenticate': 'Basic realm="git-forge"' } })
       },
       onPush: async (repo, outcome) => {

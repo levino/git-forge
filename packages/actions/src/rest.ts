@@ -1,5 +1,6 @@
 import type { Database } from '@git-forge/accounts'
 import { archiveResponse, isValidName, ObjectDatabase, readAll, resolveCommitish, type Storage } from '@git-forge/core'
+import { getActionsAccess, isAccessLevel, setActionsAccess } from './actions-download.ts'
 import { artifactFilename, type ArtifactRow, deleteArtifact, getArtifact, listArtifacts } from './artifacts.ts'
 import { blobUrl, issueBlobGrant } from './blobs.ts'
 import { type CacheEntryRow, cacheUsage, evictCacheEntries, getCacheEntry, listCaches } from './cache.ts'
@@ -624,7 +625,17 @@ const actionsRoutes = async (context: RepoRequest, collection: string | undefine
   if (collection === 'secrets') return secretRoutes(context, { owner, repo, environment: '' }, rest.map(decodeURIComponent))
   if (collection === 'variables') return variableRoutes(context, { owner, repo, environment: '' }, rest.map(decodeURIComponent))
   if (collection === 'runners') return runnerRoutes(options, request, url, owner, repo, rest, now)
+  if (collection === 'permissions' && rest.length === 1 && rest[0] === 'access') return accessRoutes(context)
   return error(404, 'Not Found')
+}
+
+const accessRoutes = async ({ options, request, owner, repo }: RepoRequest): Promise<Response> => {
+  if (request.method === 'GET') return json(200, { access_level: await getActionsAccess(options.db, { owner, name: repo }) })
+  if (request.method !== 'PUT') return error(404, 'Not Found')
+  const level = (await readBody(request))?.['access_level']
+  if (!isAccessLevel(level)) return error(422, 'access_level must be none, user or organization')
+  await setActionsAccess(options.db, { owner, name: repo }, level)
+  return noContent()
 }
 
 const labelNames = (body: Record<string, unknown> | null): string[] | null => {

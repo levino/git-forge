@@ -56,6 +56,13 @@ describe('repository settings page', () => {
     expect((await page(owner, { action: 'remove-collaborator', login: 'bob' })).html).toContain('bob removed.')
   })
 
+  it('sets the Actions access level of the repository', async () => {
+    expect((await page(owner)).html).toMatch(/<option value="none" selected>Not accessible<\/option>/)
+    expect((await page(owner, { action: 'actions-access', access_level: 'user' })).html).toContain('Actions access saved.')
+    expect((await page(owner)).html).toMatch(/<option value="user" selected>/)
+    expect((await page(owner, { action: 'actions-access', access_level: 'everyone' })).status).toBe(400)
+  })
+
   it('protects branches through the same parser as the API', async () => {
     const saved = await page(owner, { action: 'protection', pattern: 'main', require_reviews: 'on', approvals: '2', require_checks: 'on', contexts: 'build, test' })
     expect(saved.html).toContain('Protection for main saved.')

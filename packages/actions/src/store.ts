@@ -96,6 +96,7 @@ export type TokenRow = {
   readonly job_id: string | null
   readonly owner: string | null
   readonly repo: string | null
+  readonly scope: string | null
   readonly expires_at: number
 }
 
@@ -245,13 +246,14 @@ export const issueToken = async (db: Database, grant: TokenGrant, now: number): 
   const token = mintToken(grant, now)
   await db.run(
     sql(
-      'INSERT INTO actions_tokens (hash, kind, runner_id, job_id, owner, repo, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      'INSERT INTO actions_tokens (hash, kind, runner_id, job_id, owner, repo, scope, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
       await sha256Hex(token),
       grant.kind,
       grant.runnerId ?? null,
       grant.jobId ?? null,
       grant.owner ?? null,
       grant.repo ?? null,
+      grant.scope ?? null,
       now + grant.ttlMs,
     ),
   )

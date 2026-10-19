@@ -35,10 +35,17 @@ export const readPin = (config: string): Pin | null => {
   return pins.length === 1 ? { version: pins[0]![1]!, sha256: pins[0]![2]! } : null
 }
 
-export const repin = (config: string, pin: Pin): string => {
+const RUNNER_IMAGE = /ghcr\.io\/levino\/git-forge-runner:[^"\s]+/g
+
+const usesRunnerImage = (config: string): boolean => config.search(RUNNER_IMAGE) >= 0
+
+export const repin = (config: string, pin: Pin, runnerImage?: string): string => {
   if (!readPin(config)) throw new UpdateError(`${INSTANCE_CONFIG_PATH} must contain exactly one V=<version> S=<sha256> pin`)
   if (!parseVersion(pin.version) || !/^[0-9a-f]{64}$/.test(pin.sha256)) throw new UpdateError('invalid pin')
-  return config.replace(PIN, `V=${pin.version} S=${pin.sha256}`)
+  const pinned = config.replace(PIN, `V=${pin.version} S=${pin.sha256}`)
+  if (runnerImage === undefined) return pinned
+  if (!/^ghcr\.io\/levino\/git-forge-runner:[^@]+@sha256:[0-9a-f]{64}$/.test(runnerImage) || !runnerImage.includes(`:${pin.version}@`)) throw new UpdateError('invalid runner image')
+  return pinned.replace(RUNNER_IMAGE, runnerImage)
 }
 
 const github = (token?: string): Record<string, string> => ({
@@ -57,6 +64,12 @@ export const releaseChecksum = async (fetch: Outbound, version: string): Promise
   const response = await fetch(`https://github.com/${RELEASE_REPOSITORY}/releases/download/v${version}/SHA256SUMS`, { headers: { 'User-Agent': 'git-forge' } })
   if (!response.ok) throw await failure(response, 'SHA256SUMS')
   return sha256Hex(new Uint8Array(await response.arrayBuffer()))
+}
+
+export const releaseRunnerImage = async (fetch: Outbound, version: string): Promise<string> => {
+  const response = await fetch(`https://github.com/${RELEASE_REPOSITORY}/releases/download/v${version}/runner-image`, { headers: { 'User-Agent': 'git-forge' } })
+  if (!response.ok) throw await failure(response, 'runner-image')
+  return (await response.text()).trim()
 }
 
 const base64 = (bytes: Uint8Array): string => {
@@ -80,7 +93,7 @@ export const commitPin = async (fetch: Outbound, target: InstanceRepository, pin
   const updated = await fetch(url, {
     method: 'PUT',
     headers: { ...github(target.token), 'Content-Type': 'application/json' },
-    body: JSON.stringify({ message: `Update git-forge to ${pin.version}`, content: base64(utf8(repin(text, pin))), sha: file.sha }),
+    body: JSON.stringify({ message: `Update git-forge to ${pin.version}`, content: base64(utf8(repin(text, pin, usesRunnerImage(text) ? await releaseRunnerImage(fetch, pin.version) : undefined))), sha: file.sha }),
   })
   if (!updated.ok) throw await failure(updated, `committing to ${target.repository}`)
   const result = (await updated.json()) as { commit?: { html_url?: string } }

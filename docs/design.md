@@ -1655,13 +1655,13 @@ and stays queued for any registered runner with matching labels.
   limit, the platform maximum) and watches the container again when the
   object is recreated (after a deploy or an eviction); the runner exits after
   its one job and the container stops then. The image (`runner/Dockerfile`
-  of the app, shipped to instances as `runner.tar.gz` of the release, 2.4 GB
-  unpacked) is the official
+  of the app, published with every release as
+  `ghcr.io/levino/git-forge-runner:<version>`, 2.4 GB unpacked) is the official
   `ghcr.io/actions/actions-runner` image plus Git and Node.js. Like every other
   resource it comes from the wrangler config (`containers`, the `RUNNER`
   Durable Object binding and its migration, in every environment of
   `apps/forge-worker`; in the instance template a documented opt-in, because
-  every deploy then builds the image). The default instance type is `basic`
+  every deploy then pulls and pushes the image). The default instance type is `basic`
   (1/4 vCPU, 1 GiB, 4 GB disk): the smallest one whose disk holds the image,
   enough for the runner and small jobs; an instance picks a bigger one in its
   `wrangler.toml`.
@@ -1684,18 +1684,18 @@ and stays queued for any registered runner with matching labels.
   and two services cannot use the same port. Jobs that need Docker are
   launched with `docker: true`; the Worker sends them to a second container
   class (`RUNNER_DOCKER`, bigger instance type) when it is bound.
-  **Image source (decision, 18 Oct 2026):** the instance repository carries
-  the Dockerfile and `wrangler deploy` builds it and pushes it to the account's
-  Cloudflare registry; Workers Builds has Docker, so this works with the
-  Deploy button and without a shell (verified on the production instance).
-  Pre-built images are no alternative today: a `containers` entry with a
-  single `image` accepts the Cloudflare registry, Docker Hub (public images
-  without setup), Amazon ECR and Google Artifact Registry, not `ghcr.io`, so
-  an image published with the release on GHCR cannot be referenced, and
-  publishing to Docker Hub would need a Docker Hub account and credentials in
-  the release workflow. If that becomes worth it (faster deploys), the
-  release publishes `docker.io/<namespace>/git-forge-runner:<version>` and the
-  template references it by tag. The release bundle is built with
+  **Image source (decision, 19 Oct 2026):** the release workflow pushes the
+  image to GHCR (`GITHUB_TOKEN`, public package). A `containers` entry with a
+  single `image` does not accept `ghcr.io`, so the instance repository carries
+  a fixed two-line `runner/Dockerfile` (`ARG RUNNER_IMAGE`, `FROM
+  ${RUNNER_IMAGE}`) and every entry sets `image_vars = { RUNNER_IMAGE =
+  "ghcr.io/levino/git-forge-runner:<version>@sha256:<digest>" }`, which
+  wrangler passes as `--build-arg`; `wrangler deploy` builds it in Workers
+  Builds and pushes it to the account's Cloudflare registry. The digest
+  reference is the runner's pin: the release notes and the `runner-image`
+  asset carry it, `pin-template` writes it into the template, and all three
+  update paths (**Update** below) move it with `V` and `S` when the instance
+  config contains it. The release bundle is built with
   `wrangler deploy --dry-run --containers-rollout=none`, which skips the
   image.
 - **Local process:** the integration test copies the downloaded runner into a
@@ -1826,17 +1826,15 @@ update themselves.
     directory.
   - `migrations.tar.gz`: the D1 migrations (`migrations/*.sql`, currently from
     `packages/accounts`), built reproducibly.
-  - `runner.tar.gz`: `runner/` of `apps/forge-worker` (`Dockerfile`,
-    `hook.js`), the CI runner image, built reproducibly.
-  - `SHA256SUMS`: `sha256sum` output for all three files.
+  - `SHA256SUMS`: `sha256sum` output for both files.
+  - `runner-image`: the digest-pinned reference of the CI runner image.
   - The release notes contain the pin `V=<version> S=<sha256 of SHA256SUMS>`
     and the complete `[build]` command line of the template with it. Tags
     with a `-` are pre-releases.
 - **One pin covers everything:** `V` and `S` at the start of the instance's
-  `[build]` command. The command downloads `SHA256SUMS`,
-  `git-forge-worker.mjs` and `runner.tar.gz` (extracted to `dist/runner/`, so
-  runner changes reach instances with the pin), checks `SHA256SUMS` against
-  `S` and both files against `SHA256SUMS` (`sha256sum -c --ignore-missing`, so assets the
+  `[build]` command. The command downloads `SHA256SUMS` and
+  `git-forge-worker.mjs`, checks `SHA256SUMS` against `S` and the bundle
+  against `SHA256SUMS` (`sha256sum -c --ignore-missing`, so assets the
   instance does not download are skipped); any mismatch fails the build
   before anything is deployed. Asset names and the archive layout are a
   durable format: later releases may add assets, never rename or remove
@@ -1846,11 +1844,9 @@ update themselves.
   monorepo): a single `wrangler.toml` (Worker name, `main =
   "dist/git-forge-worker.mjs"`, `no_bundle`, the pinned `[build]` command,
   bindings by name, queues, cron, `limits.cpu_ms`), `.dev.vars.example`
-  (`BOOTSTRAP_TOKEN`) and a README. CI is an opt-in snippet with
-  `image = "./dist/runner/Dockerfile"`; wrangler validates that path before
-  it runs `[build]`, so an opting instance commits an empty placeholder there.
+  (`BOOTSTRAP_TOKEN`), the fixed `runner/Dockerfile` for opt-in CI and a README.
   No `package.json`, no lockfile, no scripts, nothing from npm in the Worker;
-  the command needs only `sh`, `curl`, `sha256sum` and `tar`. All vars (OIDC,
+  the command needs only `sh`, `curl` and `sha256sum`. All vars (OIDC,
   `PUBLIC_URL`, email, …) are optional and documented in the README, not
   declared. `GIT_FORGE_RELEASE_URL` overrides the download base for mirrors
   and tests. The production instance `levino/levins-git-forge` is a copy of it

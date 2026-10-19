@@ -13,8 +13,7 @@ writes into `out-dir` (default `release/dist`):
 |---|---|
 | `git-forge-worker.mjs` | `apps/forge-worker` built by `astro build` (web UI included, stylesheet compiled in) and bundled by `wrangler deploy dist/server/entry.mjs --dry-run --containers-rollout=none` (no container image build) into one ES module whose only imports are workerd built-ins (`cloudflare:workers`). Instances upload it with `no_bundle: true`, unchanged. |
 | `migrations.tar.gz` | `migrations/*.sql` for D1, collected from the packages listed in `migration_dirs`. Built reproducibly (sorted, zero mtime, `gzip -n`). |
-| `runner.tar.gz` | `runner/` (`Dockerfile`, `hook.js`) from `apps/forge-worker`, the CI runner image; instances extract it to `dist/runner/`. Built reproducibly. |
-| `SHA256SUMS` | `sha256sum` output for the three files above. |
+| `SHA256SUMS` | `sha256sum` output for the two files above. |
 
 and prints the SHA-256 of `SHA256SUMS`, which is the `S` an instance pins at
 the start of its `[build]` command (`V=<version> S=<sha256>` in
@@ -30,12 +29,16 @@ in a separate `CLI-SHA256SUMS`, and the single executables of
 `.github/workflows/release.yml` runs the script on every `v*` tag, on a push to
 `main` that changes `release/VERSION` (it then creates the tag `v<VERSION>` on
 that commit unless the release exists already) and on manual dispatch, and
-publishes the four files as release assets with `GITHUB_TOKEN`; the release
+publishes the three files as release assets with `GITHUB_TOKEN`; the release
 notes contain the pin `V=<version> S=<sha256>` and the complete `[build]`
 command line taken from `templates/instance/wrangler.toml` with that pin.
+Before that, the `runner` job pushes `apps/forge-worker/runner/` (linux/amd64)
+to `ghcr.io/levino/git-forge-runner:<version>` with `GITHUB_TOKEN`
+(`packages: write`); the digest-pinned reference goes into the release notes
+and the `runner-image` asset.
 Tags with a `-` (`v0.2.0-rc.1`) are marked as pre-releases. For every other
-release the `pin-template` job then writes the new pin into
-`templates/instance/wrangler.toml` and pushes that commit to `main`, so the
+release the `pin-template` job then writes the new pin and the runner
+reference into `templates/instance` and pushes that commit to `main`, so the
 Deploy button (which deploys `templates/instance` from `main` as is) always
 gets a published release.
 

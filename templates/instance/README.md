@@ -9,6 +9,7 @@ configures one instance.
 |---|---|
 | `wrangler.toml` | The whole instance: Worker name, the pinned release in the `[build]` command, R2 bucket, D1 database, queues, cron, vars, domain. |
 | `.dev.vars.example` | The secret the Deploy button asks for (`BOOTSTRAP_TOKEN`), and the template for `.dev.vars` in local development. |
+| `runner/Dockerfile` | Image for CI jobs, used only when [CI is enabled](#ci-opt-in): `FROM` the runner image of the release (`RUNNER_IMAGE`). Never changes. |
 | `.github/workflows/update-git-forge.yml` | Optional: opens a pull request with the new pin when a release comes out (see [Update](#update)). Delete it if you do not want it. |
 
 There is no `package.json`, no lockfile and no script. Nothing from npm ends
@@ -18,15 +19,14 @@ byte for byte, verified against the checksum pinned in `wrangler.toml`.
 ## How it deploys
 
 `wrangler deploy` (the default deploy command of Workers Builds) first runs
-the `[build]` command. It downloads the release's `SHA256SUMS`,
-`git-forge-worker.mjs` and `runner.tar.gz` (the CI runner image, extracted to
-`dist/runner/`) into `dist/`, checks `SHA256SUMS` against the pinned `S` and
-both files against `SHA256SUMS`, and fails the deploy on any mismatch. It
-needs only `sh`, `curl`, `sha256sum` and `tar`.
+the `[build]` command. It downloads the release's `SHA256SUMS` and
+`git-forge-worker.mjs` into `dist/`, checks `SHA256SUMS` against the pinned
+`S` and the bundle against `SHA256SUMS`, and fails the deploy on any mismatch.
+It needs only `sh`, `curl` and `sha256sum`.
 
 ```toml
 [build]
-command = "V=0.8.0 S=baa0866b… && U=… && mkdir -p dist && cd dist && curl … && sha256sum -c … && tar -xzf runner.tar.gz"
+command = "V=0.8.0 S=baa0866b… && U=… && mkdir -p dist && cd dist && curl … && sha256sum -c …"
 ```
 
 `V` is the release version, `S` the SHA-256 of the release's `SHA256SUMS`.
@@ -398,7 +398,13 @@ move the pin (`V` and `S` at the start of the `[build]` command):
   `curl -fsSL https://github.com/levino/git-forge/releases/download/v0.9.0/SHA256SUMS | sha256sum`,
   then commit.
 
-The pin covers the CI runner image (`dist/runner/`) as well.
+With CI, all three also move `RUNNER_IMAGE` (release notes, or the
+release's `runner-image` asset).
+
+Instances that enabled CI with the full image in `runner/` migrate once, in
+the commit with the new pin: replace `runner/Dockerfile` with the one of this
+template, delete `runner/hook.js` and add the `image_vars` line from the
+release notes to every `[[containers]]` entry.
 
 To roll back, revert the commit. Migrations are only ever added, never rolled
 back, and stay compatible with the previous release.
@@ -432,17 +438,12 @@ prints the `S` to pin (any `V` works); then
 ## CI (opt-in)
 
 CI (GitHub Actions compatible, running the official `actions/runner`) is off
-by default, because it makes every deploy build the runner image (a few
-minutes; Workers Builds has Docker, so nothing else is needed). The image
-comes with the pinned release (`dist/runner/Dockerfile`). Wrangler checks that
-the Dockerfile exists before it runs the `[build]` command, so commit an empty
-placeholder, which the build overwrites:
-
-```sh
-mkdir -p dist/runner && touch dist/runner/Dockerfile && git add -f dist/runner/Dockerfile
-```
-
-Then add to `wrangler.toml`:
+by default, because it makes every deploy pull the runner image (a few
+minutes; Workers Builds has Docker, so nothing else is needed). Each release
+publishes the image as `ghcr.io/levino/git-forge-runner:<V>` (the official
+`ghcr.io/actions/actions-runner` image plus Git, Node.js and a container hook
+for `container:` and `services:`); `RUNNER_IMAGE` pins it by digest. To enable
+CI, add to `wrangler.toml`:
 
 ```toml
 [vars]
@@ -454,7 +455,8 @@ crons = ["17 3 * * *", "*/5 * * * *"]
 
 [[containers]]
 class_name = "RunnerContainer"
-image = "./dist/runner/Dockerfile"
+image = "./runner/Dockerfile"
+image_vars = { RUNNER_IMAGE = "ghcr.io/levino/git-forge-runner:0.9.0@sha256:0000000000000000000000000000000000000000000000000000000000000000" }
 instance_type = "basic"
 max_instances = 2
 
@@ -471,7 +473,7 @@ enable_containers = false
 ```
 
 (merge the vars into an existing `[vars]` table and replace the existing
-`[triggers]`) and push. `wrangler deploy` builds `dist/runner/Dockerfile`, pushes
+`[triggers]`) and push. `wrangler deploy` builds `runner/Dockerfile`, pushes
 it to your account's Cloudflare registry and creates the container
 application. Every CI job then starts one container with the runner and a
 JIT config; the container stops when the job is done, and you pay only while
@@ -492,7 +494,8 @@ bigger instance, add a second class (the image is built once more):
 ```toml
 [[containers]]
 class_name = "DockerRunnerContainer"
-image = "./dist/runner/Dockerfile"
+image = "./runner/Dockerfile"
+image_vars = { RUNNER_IMAGE = "ghcr.io/levino/git-forge-runner:0.9.0@sha256:0000000000000000000000000000000000000000000000000000000000000000" }
 instance_type = "standard-2"
 max_instances = 2
 

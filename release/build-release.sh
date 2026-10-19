@@ -26,7 +26,5 @@ for dir in $migration_dirs; do
 done
 tar -C "$work" --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner -cf - migrations | gzip -n -9 >"$out/migrations.tar.gz"
 
-tar -C "$root/apps/forge-worker" --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner -cf - runner | gzip -n -9 >"$out/runner.tar.gz"
-
-(cd "$out" && sha256sum git-forge-worker.mjs migrations.tar.gz runner.tar.gz >SHA256SUMS)
+(cd "$out" && sha256sum git-forge-worker.mjs migrations.tar.gz >SHA256SUMS)
 sha256sum "$out/SHA256SUMS" | cut -d' ' -f1

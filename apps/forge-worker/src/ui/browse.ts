@@ -83,17 +83,18 @@ export const browse = async (repo: OpenRepository, segments: readonly string[], 
   if (!target) return { kind: 'not-found' }
   const reach = await reachOf(repo, target.commit)
   const here = reach(target.path.join('/'))
+  const pending = here === 'inside' ? lastCommitFor(repo.odb, target.commit, target.path) : Promise.resolve(null)
+  pending.catch(() => {})
   const resolved = here === 'none' ? null : await resolveTarget(repo.odb, target.commit, target.path)
   if (!resolved || resolved.kind === 'submodule') return { kind: 'not-found' }
-  const latest = here === 'inside' ? await lastCommitFor(repo.odb, target.commit, target.path) : null
   if (resolved.kind === 'tree') {
     if (expect === 'blob') return { kind: 'not-found' }
     const entries = resolved.entries.filter((entry) => reach([...target.path, entry.name].join('/')) !== 'none')
-    const [readme, lfs] = await Promise.all([readmeFor(repo, target, entries), lfsEntries(repo, target, entries)])
+    const [latest, readme, lfs] = await Promise.all([pending, readmeFor(repo, target, entries), lfsEntries(repo, target, entries)])
     return { kind: 'tree', target, entries, latest, readme, lfs }
   }
   if (expect === 'tree' || here !== 'inside') return { kind: 'not-found' }
-  const content = await readBlobContent(repo.odb, resolved.entry)
+  const [latest, content] = await Promise.all([pending, readBlobContent(repo.odb, resolved.entry)])
   if (!content) return { kind: 'not-found' }
   const markdown =
     content.kind === 'text' && isMarkdown(resolved.entry.name) && content.size <= MAX_README_BYTES

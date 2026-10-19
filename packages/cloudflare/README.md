@@ -16,7 +16,7 @@ const storage = new R2Storage(env.BUCKET, { prefix: 'optional/prefix/' })
 | `Storage` | R2 |
 |---|---|
 | `get(key)` | `bucket.get(key)`; the ETag is R2's unquoted `etag`. |
-| `get(key, range)` | `bucket.head` first, then the range is clamped to the object size and read with `bucket.get(key, { range, onlyIf: { etagMatches } })`, so the bytes and the reported size belong to the same version. A range starting at or beyond the end yields an empty body, as in `MemoryStorage`, instead of relying on how R2 treats such ranges. |
+| `get(key, range)` | One ranged `bucket.get`; bytes and size come from the same response. Only if that fails or the range runs past the end: `bucket.head` first, then the range is clamped to the object size and read with `onlyIf: { etagMatches }`. A range starting at or beyond the end yields an empty body, as in `MemoryStorage`. |
 | `head(key)` | `bucket.head(key)` |
 | `put(key, body, size)` | `bucket.put`; a `Uint8Array` is checked against `size`. A stream is piped through `exactLength(size)` from the core, which withholds the last byte until the source has ended at exactly `size` bytes, and then through `FixedLengthStream(size)` because R2 needs the length up front and must not buffer. A stream that ends early, runs long or errors never delivers all bytes, so the put fails and nothing is stored. (`FixedLengthStream` alone lets R2 commit the first `size` bytes of a body that runs long.) |
 | `put(…, { ifNoneMatch: '*' })` | `onlyIf: { etagDoesNotMatch: '*' }`: written only if the key does not exist. |
@@ -28,6 +28,13 @@ const storage = new R2Storage(env.BUCKET, { prefix: 'optional/prefix/' })
 `presignGet` and `presignPut` are not implemented: a binding cannot sign URLs.
 Presigned URLs for LFS need R2's S3 API with an access key; use `S3Storage`
 from [`@git-forge/s3`](../s3) for that.
+
+## `cacheApiObjectCache`
+
+`ObjectCache` of the core over the Cache API: `cachedStorage(storage, cacheApiObjectCache())`
+keeps pack indexes, pack heads and pack ranges up to 1 MiB in the colo's cache
+under a private host. Pack files are content-addressed, so entries never go
+stale.
 
 ## `createCloudflareEmailSender`
 

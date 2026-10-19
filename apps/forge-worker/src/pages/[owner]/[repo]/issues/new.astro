@@ -7,7 +7,7 @@ import { field, type FormOutcome, runForm, scopeFor } from '../../../../ui/colla
 import { openRepository, repoUrl } from '../../../../ui/repository.ts'
 
 const { forge, principal, session } = Astro.locals
-const repo = await openRepository(forge, principal, Astro.params.owner!, Astro.params.repo!)
+const repo = await openRepository(forge, principal, Astro.params.owner!, Astro.params.repo!, { request: Astro.request })
 if (repo.kind === 'ok' && !session) return Astro.redirect(`/login?return_to=${encodeURIComponent(Astro.url.pathname)}`)
 let outcome: FormOutcome | null = null
 if (repo.kind === 'ok' && Astro.request.method === 'POST') {

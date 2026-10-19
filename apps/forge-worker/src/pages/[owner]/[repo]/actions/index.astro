@@ -8,7 +8,7 @@ import { isoTime, relativeTime, shortId } from '../../../../ui/format.ts'
 import { openRepository, repoUrl } from '../../../../ui/repository.ts'
 
 const { forge, principal } = Astro.locals
-const repo = await openRepository(forge, principal, Astro.params.owner!, Astro.params.repo!)
+const repo = await openRepository(forge, principal, Astro.params.owner!, Astro.params.repo!, { request: Astro.request })
 const workflows = repo.kind === 'ok' ? await forge.actions.workflows(repo.name) : []
 const requested = Astro.url.searchParams.get('workflow')
 const selected = workflows.find((workflow) => workflow.path === requested) ?? null

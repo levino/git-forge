@@ -3,6 +3,7 @@ declare namespace App {
     forge: import('./app.ts').ForgeServices
     principal: import('@git-forge/accounts').Principal
     session: import('./app.ts').UiSession | null
+    instanceAdmin?: Promise<boolean>
     loginPage?: import('@git-forge/accounts').LoginPage
     cfContext?: { waitUntil(promise: Promise<unknown>): void }
   }

@@ -10,7 +10,7 @@ import { isoTime, relativeTime, shortId } from '../../../../../ui/format.ts'
 import { commitUrl, openRepository } from '../../../../../ui/repository.ts'
 
 const { forge, principal } = Astro.locals
-const repo = await openRepository(forge, principal, Astro.params.owner!, Astro.params.repo!)
+const repo = await openRepository(forge, principal, Astro.params.owner!, Astro.params.repo!, { request: Astro.request })
 const number = parseNumber(Astro.params.number)
 const scope = repo.kind === 'ok' ? await scopeFor(forge, Astro.request, principal, repo) : null
 const pull = scope && number !== null ? await unlessMissing(getPullSummary(scope, number)) : null

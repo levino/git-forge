@@ -78,6 +78,9 @@ export const adoptWranglerMigrations = async (db: Database, migrations: readonly
 }
 
 export const migrateOnStart = async (db: Database, migrations: readonly Migration[]): Promise<string[]> => {
+  const applied = await db.all<AppliedRow>(sql('SELECT name, sha256 FROM schema_migrations')).catch(() => null)
+  const known = await hashes(migrations)
+  if (applied?.length === known.size && applied.every((row) => known.get(row.name) === row.sha256)) return []
   await adoptWranglerMigrations(db, migrations)
   try {
     return await applyMigrations(db, migrations)

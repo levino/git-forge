@@ -6,12 +6,21 @@ import type { AppJob } from './app.ts'
 
 export { DockerRunnerContainer, RunnerContainer } from './runner-container.ts'
 
+const timed = (response: Response, started: number): Response => {
+  try {
+    response.headers.append('Server-Timing', `app;dur=${Date.now() - started}`)
+    return response
+  } catch {
+    return response
+  }
+}
+
 export default {
   async fetch(request, env, context): Promise<Response> {
-    if (!uiEnabled(env)) return (await forgeFor(env)).fetch(request, (promise) => context.waitUntil(promise))
+    const started = Date.now()
     const forge = await forgeFor(env)
-    if (forge.isPagesRequest(request)) return forge.fetch(request, (promise) => context.waitUntil(promise))
-    return handle(request, env as never, context)
+    if (!uiEnabled(env) || forge.isPagesRequest(request)) return timed(await forge.fetch(request, (promise) => context.waitUntil(promise)), started)
+    return timed(await handle(request, env as never, context), started)
   },
   ...backgroundHandlers,
 } satisfies ExportedHandler<Env, ImportJob | AppJob>

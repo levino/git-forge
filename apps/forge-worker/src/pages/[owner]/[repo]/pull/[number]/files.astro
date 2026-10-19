@@ -10,7 +10,7 @@ import { plural } from '../../../../../ui/format.ts'
 import { blobUrl, openRepository, repoUrl } from '../../../../../ui/repository.ts'
 
 const { forge, principal, session } = Astro.locals
-const repo = await openRepository(forge, principal, Astro.params.owner!, Astro.params.repo!)
+const repo = await openRepository(forge, principal, Astro.params.owner!, Astro.params.repo!, { request: Astro.request })
 const number = parseNumber(Astro.params.number)
 let outcome: FormOutcome | null = null
 if (repo.kind === 'ok' && number !== null && Astro.request.method === 'POST') {

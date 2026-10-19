@@ -35,6 +35,12 @@ export class R2Storage implements Storage {
 
   async get(key: string, range?: ByteRange): Promise<StoredObject | null> {
     if (range) {
+      if (range.length > 0) {
+        const direct = await this.#bucket.get(this.#prefix + key, { range: { offset: range.offset, length: range.length } }).catch(() => undefined)
+        if (direct === null) return null
+        if (direct && range.offset + range.length <= direct.size) return { ...info(direct, key), body: direct.body as ReadableStream<Uint8Array> }
+        await direct?.body.cancel()
+      }
       const head = await this.#bucket.head(this.#prefix + key)
       if (!head) return null
       const offset = Math.min(range.offset, head.size)

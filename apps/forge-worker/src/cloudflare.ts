@@ -1,5 +1,5 @@
 import { d1Database, MIGRATIONS, migrateOnStart } from '@git-forge/accounts'
-import { consumeJobs, createCloudflareEmailSender, digestStreams, QueueJobs, R2Storage } from '@git-forge/cloudflare'
+import { cacheApiObjectCache, consumeJobs, createCloudflareEmailSender, digestStreams, QueueJobs, R2Storage } from '@git-forge/cloudflare'
 import { continueImport, createConsoleEmailSender, type EmailSender, type ImportJob, type ImportScheduler, storagePublisher } from '@git-forge/core'
 import { S3Storage } from '@git-forge/s3'
 import { createSesEmailSender } from '@git-forge/ses'
@@ -49,6 +49,7 @@ export const forgeFor = (env: Env): Promise<Forge> => {
       return createForge({
         ...settings,
         storage: new R2Storage(env.BUCKET),
+        objectCache: cacheApiObjectCache(),
         db: d1Database(env.DB),
         digests: digestStreams,
         version: typeof GIT_FORGE_VERSION === 'string' ? GIT_FORGE_VERSION : 'dev',

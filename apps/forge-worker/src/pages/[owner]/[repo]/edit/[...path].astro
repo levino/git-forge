@@ -8,7 +8,7 @@ import { defaultMessage, editMode, loadEditView, oversizedForm, prepareUpload, s
 import { blobUrl, openRepository, treeUrl } from '../../../../ui/repository.ts'
 
 const { forge, principal, session } = Astro.locals
-const repo = await openRepository(forge, principal, Astro.params.owner!, Astro.params.repo!)
+const repo = await openRepository(forge, principal, Astro.params.owner!, Astro.params.repo!, { request: Astro.request })
 if (repo.kind === 'ok' && !session) return Astro.redirect(`/login?return_to=${encodeURIComponent(Astro.url.pathname + Astro.url.search)}`)
 const mode = editMode(Astro.url.searchParams.get('mode'))
 const segments = (Astro.params.path ?? '').split('/').filter((segment) => segment !== '')

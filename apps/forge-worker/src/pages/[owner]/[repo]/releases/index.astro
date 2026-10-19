@@ -8,7 +8,7 @@ import { parsePage } from '../../../../ui/history.ts'
 import { listReleases } from '../../../../ui/releases.ts'
 import { openRepository, repoUrl } from '../../../../ui/repository.ts'
 
-const repo = await openRepository(Astro.locals.forge, Astro.locals.principal, Astro.params.owner!, Astro.params.repo!)
+const repo = await openRepository(Astro.locals.forge, Astro.locals.principal, Astro.params.owner!, Astro.params.repo!, { request: Astro.request })
 const page = parsePage(Astro.url.searchParams.get('page'))
 const list = repo.kind === 'ok' ? await listReleases(Astro.locals.forge, repo, page) : null
 ---

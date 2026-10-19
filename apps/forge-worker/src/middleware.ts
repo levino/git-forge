@@ -10,6 +10,7 @@ export const onRequest = defineMiddleware(async (context, next) => {
     context.locals.forge = forge.services
     const session = await forge.services.session(context.request)
     context.locals.session = session
+    if (session) context.locals.instanceAdmin = forge.services.instance.isAdministrator(session.principal).catch(() => false)
     context.locals.principal = session?.principal ?? (await forge.services.authenticate(context.request)) ?? { kind: 'anonymous' }
   }
   if (isForgePath(context.url.pathname)) {

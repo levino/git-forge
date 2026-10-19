@@ -8,7 +8,7 @@ import { shortId } from '../../../../../../ui/format.ts'
 import { commitUrl, openRepository, repoUrl } from '../../../../../../ui/repository.ts'
 
 const { forge, principal, session } = Astro.locals
-const repo = await openRepository(forge, principal, Astro.params.owner!, Astro.params.repo!)
+const repo = await openRepository(forge, principal, Astro.params.owner!, Astro.params.repo!, { request: Astro.request })
 const id = parseNumber(Astro.params.id)
 let outcome: ActionsOutcome | null = null
 if (repo.kind === 'ok' && id !== null && Astro.request.method === 'POST') {

@@ -225,11 +225,12 @@ const fetch = async (state: AdvertisedRefs, odb: ObjectDatabase, args: readonly 
       return errorResponse('only "deepen <depth>" shallow fetches are supported; partial clones are not')
     }
   }
-  const tips = options.view ? new Set(await Promise.all(Object.values(state.refs).flatMap((id) => [id, odb.peel(id)]))) : null
+  const restricted = options.view !== undefined || (await odb.borrows())
+  const tips = restricted ? new Set(await Promise.all(Object.values(state.refs).flatMap((id) => [id, odb.peel(id)]))) : null
+  const reachable = tips && (haves.length > 0 || [...wants].some((id) => !tips.has(id))) ? await commitsReachable(odb, tips) : null
   for (const id of wants) {
-    if (!isObjectId(id) || !(await odb.has(id)) || (tips && !tips.has(id))) return errorResponse(`not our ref ${id}`)
+    if (!isObjectId(id) || !(await odb.has(id)) || (tips && !tips.has(id) && !reachable?.has(id))) return errorResponse(`not our ref ${id}`)
   }
-  const reachable = tips && haves.length > 0 ? await commitsReachable(odb, tips) : null
   const common: ObjectId[] = []
   for (const id of haves) if (isObjectId(id) && (await odb.has(id)) && (!tips || reachable?.has(id))) common.push(id)
   const sections: Uint8Array[] = []
@@ -264,7 +265,7 @@ const fetch = async (state: AdvertisedRefs, odb: ObjectDatabase, args: readonly 
     sections.push(pkt('shallow-info\n'), ...plan.lines, DELIM)
     pack = withTrailer(generatePack(odb, ids, { sending: new Set(ids) }))
     progress = `Sending ${ids.length} objects\n`
-  } else if (common.length === 0 && !options.view) {
+  } else if (common.length === 0 && !restricted) {
     const packs = await odb.packs()
     const uris = options.packfileUri && uriProtocols.length > 0 ? await uriSection(packs, uriProtocols, options.packfileUri) : null
     if (uris) {

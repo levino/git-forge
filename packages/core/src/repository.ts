@@ -255,6 +255,10 @@ export class ObjectDatabase {
     return packs
   }
 
+  async borrows(): Promise<boolean> {
+    return (await this.packs()).some((pack) => !sameRepository(pack.repo, this.#repo))
+  }
+
   async ownPacks(): Promise<readonly LoadedPack[]> {
     return (await this.packs()).filter((pack) => sameRepository(pack.repo, this.#repo))
   }

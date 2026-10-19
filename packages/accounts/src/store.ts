@@ -3,7 +3,7 @@ import { type Database, first, sql, type Statement } from './database.ts'
 import { randomId } from './encoding.ts'
 import { normalizeIssuer, type TrustedIssuer } from './federation.ts'
 import type { Grants, OrganizationRole, OwnerKind, Principal, RepositorySubject, Visibility } from './permissions.ts'
-import { NO_GRANTS } from './permissions.ts'
+import { NO_GRANTS, resolveAccess } from './permissions.ts'
 import {
   type BranchProtectionRule,
   type BranchProtectionSettings,
@@ -223,6 +223,16 @@ const REPOSITORY_SELECT = `SELECT r.id, r.name, r.visibility, r.owner_id, a.logi
 FROM repositories r JOIN accounts a ON a.id = r.owner_id`
 
 const LIVE = 'r.deleted_at IS NULL AND a.disabled_at IS NULL'
+
+const detachPublicForks = (parentId: string): Statement[] => {
+  const detached = `WITH RECURSIVE detached(id, top) AS (
+    SELECT f.repository_id, f.repository_id FROM repository_forks f JOIN repositories r ON r.id = f.repository_id WHERE f.parent_id = ? AND r.visibility = 'public'
+    UNION ALL SELECT f.repository_id, d.top FROM repository_forks f JOIN detached d ON f.parent_id = d.id)`
+  return [
+    sql(`${detached} UPDATE repository_forks SET root_id = (SELECT top FROM detached WHERE id = repository_forks.repository_id) WHERE repository_id IN (SELECT id FROM detached WHERE id <> top)`, parentId),
+    sql("DELETE FROM repository_forks WHERE parent_id = ? AND repository_id IN (SELECT id FROM repositories WHERE visibility = 'public')", parentId),
+  ]
+}
 
 const STORAGE_PATH = "COALESCE(r.storage_path, a.login || '/' || r.name)"
 
@@ -874,6 +884,7 @@ export const createAccountsStore = (db: Database, options: AccountsStoreOptions 
     setRepositoryVisibility: async (repositoryId: string, visibility: Visibility, actor: AuditActor = SYSTEM): Promise<void> => {
       await write(actor, { action: 'repository.visibility', subjectKind: 'repository', subjectId: repositoryId, repositoryId, data: { visibility } }, [
         sql('UPDATE repositories SET visibility = ? WHERE id = ?', visibility, repositoryId),
+        ...(visibility === 'private' ? detachPublicForks(repositoryId) : []),
       ])
     },
 
@@ -1222,6 +1233,22 @@ export const createAccountsStore = (db: Database, options: AccountsStoreOptions 
       ).map((row) => ({ issuer: row.issuer, repository: row.repository, callback: row.callback })),
 
     grantsFor: async (principal: Principal, repo: RepositorySubject): Promise<Grants> => {
+      const grants = await store.directGrants(principal, repo)
+      return repo.visibility === 'private' && !(await store.readsParent(principal, repo.id)) ? { ...grants, upstreamDenied: true } : grants
+    },
+
+    readsParent: async (principal: Principal, repositoryId: string): Promise<boolean> => {
+      const fork = await first<{ parent_id: string }>(db, sql('SELECT parent_id FROM repository_forks WHERE repository_id = ?', repositoryId))
+      if (!fork) return true
+      const row = await first<RepositoryRow>(db, sql(`${REPOSITORY_SELECT} WHERE r.id = ?`, fork.parent_id))
+      if (!row) return false
+      const parent = toSubject(row)
+      const subject: Principal =
+        principal.kind === 'user' ? { ...principal, limits: null } : principal.kind === 'app' ? { ...principal, limits: { ceiling: 'read', repositoryIds: null } } : principal
+      return resolveAccess(subject, parent, await store.grantsFor(subject, parent)) !== 'none'
+    },
+
+    directGrants: async (principal: Principal, repo: RepositorySubject): Promise<Grants> => {
       switch (principal.kind) {
         case 'anonymous':
           return NO_GRANTS

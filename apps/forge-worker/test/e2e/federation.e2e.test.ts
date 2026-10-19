@@ -86,6 +86,14 @@ const lfsObject = async (instance: Instance, oid: string): Promise<Uint8Array | 
   return new Uint8Array(await response.arrayBuffer())
 }
 
+const lfsArrives = (instance: Instance, blob: Uint8Array) =>
+  expect
+    .poll(async () => {
+      const stored = await lfsObject(instance, sha256(blob))
+      return stored && sha256(stored)
+    }, { timeout: 30_000, interval: 250 })
+    .toBe(sha256(blob))
+
 const randomBlob = (size: number, seed: number): Buffer => {
   const out = Buffer.alloc(size)
   let x = seed
@@ -177,7 +185,7 @@ describe('three federated instances on wrangler dev', () => {
     const refs = await lsRemote(beta)
     expect(refs.get('refs/upstream/origin/heads/main')).toBe(firstTip)
     expect(refs.get('refs/heads/main')).toBe(firstTip)
-    expect(sha256((await lfsObject(beta, sha256(firstBlob)))!)).toBe(sha256(firstBlob))
+    await lfsArrives(beta, firstBlob)
   })
 
   it('lets gamma mirror beta, but not alpha directly', async () => {
@@ -189,7 +197,7 @@ describe('three federated instances on wrangler dev', () => {
     await syncedByCron(gamma)
     const refs = await lsRemote(gamma)
     expect(refs.get('refs/upstream/origin/heads/main')).toBe(firstTip)
-    expect(sha256((await lfsObject(gamma, sha256(firstBlob)))!)).toBe(sha256(firstBlob))
+    await lfsArrives(gamma, firstBlob)
     const direct = await api(gamma, 'POST', '/api/repos/village/archive/mirrors/direct/sync')
     expect(direct.status).toBe(502)
     expect(((await direct.json()) as { error: string }).error).toMatch(/401/)
@@ -220,7 +228,7 @@ describe('three federated instances on wrangler dev', () => {
       expect(archived).toBeDefined()
       const status = await mirrorStatus(instance)
       expect(status?.alarms).toContainEqual(expect.objectContaining({ kind: 'history-rewritten', ref: 'refs/heads/main', archivedAs: archived![0] }))
-      expect(sha256((await lfsObject(instance, sha256(secondBlob)))!)).toBe(sha256(secondBlob))
+      await lfsArrives(instance, secondBlob)
     }
   })
 

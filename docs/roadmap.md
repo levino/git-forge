@@ -150,6 +150,8 @@ Design: [design.md §18](design.md#18-web-ui).
 - [x] Explore and profile listings without one access check per repository (one SQL query, stored default branch and last commit time, sort and paging)
 - [x] Search box and results page (repositories, issues and pull requests, discussions, users)
 - [x] Page load performance: shared pack caches (isolate and Cache API), parallel ref, pack list and header reads, single-request R2 ranges, lazy highlighter grammars, one-read migration check on start, `Server-Timing`
+- [x] Repository state cache: refs, pack list and alternates per repository in the database (`storage_state`, D1 or SQLite), bucket stays the source of truth, safe under concurrent CAS writers (design §18)
+- [x] Last commit per path precomputed after a push (`last-commits` job, `cache/last-commits/<commit>.json`): latest commit per entry on tree pages, faster path history; fallback to the walk
 - [ ] Issue/PR UI: labels, assignees, milestones, reviewer requests, suggested changes, `#N` autolinks in rendered Markdown
 
 ## M7 — Collaboration

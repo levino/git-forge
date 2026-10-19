@@ -1,11 +1,13 @@
 ---
-import type { DirectoryEntry } from '@git-forge/core'
-import { blobUrl, type OpenRepository, treeUrl } from '../ui/repository.ts'
+import type { CommitInfo, DirectoryEntry } from '@git-forge/core'
+import { isoTime, relativeTime } from '../ui/format.ts'
+import { blobUrl, commitUrl, type OpenRepository, treeUrl } from '../ui/repository.ts'
 import Icon from './Icon.astro'
 
-type Props = { repo: OpenRepository; refName: string; path: readonly string[]; entries: readonly DirectoryEntry[]; lfs?: ReadonlySet<string> }
+type Props = { repo: OpenRepository; refName: string; path: readonly string[]; entries: readonly DirectoryEntry[]; lfs?: ReadonlySet<string>; commits?: ReadonlyMap<string, CommitInfo> | null }
 
-const { repo, refName, path, entries, lfs = new Set<string>() } = Astro.props
+const { repo, refName, path, entries, lfs = new Set<string>(), commits = null } = Astro.props
+const now = Math.floor(Date.now() / 1000)
 const icon = (entry: DirectoryEntry) => (entry.kind === 'tree' ? 'folder' : entry.kind === 'submodule' ? 'submodule' : entry.kind === 'symlink' ? 'symlink' : lfs.has(entry.name) ? 'lfs' : 'file')
 const href = (entry: DirectoryEntry) =>
   entry.kind === 'tree' ? treeUrl(repo.name, refName, [...path, entry.name]) : entry.kind === 'submodule' ? null : blobUrl(repo.name, refName, [...path, entry.name])
@@ -16,7 +18,7 @@ const href = (entry: DirectoryEntry) =>
     {
       path.length > 0 && (
         <tr class="hover:bg-base-200/60">
-          <td class="py-2">
+          <td class="py-2" colspan={commits ? 3 : 1}>
             <a href={treeUrl(repo.name, refName, path.slice(0, -1))} class="flex items-center gap-2.5 hover:underline" aria-label="Parent directory">
               <Icon name="folder" class="size-4 text-primary/70" />
               ..
@@ -40,6 +42,20 @@ const href = (entry: DirectoryEntry) =>
             {lfs.has(entry.name) && <span class="badge badge-xs">LFS</span>}
             <span class="sr-only">{entry.kind === 'tree' ? '(directory)' : entry.kind === 'submodule' ? '(submodule)' : ''}</span>
           </td>
+          {commits && (
+            <td class="hidden md:table-cell py-2 max-w-xs">
+              {commits.get(entry.name) && (
+                <a href={commitUrl(repo.name, commits.get(entry.name)!.id)} class="block truncate text-base-content/70 hover:underline hover:text-primary">
+                  {commits.get(entry.name)!.summary}
+                </a>
+              )}
+            </td>
+          )}
+          {commits && (
+            <td class="py-2 text-right whitespace-nowrap text-xs text-base-content/60">
+              {commits.get(entry.name) && <time datetime={isoTime(commits.get(entry.name)!.committer.timestamp)}>{relativeTime(commits.get(entry.name)!.committer.timestamp, now)}</time>}
+            </td>
+          )}
         </tr>
       ))
     }

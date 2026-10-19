@@ -118,6 +118,7 @@ export type LogOptions = {
   readonly skip?: number
   readonly path?: readonly string[]
   readonly maxWalk?: number
+  readonly first?: ObjectId | null
 }
 
 export const DEFAULT_MAX_LOG_WALK = 10_000
@@ -139,10 +140,12 @@ const touchesPath = async (odb: ObjectDatabase, commit: CommitInfo, path: readon
 export const commitLog = async (odb: ObjectDatabase, start: ObjectId, options: LogOptions): Promise<LogPage> => {
   const skip = options.skip ?? 0
   const path = options.path ?? []
+  if (path.length > 0 && options.first === null) return { commits: [], more: false }
+  let first = path.length > 0 ? options.first : undefined
   const wanted = skip + options.limit + 1
   const seen = new Set<ObjectId>([start])
-  const first = await readCommit(odb, start)
-  const queue: CommitInfo[] = first ? [first] : []
+  const head = await readCommit(odb, start)
+  const queue: CommitInfo[] = head ? [head] : []
   const matched: CommitInfo[] = []
   const maxWalk = options.maxWalk ?? DEFAULT_MAX_LOG_WALK
   let walked = 0
@@ -150,7 +153,9 @@ export const commitLog = async (odb: ObjectDatabase, start: ObjectId, options: L
     let best = 0
     for (let i = 1; i < queue.length; i++) if (queue[i]!.committer.timestamp > queue[best]!.committer.timestamp) best = i
     const commit = queue.splice(best, 1)[0]!
-    if (path.length === 0 || (await touchesPath(odb, commit, path))) matched.push(commit)
+    const known = first !== undefined
+    if (commit.id === first) first = undefined
+    if (path.length === 0 || (known ? first === undefined : await touchesPath(odb, commit, path))) matched.push(commit)
     for (const parent of commit.parents) {
       if (seen.has(parent)) continue
       seen.add(parent)

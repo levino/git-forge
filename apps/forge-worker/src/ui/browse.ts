@@ -3,8 +3,12 @@ import {
   type BlobContent,
   type CommitInfo,
   type DirectoryEntry,
+  type LastCommits,
   lastCommitFor,
   lfsAttributeRules,
+  type ObjectId,
+  readCommit,
+  readLastCommits,
   matchesLfs,
   readBlobContent,
   type RefTarget,
@@ -22,6 +26,7 @@ export type TreeView = {
   readonly target: RefTarget
   readonly entries: readonly DirectoryEntry[]
   readonly latest: CommitInfo | null
+  readonly commits: ReadonlyMap<string, CommitInfo> | null
   readonly readme: Readme | null
   readonly lfs: ReadonlySet<string>
 }
@@ -74,6 +79,30 @@ const lfsEntries = async (repo: OpenRepository, target: RefTarget, entries: read
   return new Set(entries.filter((entry) => entry.kind === 'blob' && matchesLfs(rules, [...target.path, entry.name].join('/'))).map((entry) => entry.name))
 }
 
+export const MAX_ENTRY_COMMITS = 1000
+
+export const knownLastCommits = async (repo: OpenRepository, commit: ObjectId): Promise<LastCommits | null> =>
+  repo.branches.some((branch) => branch.id === commit) ? readLastCommits(repo.odb, commit).catch(() => null) : null
+
+const latestFor = async (repo: OpenRepository, known: Promise<LastCommits | null>, commit: ObjectId, path: readonly string[]): Promise<CommitInfo | null> => {
+  const id = path.length === 0 ? commit : (await known)?.get(path.join('/'))
+  if (id === undefined) return lastCommitFor(repo.odb, commit, path)
+  return id === null ? null : readCommit(repo.odb, id)
+}
+
+const entryCommits = async (repo: OpenRepository, known: LastCommits | null, path: readonly string[], names: readonly string[]): Promise<Map<string, CommitInfo> | null> => {
+  if (!known || names.length > MAX_ENTRY_COMMITS) return null
+  const ids = names.map((name) => [name, known.get([...path, name].join('/')) ?? null] as const)
+  const commits = new Map<ObjectId, CommitInfo | null>()
+  await Promise.all([...new Set(ids.flatMap(([, id]) => (id ? [id] : [])))].map(async (id) => commits.set(id, await readCommit(repo.odb, id))))
+  const result = new Map<string, CommitInfo>()
+  for (const [name, id] of ids) {
+    const commit = id && commits.get(id)
+    if (commit) result.set(name, commit)
+  }
+  return result
+}
+
 export const browse = async (repo: OpenRepository, segments: readonly string[], expect: 'tree' | 'blob' | 'any' = 'any'): Promise<BrowseView> => {
   if (segments.length === 0) {
     if (!repo.defaultBranch) return { kind: 'empty' }
@@ -83,15 +112,17 @@ export const browse = async (repo: OpenRepository, segments: readonly string[], 
   if (!target) return { kind: 'not-found' }
   const reach = await reachOf(repo, target.commit)
   const here = reach(target.path.join('/'))
-  const pending = here === 'inside' ? lastCommitFor(repo.odb, target.commit, target.path) : Promise.resolve(null)
+  const known = here === 'none' ? Promise.resolve(null) : knownLastCommits(repo, target.commit)
+  const pending = here === 'inside' ? latestFor(repo, known, target.commit, target.path) : Promise.resolve(null)
   pending.catch(() => {})
   const resolved = here === 'none' ? null : await resolveTarget(repo.odb, target.commit, target.path)
   if (!resolved || resolved.kind === 'submodule') return { kind: 'not-found' }
   if (resolved.kind === 'tree') {
     if (expect === 'blob') return { kind: 'not-found' }
     const entries = resolved.entries.filter((entry) => reach([...target.path, entry.name].join('/')) !== 'none')
-    const [latest, readme, lfs] = await Promise.all([pending, readmeFor(repo, target, entries), lfsEntries(repo, target, entries)])
-    return { kind: 'tree', target, entries, latest, readme, lfs }
+    const visible = entries.filter((entry) => reach([...target.path, entry.name].join('/')) === 'inside').map((entry) => entry.name)
+    const [latest, commits, readme, lfs] = await Promise.all([pending, known.then((map) => entryCommits(repo, map, target.path, visible)), readmeFor(repo, target, entries), lfsEntries(repo, target, entries)])
+    return { kind: 'tree', target, entries, latest, commits, readme, lfs }
   }
   if (expect === 'tree' || here !== 'inside') return { kind: 'not-found' }
   const [latest, content] = await Promise.all([pending, readBlobContent(repo.odb, resolved.entry)])

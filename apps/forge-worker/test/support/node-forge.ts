@@ -1,4 +1,4 @@
-import { applyMigrations, type Database, MIGRATIONS } from '@git-forge/accounts'
+import { applyMigrations, createStateCache, type Database, MIGRATIONS } from '@git-forge/accounts'
 import { openSqliteDatabase } from '@git-forge/accounts-node'
 import { MemoryStorage } from '@git-forge/core'
 import { createForge, type Forge, type ForgeOptions } from '../../src/app.ts'
@@ -15,6 +15,7 @@ export const nodeForge = async (overrides: Partial<ForgeOptions> = {}): Promise<
   const forge = createForge({
     storage,
     db,
+    stateCache: createStateCache(db),
     publicUrl: undefined,
     instanceKey: undefined,
     bootstrapToken: BOOTSTRAP_TOKEN,

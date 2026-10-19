@@ -170,6 +170,16 @@ describe('repository pages', () => {
     expect(html).toContain(`<img src="/alice/site/raw/${head}/image.png"`)
   })
 
+  it('shows the last commit of every entry from the map stored after the push', async () => {
+    expect(await forge.storage.head(`repos/alice/site/cache/last-commits/${head}.json`)).not.toBeNull()
+    const { html } = await render(RepoHome, '/alice/site', { owner: 'alice', repo: 'site' })
+    expect(html).toMatch(new RegExp(`href="/alice/site/commit/${first}"[^>]*>\\s*Initial commit`))
+    expect(html).toMatch(new RegExp(`href="/alice/site/commit/${head}"[^>]*>\\s*Fix the answer`))
+    const tag = await render(Tree, '/alice/site/tree/v1.0', { owner: 'alice', repo: 'site', path: 'v1.0' })
+    expect(tag.html).toContain('Initial commit')
+    expect(tag.html).not.toMatch(new RegExp(`<td[^>]*>\\s*<a href="/alice/site/commit/${first}"`))
+  })
+
   it('lists commits, branches and tags', async () => {
     const commits = await render(Commits, '/alice/site/commits', { owner: 'alice', repo: 'site' })
     expect(commits.html.indexOf('Fix the answer')).toBeLessThan(commits.html.indexOf('Initial commit'))

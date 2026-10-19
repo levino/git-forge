@@ -78,7 +78,7 @@ const editable = session !== null && repo.view === null && (view.kind === 'empty
       </div>
       <div class="border border-base-300 rounded-box overflow-hidden">
         {view.latest && <LatestCommit repo={repo.name} commit={view.latest} historyHref={commitsUrl(repo.name, view.target.ref, view.target.path)} />}
-        <FileList repo={repo} refName={view.target.ref} path={view.target.path} entries={view.entries} lfs={view.lfs} />
+        <FileList repo={repo} refName={view.target.ref} path={view.target.path} entries={view.entries} lfs={view.lfs} commits={view.commits} />
       </div>
       {view.readme && <Readme readme={view.readme} />}
     </>

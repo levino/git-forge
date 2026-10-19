@@ -46,9 +46,11 @@ import {
   listCurrentJobs,
   listLogs,
   listRunJobs,
+  busyRunnerIds,
   listRunners,
   listRuns,
   removeRunner,
+  setRunnerLabels,
   type Runner,
   RunnerExistsError,
   type RunRow,
@@ -58,6 +60,8 @@ import { deleteVariable, getVariable, listVariables, putVariable, type Variable 
 
 export type RepositoryAuthorize = (request: Request, owner: string, repo: string) => Promise<boolean>
 
+export type OrganizationAuthorize = (request: Request, org: string) => Promise<boolean>
+
 export type GhesApiOptions = {
   readonly db: Database
   readonly storage: Storage
@@ -65,6 +69,7 @@ export type GhesApiOptions = {
   readonly authorize: RepositoryAuthorize
   readonly authorizeRead?: RepositoryAuthorize
   readonly authorizeWrite?: RepositoryAuthorize
+  readonly authorizeOrganization?: OrganizationAuthorize
   readonly actor?: (request: Request) => Promise<string | null>
   readonly secretsKey?: SecretsKey
   readonly launcher?: RunnerLauncher
@@ -86,16 +91,22 @@ const noContent = (status = 204) => new Response(null, { status })
 
 const iso = (ms: number | null): string | null => (ms === null ? null : new Date(ms).toISOString())
 
-const runnerJson = (runner: Runner) => ({
+const READ_ONLY_LABELS = new Set(['self-hosted', 'linux', 'windows', 'macos', 'x64', 'arm64', 'arm'])
+
+const labelsJson = (labels: readonly string[]) => labels.map((name, index) => ({ id: index + 1, name, type: READ_ONLY_LABELS.has(name.toLowerCase()) ? 'read-only' : 'custom' }))
+
+const runnerJson = (runner: Runner, busy: ReadonlySet<number>) => ({
   id: runner.id,
   name: runner.name,
   os: 'linux',
   status: runner.status === 'online' ? 'online' : 'offline',
-  busy: false,
+  busy: busy.has(runner.id),
   ephemeral: runner.ephemeral,
   runner_group_id: 1,
-  labels: runner.labels.map((name, index) => ({ id: index + 1, name, type: 'custom' })),
+  labels: labelsJson(runner.labels),
 })
+
+const DEFAULT_RUNNER_GROUP = { id: 1, name: 'Default', visibility: 'all', default: true, allows_public_repositories: true, restricted_to_workflows: false, selected_workflows: [], workflow_restrictions_read_only: false }
 
 const runStatus = (run: RunRow, jobs: readonly JobRow[]): string => {
   if (run.completed_at !== null) return 'completed'
@@ -293,6 +304,8 @@ const generateJitConfig = async (options: GhesApiOptions, request: Request, owne
   const name = body?.['name']
   const labels = body?.['labels']
   const workFolder = body?.['work_folder']
+  const group = body?.['runner_group_id']
+  if (group !== undefined && group !== 1) return error(422, 'runner_group_id must be 1 (the default group)')
   if (typeof name !== 'string' || !RUNNER_NAME.test(name)) return error(422, 'name must match [A-Za-z0-9][A-Za-z0-9._-]{0,63}')
   if (!Array.isArray(labels) || labels.length === 0 || !labels.every((label) => typeof label === 'string' && label.length > 0 && label.length <= 256)) {
     return error(422, 'labels must be a non-empty array of strings')
@@ -305,7 +318,7 @@ const generateJitConfig = async (options: GhesApiOptions, request: Request, owne
       { name, owner, repo, labels: labels as string[], ...(typeof workFolder === 'string' ? { workFolder } : {}) },
       now,
     )
-    return json(201, { runner: runnerJson(runner), encoded_jit_config: encodedJitConfig })
+    return json(201, { runner: runnerJson(runner, new Set()), encoded_jit_config: encodedJitConfig })
   } catch (caught) {
     if (caught instanceof RunnerExistsError) return error(409, `a runner named ${name} already exists`)
     throw caught
@@ -619,26 +632,70 @@ const actionsRoutes = async (context: RepoRequest, collection: string | undefine
   if (!(await options.authorize(request, owner, repo))) return error(404, 'Not Found')
   if (collection === 'secrets') return secretRoutes(context, { owner, repo, environment: '' }, rest.map(decodeURIComponent))
   if (collection === 'variables') return variableRoutes(context, { owner, repo, environment: '' }, rest.map(decodeURIComponent))
-  if (collection === 'runners') {
-    if (rest.length === 0 && method === 'GET') {
-      const runners = await listRunners(options.db, owner, repo, url.searchParams.get('name') ?? undefined)
-      return json(200, { total_count: runners.length, runners: runners.map(runnerJson) })
-    }
-    if (rest.length === 1 && rest[0] === 'generate-jitconfig' && method === 'POST') return generateJitConfig(options, request, owner, repo, now)
-    if (rest.length === 1 && (rest[0] === 'registration-token' || rest[0] === 'remove-token') && method === 'POST') {
-      const token = await issueToken(options.db, { kind: 'registration', owner, repo, ttlMs: REGISTRATION_TOKEN_TTL_MS }, now)
-      return json(201, { token, expires_at: new Date(now + REGISTRATION_TOKEN_TTL_MS).toISOString() })
-    }
-    if (rest.length === 1 && /^\d+$/.test(rest[0]!)) {
-      const runner = await getRunner(options.db, Number(rest[0]))
-      if (!runner || runner.owner !== owner || runner.repo !== repo) return error(404, 'Not Found')
-      if (method === 'GET') return json(200, runnerJson(runner))
-      if (method === 'DELETE') {
-        await removeRunner(options.db, runner.id, now)
-        return noContent()
-      }
-    }
+  if (collection === 'runners') return runnerRoutes(options, request, url, owner, repo, rest, now)
+  return error(404, 'Not Found')
+}
+
+const labelNames = (body: Record<string, unknown> | null): string[] | null => {
+  const labels = body?.['labels']
+  return Array.isArray(labels) && labels.every((label) => typeof label === 'string' && label.length > 0 && label.length <= 256) ? (labels as string[]) : null
+}
+
+const labelRoutes = async (options: GhesApiOptions, request: Request, runner: Runner, rest: readonly string[]): Promise<Response> => {
+  const method = request.method
+  const readOnly = runner.labels.filter((label) => READ_ONLY_LABELS.has(label.toLowerCase()))
+  const respond = (labels: readonly string[]) => json(200, { total_count: labels.length, labels: labelsJson(labels) })
+  const save = async (labels: readonly string[]) => {
+    const unique = [...new Map(labels.map((label) => [label.toLowerCase(), label])).values()]
+    await setRunnerLabels(options.db, runner.id, unique)
+    return respond(unique)
   }
+  if (rest.length === 0 && method === 'GET') return respond(runner.labels)
+  if (rest.length === 0 && method === 'DELETE') return save(readOnly)
+  if (rest.length === 1 && method === 'DELETE') {
+    const name = decodeURIComponent(rest[0]!)
+    if (!runner.labels.some((label) => label.toLowerCase() === name.toLowerCase())) return error(404, 'Not Found')
+    if (READ_ONLY_LABELS.has(name.toLowerCase())) return error(422, `${name} is a read-only label`)
+    return save(runner.labels.filter((label) => label.toLowerCase() !== name.toLowerCase()))
+  }
+  if (rest.length !== 0 || (method !== 'POST' && method !== 'PUT')) return error(404, 'Not Found')
+  const labels = labelNames(await readBody(request))
+  if (!labels) return error(422, 'labels must be an array of strings')
+  return save(method === 'POST' ? [...runner.labels, ...labels] : [...readOnly, ...labels])
+}
+
+const runnerRoutes = async (options: GhesApiOptions, request: Request, url: URL, owner: string, repo: string, rest: readonly string[], now: number): Promise<Response> => {
+  const method = request.method
+  if (rest.length === 0 && method === 'GET') {
+    const runners = await listRunners(options.db, owner, repo, url.searchParams.get('name') ?? undefined)
+    const busy = await busyRunnerIds(options.db)
+    return json(200, { total_count: runners.length, runners: runners.map((runner) => runnerJson(runner, busy)) })
+  }
+  if (rest.length === 1 && rest[0] === 'generate-jitconfig' && method === 'POST') return generateJitConfig(options, request, owner, repo, now)
+  if (rest.length === 1 && (rest[0] === 'registration-token' || rest[0] === 'remove-token') && method === 'POST') {
+    const token = await issueToken(options.db, { kind: 'registration', owner, repo, ttlMs: REGISTRATION_TOKEN_TTL_MS }, now)
+    return json(201, { token, expires_at: new Date(now + REGISTRATION_TOKEN_TTL_MS).toISOString() })
+  }
+  const runner = /^\d+$/.test(rest[0] ?? '') ? await getRunner(options.db, Number(rest[0])) : null
+  if (!runner || runner.owner !== owner || runner.repo !== repo) return error(404, 'Not Found')
+  if (rest[1] === 'labels') return labelRoutes(options, request, runner, rest.slice(2))
+  if (rest.length === 1 && method === 'GET') return json(200, runnerJson(runner, await busyRunnerIds(options.db)))
+  if (rest.length === 1 && method === 'DELETE') {
+    await removeRunner(options.db, runner.id, now)
+    return noContent()
+  }
+  return error(404, 'Not Found')
+}
+
+const organizationRoutes = async (options: GhesApiOptions, request: Request, url: URL, org: string, rest: readonly string[], now: number): Promise<Response> => {
+  if (!options.authorizeOrganization || !(await options.authorizeOrganization(request, org))) return error(404, 'Not Found')
+  const [collection, ...tail] = rest
+  if (collection === 'runners') return runnerRoutes(options, request, url, org, '', tail, now)
+  if (collection !== 'runner-groups' || request.method !== 'GET') return error(404, 'Not Found')
+  if (tail.length === 0) return json(200, { total_count: 1, runner_groups: [DEFAULT_RUNNER_GROUP] })
+  if (tail[0] !== '1') return error(404, 'Not Found')
+  if (tail.length === 1) return json(200, DEFAULT_RUNNER_GROUP)
+  if (tail.length === 2 && tail[1] === 'runners') return runnerRoutes(options, request, url, org, '', [], now)
   return error(404, 'Not Found')
 }
 
@@ -650,6 +707,7 @@ export const handleGhesApi = async (request: Request, options: GhesApiOptions): 
   const method = request.method
   if (segments.length === 0 || (segments.length === 1 && segments[0] === 'meta')) return json(200, { installed_version: GHES_VERSION, verifiable_password_authentication: false })
   if (segments.join('/') === 'actions/runner-registration' && method === 'POST') return runnerRegistration(options, request, now)
+  if (segments[0] === 'orgs' && segments[2] === 'actions' && segments[1] && isValidName(segments[1])) return organizationRoutes(options, request, url, segments[1], segments.slice(3), now)
   const [scope, owner, repo, area, collection, ...rest] = segments
   if (scope !== 'repos' || !owner || !repo || !isValidName(owner) || !isValidName(repo)) return error(404, 'Not Found')
   const context: RepoRequest = { options, request, url, owner, repo, now }

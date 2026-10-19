@@ -1,4 +1,4 @@
-import type { ExpressionValue } from '@git-forge/core'
+import type { ExpressionValue, YamlValue } from '@git-forge/core'
 
 export type TemplateToken =
   | string
@@ -60,4 +60,10 @@ const STATUS_FUNCTION = /\b(success|failure|cancelled|always)\s*\(\s*\)/
 export const stepCondition = (condition: string | undefined): string => {
   if (condition === undefined || condition.trim() === '') return 'success()'
   return STATUS_FUNCTION.test(condition) ? condition : `success() && (${condition})`
+}
+
+export const stringsToken = (value: YamlValue): TemplateToken => {
+  if (Array.isArray(value)) return sequenceToken(value.map(stringsToken))
+  if (value !== null && typeof value === 'object') return mappingToken(Object.fromEntries(Object.entries(value).map(([key, item]) => [key, stringsToken(item)])))
+  return expressionToken(value === null ? '' : String(value))
 }

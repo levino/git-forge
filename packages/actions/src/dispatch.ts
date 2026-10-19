@@ -42,6 +42,7 @@ import {
 } from '@git-forge/core'
 import { type JobDefinition, jobDefinitionOf, jobOutputsOf, type RunDefinition, runContextOf, runDefinitionOf, type RunInputs } from './definitions.ts'
 import { encodeJitConfig } from './jit.ts'
+import type { WorkflowJobAction } from './webhook.ts'
 import { githubContextValue, type NeedResult, needsContextValue, strategyContextValue, type StrategyContext } from './job-message.ts'
 import { generateRunnerKey } from './keys.ts'
 import { getEnvironment } from './secrets.ts'
@@ -62,6 +63,8 @@ import {
   getRun,
   getRunnerIncludingRemoved,
   type JobGroup,
+  labelsMatch,
+  selfHostedRunnerFor,
   type JobRow,
   jobsInGroup,
   listCurrentJobs,
@@ -87,12 +90,19 @@ export type RunnerLaunch = {
   readonly requestId: number
   readonly runnerName: string
   readonly labels: readonly string[]
+  readonly docker: boolean
   readonly encodedJitConfig: string
 }
 
 export interface RunnerLauncher {
+  readonly labels?: readonly string[]
   launch(launch: RunnerLaunch): Promise<void>
 }
+
+export type JobEventSink = (action: WorkflowJobAction, job: JobRow) => Promise<void>
+
+export const needsDocker = (job: WorkflowJob): boolean =>
+  job.container !== undefined || job.services !== undefined || job.steps.some((step) => step.kind === 'uses' && step.uses.startsWith('docker://'))
 
 export type ServiceUrls = {
   readonly serverUrl: string
@@ -174,6 +184,7 @@ export type DispatchOptions = {
   readonly now?: () => number
   readonly log?: (event: Record<string, unknown>) => void
   readonly cacheLimits?: CacheLimits
+  readonly onJobEvent?: JobEventSink
 }
 
 export const MAX_LAUNCHES = 3
@@ -218,10 +229,12 @@ const recordChecks = async (options: DispatchOptions, run: RunRow, requestIds: I
   }
 }
 
-const launchJob = async (options: DispatchOptions, job: JobRow, owner: string, repo: string): Promise<void> => {
-  if (!options.launcher) return
+const launchJob = async (options: DispatchOptions, job: JobRow, owner: string, repo: string): Promise<boolean> => {
+  if (!options.launcher) return false
   const now = clock(options)
   const labels = JSON.parse(job.labels) as string[]
+  if (options.launcher.labels && !labelsMatch(labels, options.launcher.labels)) return false
+  if (await selfHostedRunnerFor(options.db, owner, repo, labels)) return false
   const { runner, encodedJitConfig } = await createJitRunner(
     options.db,
     options.urls,
@@ -231,12 +244,18 @@ const launchJob = async (options: DispatchOptions, job: JobRow, owner: string, r
   await bindJobToRunner(options.db, job.request_id, runner.id)
   await recordLaunch(options.db, job.request_id)
   try {
-    await options.launcher.launch({ jobId: job.id, requestId: job.request_id, runnerName: runner.name, labels, encodedJitConfig })
+    await options.launcher.launch({ jobId: job.id, requestId: job.request_id, runnerName: runner.name, labels, docker: needsDocker(jobDefinitionOf(job).job), encodedJitConfig })
   } catch (error) {
     options.log?.({ event: 'runner-launch-failed', jobId: job.id, runner: runner.name, error: String(error) })
     await unbindJob(options.db, job.request_id, runner.id)
     await removeRunner(options.db, runner.id, now)
   }
+  return true
+}
+
+const queueJob = async (options: DispatchOptions, job: JobRow, owner: string, repo: string): Promise<void> => {
+  await options.onJobEvent?.('queued', job)
+  await launchJob(options, job, owner, repo)
 }
 
 const releaseRunner = async (options: DispatchOptions, job: JobRow): Promise<void> => {
@@ -484,7 +503,7 @@ const expandJob = async (options: DispatchOptions, run: RunRow, definition: RunD
     }
   }
   for (const leg of created) {
-    if (leg.status === 'queued') await launchJob(options, leg, run.owner, run.repo)
+    if (leg.status === 'queued') await queueJob(options, leg, run.owner, run.repo)
     else await claimGroup(options, run, leg)
   }
   await recordChecks(
@@ -525,6 +544,7 @@ const cancelJobs = async (options: DispatchOptions, run: RunRow, jobs: readonly 
       await revokeJobTokens(options.db, job.id, now)
       await releaseRunner(options, job)
       await recordChecks(options, run, [job.request_id])
+      if (job.status === 'queued') await options.onJobEvent?.('completed', (await getJob(options.db, job.request_id))!)
       changed = true
     } else if (await requestJobCancel(options.db, job.request_id, reason, now)) changed = true
   }
@@ -546,7 +566,7 @@ const legacyAdvance = async (options: DispatchOptions, run: RunRow): Promise<Job
         if (await finishPending(options.db, job.request_id, 'skipped', null, now)) changed = true
       } else if (needs.every((need) => need?.status === 'completed') && (await promoteJob(options.db, job.request_id))) {
         const promoted = { ...job, status: 'queued' as const }
-        await launchJob(options, promoted, run.owner, run.repo)
+        await queueJob(options, promoted, run.owner, run.repo)
         started.push(promoted)
         changed = true
       }
@@ -609,7 +629,7 @@ export const advance = async (options: DispatchOptions, runId: number): Promise<
         if (run.cancelled_at !== null) continue
         if (await promoteJob(db, row.request_id, groupOf(run, row))) {
           const promoted = (await getJob(db, row.request_id))!
-          await launchJob(options, promoted, run.owner, run.repo)
+          await queueJob(options, promoted, run.owner, run.repo)
           await recordChecks(options, run, [row.request_id])
           started.push(promoted)
           active++
@@ -1009,6 +1029,7 @@ const abandon = async (options: DispatchOptions, job: JobRow, conclusion: string
   if (changes !== 1) return false
   await revokeJobTokens(options.db, job.id, now)
   await releaseRunner(options, job)
+  await options.onJobEvent?.('completed', (await getJob(options.db, job.request_id))!)
   await advanceRun(options, job)
   return true
 }
@@ -1059,10 +1080,7 @@ export const reapActions = async (options: DispatchOptions): Promise<ReapReport>
     if (job.runner_id === null) {
       if (job.launches < MAX_LAUNCHES && job.queued_at < now - REAPER.relaunchDelayMs) {
         const run = await getRun(db, job.run_id)
-        if (run) {
-          await launchJob(options, job, run.owner, run.repo)
-          requeued++
-        }
+        if (run && (await launchJob(options, job, run.owner, run.repo))) requeued++
       }
       continue
     }

@@ -14,6 +14,7 @@ export type Env = ForgeVars & {
   readonly BACKUP?: R2Bucket
   readonly DB: D1Database
   readonly RUNNER?: DurableObjectNamespace
+  readonly RUNNER_DOCKER?: DurableObjectNamespace
   readonly IMPORTS?: Queue<ImportJob>
   readonly JOBS?: Queue<AppJob>
   readonly EMAIL?: SendEmail
@@ -75,7 +76,7 @@ export const forgeFor = (env: Env): Promise<Forge> => {
                 idTokenKeys,
                 artifactRetentionDays: actions.artifactRetentionDays,
                 cacheLimits: actions.cacheLimits,
-                ...(env.RUNNER ? { launcher: containerLauncher(env.RUNNER) } : {}),
+                ...(env.RUNNER ? { launcher: containerLauncher(env.RUNNER, env.RUNNER_DOCKER, actions.runnerLabels) } : {}),
               },
             }
           : {}),

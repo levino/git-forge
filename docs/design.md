@@ -1545,10 +1545,37 @@ Implemented for repositories: `POST …/actions/runners/generate-jitconfig`,
 `…/environments[/{name}[/secrets[/{name}]]]`, `GET
 …/tarball/{ref}`, `GET /api/v3/meta`. Reading runs, jobs, logs
 and tarballs needs read access, cancel/re-run/dispatch need write access,
-runners, secrets and environments need admin access. Pure functions for signed `workflow_job` webhooks
-(`X-Hub-Signature-256`) exist; delivering them to providers, GitHub App auth
-(JWT → installation token) and org-level runners come with the provider work
-package.
+runners, secrets and environments need admin access.
+
+Runners also exist per organization (`actions_runners.repo = ''`, admin of the
+organization): `/api/v3/orgs/{org}/actions/runners[/{id}]`,
+`…/generate-jitconfig`, `…/registration-token`, `…/remove-token`, and
+`/orgs/{org}/actions/runner-groups[/1[/runners]]` with the single group
+`Default` (id 1, the only accepted `runner_group_id`). Labels per runner:
+`GET/POST/PUT/DELETE …/runners/{id}/labels[/{name}]`; `self-hosted`, OS and
+architecture labels are `read-only`. `config.sh --url https://<forge>/<owner>[/<repo>]
+--token …` works unchanged: the runner posts the token to
+`/api/v3/actions/runner-registration` (it drops any port from the URL), gets
+the service URL, which must be on the same host, and registers with
+`POST _apis/v1/Agent/1` (lists with pool `0`); `config.sh remove` deletes
+with a `remove-token`. Removed runners free their name. A runner claims
+queued jobs of its scope only (its repository, or every repository of its
+organization) whose labels it has.
+
+Routing: a queued job goes to the built-in launcher unless a registered
+runner of its scope (not bound to a job) has all its labels, or the launcher
+does not serve them (`RunnerLauncher.labels`, `ACTIONS_RUNNER_LABELS` in the
+Worker). Such jobs wait for that runner or for an external provider.
+
+`workflow_job` events: dispatch reports `queued` (and `completed` for queued
+jobs that are cancelled or abandoned), the service `in_progress` (first lock
+renewal) and `completed` through `JobEventSink`; the Worker turns them into
+forge events, so repository and organization webhooks receive them signed
+(`X-Hub-Signature-256`) like every other event, and GitHub App installations
+receive whatever the event fan-out routes to them. The REST API accepts any
+principal the accounts layer authenticates (PATs, sessions, later
+installation tokens); runner management needs admin rights on the repository
+or organization.
 
 #### Tokens and permissions
 
@@ -1595,6 +1622,25 @@ and stays queued for any registered runner with matching labels.
   (1/4 vCPU, 1 GiB, 4 GB disk): the smallest one whose disk holds the image,
   enough for the runner and small jobs; an instance picks a bigger one in its
   `wrangler.toml`.
+  **Docker (`container:`, `services:`, `docker://`):** the stock runner puts
+  job and service containers on a Docker network with aliases, which needs
+  iptables; Cloudflare Containers run Docker-in-Docker but without iptables.
+  So the image sets `ACTIONS_RUNNER_CONTAINER_HOOKS` to `runner/hook.js`, an
+  implementation of the runner container hook protocol (`prepare_job`,
+  `run_script_step`, `run_container_step`, `cleanup_job`). It starts the
+  image's `dockerd` with sudo on first use (`--iptables=false`; `vfs` when the
+  root file system is overlayfs), pulls with `registry` credentials, runs all
+  containers with `--network=host`, adds every service name and
+  `--network-alias` as `127.0.0.1` to the job container's `/etc/hosts`,
+  waits for health checks (`--health-cmd` in `options`) like GitHub, execs
+  `run` steps in the job container and removes everything labelled
+  `git-forge-hook` at the end. The hook protocol does not pass service names,
+  so the job message appends `--label=git-forge-service=<name>` to each
+  service's `options`. With a shared network, ports are not remapped: a
+  service listens on its own port (`ports: ['5433:5432']` still means 5432),
+  and two services cannot use the same port. Jobs that need Docker are
+  launched with `docker: true`; the Worker sends them to a second container
+  class (`RUNNER_DOCKER`, bigger instance type) when it is bound.
   **Image source (decision, 18 Oct 2026):** the instance repository carries
   the Dockerfile and `wrangler deploy` builds it and pushes it to the account's
   Cloudflare registry; Workers Builds has Docker, so this works with the
@@ -1612,10 +1658,11 @@ and stays queued for any registered runner with matching labels.
 - **Local process:** the integration test copies the downloaded runner into a
   temporary directory per job and starts it with `--jitconfig`. The same works
   on a Pi or against `wrangler dev`.
-- **External providers (later):** WarpBuild Enterprise, AWS CodeBuild and
-  RunsOn call `generate-jitconfig` / `registration-token` themselves after a
-  `workflow_job` webhook; the forge only has to deliver signed webhooks and
-  accept GitHub App or PAT authentication on `/api/v3`.
+- **External providers:** WarpBuild Enterprise, AWS CodeBuild and RunsOn
+  call `generate-jitconfig` / `registration-token` themselves after a
+  `workflow_job` webhook (see "GHES API"). Tested with a mini provider that
+  receives the `queued` webhook, calls `generate-jitconfig` and starts the
+  real runner with `--jitconfig`; not yet tried with the real providers.
 
 #### Secrets and environments
 
@@ -1678,7 +1725,13 @@ same functions (`reviewDeployment`).
 - Deployed on Cloudflare Containers on the production instance (image
   built by Workers Builds, `basic` instances, `ACTIONS_GITHUB_FALLBACK` for
   `actions/checkout`).
-- Not supported yet: `container:`, `services:`, reusable workflows,
+- `container:` and `services:` run on the real runner with the container
+  hook against local Docker (`node:22` job container, a `postgres` service
+  queried as `postgres:5432`, a `docker://` step); a runner registered with
+  `config.sh` and a provider's JIT runner run jobs against `wrangler dev`
+  (`apps/forge-worker/test/e2e/runners.e2e.test.ts`). Docker-in-Docker on
+  Cloudflare itself is not verified yet.
+- Not supported yet: reusable workflows,
   organization variables, `hashFiles` server-side, wait timers and branch
   policies of environments, re-running single matrix legs.
 - Broker / run service (v2 flow) and message encryption with the session

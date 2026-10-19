@@ -48,7 +48,8 @@ The tables are part of the D1 schema in `packages/accounts/migrations`
   functions included), `runs-on` with expressions, `strategy.matrix`
   (`include`, `exclude`, expressions such as `fromJSON(needs.x.outputs.y)`),
   `fail-fast`, `max-parallel`, `continue-on-error`, `timeout-minutes`,
-  `environment` (with required reviewers), `env`, `defaults`, `outputs`.
+  `environment` (with required reviewers), `env`, `defaults`, `outputs`,
+  `container`, `services` (through the runner container hook, design §15).
 - Steps: `run` and `uses` (actions downloaded as tarballs from repositories
   on the forge), `if`, `continue-on-error`, `timeout-minutes`, `env`,
   `shell`, `working-directory`. Step expressions are evaluated by the runner.
@@ -81,7 +82,8 @@ The tables are part of the D1 schema in `packages/accounts/migrations`
 | `GET …/tarball/{ref}` | read (or the action token handed to the runner) |
 | `GET …/actions/artifacts[/{id}[/zip]]`, `GET …/actions/runs/{id}/artifacts`, `GET …/actions/caches`, `GET …/actions/cache/usage` | read |
 | `DELETE …/actions/artifacts/{id}`, `DELETE …/actions/caches?key=&ref=`, `DELETE …/actions/caches/{id}` | write |
-| runners, `generate-jitconfig`, `registration-token` | admin |
+| `…/actions/runners[/{id}[/labels[/{name}]]]`, `generate-jitconfig`, `registration-token`, `remove-token` | admin |
+| same under `orgs/{org}/actions/runners`, `GET orgs/{org}/actions/runner-groups[/1[/runners]]` | organization admin |
 
 ## Running a runner by hand
 
@@ -96,6 +98,8 @@ curl -sX POST http://127.0.0.1:8787/api/v3/repos/acme/site/actions/runners/gener
 ```
 
 The runner then picks up queued jobs whose `runs-on` labels it has.
+`./config.sh --url https://forge.example/acme/site --token <registration-token>`
+registers a permanent runner; the runner drops any port from that URL.
 
 ## Tests
 

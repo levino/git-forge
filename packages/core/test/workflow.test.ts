@@ -103,9 +103,9 @@ describe('parseWorkflow', () => {
 
   it('rejects job keys that would otherwise be ignored', () => {
     expect(() =>
-      parseWorkflow('on:\n  push:\n    paths-filter: [src]\nrun-name: x\njobs:\n  a:\n    services: {}\n    runs-on: x\n    strategy: {matrix: {os: x}, retry: 1}\n    steps: [{run: x, retry: 3}]'),
+      parseWorkflow('on:\n  push:\n    paths-filter: [src]\nrun-name: x\njobs:\n  a:\n    services: {db: {ports: [1]}}\n    runs-on: x\n    strategy: {matrix: {os: x}, retry: 1}\n    steps: [{run: x, retry: 3}]'),
     ).toThrow(
-      'run-name: is not supported yet; jobs.a.services: is not supported yet; jobs.a.strategy.retry: is not supported yet; jobs.a.strategy.matrix.os: expected a list or an expression; jobs.a.steps[0].retry: is not supported yet; on.push.paths-filter: is not supported yet',
+      'run-name: is not supported yet; jobs.a.strategy.retry: is not supported yet; jobs.a.strategy.matrix.os: expected a list or an expression; jobs.a.services.db.image: is required; jobs.a.steps[0].retry: is not supported yet; on.push.paths-filter: is not supported yet',
     )
   })
 

@@ -21,6 +21,8 @@ import {
   GITHUB_TOKEN_PREFIX,
   getJobById,
   getRun,
+  getRunnerIncludingRemoved,
+  type JobEventSink,
   type JobRow,
   listCurrentJobs,
   listRunJobs,
@@ -1779,9 +1781,27 @@ export const createForge = (options: ForgeOptions): Forge => {
       checks: checkRuns,
       ...(options.actions?.launcher ? { launcher: options.actions.launcher } : {}),
       ...(options.actions?.cacheLimits ? { cacheLimits: options.actions.cacheLimits } : {}),
+      onJobEvent: jobEvents(serverUrl),
       now: () => now().getTime(),
       log: (event) => console.log(JSON.stringify(event)),
     }
+  }
+
+  const jobEvents =
+    (serverUrl: string): JobEventSink =>
+    async (action, job) => {
+      const run = await getRun(db, job.run_id)
+      if (!run) return
+      const runner = job.runner_id === null ? null : await getRunnerIncludingRemoved(db, job.runner_id)
+      const context = { baseUrl: serverUrl, repository: { owner: run.owner, name: run.repo }, actor: { kind: 'user' as const, id: null, login: run.actor } }
+      await emit(workflowJobEvent(context, workflowJobPayload(action, job, run, serverUrl, runner?.name.replace(/\/removed\/\d+$/, '') ?? null)))
+    }
+
+  const isOrganizationAdmin = async (request: Request, org: string): Promise<boolean> => {
+    const principal = await principalOf(request)
+    if (principal.kind !== 'user' || !canManage(principal)) return false
+    const account = await store.findAccount(org)
+    return account?.kind === 'organization' && ((await store.isOrganizationOwner(account.id, principal.id)) || (await store.isInstanceAdmin(principal.id)))
   }
 
   const repositoryFacts = async (owner: string, name: string) => {
@@ -1902,6 +1922,7 @@ export const createForge = (options: ForgeOptions): Forge => {
           await advanceRun(dispatch, job)
           await emitRunEvents(dispatch.urls.serverUrl, job)
         },
+        onJobEvent: jobEvents(dispatch.urls.serverUrl),
         results: { idTokens: (actions.idTokenKeys?.length ?? 0) > 0, ...(actions.artifactRetentionDays ? { artifactRetentionDays: actions.artifactRetentionDays } : {}) },
       })) ??
       (await handleGhesApi(request, {
@@ -1911,6 +1932,7 @@ export const createForge = (options: ForgeOptions): Forge => {
         authorize: isRepositoryAdmin,
         authorizeRead: (incoming, owner, name) => hasRepositoryAccess(incoming, owner, name, 'read'),
         authorizeWrite: (incoming, owner, name) => hasRepositoryAccess(incoming, owner, name, 'write'),
+        authorizeOrganization: isOrganizationAdmin,
         actor: userLogin,
         ...(actions.secretsKey ? { secretsKey: actions.secretsKey } : {}),
         ...(actions.launcher ? { launcher: actions.launcher } : {}),
@@ -1948,7 +1970,6 @@ export const createForge = (options: ForgeOptions): Forge => {
     const run = await getRun(db, job.run_id)
     if (!run) return
     const context = { baseUrl: serverUrl, repository: { owner: run.owner, name: run.repo }, actor: { kind: 'user' as const, id: null, login: run.actor } }
-    await emit(workflowJobEvent(context, workflowJobPayload('completed', job, run, serverUrl, null)))
     const jobs = await listRunJobs(db, run.id)
     if (jobs.some((entry) => entry.status !== 'completed')) return
     const failed = jobs.some((entry) => entry.conclusion !== null && !['success', 'skipped', 'neutral'].includes(entry.conclusion))

@@ -11,6 +11,7 @@ import {
   handleGhesApi,
   handleResultsService,
   type IdTokenKey,
+  type JobEventSink,
   type QueuedRun,
   queueRunsForPush,
   type RunnerLauncher,
@@ -61,6 +62,7 @@ export type TestForgeOptions = {
   readonly now?: () => number
   readonly idTokenKeys?: readonly IdTokenKey[]
   readonly results?: boolean
+  readonly onJobEvent?: JobEventSink
 }
 
 const presented = (request: Request): string | null => {
@@ -89,6 +91,7 @@ export const createTestForge = async (options: TestForgeOptions = {}): Promise<T
     checks,
     ...(options.launcher ? { launcher: options.launcher } : {}),
     ...(options.now ? { now: options.now } : {}),
+    ...(options.onJobEvent ? { onJobEvent: options.onJobEvent } : {}),
   })
   const readable = async (incoming: Request, owner: string, name: string): Promise<boolean> => {
     const token = presented(incoming)
@@ -126,6 +129,7 @@ export const createTestForge = async (options: TestForgeOptions = {}): Promise<T
       onJobCompleted: async (job) => {
         await advanceRun(dispatch, job)
       },
+      ...(options.onJobEvent ? { onJobEvent: options.onJobEvent } : {}),
       ...(options.results !== false ? { results: { idTokens: (options.idTokenKeys?.length ?? 0) > 0 } } : {}),
     })
     if (service) return service
@@ -136,6 +140,7 @@ export const createTestForge = async (options: TestForgeOptions = {}): Promise<T
       authorize: async (incoming) => presented(incoming) === ADMIN_TOKEN,
       authorizeRead: readable,
       authorizeWrite: async (incoming) => presented(incoming) === ADMIN_TOKEN,
+      authorizeOrganization: async (incoming) => presented(incoming) === ADMIN_TOKEN,
       actor: async (incoming) => (presented(incoming) === ADMIN_TOKEN ? 'admin' : presented(incoming) === REVIEWER_TOKEN ? 'reviewer' : null),
       ...(options.secretsKey ? { secretsKey: options.secretsKey } : {}),
       ...(options.launcher ? { launcher: options.launcher } : {}),

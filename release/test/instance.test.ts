@@ -157,6 +157,12 @@ describe('instance template', () => {
     expect(buildCommand(toml)).toContain('https://github.com/levino/git-forge/releases/download/v$V')
   })
 
+  it('ships the same runner image as the app', () => {
+    const appRunner = resolve(releaseRoot, '../apps/forge-worker/runner')
+    expect(readdirSync(join(templateRoot, 'runner')).sort()).toEqual(['Dockerfile', 'hook.js'])
+    for (const file of readdirSync(appRunner)) expect(readFileSync(join(templateRoot, 'runner', file), 'utf8')).toBe(readFileSync(join(appRunner, file), 'utf8'))
+  })
+
   it('declares every resource by name only, so the first deploy provisions it', () => {
     expect(toml).not.toMatch(/\b(database_id|id)\s*=/)
     expect(toml).toMatch(/\[\[d1_databases\]\]\nbinding = "DB"\ndatabase_name = "[^"]+"\n\n/)

@@ -179,9 +179,26 @@ export const listRunners = async (db: Database, owner: string, repo: string, nam
   return rows.map(toRunner)
 }
 
+export const busyRunnerIds = async (db: Database): Promise<Set<number>> =>
+  new Set((await db.all<{ runner_id: number }>(sql("SELECT DISTINCT runner_id FROM actions_jobs WHERE status IN ('assigned', 'in_progress') AND runner_id IS NOT NULL"))).map((row) => row.runner_id))
+
+export const ranJob = async (db: Database, runnerId: number): Promise<boolean> =>
+  (await first(db, sql("SELECT 1 FROM actions_jobs WHERE runner_id = ? AND status = 'completed' LIMIT 1", runnerId))) !== null
+
+export const setRunnerLabels = async (db: Database, id: number, labels: readonly string[]): Promise<void> => {
+  await db.run(sql('UPDATE actions_runners SET labels = ? WHERE id = ? AND removed_at IS NULL', JSON.stringify(labels), id))
+}
+
+export const selfHostedRunnerFor = async (db: Database, owner: string, repo: string, labels: readonly string[]): Promise<Runner | null> => {
+  const rows = await db.all<RunnerRow>(
+    sql("SELECT * FROM actions_runners WHERE removed_at IS NULL AND job_id IS NULL AND owner = ? COLLATE NOCASE AND (repo = ? COLLATE NOCASE OR repo = '') ORDER BY id", owner, repo),
+  )
+  return rows.map(toRunner).find((runner) => labelsMatch(labels, runner.labels)) ?? null
+}
+
 export const removeRunner = async (db: Database, id: number, now: number): Promise<boolean> =>
   (await db.batch([
-    sql('UPDATE actions_runners SET removed_at = ?, status = ? WHERE id = ? AND removed_at IS NULL', now, 'offline', id),
+    sql("UPDATE actions_runners SET removed_at = ?, status = ?, name = name || '/removed/' || id WHERE id = ? AND removed_at IS NULL", now, 'offline', id),
     sql('UPDATE actions_tokens SET expires_at = ? WHERE runner_id = ? AND expires_at > ?', now, id, now),
   ]))[0]!.changes === 1
 
@@ -524,7 +541,7 @@ export const unbindJob = async (db: Database, requestId: number, runnerId: numbe
   await db.run(sql("UPDATE actions_jobs SET runner_id = NULL WHERE request_id = ? AND runner_id = ? AND status = 'queued'", requestId, runnerId))
 }
 
-const labelsMatch = (required: readonly string[], offered: readonly string[]): boolean => {
+export const labelsMatch = (required: readonly string[], offered: readonly string[]): boolean => {
   const available = new Set(offered.map((label) => label.toLowerCase()))
   return required.every((label) => available.has(label.toLowerCase()))
 }
@@ -536,7 +553,13 @@ export const claimJob = async (db: Database, runner: Runner, sessionId: string, 
   const candidates = await db.all<JobRow>(
     runner.jobId
       ? sql("SELECT * FROM actions_jobs WHERE status = 'queued' AND id = ? AND (runner_id IS NULL OR runner_id = ?)", runner.jobId, runner.id)
-      : sql("SELECT * FROM actions_jobs WHERE status = 'queued' AND (runner_id IS NULL OR runner_id = ?) ORDER BY runner_id IS NULL, request_id LIMIT 50", runner.id),
+      : sql(
+          "SELECT j.* FROM actions_jobs j JOIN actions_runs r ON r.id = j.run_id WHERE j.status = 'queued' AND (j.runner_id IS NULL OR j.runner_id = ?) AND r.owner = ? COLLATE NOCASE AND (? = '' OR r.repo = ? COLLATE NOCASE) ORDER BY j.runner_id IS NULL, j.request_id LIMIT 50",
+          runner.id,
+          runner.owner,
+          runner.repo,
+          runner.repo,
+        ),
   )
   for (const candidate of candidates) {
     if (candidate.runner_id === null && !labelsMatch(JSON.parse(candidate.labels) as string[], runner.labels)) continue

@@ -17,7 +17,7 @@ export const workflowJobPayload = (action: WorkflowJobAction, job: JobRow, run: 
     workflow_job: {
       id: job.request_id,
       run_id: run.id,
-      run_attempt: 1,
+      run_attempt: job.attempt,
       head_sha: run.sha,
       head_branch: run.ref.replace(/^refs\/(heads|tags)\//, ''),
       workflow_name: run.workflow_name,

@@ -27,3 +27,5 @@ export class RunnerContainer implements DurableObject {
     return new Response(null, { status: 202 })
   }
 }
+
+export class DockerRunnerContainer extends RunnerContainer {}

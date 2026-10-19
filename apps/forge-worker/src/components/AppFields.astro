@@ -1,0 +1,62 @@
+---
+import type { AppRow } from '@git-forge/accounts'
+import type { HookRow } from '@git-forge/notifications'
+import { APP_EVENT_CHOICES, appEvents, appPermissions, PERMISSION_CHOICES } from '../ui/github-apps.ts'
+
+type Props = { readonly app?: AppRow | null; readonly hook?: HookRow | null }
+const { app = null, hook = null } = Astro.props
+const permissions = app ? appPermissions(app) : {}
+const events = app ? appEvents(app) : []
+const label = (name: string) => name.replace(/_/g, ' ')
+---
+
+<label class="text-sm font-semibold" for="app-name">Name</label>
+<input id="app-name" name="name" class="input w-full" maxlength="34" required value={app?.name ?? ''} />
+<label class="text-sm font-semibold" for="app-description">Description</label>
+<textarea id="app-description" name="description" class="textarea w-full" rows="2">{app?.description ?? ''}</textarea>
+<label class="text-sm font-semibold" for="app-url">Homepage URL</label>
+<input id="app-url" name="url" type="url" class="input w-full" value={app?.external_url ?? ''} />
+<label class="text-sm font-semibold" for="app-setup">Setup URL</label>
+<input id="app-setup" name="setup_url" type="url" class="input w-full" value={app?.setup_url ?? ''} />
+<label class="text-sm font-semibold" for="app-redirect">Redirect URL</label>
+<input id="app-redirect" name="redirect_url" type="url" class="input w-full" value={app?.redirect_url ?? ''} />
+<fieldset class="fieldset border border-base-300 rounded-box p-3">
+  <legend class="fieldset-legend">Webhook</legend>
+  <label class="flex items-center gap-2 text-sm"><input type="checkbox" name="webhook_active" class="checkbox checkbox-sm" checked={hook ? hook.active === 1 : true} /> Active</label>
+  <label class="text-sm font-semibold" for="app-webhook">Webhook URL</label>
+  <input id="app-webhook" name="webhook_url" type="url" class="input w-full" value={hook?.url ?? ''} />
+  <label class="text-sm font-semibold" for="app-secret">Webhook secret</label>
+  <input id="app-secret" name="webhook_secret" type="password" class="input w-full" autocomplete="new-password" placeholder={hook?.secret ? 'unchanged' : ''} />
+</fieldset>
+<fieldset class="fieldset border border-base-300 rounded-box p-3">
+  <legend class="fieldset-legend">Repository and organization permissions</legend>
+  <div class="grid sm:grid-cols-2 gap-2">
+    {
+      PERMISSION_CHOICES.map((name) => (
+        <label class="flex items-center justify-between gap-2 text-sm">
+          <span class="capitalize">{label(name)}</span>
+          <select name={`permission:${name}`} class="select select-sm w-32" aria-label={`${label(name)} permission`}>
+            <option value="">No access</option>
+            <option value="read" selected={permissions[name] === 'read'}>Read-only</option>
+            <option value="write" selected={permissions[name] === 'write'}>Read and write</option>
+          </select>
+        </label>
+      ))
+    }
+  </div>
+  <p class="text-xs text-base-content/70">Metadata is always read-only. Installations keep their permissions until an owner accepts changes.</p>
+</fieldset>
+<fieldset class="fieldset border border-base-300 rounded-box p-3">
+  <legend class="fieldset-legend">Subscribe to events</legend>
+  <div class="grid grid-cols-2 sm:grid-cols-3 gap-1">
+    {
+      APP_EVENT_CHOICES.map((name) => (
+        <label class="flex items-center gap-2 text-sm">
+          <input type="checkbox" name="events" value={name} class="checkbox checkbox-sm" checked={events.includes(name)} />
+          {name}
+        </label>
+      ))
+    }
+  </div>
+</fieldset>
+<label class="flex items-center gap-2 text-sm"><input type="checkbox" name="public" class="checkbox checkbox-sm" checked={app?.public === 1} /> Any account on this instance may install this app</label>

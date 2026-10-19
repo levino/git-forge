@@ -1,0 +1,13 @@
+---
+import NewApp from '../../../../../components/NewApp.astro'
+import { newAppRequest } from '../../../../../ui/github-apps.ts'
+
+const { forge, session } = Astro.locals
+if (Astro.request.method !== 'POST' && !session) return Astro.redirect(`/login?return_to=${encodeURIComponent(Astro.url.pathname)}`)
+const state = await newAppRequest(forge, Astro.request)
+if (state.outcome?.kind === 'redirect') return Astro.redirect(state.outcome.location, 303)
+if (state.outcome?.kind === 'error') Astro.response.status = state.outcome.status
+Astro.response.headers.set('Cache-Control', 'no-store')
+---
+
+<NewApp state={state} owner={Astro.params.org!} />

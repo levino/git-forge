@@ -63,11 +63,14 @@ export type PushOutcome = {
 
 export type RefPolicy = (command: RefCommand & { readonly fastForward: boolean }) => string | null
 
+export type RefCheck = (command: RefCommand & { readonly fastForward: boolean }) => Promise<string | null>
+
 export type ReceiveOptions = {
   readonly storage: Storage
   readonly repo: RepositoryName
   readonly now?: () => Date
   readonly policy?: RefPolicy
+  readonly check?: RefCheck
   readonly beforeUpdate?: (pushed: PushedPack, commands: readonly RefCommand[]) => Promise<string | null>
   readonly pack?: IngestOptions
 }
@@ -214,7 +217,7 @@ export const receivePack = async (
       }
       const fastForward =
         existing === ZERO_ID || command.newId === ZERO_ID ? existing === ZERO_ID : await isAncestor(source, existing, command.newId)
-      const denied = options.policy?.({ ...command, fastForward }) ?? null
+      const denied = options.policy?.({ ...command, fastForward }) ?? (await options.check?.({ ...command, fastForward })) ?? null
       if (denied) {
         results.push({ ...command, ok: false, reason: denied })
         continue

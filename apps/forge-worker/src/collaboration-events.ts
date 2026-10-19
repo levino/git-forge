@@ -49,6 +49,7 @@ const issueInfo = (issue: Issue): IssueInfo => ({
   updatedAt: issue.updatedAt,
   closedAt: issue.closedAt,
   stateReason: issue.stateReason,
+  milestone: issue.milestone ? { number: issue.milestone.number, title: issue.milestone.title } : null,
 })
 
 const pullInfo = (pull: PullRequest): PullRequestInfo => ({
@@ -104,7 +105,7 @@ export const activityEvent = async (scope: Scope, activity: Activity, baseUrl: s
       return issuesEvent(context, activity.action as IssuesAction, issueInfo(await getIssue(scope, number)), activity.changes)
     case 'issue_comment': {
       const issue = await getIssue(scope, number)
-      const comment = await getComment(scope, activity.commentId!)
+      const comment = await getComment(scope, activity.commentId!, activity.deleted)
       const subject = issue.isPull ? pullInfo(await getPullSummary(scope, number)) : issueInfo(issue)
       return issueCommentEvent(
         context,
@@ -112,6 +113,7 @@ export const activityEvent = async (scope: Scope, activity: Activity, baseUrl: s
         subject,
         { id: comment.id, body: comment.body, author: comment.author.login, createdAt: comment.createdAt, updatedAt: comment.updatedAt },
         issue.isPull,
+        activity.changes,
       )
     }
     case 'pull_request':
@@ -130,10 +132,10 @@ export const activityEvent = async (scope: Scope, activity: Activity, baseUrl: s
         author: review.author.login,
         commitId: review.commitId,
         submittedAt: review.submittedAt,
-      })
+      }, activity.changes)
     }
     case 'pull_request_review_comment': {
-      const comment = await getReviewComment(scope, activity.commentId!)
+      const comment = await getReviewComment(scope, activity.commentId!, activity.deleted)
       return pullRequestReviewCommentEvent(context, activity.action as CommentAction, pullInfo(await getPullSummary(scope, number)), {
         id: comment.id,
         body: comment.body,
@@ -145,7 +147,7 @@ export const activityEvent = async (scope: Scope, activity: Activity, baseUrl: s
         commitId: comment.commitId,
         diffHunk: comment.diffHunk,
         inReplyToId: comment.inReplyToId,
-      })
+      }, activity.changes)
     }
     case 'discussion': {
       const answer = activity.action === 'answered' && activity.commentId !== undefined ? discussionCommentInfo(await getDiscussionComment(scope, activity.commentId)) : undefined

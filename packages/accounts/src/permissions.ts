@@ -53,6 +53,8 @@ export type AppPrincipal = {
   readonly slug: string
   readonly limits: TokenLimits
   readonly tokenId: string
+  readonly installationId?: number
+  readonly permissions?: Readonly<Record<string, string>>
 }
 
 export type InstancePrincipal = {

@@ -92,7 +92,7 @@ export const organizationObject = (baseUrl: string, repository: RepositoryRow) =
 export const hookEvents = (hook: HookRow): string[] => JSON.parse(hook.events) as string[]
 
 export const hookObject = (baseUrl: string, hook: HookRow, scopePath: string) => ({
-  type: hook.repository_id ? 'Repository' : 'Organization',
+  type: hook.repository_id ? 'Repository' : hook.app_id ? 'App' : 'Organization',
   id: hook.id,
   name: 'web',
   active: hook.active === 1,
@@ -122,6 +122,7 @@ export type DeliveryRequest = {
 export const buildDeliveryRequest = async (
   hook: HookRow,
   delivery: { readonly guid: string; readonly event: string; readonly payload: string },
+  secret: string | null,
 ): Promise<DeliveryRequest> => {
   const body = hook.content_type === 'form' ? `payload=${encodeURIComponent(delivery.payload)}` : delivery.payload
   return {
@@ -134,9 +135,9 @@ export const buildDeliveryRequest = async (
       'X-GitHub-Event': delivery.event,
       'X-GitHub-Delivery': delivery.guid,
       'X-GitHub-Hook-ID': String(hook.id),
-      'X-GitHub-Hook-Installation-Target-Type': hook.repository_id ? 'repository' : 'organization',
-      'X-GitHub-Hook-Installation-Target-ID': hook.repository_id ?? hook.organization_id ?? '',
-      ...(await signatureHeaders(hook.secret, body)),
+      'X-GitHub-Hook-Installation-Target-Type': hook.repository_id ? 'repository' : hook.app_id ? 'integration' : 'organization',
+      'X-GitHub-Hook-Installation-Target-ID': hook.repository_id ?? hook.organization_id ?? hook.app_id ?? '',
+      ...(await signatureHeaders(secret, body)),
     },
   }
 }

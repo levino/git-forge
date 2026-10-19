@@ -1,0 +1,121 @@
+---
+import AppFields from '../../../components/AppFields.astro'
+import CopyField from '../../../components/CopyField.astro'
+import Layout from '../../../layouts/Layout.astro'
+import NotFound from '../../../components/NotFound.astro'
+import { isoTime } from '../../../ui/format.ts'
+import { type AppOutcome, handleAppPost } from '../../../ui/github-apps.ts'
+
+const { forge, session } = Astro.locals
+const slug = Astro.params.slug!
+if (!session) return Astro.redirect(`/login?return_to=${encodeURIComponent(`/settings/apps/${slug}`)}`)
+let outcome: AppOutcome | null = null
+if (Astro.request.method === 'POST') {
+  outcome = await handleAppPost(forge, Astro.request, { slug })
+  if (outcome.kind === 'redirect') return Astro.redirect(outcome.location, 303)
+  if (outcome.kind === 'error') Astro.response.status = outcome.status
+}
+Astro.response.headers.set('Cache-Control', 'no-store')
+const app = await forge.githubApps.managedApp(session.principal, slug).catch(() => null)
+if (!app) Astro.response.status = 404
+const [hook, keys, deliveries] = app ? await Promise.all([forge.githubApps.hookOf(app), forge.githubApps.keys(app), forge.githubApps.deliveries(app)]) : [null, [], []]
+const day = (ms: number) => isoTime(Math.floor(ms / 1000)).slice(0, 10)
+---
+
+{!app && <NotFound />}
+{
+  app && (
+    <Layout title={app.name} narrow>
+      <div class="flex flex-wrap items-center gap-3 mb-5">
+        <h1 class="text-xl font-semibold">{app.name}</h1>
+        <a class="btn btn-sm ml-auto" href={`/apps/${app.slug}`}>Public page</a>
+      </div>
+      {outcome?.kind === 'error' && <div role="alert" class="alert alert-error mb-4">{outcome.message}</div>}
+      {outcome?.kind === 'ok' && <div role="status" class="alert alert-success mb-4">{outcome.message}</div>}
+      {outcome?.kind === 'ok' && outcome.secret && (
+        <div class="panel">
+          <p class="font-semibold">{outcome.secret.label}</p>
+          <textarea class="textarea w-full font-mono text-xs" rows="6" readonly aria-label={outcome.secret.label}>{outcome.secret.value}</textarea>
+        </div>
+      )}
+      <section class="panel" aria-labelledby="about">
+        <h2 id="about" class="panel-title">About</h2>
+        <p class="text-sm">Owned by {app.owner_login}</p>
+        <CopyField id="app-id" value={app.id} label="App ID" />
+        <CopyField id="client-id" value={app.client_id ?? ''} label="Client ID" />
+      </section>
+      <form method="post" class="panel" aria-label="Edit app">
+        <h2 class="panel-title">General</h2>
+        <input type="hidden" name="csrf" value={session.csrf} />
+        <input type="hidden" name="action" value="update" />
+        <AppFields app={app} hook={hook} />
+        <button class="btn btn-primary self-start">Save changes</button>
+      </form>
+      <section class="panel" aria-labelledby="keys">
+        <h2 id="keys" class="panel-title">Private keys</h2>
+        <p class="text-sm text-base-content/70">Sign RS256 JWTs (iss = App ID or Client ID, at most 10 minutes) to authenticate as the app.</p>
+        {keys.length > 0 && (
+          <ul class="border border-base-300 rounded-box divide-y divide-base-300">
+            {keys.map((key) => (
+              <li class="flex flex-wrap items-center gap-3 px-4 py-3">
+                <span class="font-mono text-xs break-all flex-1">{key.fingerprint}</span>
+                <span class="text-sm text-base-content/70">added {day(key.created_at)}</span>
+                <form method="post">
+                  <input type="hidden" name="csrf" value={session.csrf} />
+                  <input type="hidden" name="action" value="revoke-key" />
+                  <input type="hidden" name="key" value={key.id} />
+                  <button class="btn btn-xs btn-error btn-outline" aria-label={`Delete key ${key.fingerprint}`}>Delete</button>
+                </form>
+              </li>
+            ))}
+          </ul>
+        )}
+        <div class="flex flex-wrap gap-2">
+          <form method="post">
+            <input type="hidden" name="csrf" value={session.csrf} />
+            <input type="hidden" name="action" value="generate-key" />
+            <button class="btn btn-sm">Generate a private key</button>
+          </form>
+          <form method="post">
+            <input type="hidden" name="csrf" value={session.csrf} />
+            <input type="hidden" name="action" value="client-secret" />
+            <button class="btn btn-sm">Generate a new client secret</button>
+          </form>
+        </div>
+      </section>
+      {hook && (
+        <section class="panel" aria-labelledby="deliveries">
+          <h2 id="deliveries" class="panel-title">Recent deliveries</h2>
+          {deliveries.length === 0 ? (
+            <p class="text-base-content/70">No deliveries yet.</p>
+          ) : (
+            <ul class="border border-base-300 rounded-box divide-y divide-base-300">
+              {deliveries.map((delivery) => (
+                <li class="flex flex-wrap items-center gap-3 px-4 py-2 text-sm">
+                  <span class:list={['badge badge-sm', delivery.status === 'delivered' ? 'badge-success' : delivery.status === 'failed' ? 'badge-error' : 'badge-ghost']}>{delivery.status_code ?? delivery.status}</span>
+                  <span class="font-mono">{delivery.event}{delivery.action ? `.${delivery.action}` : ''}</span>
+                  <span class="font-mono text-xs text-base-content/60 break-all">{delivery.guid}</span>
+                  <form method="post" class="ml-auto">
+                    <input type="hidden" name="csrf" value={session.csrf} />
+                    <input type="hidden" name="action" value="redeliver" />
+                    <input type="hidden" name="delivery" value={String(delivery.id)} />
+                    <button class="btn btn-xs">Redeliver</button>
+                  </form>
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
+      )}
+      <section class="mb-10" aria-labelledby="danger">
+        <h2 id="danger" class="text-xl font-semibold mb-2">Delete app</h2>
+        <form method="post">
+          <input type="hidden" name="csrf" value={session.csrf} />
+          <input type="hidden" name="action" value="delete" />
+          <button class="btn btn-sm btn-error btn-outline">Delete {app.name}</button>
+        </form>
+        <p class="text-sm text-base-content/70 mt-2">Removes every installation and revokes its tokens.</p>
+      </section>
+    </Layout>
+  )
+}

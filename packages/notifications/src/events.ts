@@ -21,6 +21,8 @@ export const WEBHOOK_EVENTS = [
   'check_suite',
   'status',
   'mirror_alarm',
+  'installation',
+  'installation_repositories',
 ] as const
 
 export type WebhookEventName = (typeof WEBHOOK_EVENTS)[number]
@@ -140,6 +142,7 @@ export type IssueInfo = {
   readonly updatedAt: string | number
   readonly closedAt?: string | number | null
   readonly stateReason?: string | null
+  readonly milestone?: { readonly number: number; readonly title: string } | null
 }
 
 export type PullRequestInfo = IssueInfo & {
@@ -192,6 +195,7 @@ const issueObject = (context: EventContext, issue: IssueInfo, kind: 'issues' | '
     created_at: iso(issue.createdAt),
     updated_at: iso(issue.updatedAt),
     closed_at: iso(issue.closedAt),
+    milestone: issue.milestone ? { number: issue.milestone.number, title: issue.milestone.title } : null,
     url: apiUrl(context.baseUrl, `/repos/${path}/${kind === 'pull' ? 'pulls' : 'issues'}/${issue.number}`),
     html_url: htmlUrl(context.baseUrl, `/${path}/${kind}/${issue.number}`),
     comments_url: apiUrl(context.baseUrl, `/repos/${path}/issues/${issue.number}/comments`),
@@ -249,7 +253,7 @@ const issueSubject = (context: EventContext, issue: IssueInfo, type: 'Issue' | '
   }
 }
 
-export type IssuesAction = 'opened' | 'edited' | 'closed' | 'reopened' | 'assigned' | 'unassigned' | 'labeled' | 'unlabeled' | 'deleted' | 'transferred' | 'locked' | 'unlocked'
+export type IssuesAction = 'opened' | 'edited' | 'closed' | 'reopened' | 'assigned' | 'unassigned' | 'labeled' | 'unlabeled' | 'deleted' | 'transferred' | 'locked' | 'unlocked' | 'milestoned' | 'demilestoned'
 
 export const issuesEvent = (context: EventContext, action: IssuesAction, issue: IssueInfo, changes?: Record<string, unknown>): ForgeEvent =>
   event(context, 'issues', action, { issue: issueObject(context, issue, 'issues'), ...(changes ? { changes } : {}) }, {
@@ -264,12 +268,12 @@ export const issuesEvent = (context: EventContext, action: IssuesAction, issue: 
 
 export type CommentAction = 'created' | 'edited' | 'deleted'
 
-export const issueCommentEvent = (context: EventContext, action: CommentAction, issue: IssueInfo | PullRequestInfo, comment: CommentInfo, isPullRequest = false): ForgeEvent => {
+export const issueCommentEvent = (context: EventContext, action: CommentAction, issue: IssueInfo | PullRequestInfo, comment: CommentInfo, isPullRequest = false, changes?: Record<string, unknown>): ForgeEvent => {
   const path = repoPath(context.repository)
   const apiPath = `/repos/${path}/issues/comments/${comment.id}`
   const htmlPath = `/${path}/${isPullRequest ? 'pull' : 'issues'}/${issue.number}#issuecomment-${comment.id}`
   const issuePayload = isPullRequest ? { ...issueObject(context, issue, 'pull'), pull_request: { url: apiUrl(context.baseUrl, `/repos/${path}/pulls/${issue.number}`) } } : issueObject(context, issue, 'issues')
-  return event(context, 'issue_comment', action, { issue: issuePayload, comment: commentObject(context, comment, htmlPath, apiPath) }, {
+  return event(context, 'issue_comment', action, { issue: issuePayload, comment: commentObject(context, comment, htmlPath, apiPath), ...(changes ? { changes } : {}) }, {
     subject: issueSubject(context, issue, isPullRequest ? 'PullRequest' : 'Issue', apiUrl(context.baseUrl, apiPath)),
     audience:
       action === 'created'
@@ -292,6 +296,8 @@ export type PullRequestAction =
   | 'unlabeled'
   | 'ready_for_review'
   | 'converted_to_draft'
+  | 'milestoned'
+  | 'demilestoned'
 
 export const pullRequestEvent = (
   context: EventContext,
@@ -326,7 +332,7 @@ export const pullRequestEvent = (
 
 export type ReviewAction = 'submitted' | 'edited' | 'dismissed'
 
-export const pullRequestReviewEvent = (context: EventContext, action: ReviewAction, pullRequest: PullRequestInfo, review: ReviewInfo): ForgeEvent => {
+export const pullRequestReviewEvent = (context: EventContext, action: ReviewAction, pullRequest: PullRequestInfo, review: ReviewInfo, changes?: Record<string, unknown>): ForgeEvent => {
   const path = repoPath(context.repository)
   return event(
     context,
@@ -343,6 +349,7 @@ export const pullRequestReviewEvent = (context: EventContext, action: ReviewActi
         submitted_at: iso(review.submittedAt),
         html_url: htmlUrl(context.baseUrl, `/${path}/pull/${pullRequest.number}#pullrequestreview-${review.id}`),
       },
+      ...(changes ? { changes } : {}),
     },
     {
       subject: issueSubject(context, pullRequest, 'PullRequest'),
@@ -351,7 +358,7 @@ export const pullRequestReviewEvent = (context: EventContext, action: ReviewActi
   )
 }
 
-export const pullRequestReviewCommentEvent = (context: EventContext, action: CommentAction, pullRequest: PullRequestInfo, comment: ReviewCommentInfo): ForgeEvent => {
+export const pullRequestReviewCommentEvent = (context: EventContext, action: CommentAction, pullRequest: PullRequestInfo, comment: ReviewCommentInfo, changes?: Record<string, unknown>): ForgeEvent => {
   const path = repoPath(context.repository)
   const apiPath = `/repos/${path}/pulls/comments/${comment.id}`
   return event(
@@ -368,6 +375,7 @@ export const pullRequestReviewCommentEvent = (context: EventContext, action: Com
         diff_hunk: comment.diffHunk ?? '',
         in_reply_to_id: comment.inReplyToId ?? undefined,
       },
+      ...(changes ? { changes } : {}),
     },
     {
       subject: issueSubject(context, pullRequest, 'PullRequest', apiUrl(context.baseUrl, apiPath)),

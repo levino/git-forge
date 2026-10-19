@@ -223,3 +223,8 @@ export const resolveRefAndPath = async (odb: ObjectDatabase, state: RefsState, s
   }
   return null
 }
+
+export const pathIdAt = async (odb: ObjectDatabase, commit: ObjectId, path: readonly string[]): Promise<ObjectId | null> => {
+  const info = await readCommit(odb, commit)
+  return info ? ((await entryAt(odb, info.tree, path))?.id ?? null) : null
+}

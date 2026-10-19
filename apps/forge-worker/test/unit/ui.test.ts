@@ -34,6 +34,8 @@ describe('routing between the UI and the forge', () => {
     `/acme/site/media/${'a'.repeat(64)}`,
     '/acme/site/raw/main/README.md',
     '/acme/site/releases/download/v1.0/app.tar.gz',
+    '/acme/site/archive/refs/tags/v1.0.zip',
+    '/acme/site/archive/main.tar.gz',
   ])('sends %s to the forge', (path) => {
     expect(isForgePath(path)).toBe(true)
   })

@@ -44,6 +44,7 @@ import {
   checkRepositoryAccess,
   checkSession,
   createAccountsStore,
+  createAppsStore,
   createMirrorVerificationStore,
   createLoginHandler,
   createLoginStore,
@@ -66,6 +67,13 @@ import {
   sessionUserPrincipal,
   normalizeIssuer,
   parseAuthorization,
+  type AppPermissions,
+  grantsNeed,
+  installationNeeds,
+  isLfsBatchPath,
+  missingPermission,
+  tokenKindOf,
+  workflowCheck,
   type Principal,
   type RepositorySubject,
   type Role,
@@ -120,6 +128,7 @@ import {
   type EmailSender,
   type FetchFunction,
   GitHubApiError,
+  handleArchiveRequest,
   handleContentRequest,
   handleGitRequest,
   type JobQueue,
@@ -204,7 +213,7 @@ import {
   type ThreadRow,
 } from '@git-forge/notifications'
 import { type ArtifactSource, createPages, isPagesJob, type PagesJob } from '@git-forge/pages'
-import { type AssetRow, createReleaseStore, handleReleasesRequest, type ReleaseRow } from '@git-forge/releases'
+import { type AssetRow, createReleaseStore, handleReleasesRequest, type ReleaseOperations, releaseOperations, type ReleaseRow, type ReleasesOptions } from '@git-forge/releases'
 import { AdminError, type AdminOperations, createAdminOperations, readOidcSettings } from './admin/operations.ts'
 import { createJobFailures } from './admin/jobs.ts'
 import { createInstanceSettings, deriveSettingsKey } from './admin/settings.ts'
@@ -228,6 +237,7 @@ import {
 import { type BackupJob, type BackupStatus, backupStatus, backupStep, startBackup, verifyBackup } from './backup.ts'
 import { MirrorAuthError, type MirrorContext, runMirrorSync, type ScheduledMirrorRun, syncDueMirrors } from './mirrors.ts'
 import { receiveGitHubWebhook, setUpGitHubWebhook } from './github-mirrors.ts'
+import { createGitHubApps, type GitHubApps } from './github-apps.ts'
 import { createMirrorSecrets, MirrorSecretsUnavailableError } from './mirror-secrets.ts'
 
 export type ActionsOptions = {
@@ -320,6 +330,7 @@ export type ForgeServices = {
   readonly redirect: (request: Request, principal: Principal) => Promise<string | null>
   readonly listRepositories: (principal: Principal, options: RepositoryListOptions) => Promise<Page<RepositoryListing>>
   readonly search: (principal: Principal, request: SearchRequest) => Promise<SearchResults>
+  readonly githubApps: GitHubApps['ui']
 }
 
 export type MirrorOverviewEntry = { readonly repository: RepositoryName; readonly config: MirrorConfig; readonly status: MirrorStatus | null }
@@ -397,6 +408,8 @@ export type ReleaseReads = {
   readonly list: (repository: RepositorySubject, includeDrafts: boolean, limit: number, offset: number) => Promise<ReleaseRow[]>
   readonly byTag: (repository: RepositorySubject, tag: string, includeDrafts: boolean) => Promise<ReleaseRow | null>
   readonly assets: (releaseIds: readonly number[]) => Promise<AssetRow[]>
+  readonly latest: (repository: RepositorySubject) => Promise<ReleaseRow | null>
+  readonly write: (request: Request, principal: Principal) => ReleaseOperations
 }
 
 export type NewRepository = { readonly owner: string; readonly name: string; readonly visibility?: string; readonly defaultBranch?: string }
@@ -793,8 +806,18 @@ export const createForge = (options: ForgeOptions): Forge => {
     ...(options.email ? { email: options.email } : {}),
     ...(options.fetch ? { fetch: options.fetch } : {}),
     allowInsecureWebhooks: options.allowInsecureWebhooks ?? false,
+    ...(mirrorSecrets.available ? { secrets: mirrorSecrets } : {}),
     ...(options.publicUrl ? { baseUrl: options.publicUrl } : {}),
     now: () => now().getTime(),
+  })
+
+  const githubApps = createGitHubApps({
+    apps: createAppsStore(db, store, () => now().getTime()),
+    accounts: store,
+    notifications,
+    principal: apiPrincipal,
+    baseUrl: issuerFor,
+    allowInsecureWebhooks: options.allowInsecureWebhooks ?? false,
   })
 
   const emit = async (event: ForgeEvent): Promise<void> => {
@@ -2209,7 +2232,48 @@ export const createForge = (options: ForgeOptions): Forge => {
     return (await authorize(anonymous, repo, 'read', 'git')) ? undefined : publicPackfileUris(options.packfileUriBase)(request, repo)
   }
 
+  const releasesOptions = (request: Request, waitUntil?: WaitUntil): ReleasesOptions => ({
+    db,
+    storage,
+    directory: store,
+    authenticate: apiPrincipal,
+    isInstanceAdmin: store.isInstanceAdmin,
+    baseUrl: issuerFor,
+    maxAssetBytes: options.maxLfsObjectBytes,
+    ...(options.digests ? { digests: options.digests } : {}),
+    now: () => now().getTime(),
+    emit,
+    onTagCreated: (repo, outcome, principal) => afterPush(request, repo, outcome, waitUntil, principal),
+  })
+
+  const installationPermissions = async (request: Request): Promise<AppPermissions | null> => {
+    const credential = parseAuthorization(request.headers.get('Authorization'))
+    if (credential.kind !== 'secret' || tokenKindOf(credential.secret) !== 'app') return null
+    const principal = await store.authenticateToken(credential.secret)
+    return principal?.kind === 'app' && principal.permissions ? (principal.permissions as AppPermissions) : null
+  }
+
+  const lfsOperation = async (request: Request): Promise<string | null> => {
+    try {
+      return String(((await request.clone().json()) as { operation?: unknown }).operation ?? '')
+    } catch {
+      return null
+    }
+  }
+
+  const installationGate = async (request: Request): Promise<Response | null> => {
+    const permissions = await installationPermissions(request)
+    if (!permissions) return null
+    const url = new URL(request.url)
+    const operation = request.method === 'POST' && isLfsBatchPath(url.pathname) ? await lfsOperation(request) : null
+    const problem = missingPermission(permissions, installationNeeds(request.method, url, operation))
+    if (!problem) return null
+    return url.pathname.startsWith('/api/') ? json(403, { message: `Resource not accessible by integration: ${problem}` }) : new Response(`${problem}\n`, { status: 403, headers: { 'Content-Type': 'text/plain; charset=utf-8' } })
+  }
+
   const handle = async (request: Request, waitUntil?: WaitUntil): Promise<Response> => {
+    const gated = await installationGate(request)
+    if (gated) return gated
     const site = await pages.serve(request)
     if (site) return site
     const wellKnown = options.instanceKey ? handleWellKnownRequest(request, { issuer: issuerFor(request), keys: [options.instanceKey.publicJwk] }) : null
@@ -2228,6 +2292,8 @@ export const createForge = (options: ForgeOptions): Forge => {
     })(request)
     if (scim) return scim
     const authentication = authenticateOptions(request)
+    const archive = await handleArchiveRequest(request, { storage, authorize: withSessionReads(withJobTokens(createGitAccess(authentication).authorize)) })
+    if (archive) return archive
     const protection = await handleBranchProtectionRequest(request, { store, authenticate: apiPrincipal })
     if (protection) return protection
     const notificationsResponse = await handleNotificationsRequest(request, {
@@ -2239,19 +2305,9 @@ export const createForge = (options: ForgeOptions): Forge => {
       allowInsecureWebhooks: options.allowInsecureWebhooks ?? false,
     })
     if (notificationsResponse) return notificationsResponse
-    const releases = await handleReleasesRequest(request, {
-      db,
-      storage,
-      directory: store,
-      authenticate: apiPrincipal,
-      isInstanceAdmin: store.isInstanceAdmin,
-      baseUrl: issuerFor,
-      maxAssetBytes: options.maxLfsObjectBytes,
-      ...(options.digests ? { digests: options.digests } : {}),
-      now: () => now().getTime(),
-      emit,
-      onTagCreated: (repo, outcome, principal) => afterPush(request, repo, outcome, waitUntil, principal),
-    })
+    const appsResponse = await githubApps.handle(request)
+    if (appsResponse) return appsResponse
+    const releases = await handleReleasesRequest(request, releasesOptions(request, waitUntil))
     if (releases) return releases
     const pagesApi = await pages.api(request)
     if (pagesApi) return pagesApi
@@ -2283,6 +2339,14 @@ export const createForge = (options: ForgeOptions): Forge => {
       storage: presigningStorage,
       authorize,
       pushPolicy: access.pushPolicy,
+      pushCheck: async (incoming, repo) => {
+        const permissions = await installationPermissions(incoming)
+        if (!permissions || grantsNeed(permissions, ['workflows', 'write'])) return null
+        return workflowCheck(new ObjectDatabase(storage, repo), async () => {
+          const refs = await readRefs(storage, repo)
+          return refs ? (refs.state.refs[refs.state.head] ?? null) : null
+        })
+      },
       ...(options.maxPushBytes !== undefined ? { maxPushBytes: options.maxPushBytes } : {}),
       lfs: {
         maxObjectBytes: options.maxLfsObjectBytes,
@@ -2326,7 +2390,8 @@ export const createForge = (options: ForgeOptions): Forge => {
       const active = await readActiveSession(request, (await loginOptions(request)))
       if (active) return sessionUserPrincipal(active.session)
     }
-    return authenticateRequest(request, authenticateOptions(request))
+    const principal = await authenticateRequest(request, authenticateOptions(request))
+    return principal?.kind === 'app' && principal.installationId !== undefined ? null : principal
   }
 
   return {
@@ -2398,6 +2463,7 @@ export const createForge = (options: ForgeOptions): Forge => {
         markDone: (user, id) => notifications.store.markThreadDone(user.id, id),
         markAllRead: (user) => notifications.store.markAllRead(user.id, now().getTime()),
       },
+      githubApps: githubApps.ui,
       collaboration: async (request, principal, owner, name) => {
         try {
           return await openCollaborationRepository(collaborationOptions(request), principal, owner, name)
@@ -2415,6 +2481,8 @@ export const createForge = (options: ForgeOptions): Forge => {
           return release && (includeDrafts || release.draft === 0) ? release : null
         },
         assets: (releaseIds) => releaseStore.assets(releaseIds),
+        latest: (repository) => releaseStore.latest(repository.id),
+        write: (request, principal) => releaseOperations(releasesOptions(request), principal, issuerFor(request)),
       },
     },
     scheduled: async (at = now()) => {

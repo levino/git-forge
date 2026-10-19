@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { type AccountsStore, applyMigrations, createAccountsStore, MIGRATIONS } from '@git-forge/accounts'
+import { type AccountsStore, applyMigrations, createAccountsStore, type Database, MIGRATIONS, sql } from '@git-forge/accounts'
 import { openSqliteDatabase } from '@git-forge/accounts-node'
 import {
   concat,
@@ -43,6 +43,9 @@ const commitTo = async (storage: MemoryStorage, branch: string, message: string)
 }
 
 type Fixture = {
+  db: Database
+  repositoryId: string
+  ids: Record<string, string>
   storage: MemoryStorage
   store: AccountsStore
   tokens: Record<'alice' | 'bob' | 'carol', string>
@@ -103,7 +106,7 @@ const setup = async (visibility: 'public' | 'private' = 'private'): Promise<Fixt
     if (!response) throw new Error(`no route for ${method} ${path}`)
     return response
   }
-  return { storage, store, tokens, events, tags, main, call }
+  return { db, repositoryId: repository.id, ids, storage, store, tokens, events, tags, main, call }
 }
 
 type Release = { id: number; tag_name: string; draft: boolean; prerelease: boolean; name: string | null; upload_url: string; html_url: string; assets: Asset[]; author: { login: string } }
@@ -186,6 +189,18 @@ describe('releases API', () => {
     expect(fixture.events.at(-1)!.action).toBe('deleted')
   })
 
+  it('honors make_latest', async () => {
+    const latest = async () => ((await (await fixture.call('GET', '/api/v3/repos/alice/engine/releases/latest', fixture.tokens.bob)).json()) as Release).tag_name
+    await fixture.call('POST', '/api/v3/repos/alice/engine/releases', fixture.tokens.alice, { tag_name: 'v1' })
+    const second = (await (await fixture.call('POST', '/api/v3/repos/alice/engine/releases', fixture.tokens.alice, { tag_name: 'v2', make_latest: 'false' })).json()) as Release
+    expect(await latest()).toBe('v1')
+    await fixture.call('PATCH', `/api/v3/repos/alice/engine/releases/${second.id}`, fixture.tokens.alice, { make_latest: 'true' })
+    expect(await latest()).toBe('v2')
+    await fixture.call('POST', '/api/v3/repos/alice/engine/releases', fixture.tokens.alice, { tag_name: 'v3', make_latest: 'legacy' })
+    expect(await latest()).toBe('v2')
+    expect((await fixture.call('POST', '/api/v3/repos/alice/engine/releases', fixture.tokens.alice, { tag_name: 'v4', make_latest: 'yes' })).status).toBe(422)
+  })
+
   it('stores uploaded assets as LFS objects and redirects downloads to the immutable media URL', async () => {
     const release = (await (await fixture.call('POST', '/api/v3/repos/alice/engine/releases', fixture.tokens.alice, { tag_name: 'v1' })).json()) as Release
     const bytes = new Uint8Array(70_000).map((_, i) => (i * 7) % 251)
@@ -256,5 +271,92 @@ describe('public repositories', () => {
     expect(download.status).toBe(302)
     expect(download.headers.get('Cache-Control')).toBe('public, max-age=60')
     expect((await fixture.call('POST', '/api/v3/repos/alice/engine/releases', null, { tag_name: 'v2' })).status).toBe(401)
+  })
+})
+
+const commitChild = async (storage: MemoryStorage, parent: string, message: string, config: string): Promise<string> => {
+  const entry = (mode: string, name: string, id: string) => concat([utf8(`${mode} ${name}\0`), Uint8Array.from(Buffer.from(id, 'hex'))])
+  const readme = utf8(message)
+  const yml = utf8(config)
+  const github = entry('100644', 'release.yml', hashObject('blob', yml))
+  const tree = concat([entry('40000', '.github', hashObject('tree', github)), entry('100644', 'README', hashObject('blob', readme))])
+  const commit = utf8(`tree ${hashObject('tree', tree)}\nparent ${parent}\nauthor A <a@example.org> 1760781600 +0000\ncommitter A <a@example.org> 1760781600 +0000\n\n${message}\n`)
+  const pack = writePack([
+    { type: 'blob', data: readme },
+    { type: 'blob', data: yml },
+    { type: 'tree', data: github },
+    { type: 'tree', data: tree },
+    { type: 'commit', data: commit },
+  ])
+  await new ObjectDatabase(storage, repo).ingest(new Blob([new Uint8Array(pack.bytes)]).stream())
+  const id = hashObject('commit', commit)
+  const refs = (await readRefs(storage, repo))!
+  await writeRefs(storage, repo, { ...refs.state, refs: { ...refs.state.refs, 'refs/heads/main': id } }, refs.etag)
+  return id
+}
+
+describe('generated release notes', () => {
+  it('lists merged pull requests since the previous release with categories and new contributors', async () => {
+    const fixture = await setup()
+    const merged = async (number: number, title: string, author: string, sha: string, label?: string) => {
+      await fixture.db.run(
+        sql(
+          "INSERT INTO issues (node_id, repository_id, number, is_pull, title, author_kind, author_id, state, created_at, updated_at) VALUES (?, ?, ?, 1, ?, 'user', ?, 'closed', ?, ?)",
+          `PR${number}`,
+          fixture.repositoryId,
+          number,
+          title,
+          fixture.ids[author]!,
+          number,
+          number,
+        ),
+      )
+      await fixture.db.run(
+        sql(
+          "INSERT INTO pull_requests (issue_id, repository_id, head_ref, base_ref, head_sha, base_sha, merged_at, merge_commit_sha) SELECT id, ?, 'refs/heads/x', 'refs/heads/main', ?, ?, ?, ? FROM issues WHERE node_id = ?",
+          fixture.repositoryId,
+          sha,
+          sha,
+          number,
+          sha,
+          `PR${number}`,
+        ),
+      )
+      if (label) {
+        await fixture.db.run(sql("INSERT OR IGNORE INTO labels (node_id, repository_id, name, color, created_at) VALUES (?, ?, ?, 'ededed', 0)", `L${label}`, fixture.repositoryId, label))
+        await fixture.db.run(sql('INSERT INTO issue_labels (issue_id, label_id, created_at) SELECT i.id, l.id, 0 FROM issues i, labels l WHERE i.node_id = ? AND l.name = ?', `PR${number}`, label))
+      }
+    }
+    await merged(1, 'One', 'bob', fixture.main)
+    expect((await fixture.call('POST', '/api/v3/repos/alice/engine/releases', fixture.tokens.alice, { tag_name: 'v1.0.0' })).status).toBe(201)
+    const config = 'changelog:\n  exclude:\n    labels: [skip]\n  categories:\n    - title: Features\n      labels: [feature]\n'
+    const second = await commitChild(fixture.storage, fixture.main, 'second', config)
+    const third = await commitChild(fixture.storage, second, 'third', config)
+    await merged(2, 'Two', 'carol', second, 'feature')
+    await merged(3, 'Three', 'bob', third)
+    await merged(4, 'Four', 'alice', third, 'skip')
+    const body = [
+      "## What's Changed",
+      '### Features',
+      `* Two by @carol in ${BASE}/alice/engine/pull/2`,
+      '### Other Changes',
+      `* Three by @bob in ${BASE}/alice/engine/pull/3`,
+      '',
+      '## New Contributors',
+      `* @carol made their first contribution in ${BASE}/alice/engine/pull/2`,
+      '',
+      `**Full Changelog**: ${BASE}/alice/engine/compare/v1.0.0...v2.0.0`,
+    ].join('\n')
+    const notes = await fixture.call('POST', '/api/v3/repos/alice/engine/releases/generate-notes', fixture.tokens.alice, { tag_name: 'v2.0.0' })
+    expect(await notes.json()).toEqual({ name: 'v2.0.0', body })
+    expect((await fixture.call('POST', '/api/v3/repos/alice/engine/releases/generate-notes', fixture.tokens.bob, { tag_name: 'v2.0.0' })).status).toBe(403)
+    const created = (await (await fixture.call('POST', '/api/v3/repos/alice/engine/releases', fixture.tokens.alice, { tag_name: 'v2.0.0', generate_release_notes: true })).json()) as Release & {
+      body: string
+      tarball_url: string
+      zipball_url: string
+    }
+    expect(created).toMatchObject({ name: 'v2.0.0', body, tarball_url: `${BASE}/api/v3/repos/alice/engine/tarball/v2.0.0`, zipball_url: `${BASE}/api/v3/repos/alice/engine/zipball/v2.0.0` })
+    const all = (await (await fixture.call('POST', '/api/v3/repos/alice/engine/releases/generate-notes', fixture.tokens.alice, { tag_name: 'v2.0.0', previous_tag_name: null, configuration_file_path: 'none.yml' })).json()) as { body: string }
+    expect(all.body).toContain('* Four by @alice')
   })
 })

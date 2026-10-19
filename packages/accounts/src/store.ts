@@ -65,7 +65,7 @@ export const LOGIN_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/
 
 export const TEAM_SLUG_PATTERN = LOGIN_PATTERN
 
-export const RESERVED_LOGINS: ReadonlySet<string> = new Set(['api', 'explore', 'login', 'logout', 'settings', 'notifications', 'organizations', 'orgs', 'new', 'search', 'scim'])
+export const RESERVED_LOGINS: ReadonlySet<string> = new Set(['api', 'explore', 'login', 'logout', 'settings', 'notifications', 'organizations', 'orgs', 'new', 'search', 'scim', 'apps'])
 
 export const isReservedLogin = (login: string): boolean => RESERVED_LOGINS.has(login.toLowerCase())
 
@@ -89,6 +89,8 @@ export type TokenOptions = {
   readonly scopes: readonly TokenScope[]
   readonly expiresAt: number | null
   readonly repositoryIds?: readonly string[] | null
+  readonly installationId?: number | null
+  readonly permissions?: Readonly<Record<string, string>> | null
 }
 
 export type AccountsStoreOptions = {
@@ -123,6 +125,8 @@ type TokenRow = {
   account_disabled_at: number | null
   slug: string | null
   app_disabled_at: number | null
+  installation_id: number | null
+  permissions: string | null
 }
 
 type GrantRow = { source: 'organization' | 'collaborator' | 'team'; role: string }
@@ -359,7 +363,7 @@ export const createAccountsStore = (db: Database, options: AccountsStoreOptions 
       },
       [
         sql(
-          `INSERT INTO tokens (id, kind, ${ownerColumn}, name, token_hash, display_prefix, scopes, repository_ids, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO tokens (id, kind, ${ownerColumn}, name, token_hash, display_prefix, scopes, repository_ids, created_at, expires_at, installation_id, permissions) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           id,
           kind,
           ownerId,
@@ -370,6 +374,8 @@ export const createAccountsStore = (db: Database, options: AccountsStoreOptions 
           repositoryIds,
           now(),
           options.expiresAt,
+          options.installationId ?? null,
+          options.permissions ? JSON.stringify(options.permissions) : null,
         ),
       ],
     )
@@ -999,14 +1005,33 @@ export const createAccountsStore = (db: Database, options: AccountsStoreOptions 
 
     createAppToken: async (
       appId: string,
-      options: { readonly scopes: readonly TokenScope[]; readonly ttlSeconds?: number; readonly repositoryIds?: readonly string[] | null },
+      options: {
+        readonly scopes: readonly TokenScope[]
+        readonly ttlSeconds?: number
+        readonly repositoryIds?: readonly string[] | null
+        readonly installationId?: number
+        readonly permissions?: Readonly<Record<string, string>>
+      },
       actor: AuditActor = SYSTEM,
     ): Promise<CreatedToken> => {
       const ttl = options.ttlSeconds ?? MAX_APP_TOKEN_SECONDS
       if (ttl <= 0 || ttl > MAX_APP_TOKEN_SECONDS) throw new AccountsError(`app tokens live at most ${MAX_APP_TOKEN_SECONDS} seconds`)
       const app = await first<{ disabled_at: number | null }>(db, sql('SELECT disabled_at FROM apps WHERE id = ?', appId))
       if (!app || app.disabled_at !== null) throw new AccountsError(`no active app ${appId}`)
-      return insertToken('app', 'app_id', appId, { name: 'app', scopes: options.scopes, expiresAt: now() + ttl * 1000, repositoryIds: options.repositoryIds ?? null }, actor)
+      return insertToken(
+        'app',
+        'app_id',
+        appId,
+        {
+          name: options.installationId === undefined ? 'app' : `installation ${options.installationId}`,
+          scopes: options.scopes,
+          expiresAt: now() + ttl * 1000,
+          repositoryIds: options.repositoryIds ?? null,
+          installationId: options.installationId ?? null,
+          permissions: options.permissions ?? null,
+        },
+        actor,
+      )
     },
 
     revokeToken: async (tokenId: string, actor: AuditActor = SYSTEM): Promise<void> => {
@@ -1039,7 +1064,7 @@ export const createAccountsStore = (db: Database, options: AccountsStoreOptions 
       const row = await first<TokenRow>(
         db,
         sql(
-          `SELECT t.id, t.kind, t.account_id, t.app_id, t.scopes, t.repository_ids, t.expires_at, t.revoked_at, t.last_used_at,
+          `SELECT t.id, t.kind, t.account_id, t.app_id, t.scopes, t.repository_ids, t.expires_at, t.revoked_at, t.last_used_at, t.installation_id, t.permissions,
                   a.login, a.disabled_at AS account_disabled_at, ap.slug, ap.disabled_at AS app_disabled_at
            FROM tokens t LEFT JOIN accounts a ON a.id = t.account_id LEFT JOIN apps ap ON ap.id = t.app_id
            WHERE t.token_hash = ?`,
@@ -1057,7 +1082,8 @@ export const createAccountsStore = (db: Database, options: AccountsStoreOptions 
         return { kind: 'user', id: row.account_id, login: row.login, limits, tokenId: row.id }
       }
       if (row.kind === 'app' && row.app_id && row.slug && row.app_disabled_at === null) {
-        return { kind: 'app', id: row.app_id, slug: row.slug, limits, tokenId: row.id }
+        if (row.installation_id === null) return { kind: 'app', id: row.app_id, slug: row.slug, limits, tokenId: row.id }
+        return { kind: 'app', id: row.app_id, slug: row.slug, limits, tokenId: row.id, installationId: row.installation_id, permissions: JSON.parse(row.permissions ?? '{}') as Record<string, string> }
       }
       return null
     },
@@ -1224,7 +1250,19 @@ export const createAccountsStore = (db: Database, options: AccountsStoreOptions 
           }
         }
         case 'app': {
-          const row = await first<{ role: string }>(db, sql('SELECT role FROM app_repositories WHERE app_id = ? AND repository_id = ?', principal.id, repo.id))
+          const row = await first<{ role: string }>(
+            db,
+            principal.installationId === undefined
+              ? sql('SELECT role FROM app_repositories WHERE app_id = ? AND repository_id = ?', principal.id, repo.id)
+              : sql(
+                  `SELECT i.role FROM app_installations i WHERE i.id = ? AND i.app_id = ? AND i.account_id = ? AND i.deleted_at IS NULL AND i.suspended_at IS NULL
+                     AND (i.repository_selection = 'all' OR EXISTS (SELECT 1 FROM app_installation_repositories r WHERE r.installation_id = i.id AND r.repository_id = ?))`,
+                  principal.installationId,
+                  principal.id,
+                  repo.ownerId,
+                  repo.id,
+                ),
+          )
           return { ...NO_GRANTS, appRole: isRole(row?.role) ? row.role : null }
         }
         case 'instance': {

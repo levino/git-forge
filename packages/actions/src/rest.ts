@@ -1,5 +1,5 @@
 import type { Database } from '@git-forge/accounts'
-import { commitTarball, gzipStream, isValidName, ObjectDatabase, readAll, resolveCommitish, type Storage } from '@git-forge/core'
+import { archiveResponse, isValidName, ObjectDatabase, readAll, resolveCommitish, type Storage } from '@git-forge/core'
 import { artifactFilename, type ArtifactRow, deleteArtifact, getArtifact, listArtifacts } from './artifacts.ts'
 import { blobUrl, issueBlobGrant } from './blobs.ts'
 import { type CacheEntryRow, cacheUsage, evictCacheEntries, getCacheEntry, listCaches } from './cache.ts'
@@ -360,20 +360,11 @@ type RepoRequest = {
   readonly now: number
 }
 
-const tarball = async (context: RepoRequest, ref: string): Promise<Response> => {
+const archive = async (context: RepoRequest, ref: string, format: 'tar.gz' | 'zip'): Promise<Response> => {
   const repo = { owner: context.owner, name: context.repo }
   const sha = await resolveCommitish(context.options.storage, repo, decodeURIComponent(ref))
   if (!sha) return error(404, 'Not Found')
-  const prefix = `${context.owner}-${context.repo}-${sha.slice(0, 7)}`
-  const body = gzipStream(commitTarball(new ObjectDatabase(context.options.storage, repo), sha, { prefix }))
-  return new Response(body, {
-    headers: {
-      'Content-Type': 'application/x-gzip',
-      'Content-Disposition': `attachment; filename=${prefix}.tar.gz`,
-      'Cache-Control': 'private, max-age=86400, immutable',
-      ETag: `"${sha}"`,
-    },
-  })
+  return archiveResponse(new ObjectDatabase(context.options.storage, repo), sha, format, `${context.owner}-${context.repo}-${sha.slice(0, 7)}`, 'private, max-age=86400, immutable')
 }
 
 const secretRoutes = async (context: RepoRequest, scope: SecretScope, rest: readonly string[]): Promise<Response> => {
@@ -656,7 +647,7 @@ export const handleGhesApi = async (request: Request, options: GhesApiOptions): 
   const read = options.authorizeRead ?? options.authorize
   if ((area === 'tarball' || area === 'zipball') && collection && rest.length === 0 && (method === 'GET' || method === 'HEAD')) {
     if (!(await read(request, owner, repo))) return error(404, 'Not Found')
-    return area === 'tarball' ? tarball(context, collection) : error(501, 'zipballs are not supported; use the tarball')
+    return archive(context, collection, area === 'tarball' ? 'tar.gz' : 'zip')
   }
   if (area === 'environments') {
     if (!(await options.authorize(request, owner, repo))) return error(404, 'Not Found')

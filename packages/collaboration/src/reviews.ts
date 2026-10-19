@@ -267,13 +267,13 @@ export const listReviewComments = async (scope: Scope, number: number | null, fi
   )
 }
 
-const commentRow = async (scope: Scope, id: number): Promise<CommentRow> => {
-  const row = await first<CommentRow>(scope.db, sql(`${COMMENT_SELECT} WHERE c.id = ? AND i.repository_id = ? AND c.deleted_at IS NULL`, id, scope.repository.id))
+const commentRow = async (scope: Scope, id: number, includeDeleted = false): Promise<CommentRow> => {
+  const row = await first<CommentRow>(scope.db, sql(`${COMMENT_SELECT} WHERE c.id = ? AND i.repository_id = ?${includeDeleted ? '' : ' AND c.deleted_at IS NULL'}`, id, scope.repository.id))
   if (!row || !visibleTo(scope, { state: row.review_state, author_kind: row.author_kind, author_id: row.author_id })) throw notFound()
   return row
 }
 
-export const getReviewComment = async (scope: Scope, id: number): Promise<ReviewComment> => (await hydrateComments(scope, [await commentRow(scope, id)]))[0]!
+export const getReviewComment = async (scope: Scope, id: number, includeDeleted = false): Promise<ReviewComment> => (await hydrateComments(scope, [await commentRow(scope, id, includeDeleted)]))[0]!
 
 const reviewCommit = async (scope: Scope, pull: PullRow, commitId: unknown): Promise<ObjectId> => {
   if (commitId === undefined || commitId === null) return pull.head_sha
@@ -390,8 +390,9 @@ export const submitReview = async (scope: Scope, number: number, id: number, inp
 export const updateReviewBody = async (scope: Scope, number: number, id: number, body: unknown): Promise<Review> => {
   const pull = await pullRow(scope, number)
   const row = await reviewRow(scope, pull, id)
-  requirePermission(scope, 'comment:edit', { author: refFromColumns(row.author_kind, row.author_id) })
+  const actor = requirePermission(scope, 'comment:edit', { author: refFromColumns(row.author_kind, row.author_id) })
   await scope.db.run(sql('UPDATE pull_request_reviews SET body = ? WHERE id = ?', requireBody(body), id))
+  if (row.state !== 'PENDING') await emitActivity(scope, { kind: 'pull_request_review', action: 'edited', number, actor, reviewId: id, changes: { body: { from: row.body } } })
   return getReview(scope, number, id)
 }
 
@@ -501,8 +502,9 @@ export const updateReviewComment = async (scope: Scope, id: number, body: unknow
 
 export const deleteReviewComment = async (scope: Scope, id: number): Promise<void> => {
   const row = await commentRow(scope, id)
-  requirePermission(scope, 'comment:edit', { author: refFromColumns(row.author_kind, row.author_id) })
+  const actor = requirePermission(scope, 'comment:edit', { author: refFromColumns(row.author_kind, row.author_id) })
   await scope.db.run(sql('UPDATE review_comments SET deleted_at = ?, updated_at = ? WHERE id = ?', scope.now(), scope.now(), id))
+  await emitActivity(scope, { kind: 'pull_request_review_comment', action: 'deleted', number: row.number, actor, commentId: id, deleted: true })
 }
 
 export const accessOf = async (scope: Scope, ref: ActorRef): Promise<ReturnType<typeof resolveAccess>> => {

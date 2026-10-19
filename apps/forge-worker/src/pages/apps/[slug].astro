@@ -1,0 +1,43 @@
+---
+import Layout from '../../layouts/Layout.astro'
+import NotFound from '../../components/NotFound.astro'
+import { appEvents, appPermissions } from '../../ui/github-apps.ts'
+
+const { forge, session } = Astro.locals
+const app = await forge.githubApps.publicApp(Astro.params.slug!, session?.principal ?? null)
+const permissions = app ? Object.entries(appPermissions(app)) : []
+const events = app ? appEvents(app) : []
+---
+
+{!app && <NotFound />}
+{
+  app && (
+    <Layout title={app.name} narrow>
+      <div class="flex flex-wrap items-center gap-3 mb-3">
+        <h1 class="text-xl font-semibold">{app.name}</h1>
+        <a class="btn btn-primary btn-sm ml-auto" href={`/apps/${app.slug}/installations/new`}>Install</a>
+      </div>
+      <p class="text-sm text-base-content/70 mb-4">
+        by {app.owner_login}
+        {app.external_url && (
+          <>
+            {' · '}
+            <a class="link" href={app.external_url} rel="nofollow noopener">{app.external_url}</a>
+          </>
+        )}
+      </p>
+      {app.description && <p class="mb-4 whitespace-pre-line">{app.description}</p>}
+      <section class="panel" aria-labelledby="permissions">
+        <h2 id="permissions" class="panel-title">Permissions</h2>
+        <ul class="text-sm list-disc pl-5">
+          {permissions.map(([name, level]) => (
+            <li>
+              <span class="capitalize">{name.replace(/_/g, ' ')}</span>: {level === 'read' ? 'read-only' : 'read and write'}
+            </li>
+          ))}
+        </ul>
+        {events.length > 0 && <p class="text-sm">Events: {events.join(', ')}</p>}
+      </section>
+    </Layout>
+  )
+}

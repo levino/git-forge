@@ -3,11 +3,12 @@ import NotFound from '../../../../../components/NotFound.astro'
 import ReleaseCard from '../../../../../components/ReleaseCard.astro'
 import RepoHeader from '../../../../../components/RepoHeader.astro'
 import Layout from '../../../../../layouts/Layout.astro'
-import { releaseByTag } from '../../../../../ui/releases.ts'
+import { latestRelease, releaseByTag } from '../../../../../ui/releases.ts'
 import { openRepository } from '../../../../../ui/repository.ts'
 
 const repo = await openRepository(Astro.locals.forge, Astro.locals.principal, Astro.params.owner!, Astro.params.repo!)
 const view = repo.kind === 'ok' && Astro.params.tag ? await releaseByTag(Astro.locals.forge, repo, Astro.params.tag) : null
+const latest = repo.kind === 'ok' && view ? await latestRelease(Astro.locals.forge, repo) : null
 ---
 
 {
@@ -16,7 +17,7 @@ const view = repo.kind === 'ok' && Astro.params.tag ? await releaseByTag(Astro.l
   ) : (
     <Layout title={`${view.title} · ${repo.name.owner}/${repo.name.name}`}>
       <RepoHeader repo={repo} tab="releases" />
-      <ReleaseCard repo={repo} view={view} heading="h1" />
+      <ReleaseCard repo={repo} view={view} heading="h1" latest={latest?.id === view.release.id} />
     </Layout>
   )
 }

@@ -1,0 +1,20 @@
+---
+type Props = { readonly selection: 'all' | 'selected'; readonly repositories: readonly { readonly id: string; readonly name: string }[]; readonly chosen: readonly string[] }
+const { selection, repositories, chosen } = Astro.props
+---
+
+<fieldset class="fieldset border border-base-300 rounded-box p-3">
+  <legend class="fieldset-legend">Repository access</legend>
+  <label class="flex items-center gap-2 text-sm"><input type="radio" name="selection" value="all" class="radio radio-sm" checked={selection === 'all'} /> All repositories, including future ones</label>
+  <label class="flex items-center gap-2 text-sm"><input type="radio" name="selection" value="selected" class="radio radio-sm" checked={selection === 'selected'} /> Only select repositories</label>
+  <div class="grid sm:grid-cols-2 gap-1 pl-6">
+    {
+      repositories.map((repository) => (
+        <label class="flex items-center gap-2 text-sm">
+          <input type="checkbox" name="repositories" value={repository.id} class="checkbox checkbox-sm" checked={chosen.includes(repository.id)} />
+          {repository.name}
+        </label>
+      ))
+    }
+  </div>
+</fieldset>

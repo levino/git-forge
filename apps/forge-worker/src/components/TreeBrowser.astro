@@ -1,6 +1,8 @@
 ---
 import { cloneUrl, commitsUrl, type OpenRepository, repoUrl, treeUrl } from '../ui/repository.ts'
+import type { ReleaseRow } from '@git-forge/releases'
 import type { TreeView } from '../ui/browse.ts'
+import { releaseUrl } from '../ui/releases.ts'
 import Breadcrumbs from './Breadcrumbs.astro'
 import CopyField from './CopyField.astro'
 import FileList from './FileList.astro'
@@ -9,9 +11,9 @@ import LatestCommit from './LatestCommit.astro'
 import Readme from './Readme.astro'
 import RefPicker from './RefPicker.astro'
 
-type Props = { repo: OpenRepository; view: TreeView | { kind: 'empty' }; importing?: boolean }
+type Props = { repo: OpenRepository; view: TreeView | { kind: 'empty' }; importing?: boolean; latest?: ReleaseRow | null }
 
-const { repo, view, importing = false } = Astro.props
+const { repo, view, importing = false, latest = null } = Astro.props
 const origin = Astro.url.origin
 ---
 
@@ -50,6 +52,13 @@ const origin = Astro.url.origin
               <Icon name="tag" />
               <span class="font-semibold text-base-content">{repo.tags.length}</span> {repo.tags.length === 1 ? 'tag' : 'tags'}
             </a>
+            {latest && (
+              <a href={releaseUrl(repo, latest.tag_name)} class="flex items-center gap-1 hover:text-primary" aria-label="Latest release">
+                <Icon name="release" />
+                <span class="font-semibold text-base-content">{latest.name?.trim() || latest.tag_name}</span>
+                <span class="badge badge-success badge-sm">Latest</span>
+              </a>
+            )}
           </div>
         )}
       </div>

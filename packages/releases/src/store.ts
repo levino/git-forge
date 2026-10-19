@@ -15,7 +15,11 @@ export type ReleaseRow = {
   readonly created_at: number
   readonly updated_at: number
   readonly published_at: number | null
+  readonly make_latest?: MakeLatest | null
+  readonly latest_at?: number | null
 }
+
+export type MakeLatest = 'true' | 'false' | 'legacy'
 
 export type AssetRow = {
   readonly id: number
@@ -64,7 +68,16 @@ export const createReleaseStore = (db: Database, now: () => number = Date.now) =
   byTag: (repositoryId: string, tag: string): Promise<ReleaseRow | null> => first<ReleaseRow>(db, sql('SELECT * FROM releases WHERE repository_id = ? AND tag_name = ?', repositoryId, tag)),
 
   latest: (repositoryId: string): Promise<ReleaseRow | null> =>
-    first<ReleaseRow>(db, sql('SELECT * FROM releases WHERE repository_id = ? AND draft = 0 AND prerelease = 0 ORDER BY published_at DESC, id DESC LIMIT 1', repositoryId)),
+    first<ReleaseRow>(
+      db,
+      sql(
+        "SELECT * FROM releases WHERE repository_id = ? AND draft = 0 AND prerelease = 0 AND COALESCE(make_latest, 'legacy') <> 'false' ORDER BY latest_at IS NULL, latest_at DESC, published_at DESC, id DESC LIMIT 1",
+        repositoryId,
+      ),
+    ),
+
+  setLatest: async (release: ReleaseRow, mode: MakeLatest): Promise<ReleaseRow> =>
+    (await first<ReleaseRow>(db, sql('UPDATE releases SET make_latest = ?, latest_at = ? WHERE id = ? RETURNING *', mode, mode === 'true' && release.draft === 0 ? now() : null, release.id)))!,
 
   create: async (repositoryId: string, input: ReleaseInput, author: Author, times?: { readonly createdAt: number; readonly publishedAt: number | null }): Promise<ReleaseRow> => {
     const at = times?.createdAt ?? now()

@@ -17,7 +17,7 @@ import {
   type ReadView,
   visibleRefs,
 } from '@git-forge/core'
-import { type ForkInfo, forkInfo, listForks, openCounts, type Scope } from '@git-forge/collaboration'
+import { type ForkInfo, type Scope } from '@git-forge/collaboration'
 import type { ForgeServices } from '../app.ts'
 import { encodePath } from './format.ts'
 

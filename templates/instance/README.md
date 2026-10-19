@@ -316,6 +316,14 @@ vars `R2_S3_ENDPOINT` (`https://<account id>.r2.cloudflarestorage.com`, or
 the jurisdiction endpoint), `R2_BUCKET_NAME` and raise `MAX_LFS_OBJECT_BYTES`
 (up to about 5 GiB).
 
+Uploads from the browser (upload form) go to the same presigned URLs and
+need CORS on the bucket for your forge origin:
+
+```sh
+echo '{"rules":[{"allowed":{"origins":["https://<your domain>"],"methods":["PUT"],"headers":["*"]},"maxAgeSeconds":3600}]}' > cors.json
+npx wrangler@4 r2 bucket cors set <bucket_name of BUCKET> --file cors.json
+```
+
 ## Imports
 
 `POST /api/repos/<owner>/<name>/import` creates or updates a repository by

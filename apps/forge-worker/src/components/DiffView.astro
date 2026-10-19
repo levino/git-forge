@@ -1,8 +1,10 @@
 ---
 import type { FileDiff } from '@git-forge/core'
 import { highlightHunks } from '../ui/highlight.ts'
+import type { ReactionProps } from '../ui/collaboration.ts'
+import Reactions from './Reactions.astro'
 
-export type LineComment = { readonly id: number; readonly author: string; readonly html: string; readonly line: number; readonly side: 'LEFT' | 'RIGHT' }
+export type LineComment = { readonly id: number; readonly author: string; readonly html: string; readonly line: number; readonly side: 'LEFT' | 'RIGHT'; readonly reactions?: ReactionProps }
 
 type Props = { file: FileDiff; index: number; href: string | null; comments?: readonly LineComment[]; commentable?: boolean }
 
@@ -90,6 +92,7 @@ const commentsAt = (side: 'LEFT' | 'RIGHT', line: number) => comments.filter((co
                             <div id={`discussion-${comment.id}`} class="border border-base-300 rounded-box bg-base-100 mb-2 last:mb-0">
                               <p class="px-3 py-1 border-b border-base-300 font-semibold">{comment.author}</p>
                               <div class="markdown-body px-3 py-2" set:html={comment.html} />
+                              {comment.reactions && <Reactions {...comment.reactions} />}
                             </div>
                           ))}
                         </td>

@@ -1,5 +1,7 @@
 import { authenticateRequest, type InstanceVerifier, type Principal, type RepositoryDirectory } from '@git-forge/accounts'
-import { isValidName, readAll, SizeLimitError } from '@git-forge/core'
+import { isValidName, MAX_WEB_FILE_BYTES, readAll, SizeLimitError } from '@git-forge/core'
+import { type ContentItem, deleteContents, getContents, putContents } from './contents.ts'
+import { createReaction, deleteReaction, listReactions, type ReactionKind, type ReactionSubject } from './reactions.ts'
 import { CollaborationError, type CollaborationOptions, invalid, openRepository, type Scope, scopeOptions } from './context.ts'
 import { createFork, forkInfo, forkNetwork, listForks } from './forks.ts'
 import { DEFAULT_SETTINGS } from './permissions.ts'
@@ -58,6 +60,8 @@ import {
   checkRunJson,
   combinedStatusJson,
   commentJson,
+  contentCommitJson,
+  contentJson,
   commitJson,
   discussionCommentJson,
   discussionJson,
@@ -67,6 +71,7 @@ import {
   labelJson,
   milestoneJson,
   pullJson,
+  reactionJson,
   repositoryJson,
   reviewCommentJson,
   reviewJson,
@@ -114,7 +119,7 @@ type Context = {
 
 type Handler = (context: Context) => Promise<Response>
 
-type Route = { readonly method: string; readonly pattern: RegExp; readonly handler: Handler; readonly body?: boolean }
+type Route = { readonly method: string; readonly pattern: RegExp; readonly handler: Handler; readonly body?: boolean; readonly maxBody?: number }
 
 const GHES_VERSION = '3.14.0'
 
@@ -128,11 +133,11 @@ const errorResponse = (status: number, message: string, errors: readonly unknown
 
 const MAX_BODY_BYTES = 1024 * 1024
 
-const readBody = async (request: Request): Promise<Body> => {
+const readBody = async (request: Request, limit = MAX_BODY_BYTES): Promise<Body> => {
   if (!request.body) return {}
   let bytes: Uint8Array
   try {
-    bytes = await readAll(request.body, MAX_BODY_BYTES)
+    bytes = await readAll(request.body, limit)
   } catch (error) {
     if (error instanceof SizeLimitError) throw new CollaborationError(422, 'request body too large')
     throw error
@@ -281,8 +286,61 @@ const SETTINGS_FIELDS: Readonly<Record<string, string>> = {
   allow_rebase_merge: 'allowRebaseMerge',
 }
 
+const reactionRoutes = (kind: ReactionKind, prefix: string): Route[] => {
+  const subject = (context: Context): ReactionSubject => ({ kind, id: int(context.params[0]!) })
+  return [
+    { method: 'GET', pattern: new RegExp(`^${prefix}/reactions$`), handler: async (context) => sliced(context, await listReactions(context.scope, subject(context), context.url.searchParams.get('content')), (reaction) => reactionJson(context.urls, reaction)) },
+    {
+      method: 'POST',
+      pattern: new RegExp(`^${prefix}/reactions$`),
+      body: true,
+      handler: async (context) => {
+        const { reaction, created } = await createReaction(context.scope, subject(context), context.body.content)
+        return json(created ? 201 : 200, reactionJson(context.urls, reaction))
+      },
+    },
+    {
+      method: 'DELETE',
+      pattern: new RegExp(`^${prefix}/reactions/(\\d+)$`),
+      handler: async (context) => {
+        await deleteReaction(context.scope, subject(context), int(context.params[1]!))
+        return json(204, null)
+      },
+    },
+  ]
+}
+
+const CONTENTS_BODY_BYTES = Math.ceil((MAX_WEB_FILE_BYTES * 4) / 3) + 64 * 1024
+
 const routes: readonly Route[] = [
   { method: 'GET', pattern: /^$/, handler: repositoryResponse },
+  ...reactionRoutes('issue', '/issues/(\\d+)'),
+  ...reactionRoutes('issue_comment', '/issues/comments/(\\d+)'),
+  ...reactionRoutes('review_comment', '/pulls/comments/(\\d+)'),
+  {
+    method: 'GET',
+    pattern: /^\/contents(?:\/(.*))?$/,
+    handler: async (context) => {
+      const { ref, item } = await getContents(context.scope, context.params[0] ?? '', context.url.searchParams.get('ref'))
+      return json(200, Array.isArray(item) ? item.map((entry) => contentJson(context.urls, context.scope.repository, ref, entry)) : contentJson(context.urls, context.scope.repository, ref, item as ContentItem))
+    },
+  },
+  {
+    method: 'PUT',
+    pattern: /^\/contents\/(.+)$/,
+    body: true,
+    maxBody: CONTENTS_BODY_BYTES,
+    handler: async (context) => {
+      const { outcome, item, created } = await putContents(context.scope, context.params[0]!, context.body)
+      return json(created ? 201 : 200, { content: contentJson(context.urls, context.scope.repository, outcome.branch, item), commit: contentCommitJson(context.urls, context.scope.repository, outcome) })
+    },
+  },
+  {
+    method: 'DELETE',
+    pattern: /^\/contents\/(.+)$/,
+    body: true,
+    handler: async (context) => json(200, { content: null, commit: contentCommitJson(context.urls, context.scope.repository, await deleteContents(context.scope, context.params[0]!, context.body)) }),
+  },
   {
     method: 'PATCH',
     pattern: /^$/,
@@ -865,7 +923,7 @@ export const handleCollaborationApi = async (request: Request, options: Collabor
   if (!principal) return errorResponse(401, 'Bad credentials', [], { 'WWW-Authenticate': 'Bearer' })
   try {
     const scope = await openRepository(options, principal, matched.owner, matched.name)
-    const body = matched.route.body ? await readBody(request) : {}
+    const body = matched.route.body ? await readBody(request, matched.route.maxBody) : {}
     return await matched.route.handler({ scope, url, urls: urlsFor(request, options), body, request, params: matched.params })
   } catch (error) {
     if (error instanceof CollaborationError) {

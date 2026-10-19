@@ -8,6 +8,7 @@ import RefPicker from '../../../../components/RefPicker.astro'
 import RepoHeader from '../../../../components/RepoHeader.astro'
 import Layout from '../../../../layouts/Layout.astro'
 import { browse, previewKind } from '../../../../ui/browse.ts'
+import { editUrl } from '../../../../ui/edit.ts'
 import { formatBytes, plural } from '../../../../ui/format.ts'
 import { blameUrl, blobUrl, commitsUrl, mediaUrl, openRepository, rawUrl, treeUrl } from '../../../../ui/repository.ts'
 
@@ -18,6 +19,7 @@ if (repo.kind === 'ok' && view?.kind === 'tree') return Astro.redirect(treeUrl(r
 const showSource = Astro.url.searchParams.get('plain') === '1'
 const name = view?.kind === 'blob' ? view.entry.name : ''
 const preview = previewKind(name)
+const editable = repo.kind === 'ok' && view?.kind === 'blob' && Astro.locals.session !== null && repo.view === null && repo.branches.some((branch) => branch.name === view.target.ref)
 ---
 
 {
@@ -57,6 +59,16 @@ const preview = previewKind(name)
             <a class="btn btn-xs" href={rawUrl(repo.name, view.target.ref, view.target.path)}>
               Raw
             </a>
+            {editable && view.content.kind === 'text' && (
+              <a class="btn btn-xs" href={editUrl(repo, 'edit', view.target.ref, view.target.path)}>
+                Edit
+              </a>
+            )}
+            {editable && (
+              <a class="btn btn-xs" href={editUrl(repo, 'delete', view.target.ref, view.target.path)}>
+                Delete
+              </a>
+            )}
           </div>
         </div>
         {view.content.kind === 'text' && view.markdown !== null && !showSource && <article class="markdown-body p-6 overflow-x-auto" set:html={view.markdown} />}

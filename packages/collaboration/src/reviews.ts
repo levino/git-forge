@@ -5,6 +5,7 @@ import { type ActorRef, emitActivity, invalid, nodeId, notFound, refFromColumns,
 import { branchTip, currentRefs, objectDatabase, peelToCommit } from './git.ts'
 import { eventStatement, optionalBody, requireBody } from './issues.ts'
 import { type PullRow, pullRow, refreshPull } from './pull-rows.ts'
+import { EMPTY_ROLLUP, type ReactionRollup, reactionRollups } from './reactions.ts'
 
 export type ReviewState = 'PENDING' | 'COMMENTED' | 'APPROVED' | 'CHANGES_REQUESTED' | 'DISMISSED'
 
@@ -49,6 +50,7 @@ export type ReviewComment = {
   readonly outdated: boolean
   readonly createdAt: number
   readonly updatedAt: number
+  readonly reactions: ReactionRollup
 }
 
 type ReviewRow = {
@@ -207,6 +209,7 @@ const hydrateComments = async (scope: Scope, rows: readonly CommentRow[]): Promi
   const odb = objectDatabase(scope)
   const pulls = new Map<number, PullRow>()
   const files = new Map<string, FileDiff | null>()
+  const reactions = await reactionRollups(scope.db, 'review_comment', rows.map((row) => row.id))
   const blobs = new Map<string, string | null>()
   const blobAt = async (commit: ObjectId, path: string) => {
     const key = `${commit}:${path}`
@@ -243,6 +246,7 @@ const hydrateComments = async (scope: Scope, rows: readonly CommentRow[]): Promi
       outdated,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
+      reactions: reactions.get(row.id) ?? EMPTY_ROLLUP,
     })
   }
   return result

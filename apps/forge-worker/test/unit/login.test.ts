@@ -413,6 +413,13 @@ describe('device flow', () => {
     expect(page).toContain('value="repo:write" checked')
     expect(page).not.toContain('value="repo:admin"')
     expect((await browser.form('/login/device', { user_code: started.user_code, decision: 'approve' })).status).toBe(403)
+    const multipart = (fields: Record<string, string>) => {
+      const body = new FormData()
+      for (const [key, value] of Object.entries(fields)) body.set(key, value)
+      return browser.fetch('/login/device', { method: 'POST', body })
+    }
+    expect((await multipart({ csrf: 'wrong' })).status).toBe(403)
+    expect((await multipart({ csrf: await browser.csrf() })).status).not.toBe(403)
     const approved = await browser.form('/login/device', { user_code: started.user_code, decision: 'approve', csrf: await browser.csrf() })
     expect(await approved.text()).toContain('Device connected')
 

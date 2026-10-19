@@ -2023,9 +2023,12 @@ export const createForge = (options: ForgeOptions): Forge => {
     storage,
     accounts: store,
     now: () => now().getTime(),
+    lfs: { maxObjectBytes: options.maxLfsObjectBytes, onStored: storedObject, ...(options.digests ? { digests: options.digests } : {}) },
     onBranchUpdated: async (update: BranchUpdate) => {
       const outcome: PushOutcome = { unpack: 'ok', results: [{ name: update.ref, oldId: update.oldId, newId: update.newId, ok: true }], pack: null, objectCount: 0, archived: [] }
-      await afterPush(request, update.repo, outcome, waitUntil, await apiPrincipal(request))
+      const user = update.actor.kind === 'user' ? await store.findUserById(update.actor.id) : null
+      const principal: Principal | null = user ? { kind: 'user', id: user.id, login: user.login, limits: null, tokenId: null } : request.bodyUsed ? null : await apiPrincipal(request)
+      await afterPush(request, update.repo, outcome, waitUntil, principal)
     },
     onActivity: async (scope, activity) => {
       await emit(await activityEvent(scope, activity, issuerFor(request)))

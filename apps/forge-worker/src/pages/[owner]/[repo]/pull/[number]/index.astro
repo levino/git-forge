@@ -4,9 +4,10 @@ import { can, createComment, createReview, getIssue, getPull, mergePull, timelin
 import NotFound from '../../../../../components/NotFound.astro'
 import PullHeader from '../../../../../components/PullHeader.astro'
 import RepoHeader from '../../../../../components/RepoHeader.astro'
+import Reactions from '../../../../../components/Reactions.astro'
 import Timeline from '../../../../../components/Timeline.astro'
 import Layout from '../../../../../layouts/Layout.astro'
-import { field, type FormOutcome, parseNumber, renderBody, renderTimeline, runForm, safeUrl, scopeFor, unlessMissing } from '../../../../../ui/collaboration.ts'
+import { field, type FormOutcome, parseNumber, reactionsFor, reactTo, renderBody, renderTimeline, runForm, safeUrl, scopeFor, unlessMissing } from '../../../../../ui/collaboration.ts'
 import { checkBadge, checksFor, MERGE_LABELS } from '../../../../../ui/pulls.ts'
 import { openRepository, repoUrl } from '../../../../../ui/repository.ts'
 
@@ -18,6 +19,10 @@ if (repo.kind === 'ok' && number !== null && Astro.request.method === 'POST') {
   const here = repoUrl(repo.name, 'pull', String(number))
   outcome = await runForm(forge, Astro.request, repo, async (scope, form) => {
     const action = field(form, 'action')
+    if (action === 'react') {
+      await reactTo(scope, form)
+      return here
+    }
     const body = field(form, 'body').trim()
     if (action === 'merge') {
       await mergePull(scope, number, { method: field(form, 'method') || 'merge', sha: field(form, 'sha') || undefined })
@@ -48,7 +53,11 @@ if (repo.kind === 'ok' && scope && number !== null && !pull) {
   const issue = await unlessMissing(getIssue(scope, number))
   if (issue && !issue.isPull) return Astro.redirect(repoUrl(repo.name, 'issues', String(number)))
 }
-const items = repo.kind === 'ok' && scope && pull ? await renderTimeline(repo, await timeline(scope, pull.number)) : []
+const entries = scope && pull ? await timeline(scope, pull.number) : []
+const items = repo.kind === 'ok' ? await renderTimeline(repo, entries) : []
+const csrf = session?.csrf ?? null
+const commentReactions = scope && pull ? await reactionsFor(scope, 'issue_comment', entries.flatMap((entry) => (entry.kind === 'comment' ? [{ id: entry.comment.id, subject: entry.comment.id, reactions: entry.comment.reactions }] : [])), csrf, pull.locked) : new Map()
+const ownReactions = scope && pull ? (await reactionsFor(scope, 'issue', [{ id: pull.id, subject: pull.number, reactions: pull.reactions }], csrf, pull.locked)).get(pull.id) : undefined
 const body = repo.kind === 'ok' && pull ? await renderBody(repo, pull.body) : null
 const checks = scope && pull ? await checksFor(scope, pull.headSha) : null
 const canComment = scope && pull ? can(scope, 'comment:create', { locked: pull.locked }) : false
@@ -72,8 +81,9 @@ const methods = scope ? (['merge', 'squash', 'rebase'] as const).filter((method)
           <span class="font-semibold">{pull.author.login}</span> wrote
         </header>
         {body ? <div class="markdown-body p-4 overflow-x-auto" set:html={body} /> : <p class="p-4 text-sm text-base-content/70">No description provided.</p>}
+        {ownReactions && <Reactions {...ownReactions} />}
       </article>
-      <Timeline items={items} />
+      <Timeline items={items} reactions={commentReactions} />
 
       {(checks.runs.length > 0 || checks.statuses) && (
         <section class="mt-6 border border-base-300 rounded-box" aria-labelledby="checks">
@@ -107,6 +117,9 @@ const methods = scope ? (['merge', 'squash', 'rebase'] as const).filter((method)
           <ul class="list-disc pl-6 text-sm mb-2">
             {pull.conflicts.map((conflict) => <li class="font-mono">{conflict.path}</li>)}
           </ul>
+        )}
+        {session && pull.mergeableState === 'dirty' && (
+          <a class="btn btn-sm mb-2" href={repoUrl(repo.name, 'pull', String(pull.number), 'conflicts')}>Resolve conflicts</a>
         )}
         {pull.blockers.length > 0 && (
           <ul class="list-disc pl-6 text-sm mb-2">

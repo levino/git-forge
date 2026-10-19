@@ -115,7 +115,12 @@ export const readActiveSession = async (request: Request, options: LoginHttpOpti
 const presentedCsrf = async (request: Request): Promise<string | null> => {
   const header = request.headers.get(CSRF_HEADER)
   if (header) return header
-  if (!(request.headers.get('Content-Type') ?? '').startsWith('application/x-www-form-urlencoded')) return null
+  const type = request.headers.get('Content-Type') ?? ''
+  if (type.startsWith('multipart/form-data')) {
+    const value = (await request.clone().formData().catch(() => null))?.get(CSRF_FIELD)
+    return typeof value === 'string' ? value : null
+  }
+  if (!type.startsWith('application/x-www-form-urlencoded')) return null
   return (await readForm(request.clone())).get(CSRF_FIELD)
 }
 

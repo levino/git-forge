@@ -34,6 +34,7 @@ export type Permission =
   | 'pull:close'
   | 'pull:merge'
   | 'review:submit'
+  | 'reaction:create'
   | 'review:dismiss'
   | 'review:request'
   | 'status:write'
@@ -81,6 +82,7 @@ const RULES: Readonly<Record<Permission, Rule>> = {
   'pull:merge': { role: 'write' },
   'review:submit': { role: 'triage', participate: true, respectsLock: true },
   'review:dismiss': { role: 'write' },
+  'reaction:create': { role: 'triage', participate: true, respectsLock: true },
   'review:request': { role: 'triage' },
   'status:write': { role: 'write' },
   'discussion:create': { role: 'triage', participate: true, feature: 'discussions' },

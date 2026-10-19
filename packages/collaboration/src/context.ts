@@ -12,7 +12,7 @@ import {
   resolveAccess,
   sql,
 } from '@git-forge/accounts'
-import type { RepositoryName, Storage } from '@git-forge/core'
+import type { DigestFactory, RepositoryName, Storage } from '@git-forge/core'
 import { allowed, type CollaborationSettings, DEFAULT_SETTINGS, type Permission } from './permissions.ts'
 
 export type ActorRef = { readonly kind: 'user' | 'app'; readonly id: string }
@@ -73,6 +73,12 @@ export type Activity = {
 
 export type ActivityHandler = (scope: Scope, activity: Activity) => Promise<void>
 
+export type LfsOptions = {
+  readonly maxObjectBytes?: number
+  readonly digests?: DigestFactory
+  readonly onStored?: (key: string, size: number) => Promise<void>
+}
+
 export type CollaborationOptions = {
   readonly db: Database
   readonly storage: Storage
@@ -81,6 +87,7 @@ export type CollaborationOptions = {
   readonly onBranchUpdated?: (update: BranchUpdate) => Promise<void>
   readonly onActivity?: ActivityHandler
   readonly noreplyDomain?: string
+  readonly lfs?: LfsOptions
 }
 
 export type Scope = {
@@ -95,6 +102,7 @@ export type Scope = {
   readonly repo: RepositoryName
   readonly actor: Actor
   readonly settings: CollaborationSettings
+  readonly lfs?: LfsOptions
 }
 
 export type ErrorStatus = 400 | 401 | 403 | 404 | 405 | 409 | 410 | 422
@@ -169,6 +177,7 @@ export const openRepository = async (options: CollaborationOptions, principal: P
     repo: { owner: repository.owner, name: repository.name },
     actor,
     settings: await readSettings(options.db, repository.id),
+    ...(options.lfs ? { lfs: options.lfs } : {}),
   }
 }
 
@@ -180,6 +189,7 @@ export const scopeOptions = (scope: Scope): CollaborationOptions => ({
   noreplyDomain: scope.noreplyDomain,
   ...(scope.onActivity ? { onActivity: scope.onActivity } : {}),
   ...(scope.onBranchUpdated ? { onBranchUpdated: scope.onBranchUpdated } : {}),
+  ...(scope.lfs ? { lfs: scope.lfs } : {}),
 })
 
 export const can = (scope: Scope, permission: Permission, extra: { readonly author?: ActorRef | null; readonly locked?: boolean } = {}): boolean =>

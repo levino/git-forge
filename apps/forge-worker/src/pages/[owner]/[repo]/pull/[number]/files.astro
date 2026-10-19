@@ -5,7 +5,7 @@ import NotFound from '../../../../../components/NotFound.astro'
 import PullHeader from '../../../../../components/PullHeader.astro'
 import RepoHeader from '../../../../../components/RepoHeader.astro'
 import Layout from '../../../../../layouts/Layout.astro'
-import { field, type FormOutcome, parseNumber, renderBody, runForm, scopeFor, unlessMissing } from '../../../../../ui/collaboration.ts'
+import { field, type FormOutcome, parseNumber, reactionsFor, reactTo, renderBody, runForm, scopeFor, unlessMissing } from '../../../../../ui/collaboration.ts'
 import { plural } from '../../../../../ui/format.ts'
 import { blobUrl, openRepository, repoUrl } from '../../../../../ui/repository.ts'
 
@@ -15,6 +15,10 @@ const number = parseNumber(Astro.params.number)
 let outcome: FormOutcome | null = null
 if (repo.kind === 'ok' && number !== null && Astro.request.method === 'POST') {
   outcome = await runForm(forge, Astro.request, repo, async (scope, form) => {
+    if (field(form, 'action') === 'react') {
+      await reactTo(scope, form)
+      return `${repoUrl(repo.name, 'pull', String(number), 'files')}#discussion-${field(form, 'subject')}`
+    }
     const comment = await createReviewComment(scope, number, {
       path: field(form, 'path'),
       line: Number(field(form, 'line')),
@@ -37,10 +41,11 @@ const rendered =
         reviewComments.map(async (comment) => ({ comment, html: (await renderBody(repo, comment.body)) ?? '' })),
       )
     : []
+const reactions = scope && pull ? await reactionsFor(scope, 'review_comment', reviewComments.map((comment) => ({ id: comment.id, subject: comment.id, reactions: comment.reactions })), session?.csrf ?? null, pull.locked) : new Map()
 const inline = (path: string): LineComment[] =>
   rendered
     .filter(({ comment }) => comment.path === path && comment.line !== null && !comment.outdated)
-    .map(({ comment, html }) => ({ id: comment.id, author: comment.author.login, html, line: comment.line!, side: comment.side }))
+    .map(({ comment, html }) => ({ id: comment.id, author: comment.author.login, html, line: comment.line!, side: comment.side, reactions: reactions.get(comment.id) }))
 const outdated = rendered.filter(({ comment }) => comment.outdated || comment.line === null)
 const commentable = Boolean(session && scope && pull && can(scope, 'review:submit', { locked: pull.locked }) && pull.state === 'open')
 const additions = files.reduce((sum, file) => sum + file.additions, 0)

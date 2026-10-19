@@ -1,9 +1,11 @@
 import type { RepositorySubject } from '@git-forge/accounts'
 import { type FileDiff, formatHunks, signatureDate, type ObjectId } from '@git-forge/core'
 import type { UserSummary } from './actors.ts'
+import { type CommitOutcome, type ContentItem, encodeBase64 } from './contents.ts'
 import type { CollaborationSettings } from './permissions.ts'
 import type { Discussion, DiscussionCategory, DiscussionComment } from './discussions.ts'
 import type { Issue, IssueComment, IssueEvent, Label, Milestone } from './issues.ts'
+import type { Reaction, ReactionRollup } from './reactions.ts'
 import type { PullCommit, PullDetails, PullRequest } from './pulls.ts'
 import type { Review, ReviewComment } from './reviews.ts'
 import type { CheckRun, CombinedStatus, CommitStatus } from './statuses.ts'
@@ -66,6 +68,55 @@ export const milestoneJson = (urls: Urls, repository: RepositorySubject, milesto
   due_on: iso(milestone.dueOn),
 })
 
+const encodedPath = (path: string): string => path.split('/').map(enc).join('/')
+
+export const contentJson = (urls: Urls, repository: RepositorySubject, ref: string, item: ContentItem) => {
+  const api = repoApi(urls, repository)
+  const web = repoWeb(urls, repository)
+  const self = `${api}/contents/${encodedPath(item.path)}?ref=${enc(ref)}`
+  const git = item.type === 'dir' ? `${api}/git/trees/${item.sha}` : `${api}/git/blobs/${item.sha}`
+  const html = `${web}/${item.type === 'dir' ? 'tree' : 'blob'}/${encodedPath(ref)}/${encodedPath(item.path)}`
+  return {
+    type: item.type,
+    ...(item.content ? { encoding: 'base64', content: encodeBase64(item.content).replace(/.{60}/g, '$&\n') } : {}),
+    size: item.size,
+    name: item.name,
+    path: item.path,
+    sha: item.sha,
+    url: self,
+    git_url: git,
+    html_url: html,
+    download_url: item.type === 'file' ? `${web}/raw/${encodedPath(ref)}/${encodedPath(item.path)}` : null,
+    _links: { self, git, html },
+  }
+}
+
+export const contentCommitJson = (urls: Urls, repository: RepositorySubject, outcome: CommitOutcome) => {
+  const api = repoApi(urls, repository)
+  const person = { name: outcome.signature.name, email: outcome.signature.email, date: signatureDate(outcome.signature) }
+  return {
+    sha: outcome.sha,
+    url: `${api}/git/commits/${outcome.sha}`,
+    html_url: `${repoWeb(urls, repository)}/commit/${outcome.sha}`,
+    author: person,
+    committer: person,
+    message: outcome.message,
+    tree: { sha: outcome.tree, url: `${api}/git/trees/${outcome.tree}` },
+    parents: outcome.parent ? [{ sha: outcome.parent, url: `${api}/git/commits/${outcome.parent}`, html_url: `${repoWeb(urls, repository)}/commit/${outcome.parent}` }] : [],
+    verification: { verified: false, reason: 'unsigned', signature: null, payload: null },
+  }
+}
+
+export const rollupJson = (url: string, rollup: ReactionRollup) => ({ url, total_count: rollup.total, ...rollup.counts })
+
+export const reactionJson = (urls: Urls, reaction: Reaction) => ({
+  id: reaction.id,
+  node_id: reaction.nodeId,
+  user: userJson(urls, reaction.user),
+  content: reaction.content,
+  created_at: iso(reaction.createdAt),
+})
+
 export const issueJson = (urls: Urls, repository: RepositorySubject, issue: Issue, pull?: Pick<PullRequest, 'mergedAt' | 'draft'>) => {
   const api = repoApi(urls, repository)
   const web = repoWeb(urls, repository)
@@ -96,6 +147,7 @@ export const issueJson = (urls: Urls, repository: RepositorySubject, issue: Issu
     closed_by: issue.closedBy ? userJson(urls, issue.closedBy) : null,
     author_association: association(repository, issue.author),
     body: issue.body,
+    reactions: rollupJson(`${api}/issues/${issue.number}/reactions`, issue.reactions),
     ...(issue.isPull
       ? {
           draft: pull?.draft ?? false,
@@ -122,6 +174,7 @@ export const commentJson = (urls: Urls, repository: RepositorySubject, comment: 
   updated_at: iso(comment.updatedAt),
   author_association: association(repository, comment.author),
   body: comment.body,
+  reactions: rollupJson(`${repoApi(urls, repository)}/issues/comments/${comment.id}/reactions`, comment.reactions),
 })
 
 export const eventJson = (urls: Urls, repository: RepositorySubject, event: IssueEvent) => ({
@@ -338,6 +391,7 @@ export const reviewCommentJson = (urls: Urls, repository: RepositorySubject, com
   original_line: comment.originalLine,
   side: comment.side,
   subject_type: 'line',
+  reactions: rollupJson(`${repoApi(urls, repository)}/pulls/comments/${comment.id}/reactions`, comment.reactions),
 })
 
 export const statusJson = (urls: Urls, repository: RepositorySubject, status: CommitStatus) => ({

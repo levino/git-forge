@@ -1,0 +1,44 @@
+---
+import { REACTION_EMOJI, REACTIONS } from '@git-forge/collaboration'
+import type { ReactionProps } from '../ui/collaboration.ts'
+
+type Props = ReactionProps
+
+const { kind, subject, rollup, mine, csrf } = Astro.props
+const shown = REACTIONS.filter((content) => rollup.counts[content] > 0)
+---
+
+{
+  (shown.length > 0 || csrf) && (
+    <form method="post" class="flex flex-wrap items-center gap-1 px-4 pb-3" aria-label="Reactions">
+      {csrf && <input type="hidden" name="csrf" value={csrf} />}
+      <input type="hidden" name="action" value="react" />
+      <input type="hidden" name="kind" value={kind} />
+      <input type="hidden" name="subject" value={subject} />
+      {shown.map((content) => (
+        <button
+          name="content"
+          value={content}
+          disabled={!csrf}
+          aria-pressed={mine.includes(content) ? 'true' : 'false'}
+          aria-label={`${content}: ${rollup.counts[content]}`}
+          class:list={['btn btn-xs rounded-full', mine.includes(content) ? 'btn-primary btn-soft' : 'btn-ghost border-base-300']}
+        >
+          {REACTION_EMOJI[content]} {rollup.counts[content]}
+        </button>
+      ))}
+      {csrf && (
+        <details class="dropdown">
+          <summary class="btn btn-xs btn-ghost rounded-full" aria-label="Add reaction">☺ +</summary>
+          <div class="dropdown-content z-10 flex gap-1 p-1 rounded-box bg-base-100 border border-base-300 shadow">
+            {REACTIONS.map((content) => (
+              <button name="content" value={content} class="btn btn-xs btn-ghost" aria-label={`React with ${content}`}>
+                {REACTION_EMOJI[content]}
+              </button>
+            ))}
+          </div>
+        </details>
+      )}
+    </form>
+  )
+}

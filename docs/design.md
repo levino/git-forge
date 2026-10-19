@@ -2039,7 +2039,8 @@ Issues, pull requests, reviews, commit statuses, check runs and discussions
   is written to the bucket, so a mirror or a plain bucket clone carries no
   issues or reviews (§4). Pull requests keep their head and base shas in the
   database; there are no `refs/pull/*` refs. The only Git writes are merge
-  results, which are repository content like any push.
+  results, commits from the browser and conflict resolutions, which are
+  repository content like any push.
 - **GitHub semantics and shapes.** Every pull request is an issue; issues,
   pull requests and discussions share one number sequence per repository.
   Roles are GitHub's (read, triage, write, maintain, admin); readers may open
@@ -2149,9 +2150,38 @@ Issues, pull requests, reviews, commit statuses, check runs and discussions
   that do not anchor (`validateAnchor` on their original commit and line)
   become issue comments quoting path and line. Releases keep their times;
   assets are deduplicated by name.
+- **Commits from the browser** (*submit via form*, contents API). Core
+  builds them with pure functions (`edit.ts`: `commitFileChanges` rewrites
+  only the trees on the changed paths, the result is identical to `git
+  write-tree`) and writes them like a merge: one new pack, then the
+  compare-and-swap of the branch. No git binary. Writers commit directly
+  unless branch protection refuses a push (the same `evaluateBranchUpdate`
+  with `via: 'push'`); then only a new branch with a pull request is
+  offered. Users without write access propose: the commit lands on
+  `patch-N` of their fork (created on first use, its alternates make the
+  base commit readable) and a pull request opens. A stale `sha` (the blob
+  the editor started from) is a `409`. Paths marked `filter=lfs` by the
+  branch's `.gitattributes` (the checked-in files from the root down,
+  later lines and deeper files win) become LFS objects, streamed with
+  SHA-256 verification and limited by `MAX_LFS_OBJECT_BYTES`, plus pointers;
+  other files are limited to 10 MiB. Browser uploads are multipart forms and
+  buffered by the platform (the request body limit applies); the CSRF token
+  is read from multipart forms too.
+- **Conflict resolution in the browser.** `conflictLines` in `xdiff.ts`
+  writes git's conflict markers (`merge`-style, including git's merging of
+  conflicts at most three lines apart and the newline added before a
+  marker), byte for byte like `git merge-file` on randomized inputs. Only
+  text conflicts of UTF-8 files up to 10 MiB without LFS pointers are
+  editable; everything else is refused with a hint to merge with git. The
+  resolution is a merge commit of the base into the head (parents head,
+  base), written to the head repository (base objects copied there first
+  when it does not share them) for users who may push to the head branch.
+- **Reactions** (migration `0050_reactions`): one row per subject (issue or
+  pull request, issue comment, review comment), user and content (GitHub's
+  eight), a `reactions` rollup in the JSON of the subject. No events: GitHub
+  sends no webhooks for reactions.
 - **Limits of v1.** Computing mergeability and file lists loads the involved
-  objects through the in-memory object database, no reactions, no
-  in-browser conflict resolution.
+  objects through the in-memory object database.
 
 ## 18. Web UI
 
@@ -2314,6 +2344,16 @@ fork) and, on a fork, *forked from* with a *Contribute* link. *New pull
 request* takes `head_repo` (any readable repository of the fork network)
 and offers that repository's branches; *Allow edits by maintainers* sets
 `maintainer_can_modify`.
+
+Files: the file view links *Edit* (text files) and *Delete*, the tree
+*Add file* and *Upload files*, for signed-in users on branches
+(`/{owner}/{repo}/edit/{branch}/{path}?mode=edit|new|upload|delete`). The
+commit box offers what `editPlan` allows: commit directly or to a new branch
+with an optional pull request, a new branch with a pull request on a
+protected branch, or *Propose changes* through the user's fork. A pull
+request with conflicts links `…/pull/{n}/conflicts`, one textarea per
+conflicted file. Issues, pull requests, comments and review comments show
+reactions as toggle buttons (a form per subject, `<details>` picker).
 
 Inline review comments on the *Files changed* tab use the only client script
 of these pages: a click on a line's `+` clones a `<template>` form below the

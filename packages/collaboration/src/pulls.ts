@@ -467,7 +467,7 @@ const METHOD_SETTING: Readonly<Record<MergeMethod, 'allowMergeCommit' | 'allowSq
 
 const METHOD_NAME: Readonly<Record<MergeMethod, string>> = { merge: 'Merge commits', squash: 'Squash merges', rebase: 'Rebase merges' }
 
-const signatureFor = async (scope: Scope, ref: ActorRef | null, at: number): Promise<Signature> => {
+export const signatureFor = async (scope: Scope, ref: ActorRef | null, at: number): Promise<Signature> => {
   const users = await loadUsers(scope.db, [ref])
   const user = users(ref)
   return signatureAt(user.name ?? user.login, user.email ?? `${user.login}@${scope.noreplyDomain}`, new Date(at))
@@ -597,6 +597,7 @@ export const systemScope = async (options: CollaborationOptions, owner: string, 
     repo: { owner: repository.owner, name: repository.name },
     actor: { principal: { kind: 'anonymous' }, access: 'admin', writable: true, ref: null },
     settings: await readSettings(options.db, repository.id),
+    ...(options.lfs ? { lfs: options.lfs } : {}),
   }
 }
 

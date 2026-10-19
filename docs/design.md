@@ -234,7 +234,8 @@ OIDC-style, modelled on GitHub Actions OIDC:
   authorization hook whether a request is a Git or an LFS request, so both are
   checked separately.
 - A mirror marks in its config (`auth: "instance"`) that it presents an
-  instance token to its upstream; otherwise it fetches anonymously. A mirror
+  instance token to its upstream; otherwise it fetches anonymously. Only an
+  instance admin may add such a mirror, since peers grant per issuer. A mirror
   of a mirror reads the upstream's `refs/upstream/{remote}/*` by setting the
   namespace to `upstream/{remote}/`.
 - JWKS documents are fetched without following redirects (`redirect:

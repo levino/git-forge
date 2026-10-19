@@ -1378,7 +1378,8 @@ export const createForge = (options: ForgeOptions): Forge => {
       await store.revokeInstanceRepository(normalizeIssuer(issuerInput), admin.repository.id, { kind: 'user', id: admin.principal.id })
     },
     addMirror: async (principal, repo, input, token) => {
-      const { repository } = await adminOf(principal, repo)
+      const { repository, principal: user } = await adminOf(principal, repo)
+      if (input.auth === 'instance' && !(await store.isInstanceAdmin(user.id))) throw new HttpError(403, 'only an instance admin can add a mirror with instance authentication')
       const name = { owner: repository.owner, name: repository.name }
       try {
         if (token) await mirrorSecrets.put(name, input.remote ?? 'origin', 'token', token)

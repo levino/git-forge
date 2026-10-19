@@ -1,5 +1,5 @@
 import { generateSigningKey, type SigningKey } from '@git-forge/accounts'
-import { type ImportJob, lfsObjectKey, readImportState, readRefs, sha256Hex, startImport, ZERO_ID } from '@git-forge/core'
+import { type ImportJob, lfsObjectKey, listMirrors, readImportState, readRefs, sha256Hex, startImport, ZERO_ID } from '@git-forge/core'
 import { basicAuth, chain, fakeLfs, lfsPointer, requireAuthorization } from '@git-forge/core/test/mirror-helpers.ts'
 import { S3Storage } from '@git-forge/s3'
 import { commitAll, gitBytes, initRepo, sampleHistory, tempDir, writeFile } from '@git-forge/core/test/git-helpers.ts'
@@ -425,6 +425,16 @@ describe('federation between two instances', () => {
     expect(config).toMatchObject({ issuer: downstreamServer.url, jwks_uri: `${downstreamServer.url}/.well-known/jwks.json` })
     expect((await json<{ keys: { kid: string }[] }>(await call(downstream, downstreamServer.url, 'GET', '/.well-known/jwks.json'))).keys[0]?.kid).toBe(downstreamKey.kid)
     expect((await call(upstream, upstreamServer.url, 'GET', '/.well-known/openid-configuration')).status).toBe(404)
+  })
+
+  it('lets only instance admins add mirrors with instance authentication', async () => {
+    await call(downstream, downstreamServer.url, 'POST', '/api/admin/users', downstreamAdmin, { login: 'carol' })
+    const carol = (await json<{ token: string }>(await call(downstream, downstreamServer.url, 'POST', '/api/admin/users/carol/tokens', downstreamAdmin, { scopes: ['repo:admin'] }))).token
+    await call(downstream, downstreamServer.url, 'POST', '/api/repos', carol, { owner: 'carol', name: 'copy' })
+    const url = `${upstreamServer.url}/admin/archive.git`
+    expect((await call(downstream, downstreamServer.url, 'POST', '/api/repos/carol/copy/mirrors', carol, { url, auth: 'instance' })).status).toBe(403)
+    expect(await listMirrors(downstream.storage, { owner: 'carol', name: 'copy' })).toEqual([])
+    expect((await call(downstream, downstreamServer.url, 'POST', '/api/repos/carol/copy/mirrors', carol, { url, mode: 'manual' })).status).toBe(201)
   })
 
   it('mirrors a private repository only after trust and grant', async () => {

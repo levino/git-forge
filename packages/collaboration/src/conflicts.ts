@@ -1,7 +1,8 @@
 import { type Access, atLeast } from '@git-forge/accounts'
 import { type ConflictFile, copyLfsObjects, mergeConflictFiles, ObjectDatabase, type ObjectId, resolveMergeConflicts, storeObjects, transferObjects, updateRefs } from '@git-forge/core'
 import { afterBranchUpdate, branchProblems, editErrors } from './contents.ts'
-import { CollaborationError, resolveActor, type Scope, scopeOptions } from './context.ts'
+import { CollaborationError, refFromColumns, resolveActor, type Scope, scopeOptions } from './context.ts'
+import { authorCanPushHead } from './forks.ts'
 import { branchName, branchTip, currentRefs, objectDatabase } from './git.ts'
 import { headRefsState, headRepositoryName, type PullRow, pullRow, refreshPull } from './pull-rows.ts'
 import { signatureFor, systemScope } from './pulls.ts'
@@ -32,7 +33,12 @@ const headWrite = async (scope: Scope, row: PullRow, head: ObjectId): Promise<{ 
   const repository = row.head_repository_id === null ? scope.repository : await scope.accounts.findRepositoryById(row.head_repository_id)
   if (!repository || repository.archived) return null
   const own = row.head_repository_id === null ? scope.actor : await resolveActor(scope.accounts, scope.actor.principal, repository)
-  const access: Access | null = own.writable && atLeast(own.access, 'write') ? own.access : row.maintainer_can_modify === 1 && atLeast(scope.actor.access, 'write') ? 'write' : null
+  const delegated =
+    row.head_repository_id !== null &&
+    row.maintainer_can_modify === 1 &&
+    atLeast(scope.actor.access, 'write') &&
+    (await authorCanPushHead(scope.accounts, refFromColumns(row.author_kind, row.author_id), repository))
+  const access: Access | null = own.writable && atLeast(own.access, 'write') ? own.access : delegated ? 'write' : null
   return access ? { problems: await branchProblems(scope, repository, access, row.head_ref, head) } : null
 }
 

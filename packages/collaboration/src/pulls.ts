@@ -75,6 +75,7 @@ import {
 import { headRefsState, headRepositoryName, importHeadObjects, PULL_SELECT, type PullRow, pullRow, recentCommits, refreshPull } from './pull-rows.ts'
 import { type CodeOwnerReview, evaluateCodeOwners, requestCodeOwners } from './owners.ts'
 import { accessOf, reviewEvidence } from './reviews.ts'
+import { authorCanPushHead } from './forks.ts'
 import { checkStates } from './statuses.ts'
 
 export type PullRequest = Issue & {
@@ -139,6 +140,8 @@ const hydratePulls = async (scope: Scope, rows: readonly PullRow[]): Promise<Pul
   }))
 }
 
+const FORK_COLLAB = "Fork collab can't be granted by someone without permission"
+
 type Head = { readonly repository: RepositorySubject | null; readonly branch: string }
 
 const splitHead = (scope: Scope, head: unknown): { owner: string | null; branch: string } => {
@@ -195,6 +198,7 @@ export const createPull = async (scope: Scope, input: PullInput): Promise<PullDe
   if (input.draft !== undefined && typeof input.draft !== 'boolean') throw invalid('draft must be a boolean')
   if (input.maintainerCanModify !== undefined && typeof input.maintainerCanModify !== 'boolean') throw invalid('maintainer_can_modify must be a boolean')
   const headRepositoryId = target.repository?.id ?? null
+  if (target.repository && input.maintainerCanModify === true && !(await authorCanPushHead(scope.accounts, author, target.repository))) throw invalid(FORK_COLLAB)
   const existing = await first(
     scope.db,
     sql(
@@ -441,6 +445,7 @@ export const updatePull = async (scope: Scope, number: number, input: PullUpdate
     if (!sameActor(actor, author)) throw new CollaborationError(403, 'Only the author can allow maintainers to modify the head branch')
     if (typeof input.maintainerCanModify !== 'boolean') throw invalid('maintainer_can_modify must be a boolean')
     if (row.head_repository_id === null && input.maintainerCanModify) throw invalid('maintainer_can_modify applies to pull requests from forks')
+    if (input.maintainerCanModify && !(before!.headRepository && (await authorCanPushHead(scope.accounts, author, before!.headRepository)))) throw invalid(FORK_COLLAB)
     if ((row.maintainer_can_modify === 1) !== input.maintainerCanModify) {
       statements.push(sql('UPDATE pull_requests SET maintainer_can_modify = ? WHERE issue_id = ?', input.maintainerCanModify ? 1 : 0, row.id))
     }

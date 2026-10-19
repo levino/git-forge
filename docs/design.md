@@ -827,10 +827,9 @@ anywhere else. Supported: `ServiceProviderConfig`, `Users` and `Groups` with
 `subject = externalId` or the verified email `= userName`, otherwise creates
 one. `active: false` disables the account and revokes its sessions and tokens;
 `DELETE` does the same and forgets the SCIM row. The first OIDC sign-in of an
-unlinked identity links a SCIM user with `externalId = sub`, `userName` = the
-verified email or `preferred_username`, when that account has no identity of
-this issuer yet. Groups are teams named `org/team` (id = team id; renames are
-refused; `DELETE` empties the team); a member added joins the organization,
+unlinked identity links a SCIM user with `externalId = sub` or `userName` =
+the verified email, when that account has no identity of this issuer yet.
+Groups are teams named `org/team` (id = team id; renames are refused; `DELETE` empties the team); a member added joins the organization,
 and leaving the last team of an organization removes a plain member from it.
 SCIM and the claim both write memberships; the next sign-in wins, so an IdP
 that provisions groups should also send the claim.

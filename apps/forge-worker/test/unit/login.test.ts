@@ -386,6 +386,22 @@ describe('OIDC', () => {
     const otherToken = await json<{ token: string }>(await call(forgeMode, BASE, 'POST', '/api/admin/scim/tokens', other, {}))
     expect((await forgeMode.fetch(new Request(`${BASE}/scim/v2/Users`, { headers: { Authorization: `Bearer ${otherToken.token}` } }))).status).toBe(404)
   })
+
+  it('links a SCIM user only by subject or verified email, not by preferred_username', async () => {
+    const forge = await loginForge({ ...oidcSettings(false), membershipSource: 'idp' }, mock)
+    const admin = await bootstrap(forge, BASE)
+    const { token } = await json<{ token: string }>(await call(forge, BASE, 'POST', '/api/admin/scim/tokens', admin, {}))
+    const scim = (body: unknown) => forge.fetch(new Request(`${BASE}/scim/v2/Users`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/scim+json' }, body: JSON.stringify(body) }))
+    expect((await scim({ userName: 'bob', externalId: 'sub-bob' })).status).toBe(201)
+    mock.user = { sub: 'sub-mallory', preferred_username: 'bob', email: 'bob', email_verified: false }
+    expect((await signIn(new Browser(forge))).status).toBe(403)
+    mock.user = { sub: 'sub-mallory', preferred_username: 'bob', email: 'mallory@example.org', email_verified: true }
+    expect((await signIn(new Browser(forge))).status).toBe(403)
+    mock.user = { sub: 'sub-bob', preferred_username: 'someone' }
+    const browser = new Browser(forge)
+    expect((await signIn(browser)).status).toBe(303)
+    expect(await json(await browser.fetch('/api/session'))).toMatchObject({ login: 'bob' })
+  })
 })
 
 describe('device flow', () => {

@@ -182,8 +182,8 @@ describe('SCIM', () => {
     await store.linkExternalIdentity(erin.id, { issuer: 'https://id.example', subject: 'sub-erin', email: 'erin@example.org' })
     const created = await scim('POST', '/Users', { userName: 'erin@example.org', externalId: 'sub-erin' })
     expect(created.body?.id).toBe(erin.id)
-    expect(await store.findProvisionedUser({ issuer: 'https://other.example', subject: 'x', email: null, username: 'erin@example.org' })).toEqual({ id: erin.id, login: 'erin' })
-    expect(await store.findProvisionedUser({ issuer: 'https://id.example', subject: 'x', email: null, username: 'erin@example.org' })).toBeNull()
+    expect(await store.findProvisionedUser({ issuer: 'https://other.example', subject: 'x', email: 'erin@example.org' })).toEqual({ id: erin.id, login: 'erin' })
+    expect(await store.findProvisionedUser({ issuer: 'https://id.example', subject: 'x', email: 'erin@example.org' })).toBeNull()
   })
 
   it('maps groups to org/team and keeps organization membership in step', async () => {

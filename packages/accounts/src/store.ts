@@ -520,18 +520,16 @@ export const createAccountsStore = (db: Database, options: AccountsStoreOptions 
       readonly issuer: string
       readonly subject: string
       readonly email: string | null
-      readonly username: string | null
     }): Promise<{ readonly id: string; readonly login: string } | null> =>
       first<{ id: string; login: string }>(
         db,
         sql(
           `SELECT a.id, a.login FROM scim_users s JOIN accounts a ON a.id = s.account_id
-           WHERE a.disabled_at IS NULL AND (s.external_id = ? OR s.user_name IN (?, ?))
+           WHERE a.disabled_at IS NULL AND (s.external_id = ? OR s.user_name = ?)
              AND NOT EXISTS (SELECT 1 FROM external_identities e WHERE e.account_id = a.id AND e.issuer = ?)
            ORDER BY s.external_id = ? DESC LIMIT 1`,
           identity.subject,
           identity.email ?? '',
-          identity.username ?? '',
           identity.issuer,
           identity.subject,
         ),

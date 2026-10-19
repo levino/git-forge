@@ -168,7 +168,6 @@ const resolveOidcUser = async (
     readonly issuer: string
     readonly subject: string
     readonly email: string | null
-    readonly username: string | null
     readonly candidates: readonly string[]
     readonly displayName: string | null
   },
@@ -268,7 +267,7 @@ export const completeOidcLogin = async (
     candidates: loginCandidates(claims),
     displayName: claims.name,
   }
-  const user = await resolveOidcUser(context, intentOf(data.intent), { ...identity, username: claims.preferredUsername })
+  const user = await resolveOidcUser(context, intentOf(data.intent), identity)
   if (context.membershipSource === 'idp') await syncMemberships(context.store, user.userId, groupValues(claims.raw?.[groupsClaimOf(context)]))
   await context.store.redeemInstanceAdminClaim(user.userId, claimIdentities(identity))
   await context.logins.touchExternalIdentity(provider.config.issuer, claims.sub)

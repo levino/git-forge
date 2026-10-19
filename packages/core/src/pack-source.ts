@@ -90,7 +90,7 @@ export class BlockCache {
       const stop = index === last ? end - index * this.#blockSize : block.length
       parts.push(block.subarray(start, stop))
     }
-    return parts.length === 1 ? (parts[0] as Uint8Array) : concat(parts)
+    return parts.length === 1 ? (parts[0] as Uint8Array).slice() : concat(parts)
   }
 }
 

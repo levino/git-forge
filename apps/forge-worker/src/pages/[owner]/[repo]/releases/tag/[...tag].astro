@@ -6,7 +6,7 @@ import Layout from '../../../../../layouts/Layout.astro'
 import { latestRelease, releaseByTag } from '../../../../../ui/releases.ts'
 import { openRepository } from '../../../../../ui/repository.ts'
 
-const repo = await openRepository(Astro.locals.forge, Astro.locals.principal, Astro.params.owner!, Astro.params.repo!)
+const repo = await openRepository(Astro.locals.forge, Astro.locals.principal, Astro.params.owner!, Astro.params.repo!, { request: Astro.request })
 const view = repo.kind === 'ok' && Astro.params.tag ? await releaseByTag(Astro.locals.forge, repo, Astro.params.tag) : null
 const latest = repo.kind === 'ok' && view ? await latestRelease(Astro.locals.forge, repo) : null
 ---

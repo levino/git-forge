@@ -12,10 +12,9 @@ import {
   toggleReaction,
   viewerReactions,
 } from '@git-forge/collaboration'
-import type { Principal } from '@git-forge/accounts'
 import type { ForgeServices, UiSession } from '../app.ts'
 import { renderMarkdown } from './markdown.ts'
-import { blobUrl, type OpenRepository, rawUrl } from './repository.ts'
+import { blobUrl, type OpenRepository, rawUrl, scopeFor } from './repository.ts'
 
 export type FormOutcome = { readonly kind: 'redirect'; readonly location: string } | { readonly kind: 'error'; readonly status: number; readonly message: string }
 
@@ -29,8 +28,7 @@ export const renderBody = (repo: OpenRepository, body: string | null): Promise<s
     ? renderMarkdown(body, { blob: blobUrl(repo.name, repo.defaultBranch ?? 'HEAD', []), raw: rawUrl(repo.name, repo.defaultBranch ?? 'HEAD', []), directory: '' })
     : null
 
-export const scopeFor = (forge: ForgeServices, request: Request, principal: Principal, repo: OpenRepository): Promise<Scope | null> =>
-  forge.collaboration(request, principal, repo.name.owner, repo.name.name)
+export { scopeFor }
 
 export const runForm = async (
   forge: ForgeServices,

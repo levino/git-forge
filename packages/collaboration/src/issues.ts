@@ -366,6 +366,14 @@ export const listIssues = async (scope: Scope, filters: IssueFilters = {}, page:
   return { items: await hydrateIssues(scope.db, rows), total }
 }
 
+export const openCounts = async (scope: Scope): Promise<{ readonly issues: number; readonly pulls: number }> => {
+  const row = await first<{ issues: number | null; pulls: number | null }>(
+    scope.db,
+    sql("SELECT SUM(is_pull = 0) AS issues, SUM(is_pull = 1) AS pulls FROM issues WHERE repository_id = ? AND state = 'open'", scope.repository.id),
+  )
+  return { issues: row?.issues ?? 0, pulls: row?.pulls ?? 0 }
+}
+
 const labelsByName = async (scope: Scope, names: readonly string[], create: boolean): Promise<LabelRow[]> => {
   const unique = [...new Map(names.map((name) => [name.toLowerCase(), name])).values()]
   const rows = await allIn<LabelRow>(scope.db, (marks) => `SELECT id, node_id, name, color, description FROM labels WHERE repository_id = ? AND name IN (${marks})`, unique, scope.repository.id)

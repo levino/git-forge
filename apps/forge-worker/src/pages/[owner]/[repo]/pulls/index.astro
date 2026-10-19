@@ -11,7 +11,7 @@ import { parsePage } from '../../../../ui/history.ts'
 import { openRepository, repoUrl } from '../../../../ui/repository.ts'
 
 const { forge, principal } = Astro.locals
-const repo = await openRepository(forge, principal, Astro.params.owner!, Astro.params.repo!)
+const repo = await openRepository(forge, principal, Astro.params.owner!, Astro.params.repo!, { request: Astro.request })
 const scope = repo.kind === 'ok' ? await scopeFor(forge, Astro.request, principal, repo) : null
 const state = Astro.url.searchParams.get('state') === 'closed' ? 'closed' : 'open'
 const page = parsePage(Astro.url.searchParams.get('page'))

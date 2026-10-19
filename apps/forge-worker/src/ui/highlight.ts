@@ -1,37 +1,40 @@
-import { createHighlighterCore, type HighlighterCore, type ThemedToken } from 'shiki/core'
+import { createHighlighterCore, type HighlighterCore, type LanguageRegistration, type ThemedToken } from 'shiki/core'
 import { createJavaScriptRegexEngine } from 'shiki/engine/javascript'
 import type { Hunk } from '@git-forge/core'
 import githubDark from 'shiki/dist/themes/github-dark.mjs'
 import githubLight from 'shiki/dist/themes/github-light.mjs'
-import typescript from 'shiki/dist/langs/typescript.mjs'
-import javascript from 'shiki/dist/langs/javascript.mjs'
-import tsx from 'shiki/dist/langs/tsx.mjs'
-import jsx from 'shiki/dist/langs/jsx.mjs'
-import json from 'shiki/dist/langs/json.mjs'
-import jsonc from 'shiki/dist/langs/jsonc.mjs'
-import python from 'shiki/dist/langs/python.mjs'
-import rust from 'shiki/dist/langs/rust.mjs'
-import go from 'shiki/dist/langs/go.mjs'
-import markdown from 'shiki/dist/langs/markdown.mjs'
-import yaml from 'shiki/dist/langs/yaml.mjs'
-import css from 'shiki/dist/langs/css.mjs'
-import html from 'shiki/dist/langs/html.mjs'
-import shellscript from 'shiki/dist/langs/shellscript.mjs'
-import toml from 'shiki/dist/langs/toml.mjs'
-import dockerfile from 'shiki/dist/langs/dockerfile.mjs'
-import sql from 'shiki/dist/langs/sql.mjs'
-import java from 'shiki/dist/langs/java.mjs'
-import c from 'shiki/dist/langs/c.mjs'
-import diff from 'shiki/dist/langs/diff.mjs'
-import ini from 'shiki/dist/langs/ini.mjs'
-import xml from 'shiki/dist/langs/xml.mjs'
-import kotlin from 'shiki/dist/langs/kotlin.mjs'
-import csharp from 'shiki/dist/langs/csharp.mjs'
-import graphql from 'shiki/dist/langs/graphql.mjs'
-import lua from 'shiki/dist/langs/lua.mjs'
-import make from 'shiki/dist/langs/make.mjs'
 
-const LANGUAGES = [typescript, javascript, tsx, jsx, json, jsonc, python, rust, go, markdown, yaml, css, html, shellscript, toml, dockerfile, sql, java, c, diff, ini, xml, kotlin, csharp, graphql, lua, make]
+type Grammar = { readonly default: LanguageRegistration[] }
+
+const LANGUAGES: Readonly<Record<string, () => Promise<Grammar>>> = {
+  typescript: () => import('shiki/dist/langs/typescript.mjs'),
+  javascript: () => import('shiki/dist/langs/javascript.mjs'),
+  tsx: () => import('shiki/dist/langs/tsx.mjs'),
+  jsx: () => import('shiki/dist/langs/jsx.mjs'),
+  json: () => import('shiki/dist/langs/json.mjs'),
+  jsonc: () => import('shiki/dist/langs/jsonc.mjs'),
+  python: () => import('shiki/dist/langs/python.mjs'),
+  rust: () => import('shiki/dist/langs/rust.mjs'),
+  go: () => import('shiki/dist/langs/go.mjs'),
+  markdown: () => import('shiki/dist/langs/markdown.mjs'),
+  yaml: () => import('shiki/dist/langs/yaml.mjs'),
+  css: () => import('shiki/dist/langs/css.mjs'),
+  html: () => import('shiki/dist/langs/html.mjs'),
+  shellscript: () => import('shiki/dist/langs/shellscript.mjs'),
+  toml: () => import('shiki/dist/langs/toml.mjs'),
+  dockerfile: () => import('shiki/dist/langs/dockerfile.mjs'),
+  sql: () => import('shiki/dist/langs/sql.mjs'),
+  java: () => import('shiki/dist/langs/java.mjs'),
+  c: () => import('shiki/dist/langs/c.mjs'),
+  diff: () => import('shiki/dist/langs/diff.mjs'),
+  ini: () => import('shiki/dist/langs/ini.mjs'),
+  xml: () => import('shiki/dist/langs/xml.mjs'),
+  kotlin: () => import('shiki/dist/langs/kotlin.mjs'),
+  csharp: () => import('shiki/dist/langs/csharp.mjs'),
+  graphql: () => import('shiki/dist/langs/graphql.mjs'),
+  lua: () => import('shiki/dist/langs/lua.mjs'),
+  make: () => import('shiki/dist/langs/make.mjs'),
+}
 
 const EXTENSIONS: Readonly<Record<string, string>> = {
   ts: 'typescript',
@@ -111,9 +114,25 @@ export const MAX_HIGHLIGHT_BYTES = 256 * 1024
 
 let highlighter: Promise<HighlighterCore> | undefined
 
-const getHighlighter = (): Promise<HighlighterCore> => {
-  highlighter ??= createHighlighterCore({ themes: [githubLight, githubDark], langs: LANGUAGES, engine: createJavaScriptRegexEngine({ forgiving: true }) })
-  return highlighter
+const loaded = new Map<string, Promise<HighlighterCore>>()
+
+const load = (lang: string): Promise<HighlighterCore> => {
+  highlighter ??= createHighlighterCore({ themes: [githubLight, githubDark], langs: [], engine: createJavaScriptRegexEngine({ forgiving: true }) })
+  const known = loaded.get(lang)
+  if (known) return known
+  const ready = highlighter.then(async (core) => {
+    await core.loadLanguage((await LANGUAGES[lang]!()).default)
+    return core
+  })
+  loaded.set(lang, ready)
+  return ready
+}
+
+const FENCE = /^ {0,3}(?:`{3,}|~{3,})\s*([\w+#.-]+)/gm
+
+const getHighlighter = async (text: string, lang: string): Promise<HighlighterCore> => {
+  const fences = lang === 'markdown' ? [...text.matchAll(FENCE)].flatMap((match) => languageOfFence(match[1]!) ?? []) : []
+  return (await Promise.all([lang, ...new Set(fences)].map(load)))[0]!
 }
 
 const styleOf = (token: ThemedToken): string =>
@@ -123,11 +142,9 @@ const styleOf = (token: ThemedToken): string =>
 
 const plain = (text: string): HighlightedLine[] => text.split('\n').map((line) => (line === '' ? [] : [{ content: line, style: '' }]))
 
-const LANGUAGE_IDS: ReadonlySet<string> = new Set(LANGUAGES.flat().map((language) => language.name))
-
 export const languageOfFence = (info: string): string | null => {
   const name = info.toLowerCase()
-  return LANGUAGE_IDS.has(name) ? name : (EXTENSIONS[name] ?? null)
+  return Object.hasOwn(LANGUAGES, name) ? name : (EXTENSIONS[name] ?? null)
 }
 
 export const highlightLines = (text: string, filename: string): Promise<HighlightedLine[]> => highlightText(text, languageFor(filename))
@@ -136,7 +153,7 @@ export const highlightText = async (text: string, lang: string | null): Promise<
   const body = text.endsWith('\n') ? text.slice(0, -1) : text
   if (!lang || body.length > MAX_HIGHLIGHT_BYTES) return plain(body)
   try {
-    const result = (await getHighlighter()).codeToTokens(body, { lang, themes: { light: 'github-light', dark: 'github-dark' }, defaultColor: false })
+    const result = (await getHighlighter(body, lang)).codeToTokens(body, { lang, themes: { light: 'github-light', dark: 'github-dark' }, defaultColor: false })
     return result.tokens.map((line) => line.map((token) => ({ content: token.content, style: styleOf(token) })))
   } catch {
     return plain(body)

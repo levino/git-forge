@@ -184,6 +184,8 @@ import {
   type SyncResult,
   withPresigner,
   locatedStorage,
+  cachedStorage,
+  type ObjectCache,
   ZERO_ID,
 } from '@git-forge/core'
 import {
@@ -271,6 +273,7 @@ export type ForgeOptions = ForgeSettings & {
   readonly digests?: DigestFactory
   readonly secretsKey?: SecretsKey
   readonly presigner?: Presigner
+  readonly objectCache?: ObjectCache
   readonly scheduleImport?: ImportScheduler
   readonly email?: EmailSender
   readonly renderLoginPage?: LoginPageRenderer
@@ -574,7 +577,7 @@ export const createForge = (options: ForgeOptions): Forge => {
   const now = options.now ?? (() => new Date())
   const nowMs = () => now().getTime()
   const meter = createUsageMeter(options.db, nowMs)
-  const metered = meter.storage(options.storage)
+  const metered = options.objectCache ? cachedStorage(meter.storage(options.storage), options.objectCache) : meter.storage(options.storage)
   const db = meter.database(options.db)
   const store: AccountsStore = createAccountsStore(db, { now: () => now().getTime() })
   const located = (raw: Storage): Storage => locatedStorage(raw, store.locateRepository, () => now().getTime())

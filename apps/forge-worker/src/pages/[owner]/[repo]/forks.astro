@@ -9,7 +9,7 @@ import { scopeFor } from '../../../ui/collaboration.ts'
 import { openRepository, repoUrl } from '../../../ui/repository.ts'
 
 const { forge, principal } = Astro.locals
-const repo = await openRepository(forge, principal, Astro.params.owner!, Astro.params.repo!)
+const repo = await openRepository(forge, principal, Astro.params.owner!, Astro.params.repo!, { request: Astro.request })
 const scope = repo.kind === 'ok' ? await scopeFor(forge, Astro.request, principal, repo) : null
 const forks = scope ? await listForks(scope) : []
 ---

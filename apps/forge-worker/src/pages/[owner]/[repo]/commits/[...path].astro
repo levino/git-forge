@@ -8,7 +8,7 @@ import Layout from '../../../../layouts/Layout.astro'
 import { history, parsePage } from '../../../../ui/history.ts'
 import { commitsUrl, openRepository } from '../../../../ui/repository.ts'
 
-const repo = await openRepository(Astro.locals.forge, Astro.locals.principal, Astro.params.owner!, Astro.params.repo!, true)
+const repo = await openRepository(Astro.locals.forge, Astro.locals.principal, Astro.params.owner!, Astro.params.repo!, { partial: true, request: Astro.request })
 const segments = (Astro.params.path ?? '').split('/').filter((segment) => segment !== '')
 const page = parsePage(Astro.url.searchParams.get('page'))
 const view = repo.kind === 'ok' ? await history(repo, segments, page) : null

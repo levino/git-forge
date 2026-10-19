@@ -173,6 +173,19 @@ describe('copy-only mirror sync', () => {
     expect(result.error).toMatch(/invalid pack index: checksum mismatch/)
   })
 
+  it('rejects a pack that is not named after its checksum', async () => {
+    const context = await setup()
+    const real = [...(await packFiles(context.upstream.storage, project)).keys()].find((name) => name.endsWith('.pack'))!.replace('.pack', '')
+    const fake = `pack-${'0'.repeat(40)}`
+    const renaming = async (request: Request): Promise<Response> => {
+      if (request.url.endsWith('objects/info/packs')) return new Response((await (await fetch(request)).text()).replaceAll(real, fake))
+      return request.url.includes(fake) ? fetch(request.url.replace(fake, real), request) : fetch(request)
+    }
+    const result = await context.sync({ fetch: renaming })
+    expect(result.status).toBe('failed')
+    expect(result.error).toMatch(/not named after its checksum/)
+  })
+
   it('mirrors a mirror from its static bucket files', async () => {
     const context = await setup()
     await context.sync()

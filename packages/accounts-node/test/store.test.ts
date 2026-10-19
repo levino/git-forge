@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import {
   type AccountsStore,
   applyMigrations,
+  migrateOnStart,
   pendingMigrations,
   createAccountsStore,
   d1Database,
@@ -107,6 +108,16 @@ describe('migrations on node:sqlite', () => {
     const good = [...MIGRATIONS, { name: '9998_extra', sql: 'CREATE TABLE extra (x);' }]
     expect(await applyMigrations(db, good)).toEqual(['9998_extra'])
     await expect(applyMigrations(db, [{ name: 'bad-name', sql: '' }])).rejects.toThrow(/invalid migration name/)
+  })
+
+  it('checks an up-to-date database on start with one read', async () => {
+    const { db } = openSqliteDatabase()
+    expect(await migrateOnStart(db, MIGRATIONS)).toEqual(MIGRATIONS.map((migration) => migration.name))
+    const statements: string[] = []
+    const counted: Database = { all: (s) => (statements.push(s.sql), db.all(s)), run: (s) => (statements.push(s.sql), db.run(s)), batch: (s) => (statements.push('batch'), db.batch(s)) }
+    expect(await migrateOnStart(counted, MIGRATIONS)).toEqual([])
+    expect(statements).toEqual(['SELECT name, sha256 FROM schema_migrations'])
+    expect(await migrateOnStart(counted, [...MIGRATIONS, { name: '9998_extra', sql: 'CREATE TABLE extra (x);' }])).toEqual(['9998_extra'])
   })
 
   it('keeps the audit log append-only', async () => {

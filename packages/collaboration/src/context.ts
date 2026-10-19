@@ -164,7 +164,7 @@ export const readSettings = async (db: Database, repositoryId: string): Promise<
 export const openRepository = async (options: CollaborationOptions, principal: Principal, owner: string, name: string): Promise<Scope> => {
   const repository = await options.accounts.findRepository(owner, name)
   if (!repository) throw notFound()
-  const actor = await resolveActor(options.accounts, principal, repository)
+  const [actor, settings] = await Promise.all([resolveActor(options.accounts, principal, repository), readSettings(options.db, repository.id)])
   if (!atLeast(actor.access, 'read')) throw notFound()
   return {
     db: options.db,
@@ -177,7 +177,7 @@ export const openRepository = async (options: CollaborationOptions, principal: P
     repository,
     repo: { owner: repository.owner, name: repository.name },
     actor,
-    settings: await readSettings(options.db, repository.id),
+    settings,
     ...(options.lfs ? { lfs: options.lfs } : {}),
   }
 }

@@ -6,7 +6,7 @@ import Layout from '../../../layouts/Layout.astro'
 import { refsWithCommits } from '../../../ui/refs.ts'
 import { openRepository } from '../../../ui/repository.ts'
 
-const repo = await openRepository(Astro.locals.forge, Astro.locals.principal, Astro.params.owner!, Astro.params.repo!, true)
+const repo = await openRepository(Astro.locals.forge, Astro.locals.principal, Astro.params.owner!, Astro.params.repo!, { partial: true, request: Astro.request })
 const refs = repo.kind === 'ok' ? await refsWithCommits(repo, repo.branches) : []
 ---
 

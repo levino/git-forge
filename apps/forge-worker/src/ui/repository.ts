@@ -17,6 +17,7 @@ import {
   type ReadView,
   visibleRefs,
 } from '@git-forge/core'
+import { type ForkInfo, forkInfo, listForks, openCounts, type Scope } from '@git-forge/collaboration'
 import type { ForgeServices } from '../app.ts'
 import { encodePath } from './format.ts'
 
@@ -38,31 +39,66 @@ export type OpenRepository = {
 
 export type RepositoryResult = OpenRepository | { readonly kind: 'denied'; readonly decision: Exclude<Decision, 'allow'> }
 
-export const openRepository = async (forge: ForgeServices, principal: Principal, owner: string, name: string, partial = false): Promise<RepositoryResult> => {
+export type OpenOptions = { readonly partial?: boolean; readonly request?: Request }
+
+export type HeaderData = { readonly scope: Scope | null; readonly issues?: number; readonly pulls?: number; readonly fork: ForkInfo | null; readonly forks: readonly RepositorySubject[] }
+
+const memos = new WeakMap<Request, WeakMap<Principal, Map<string, Promise<unknown>>>>()
+
+const perRequest = <T>(request: Request, principal: Principal, key: string, load: () => Promise<T>): Promise<T> => {
+  if (request.method !== 'GET') return load()
+  const byRequest = memos.get(request) ?? memos.set(request, new WeakMap()).get(request)!
+  const byPrincipal = byRequest.get(principal) ?? byRequest.set(principal, new Map()).get(principal)!
+  const known = byPrincipal.get(key)
+  if (known) return known as Promise<T>
+  const loaded = load()
+  byPrincipal.set(key, loaded)
+  return loaded
+}
+
+export const scopeFor = (forge: ForgeServices, request: Request, principal: Principal, repo: { readonly name: RepositoryName }): Promise<Scope | null> =>
+  perRequest(request, principal, `scope:${repo.name.owner}/${repo.name.name}`, () => forge.collaboration(request, principal, repo.name.owner, repo.name.name))
+
+export const headerData = (forge: ForgeServices, request: Request, principal: Principal, repo: { readonly name: RepositoryName; readonly view: ReadView | null }): Promise<HeaderData> =>
+  perRequest(request, principal, `header:${repo.name.owner}/${repo.name.name}`, async () => {
+    const scope = repo.view ? null : await scopeFor(forge, request, principal, repo)
+    if (!scope) return { scope, fork: null, forks: [] }
+    const [counts, fork, forks] = await Promise.all([openCounts(scope), forkInfo(scope), listForks(scope)])
+    return { scope, ...counts, fork, forks }
+  })
+
+export const openRepository = async (forge: ForgeServices, principal: Principal, owner: string, name: string, options: OpenOptions = {}): Promise<RepositoryResult> => {
   if (!isValidName(owner) || !isValidName(name)) return { kind: 'denied', decision: 'not-found' }
   const check = await forge.repositoryAccess(principal, { owner, name }, 'read')
-  const view = check.decision !== 'allow' && partial ? (check.view ?? null) : null
+  const view = check.decision !== 'allow' && options.partial ? (check.view ?? null) : null
   if ((check.decision !== 'allow' && !view) || !check.repository) return { kind: 'denied', decision: check.decision === 'allow' ? 'not-found' : check.decision }
   const repo = { owner: check.repository.owner, name: check.repository.name }
-  const stored = (await readRefs(forge.storage, repo))?.state ?? { head: 'refs/heads/main', refs: {} }
-  const refs: RefsState = view ? visibleRefs(stored, view) : stored
+  const odb = new ObjectDatabase(forge.storage, repo)
+  if (options.request?.method === 'GET') {
+    odb.packs().catch(() => {})
+    headerData(forge, options.request, principal, { name: repo, view }).catch(() => {})
+  }
+  const [stored, mirrors] = await Promise.all([readRefs(forge.storage, repo), view ? [] : listMirrors(forge.storage, repo)])
+  const refs: RefsState = view ? visibleRefs(stored?.state ?? EMPTY_REFS, view) : (stored?.state ?? EMPTY_REFS)
   const named = namedRefs(refs)
   return {
     kind: 'ok',
     name: repo,
     subject: check.repository,
     access: check.access,
-    odb: new ObjectDatabase(forge.storage, repo),
+    odb,
     refs,
     branches: named.branches,
     tags: named.tags,
     defaultBranch: defaultBranch(refs),
-    mirrors: view ? [] : await listMirrors(forge.storage, repo),
+    mirrors,
     canAdmin: atLeast(check.access, 'admin'),
     canWrite: atLeast(check.access, 'write'),
     view,
   }
 }
+
+const EMPTY_REFS: RefsState = { head: 'refs/heads/main', refs: {} }
 
 export const reachOf = async (repo: OpenRepository, commit: ObjectId): Promise<PathReach> =>
   repo.view ? ((await commitReach(repo.odb, repo.refs, repo.view, commit)) ?? (() => 'none')) : () => 'inside'

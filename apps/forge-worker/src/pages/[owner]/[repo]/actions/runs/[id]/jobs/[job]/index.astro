@@ -7,7 +7,7 @@ import { parseNumber } from '../../../../../../../../ui/collaboration.ts'
 import { openRepository, repoUrl } from '../../../../../../../../ui/repository.ts'
 
 const { forge, principal, session } = Astro.locals
-const repo = await openRepository(forge, principal, Astro.params.owner!, Astro.params.repo!)
+const repo = await openRepository(forge, principal, Astro.params.owner!, Astro.params.repo!, { request: Astro.request })
 const runId = parseNumber(Astro.params.id)
 const found = repo.kind === 'ok' && runId !== null && Astro.params.job ? await forge.actions.log(repo.name, runId, Astro.params.job) : null
 const state = found ? jobState(found.job) : null

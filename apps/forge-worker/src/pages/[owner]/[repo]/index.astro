@@ -9,7 +9,7 @@ import { latestRelease } from '../../../ui/releases.ts'
 import { openRepository } from '../../../ui/repository.ts'
 
 if (Astro.params.repo!.endsWith('.git')) return Astro.redirect(`/${Astro.params.owner}/${Astro.params.repo!.slice(0, -4)}`, 301)
-const repo = await openRepository(Astro.locals.forge, Astro.locals.principal, Astro.params.owner!, Astro.params.repo!, true)
+const repo = await openRepository(Astro.locals.forge, Astro.locals.principal, Astro.params.owner!, Astro.params.repo!, { partial: true, request: Astro.request })
 const view = repo.kind === 'ok' ? await browse(repo, [], 'tree') : null
 const latest = repo.kind === 'ok' && view?.kind === 'tree' ? await latestRelease(Astro.locals.forge, repo) : null
 const imported = repo.kind === 'ok' && view?.kind === 'empty' ? await importStateFor(Astro.locals.forge, Astro.locals.session, repo.name) : null

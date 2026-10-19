@@ -131,6 +131,7 @@ export type LoadedPack = {
   readonly key: string
   readonly repo: RepositoryName
   readonly index: PackIndex
+  readonly cacheKey: string
   size?: number
   blocks?: BlockCache
 }
@@ -185,8 +186,7 @@ export const alternateRepositories = async (storage: Storage, repo: RepositoryNa
   let frontier = [repo]
   for (let depth = 0; depth < MAX_ALTERNATE_DEPTH && frontier.length > 0; depth++) {
     const next: RepositoryName[] = []
-    for (const current of frontier) {
-      const stored = await getText(storage, alternatesKey(current))
+    for (const stored of await Promise.all(frontier.map((current) => getText(storage, alternatesKey(current))))) {
       for (const target of parseAlternates(stored?.text ?? '')) {
         if (seen.has(key(target))) continue
         seen.add(key(target))
@@ -201,12 +201,22 @@ export const alternateRepositories = async (storage: Storage, repo: RepositoryNa
 
 const sameRepository = (a: RepositoryName, b: RepositoryName): boolean => a.owner === b.owner && a.name === b.name
 
+const MiB = 1024 * 1024
+
+const shared = {
+  indexes: new ByteLru<string, PackIndex>(16 * MiB),
+  sizes: new ByteLru<string, number>(65_536),
+  objects: new ByteLru<string, GitObject>(8 * MiB),
+  blocks: new ByteLru<string, Uint8Array>(8 * MiB),
+}
+
 export class ObjectDatabase {
   readonly #storage: Storage
   readonly #repo: RepositoryName
   readonly #options: ObjectDatabaseOptions
-  #packs: LoadedPack[] | undefined
-  readonly #indexes = new Map<string, PackIndex>()
+  #packs: Promise<LoadedPack[]> | undefined
+  readonly #indexes: ByteLru<string, PackIndex>
+  readonly #sizes: ByteLru<string, number>
   readonly #cache: ByteLru<string, GitObject>
   readonly #blocks: ByteLru<string, Uint8Array>
 
@@ -214,8 +224,11 @@ export class ObjectDatabase {
     this.#storage = storage
     this.#repo = repo
     this.#options = options
-    this.#cache = new ByteLru(options.cacheBytes ?? 8 * 1024 * 1024)
-    this.#blocks = new ByteLru(options.blockCacheBytes ?? 4 * 1024 * 1024)
+    const own = options.cacheBytes !== undefined || options.blockCacheBytes !== undefined || options.blockSize !== undefined
+    this.#indexes = own ? new ByteLru(16 * MiB) : shared.indexes
+    this.#sizes = own ? new ByteLru(65_536) : shared.sizes
+    this.#cache = own ? new ByteLru(options.cacheBytes ?? 8 * MiB) : shared.objects
+    this.#blocks = own ? new ByteLru(options.blockCacheBytes ?? 4 * MiB) : shared.blocks
   }
 
   get storage(): Storage {
@@ -230,29 +243,42 @@ export class ObjectDatabase {
     return packNamesOf(this.#storage, this.#repo)
   }
 
-  async #loadIndex(repo: RepositoryName, name: string): Promise<PackIndex> {
+  async #loadIndex(repo: RepositoryName, name: string): Promise<{ readonly index: PackIndex; readonly cacheKey: string }> {
     const known = this.#indexes.get(name)
-    if (known) return known
+    if (known) return { index: known, cacheKey: name }
     const stored = await this.#storage.get(packKey(repo, name.replace(/\.pack$/, '.idx')))
     if (!stored) throw new Error(`missing index for ${name}`)
-    const index = new PackIndex(await readAll(stored.body))
-    this.#indexes.set(name, index)
-    return index
+    const bytes = await readAll(stored.body)
+    const index = new PackIndex(bytes)
+    if (name !== `pack-${toHex(index.packChecksum)}.pack`) return { index, cacheKey: packKey(repo, name) }
+    this.#indexes.set(name, index, bytes.length)
+    return { index, cacheKey: name }
   }
 
-  async packs(): Promise<readonly LoadedPack[]> {
-    if (this.#packs) return this.#packs
-    const packs: LoadedPack[] = []
+  async #loadPacks(): Promise<LoadedPack[]> {
+    const [alternates, own] = await Promise.all([alternateRepositories(this.#storage, this.#repo), packNamesOf(this.#storage, this.#repo)])
+    const lists = [own, ...(await Promise.all(alternates.map((repo) => packNamesOf(this.#storage, repo))))]
     const names = new Set<string>()
-    for (const repo of [this.#repo, ...(await alternateRepositories(this.#storage, this.#repo))]) {
-      for (const name of await packNamesOf(this.#storage, repo)) {
-        if (names.has(name)) continue
-        names.add(name)
-        packs.push({ name, key: packKey(repo, name), repo, index: await this.#loadIndex(repo, name) })
-      }
-    }
-    this.#packs = packs
-    return packs
+    const listed = [this.#repo, ...alternates].flatMap((repo, i) =>
+      lists[i]!.filter((name) => !names.has(name) && names.add(name)).map((name) => ({ name, repo })),
+    )
+    return Promise.all(
+      listed.map(async ({ name, repo }) => {
+        const key = packKey(repo, name)
+        const [{ index, cacheKey }, size] = await Promise.all([this.#loadIndex(repo, name), (this.#indexes.has(name) ? this.#sizes.get(name) : undefined) ?? this.#storage.head(key).then((info) => info?.size)])
+        if (size === undefined) return { name, key, repo, index, cacheKey }
+        if (cacheKey === name) this.#sizes.set(name, size, 1)
+        return { name, key, repo, index, cacheKey, size }
+      }),
+    )
+  }
+
+  packs(): Promise<readonly LoadedPack[]> {
+    this.#packs ??= this.#loadPacks().catch((error: unknown) => {
+      this.#packs = undefined
+      throw error
+    })
+    return this.#packs
   }
 
   async borrows(): Promise<boolean> {
@@ -301,6 +327,7 @@ export class ObjectDatabase {
       const info = await this.#storage.head(pack.key)
       if (!info) throw new Error(`missing pack ${pack.name}`)
       pack.size = info.size
+      if (pack.cacheKey === pack.name) this.#sizes.set(pack.name, info.size, 1)
     }
     return pack.size
   }
@@ -313,7 +340,7 @@ export class ObjectDatabase {
         size,
         this.#options.blockSize ?? 64 * 1024,
         this.#blocks,
-        `${pack.name}:`,
+        `${pack.cacheKey}:`,
       )
     }
     return pack.blocks.read(offset, length)
@@ -328,7 +355,12 @@ export class ObjectDatabase {
   }
 
   async #readAt(pack: LoadedPack, offset: number): Promise<GitObject> {
-    const key = `${pack.name}:${offset}`
+    const object = await this.#cachedAt(pack, offset)
+    return { type: object.type, data: object.data.slice() }
+  }
+
+  async #cachedAt(pack: LoadedPack, offset: number): Promise<GitObject> {
+    const key = `${pack.cacheKey}:${offset}`
     const cached = this.#cache.get(key)
     if (cached) return cached
     const raw = await this.readRaw(pack, offset)
@@ -338,7 +370,7 @@ export class ObjectDatabase {
     if (header.typeCode === OFS_DELTA) {
       const ofs = readOfsDeltaOffset(raw, position)
       position += ofs.length
-      const base = await this.#readAt(pack, offset - ofs.distance)
+      const base = await this.#cachedAt(pack, offset - ofs.distance)
       object = { type: base.type, data: applyDelta(base.data, inflateExact(raw.subarray(position), header.size)) }
     } else if (header.typeCode === REF_DELTA) {
       const baseId = toHex(raw.subarray(position, position + 20))

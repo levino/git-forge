@@ -589,7 +589,8 @@ objects via the Batch API and verify their hashes. Two strategies:
   packs are already indexed and immutable, so the mirror reads the dumb-HTTP
   files (`info/refs`, `HEAD`, `objects/info/packs`) and copies every pack it
   lacks, with its `.idx`, as is under the same name. Checks per pack, all
-  cheap: the index's own SHA-1 trailer, its size against the object count,
+  cheap: the pack name equal to its checksum (caches key packs by name), the
+  index's own SHA-1 trailer, its size against the object count,
   fan-out, strictly sorted ids and offsets inside the pack; while streaming
   the pack, the `PACK` header, version, object count equal to the index and
   the trailer SHA-1 over the whole pack equal to the index's pack checksum.
@@ -2457,6 +2458,22 @@ They read through `ObjectDatabase` like the Git endpoints. The UI layer
 (`src/ui/*.ts`) only composes them into view models; `.astro` files only
 render.
 
+**Caching.** Pack files are named by their checksum and never change, so
+everything derived from them is cached without invalidation:
+- per isolate, shared by all `ObjectDatabase` instances and keyed by pack
+  name: parsed indexes (16 MiB), pack sizes, inflated objects and 64 KiB
+  blocks (8 MiB each);
+- across isolates, `cachedStorage` (core) over an `ObjectCache` adapter
+  (`cacheApiObjectCache`, the colo's Cache API, on Workers): pack indexes,
+  heads and ranges up to 1 MiB, keyed by the physical storage key, so it
+  sits below `locatedStorage` and above the usage meter.
+
+Only `refs.json`, `objects/info/packs` and `alternates` are read per request,
+in parallel; `openRepository` starts them together with the header's
+database reads (scope, open counts, forks), memoized per request. R2 range
+reads are one request (the head-then-get path is only the fallback). The
+Worker adds `Server-Timing: app;dur=<ms>` to every response.
+
 Blame (`/{owner}/{repo}/blame/{ref}/{path}`) is `blame` in core: newest
 commit first, lines unchanged against a parent pass to it (the first parent
 that has them wins at merges, as in git), the rest belong to the commit. No
@@ -2686,7 +2703,8 @@ progress answers 409.
   immutable cache header, so pages stay small and the release needs no asset
   directory.
 - Syntax highlighting is server-side with shiki's JavaScript regex engine (no
-  WebAssembly) and a fixed set of grammars; tokens carry light and dark
+  WebAssembly) and a fixed set of grammars, each loaded on first use (Markdown
+  also loads the languages of its fences); tokens carry light and dark
   colours as CSS variables. Files above 256 KiB or with unknown types are
   shown unhighlighted. Diffs highlight the old and the new side of each hunk
   separately. Fenced Markdown code blocks (`language-*`) are highlighted after

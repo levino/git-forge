@@ -1,7 +1,5 @@
 ---
-import { forkInfo, listForks, listIssues } from '@git-forge/collaboration'
-import { scopeFor } from '../ui/collaboration.ts'
-import { cloneUrl, repoUrl, type OpenRepository } from '../ui/repository.ts'
+import { cloneUrl, headerData, repoUrl, type OpenRepository } from '../ui/repository.ts'
 import CopyField from './CopyField.astro'
 import Icon, { type IconName } from './Icon.astro'
 
@@ -12,11 +10,7 @@ const { repo, tab } = Astro.props
 const { name, subject } = repo
 const active = tab === 'commits' || tab === 'branches' || tab === 'tags' ? 'code' : tab
 const mirror = repo.mirrors.find((config) => !config.detachedAt)
-const scope = repo.view ? null : await scopeFor(Astro.locals.forge, Astro.request, Astro.locals.principal, repo)
-const [issues, pulls] = scope
-  ? await Promise.all((['issue', 'pull'] as const).map((kind) => listIssues(scope, { state: 'open', kind }, { page: 1, perPage: 1 }).then((list) => list.total)))
-  : [undefined, undefined]
-const [fork, forks] = scope ? await Promise.all([forkInfo(scope), listForks(scope)]) : [null, []]
+const { scope, issues, pulls, fork, forks } = await headerData(Astro.locals.forge, Astro.request, Astro.locals.principal, repo)
 const tabs: { id: Tab; label: string; icon: IconName; href: string; count?: number | undefined }[] = [
   { id: 'code', label: 'Code', icon: 'code', href: repoUrl(name) },
   ...(!scope || scope.settings.hasIssues ? [{ id: 'issues' as const, label: 'Issues', icon: 'issue' as const, href: repoUrl(name, 'issues'), count: issues }] : []),

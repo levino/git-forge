@@ -1,4 +1,4 @@
-import { compareBytes, equalBytes, readAll, readUint32, utf8 } from './bytes.ts'
+import { compareBytes, equalBytes, readAll, readUint32, toHex, utf8 } from './bytes.ts'
 import { type DigestFactory, javascriptDigests } from './digest.ts'
 import { sha1 } from './hash.ts'
 import { PackIndex } from './pack-index.ts'
@@ -164,6 +164,10 @@ export const copyPack = async (options: CopyPackOptions): Promise<CopiedPack> =>
     throw new RemoteError(`pack ${name} exceeds ${limit} bytes`)
   }
   const index = verifyPackIndex(idx, size)
+  if (name !== `pack-${toHex(index.packChecksum)}.pack`) {
+    if (source instanceof ReadableStream) await source.cancel()
+    throw new PackVerificationError(`${name} is not named after its checksum`)
+  }
   const expectation = { size, objects: index.count, checksum: index.packChecksum }
   const verifier = verifyingPackStream(expectation, options.digests)
   const verified =

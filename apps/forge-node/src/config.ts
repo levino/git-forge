@@ -8,7 +8,11 @@ export type NodeVars = ForgeVars & {
   readonly HOST?: string
   readonly TRUST_PROXY?: string
   readonly DATA_DIR?: string
+  readonly DATABASE?: string
   readonly DATABASE_PATH?: string
+  readonly LIBSQL_URL?: string
+  readonly LIBSQL_AUTH_TOKEN?: string
+  readonly CONDITIONAL_WRITES?: string
   readonly STORAGE?: string
   readonly STORAGE_DIR?: string
   readonly S3_ENDPOINT?: string
@@ -53,12 +57,17 @@ export type NodeEmailSettings = Exclude<EmailSettings, { readonly provider: 'clo
 
 export type StorageConfig = { readonly kind: 'fs'; readonly dir: string } | { readonly kind: 's3'; readonly config: S3StorageConfig }
 
+export type DatabaseConfig = { readonly kind: 'sqlite'; readonly path: string } | { readonly kind: 'libsql'; readonly url: string; readonly authToken?: string }
+
+export type ConditionalWrites = 'storage' | 'database'
+
 export type NodeConfig = {
   readonly port: number
   readonly host: string
   readonly trustProxy: boolean
-  readonly databasePath: string
+  readonly database: DatabaseConfig
   readonly storage: StorageConfig
+  readonly conditionalWrites: ConditionalWrites
   readonly schedule: CronSchedule
   readonly jobConcurrency: number
   readonly email: NodeEmailSettings | undefined
@@ -131,6 +140,23 @@ const storageConfig = (vars: NodeVars, scope: '' | 'BACKUP_', defaultDir: string
   }
 }
 
+const databaseConfig = (vars: NodeVars, dataDir: string): DatabaseConfig => {
+  const kind = present(vars.DATABASE) ?? 'sqlite'
+  if (kind === 'sqlite') return { kind, path: present(vars.DATABASE_PATH) ?? joinPath(dataDir, 'git-forge.sqlite') }
+  if (kind !== 'libsql') throw new ConfigurationError('DATABASE must be sqlite or libsql')
+  const url = present(vars.LIBSQL_URL)
+  if (!url) throw new ConfigurationError('LIBSQL_URL is required with DATABASE=libsql')
+  if (!/^(libsql|https?|wss?):\/\/[^/]/.test(url)) throw new ConfigurationError('LIBSQL_URL must be a libsql://, https:// or http:// URL')
+  const authToken = present(vars.LIBSQL_AUTH_TOKEN)
+  return { kind, url, ...(authToken ? { authToken } : {}) }
+}
+
+const conditionalWrites = (value: string | undefined): ConditionalWrites => {
+  const text = present(value) ?? 'storage'
+  if (text !== 'storage' && text !== 'database') throw new ConfigurationError('CONDITIONAL_WRITES must be storage or database')
+  return text
+}
+
 const schedule = (value: string | undefined): CronSchedule => {
   try {
     return parseCron(present(value) ?? DEFAULT_SCHEDULE)
@@ -185,8 +211,9 @@ export const parseNodeConfig = (vars: NodeVars): NodeConfig => {
     port: integer('PORT', vars.PORT, DEFAULT_PORT, 0, 65535),
     host: present(vars.HOST) ?? DEFAULT_HOST,
     trustProxy: flag('TRUST_PROXY', vars.TRUST_PROXY),
-    databasePath: present(vars.DATABASE_PATH) ?? joinPath(dataDir, 'git-forge.sqlite'),
+    database: databaseConfig(vars, dataDir),
     storage: storageConfig(vars, '', joinPath(dataDir, 'objects'))!,
+    conditionalWrites: conditionalWrites(vars.CONDITIONAL_WRITES),
     schedule: schedule(vars.SCHEDULE),
     jobConcurrency: integer('JOB_CONCURRENCY', vars.JOB_CONCURRENCY, DEFAULT_JOB_CONCURRENCY, 1, 64),
     email: emailSettings(vars),

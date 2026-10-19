@@ -56,7 +56,7 @@ export const DEFAULT_BACKUP_BUDGET: CopyBudget = { maxBytes: 256 * 1024 * 1024, 
 
 const PAGE_ROWS = 500
 const PAGES_PER_STEP = 50
-const OPERATIONAL = new Set(['backup_state', 'backup_objects'])
+const OPERATIONAL = new Set(['backup_state', 'backup_objects', 'storage_state', 'storage_locks'])
 const EMPTY: BackupState = { run: null, last: null, error: null }
 
 const load = async (db: Database): Promise<{ readonly version: number; readonly state: BackupState }> => {

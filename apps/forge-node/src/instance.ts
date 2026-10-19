@@ -1,8 +1,9 @@
 import { mkdir } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import type { DatabaseSync } from 'node:sqlite'
-import { applyMigrations, type Database, MIGRATIONS, pendingMigrations } from '@git-forge/accounts'
+import { applyMigrations, createStateCache, type Database, lockedStorage, MIGRATIONS, pendingMigrations } from '@git-forge/accounts'
 import { openSqliteDatabase } from '@git-forge/accounts-node'
+import { libsqlDatabase } from '@git-forge/libsql'
 import { continueImport, createConsoleEmailSender, type EmailSender, type FetchFunction, type ImportJob, type JobOutcome, type Storage, storagePublisher } from '@git-forge/core'
 import { CLIENT_ADDRESS_HEADER, FsStorage, nodeDigests } from '@git-forge/node'
 import { S3Storage } from '@git-forge/s3'
@@ -11,7 +12,7 @@ import { createSmtpEmailSender } from '@git-forge/smtp'
 import { type AppJob, createForge, type Forge } from 'forge-worker/app'
 import { type RestoreResult, restoreBackup, restoreSql, verifyBackup } from 'forge-worker/backup'
 import { ConfigurationError, loadIdTokenKeys, loadSecretsKey, parseActionsSettings, parseSettings } from 'forge-worker/config'
-import { type NodeConfig, type NodeEmailSettings, type NodeVars, parseNodeConfig, type StorageConfig } from './config.ts'
+import { type DatabaseConfig, type NodeConfig, type NodeEmailSettings, type NodeVars, parseNodeConfig, type StorageConfig } from './config.ts'
 import { createSqliteJobQueue, type SqliteJobQueue } from './jobs.ts'
 
 declare const GIT_FORGE_VERSION: string | undefined
@@ -45,19 +46,27 @@ export class PendingMigrationsError extends ConfigurationError {
 
 export const jsonLog: Log = (event) => console.log(JSON.stringify(event))
 
-export const openDatabase = async (path: string): Promise<{ readonly db: Database; readonly handle: DatabaseSync }> => {
-  if (path !== ':memory:') await mkdir(dirname(path), { recursive: true })
-  return openSqliteDatabase(path)
+export type OpenedDatabase = { readonly db: Database; close(): void }
+
+export const openDatabase = async (config: DatabaseConfig): Promise<OpenedDatabase> => {
+  if (config.kind === 'libsql') return { db: libsqlDatabase(config), close: () => undefined }
+  if (config.path !== ':memory:') await mkdir(dirname(config.path), { recursive: true })
+  const { db, handle } = openSqliteDatabase(config.path)
+  return { db, close: () => handle.close() }
 }
 
 export const migrate = async (vars: NodeVars): Promise<string[]> => {
-  const { databasePath } = parseNodeConfig(vars)
-  const { db, handle } = await openDatabase(databasePath)
+  const { db, close } = await openDatabase(parseNodeConfig(vars).database)
   try {
     return await applyMigrations(db, MIGRATIONS)
   } finally {
-    handle.close()
+    close()
   }
+}
+
+const instanceStorage = async (config: NodeConfig, db: Database): Promise<Storage> => {
+  const storage = await openStorage(config.storage)
+  return config.conditionalWrites === 'database' ? lockedStorage(storage, db) : storage
 }
 
 const backupTarget = async (config: NodeConfig): Promise<Storage> => {
@@ -68,12 +77,12 @@ const backupTarget = async (config: NodeConfig): Promise<Storage> => {
 export const restore = async (vars: NodeVars, id?: string): Promise<RestoreResult & { readonly migrated: string[] }> => {
   const config = parseNodeConfig(vars)
   const target = await backupTarget(config)
-  const { db, handle } = await openDatabase(config.databasePath)
+  const { db, close } = await openDatabase(config.database)
   try {
-    const result = await restoreBackup(target, await openStorage(config.storage), db, nodeDigests, id)
+    const result = await restoreBackup(target, await instanceStorage(config, db), db, nodeDigests, id)
     return { ...result, migrated: await applyMigrations(db, MIGRATIONS) }
   } finally {
-    handle.close()
+    close()
   }
 }
 
@@ -82,11 +91,11 @@ export const restoreSqlFrom = async (vars: NodeVars, id?: string): Promise<Async
 export const verify = async (vars: NodeVars, sample: number): Promise<{ readonly checked: number; readonly failures: string[] }> => {
   const config = parseNodeConfig(vars)
   const target = await backupTarget(config)
-  const { db, handle } = await openDatabase(config.databasePath)
+  const { db, close } = await openDatabase(config.database)
   try {
     return await verifyBackup(db, target, nodeDigests, sample)
   } finally {
-    handle.close()
+    close()
   }
 }
 
@@ -118,15 +127,15 @@ export const createInstance = async (vars: NodeVars, overrides: InstanceOverride
   const actions = parseActionsSettings(vars)
   const secretsKey = await loadSecretsKey(actions, vars)
   const idTokenKeys = await loadIdTokenKeys(actions, settings.instanceKey)
-  const { db, handle } = await openDatabase(config.databasePath)
+  const { db, close: closeDatabase } = await openDatabase(config.database)
   try {
     const pending = await pendingMigrations(db, MIGRATIONS)
     if (pending.length > 0) throw new PendingMigrationsError(pending)
   } catch (error) {
-    handle.close()
+    closeDatabase()
     throw error
   }
-  const storage = await openStorage(config.storage)
+  const storage = await instanceStorage(config, db)
   const backup = config.backup ? await openStorage(config.backup) : undefined
   let forge: Forge | undefined
   const queueOptions = {
@@ -167,6 +176,7 @@ export const createInstance = async (vars: NodeVars, overrides: InstanceOverride
     ...(email ? { email } : {}),
     storage,
     db,
+    stateCache: createStateCache(db),
     digests: nodeDigests,
     version: typeof GIT_FORGE_VERSION === 'string' ? GIT_FORGE_VERSION : 'dev',
     ...(secretsKey ? { secretsKey } : {}),
@@ -206,7 +216,7 @@ export const createInstance = async (vars: NodeVars, overrides: InstanceOverride
       if (closed) return
       closed = true
       await Promise.all([jobs.stop(graceMs), imports.stop(graceMs)])
-      handle.close()
+      closeDatabase()
     },
   }
 }

@@ -53,9 +53,19 @@ Adapters:
   interface (`D1DatabaseLike`), so no Cloudflare types are needed.
 - `nodeSqliteDatabase(new DatabaseSync(path))` / `openSqliteDatabase(path)` in
   `@git-forge/accounts-node` — Node 22 `node:sqlite` (tests, Raspberry Pi).
-- Durable Object SQLite and libSQL are a few lines each against the same
-  interface (`sql.exec(...).toArray()` inside `transactionSync`, resp.
-  `client.batch(..., 'write')`).
+- `libsqlDatabase({ url, authToken })` in `@git-forge/libsql` — libSQL over
+  Hrana HTTP (Bunny Database, Turso, `sqld`).
+- Durable Object SQLite is a few lines against the same interface
+  (`sql.exec(...).toArray()` inside `transactionSync`).
+
+`lockedStorage(storage, db)` makes conditional writes (`ifMatch`,
+`ifNoneMatch`) of any `Storage` safe on a bucket that does not honour them:
+it takes a per-key lease in `storage_locks` (upsert that only wins when the
+key is free or its lease has expired; renewed every `leaseMs / 3` while the
+upload runs, 30 s by default), checks the condition with `head`, writes
+unconditionally and releases the lease. All writers of the bucket must use the
+same database; unconditional writes pass through. A lease that expires during
+a stalled write (no renewal for 30 s) can let a second writer in.
 
 Only SQLite SQL is used (`ON CONFLICT … DO UPDATE`, `COLLATE NOCASE`,
 triggers with `RAISE`), all of which D1, Durable Objects and libSQL support.
@@ -110,6 +120,7 @@ triggers with `RAISE`), all of which D1, Durable Objects and libSQL support.
 | `invites` | hash of the invite code, fixed login or existing user, expiry, redemption |
 | `actions_*` | CI state of `@git-forge/actions`: runners, hashed CI tokens, sessions, runs, jobs, timeline records, log index (migration `0005`; the schema lives here so that all D1 migrations come from one directory) |
 | `collaboration_settings`, `repository_numbers`, `issues`, `issue_*`, `labels`, `milestones`, `pull_requests`, `pull_request_reviews`, `review_comments`, `review_requests`, `commit_statuses`, `check_runs`, `discussion*` | collaboration data of `@git-forge/collaboration` (migration `0008`); integer IDs for GitHub compatibility, never synced to mirrors |
+| `storage_locks` | per-key write leases of `lockedStorage` (migration `0062`) |
 | `search_*` | FTS5 indexes of repositories, accounts, issues, issue comments, discussions and discussion comments, kept by triggers (migration `0026`) |
 
 Timestamps are Unix milliseconds. IDs are random UUIDs. Logins and repository

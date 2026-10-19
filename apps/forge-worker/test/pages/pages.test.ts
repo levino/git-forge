@@ -44,6 +44,8 @@ const write = (root: string, path: string, content: string | Uint8Array) => {
   writeFileSync(join(root, path), content)
 }
 
+const LOCKFILE = `${JSON.stringify({ name: 'site', lockfileVersion: 3, packages: Object.fromEntries(Array.from({ length: 600 }, (_, i) => [`node_modules/package-${i}`, { version: `1.${i}.0`, resolved: `https://registry.npmjs.org/package-${i}/-/package-${i}-1.${i}.0.tgz`, integrity: `sha512-${'x'.repeat(86)}==`, license: 'MIT', dependencies: { [`package-${i + 1}`]: `^1.${i + 1}.0` } }])) }, null, 2)}\n`
+
 const ANONYMOUS: Principal = { kind: 'anonymous' }
 
 type Extra = { readonly session?: UiSession | null; readonly loginPage?: LoginPage; readonly request?: Request; readonly services?: Partial<NodeForge['services']> }
@@ -76,6 +78,7 @@ beforeAll(async () => {
   write(dir, 'README.md', '# Site\n\nRead the [guide](docs/guide.md).\n\n<script>alert("x")</script>\n')
   write(dir, 'docs/guide.md', '# Guide\n')
   write(dir, 'src/main.ts', 'export const answer = 41\n')
+  write(dir, 'package-lock.json', LOCKFILE)
   write(dir, 'image.png', new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0]))
   await git(dir, ['add', '-A'])
   await git(dir, ['commit', '-q', '-m', 'Initial commit'])
@@ -151,10 +154,17 @@ describe('repository pages', () => {
   it('highlights source files with line anchors and escapes their content', async () => {
     const { status, html } = await render(Blob, '/alice/site/blob/main/src/main.ts', { owner: 'alice', repo: 'site', path: 'main/src/main.ts' })
     expect(status).toBe(200)
-    expect(html).toContain('id="L2"')
-    expect(html).toContain('--shiki-dark')
+    expect(html).toContain('<tr id="L2"><td><a href="#L2">2</a><td><span class="l')
+    expect(html).not.toContain('style="--shiki')
     expect(html).toContain('&lt;unknown&gt;')
     expect(html).not.toContain('"<unknown>"')
+  })
+
+  it('keeps highlighted code compact', async () => {
+    const { html } = await render(Blob, '/alice/site/blob/main/package-lock.json', { owner: 'alice', repo: 'site', path: 'main/package-lock.json' })
+    expect(html).toContain('<tr id="L5000">')
+    expect(html).toMatch(/<span class="l\d+ d\d+">"node_modules\/package-599"<\/span>/)
+    console.log("RATIO", html.length / LOCKFILE.length); expect(html.length).toBeLessThan(LOCKFILE.length * 3.5)
   })
 
   it('renders Markdown files, offers the source and redirects directories to the tree view', async () => {
@@ -168,6 +178,16 @@ describe('repository pages', () => {
   it('previews binary images through the raw endpoint at the commit', async () => {
     const { html } = await render(Blob, '/alice/site/blob/main/image.png', { owner: 'alice', repo: 'site', path: 'main/image.png' })
     expect(html).toContain(`<img src="/alice/site/raw/${head}/image.png"`)
+  })
+
+  it('shows the last commit of every entry from the map stored after the push', async () => {
+    expect(await forge.storage.head(`repos/alice/site/cache/last-commits/${head}.json`)).not.toBeNull()
+    const { html } = await render(RepoHome, '/alice/site', { owner: 'alice', repo: 'site' })
+    expect(html).toMatch(new RegExp(`href="/alice/site/commit/${first}"[^>]*>\\s*Initial commit`))
+    expect(html).toMatch(new RegExp(`href="/alice/site/commit/${head}"[^>]*>\\s*Fix the answer`))
+    const tag = await render(Tree, '/alice/site/tree/v1.0', { owner: 'alice', repo: 'site', path: 'v1.0' })
+    expect(tag.html).toContain('Initial commit')
+    expect(tag.html).not.toMatch(new RegExp(`<td[^>]*>\\s*<a href="/alice/site/commit/${first}"`))
   })
 
   it('lists commits, branches and tags', async () => {
@@ -186,7 +206,7 @@ describe('repository pages', () => {
     expect(status).toBe(200)
     expect(html).toContain('Fix the answer')
     expect(html).toContain('@@ -1 +1,2 @@')
-    expect(html).toMatch(/<span style="--shiki-light:[^"]+">export<\/span>/)
+    expect(html).toMatch(/<span class="l\d+ d\d+">export<\/span>/)
     expect(html.replace(/<[^>]+>/g, '')).toContain('export const answer = 42')
     expect(html).toContain(`href="/alice/site/commit/${first}"`)
     expect((await render(Commit, '/alice/site/commit/abc', { owner: 'alice', repo: 'site', id: 'abc' })).status).toBe(404)
@@ -577,7 +597,7 @@ describe('blame and search pages', () => {
     expect(status).toBe(200)
     expect(html).toContain('Fix the answer')
     expect(html).toContain('href="#L2"')
-    expect(html).toContain('--shiki-light')
+    expect(html).toMatch(/<td class="hl"><span class="l\d+ d\d+">export<\/span>/)
     expect((await render(Blame, '/alice/site/blame/main/README.md', { owner: 'alice', repo: 'site', path: 'main/README.md' })).html).toContain('Initial commit')
     expect((await render(Blame, '/alice/secret/blame/main/README.md', { owner: 'alice', repo: 'secret', path: 'main/README.md' })).status).toBe(404)
     expect((await render(Blame, '/alice/site/blame/main/image.png', { owner: 'alice', repo: 'site', path: 'main/image.png' })).status).toBe(404)

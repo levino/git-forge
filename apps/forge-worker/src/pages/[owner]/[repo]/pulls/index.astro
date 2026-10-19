@@ -1,7 +1,7 @@
 ---
 import Icon from '../../../../components/Icon.astro'
 import EmptyState from '../../../../components/EmptyState.astro'
-import { can, listPulls } from '@git-forge/collaboration'
+import { can, listPulls, stateCounts } from '@git-forge/collaboration'
 import IssueList from '../../../../components/IssueList.astro'
 import NotFound from '../../../../components/NotFound.astro'
 import RepoHeader from '../../../../components/RepoHeader.astro'
@@ -16,17 +16,13 @@ const scope = repo.kind === 'ok' ? await scopeFor(forge, Astro.request, principa
 const state = Astro.url.searchParams.get('state') === 'closed' ? 'closed' : 'open'
 const page = parsePage(Astro.url.searchParams.get('page'))
 const PER_PAGE = 25
-const [list, open, closed] = scope
-  ? await Promise.all([
-      listPulls(scope, { state }, { page, perPage: PER_PAGE }),
-      listPulls(scope, { state: 'open' }, { page: 1, perPage: 1 }),
-      listPulls(scope, { state: 'closed' }, { page: 1, perPage: 1 }),
-    ])
-  : [null, null, null]
+const [list, counts] = scope
+  ? await Promise.all([listPulls(scope, { state }, { page, perPage: PER_PAGE }), stateCounts(scope, 'pull')])
+  : [null, null]
 ---
 
 {
-  repo.kind !== 'ok' || !scope || !list || !open || !closed ? (
+  repo.kind !== 'ok' || !scope || !list || !counts ? (
     <NotFound />
   ) : (
     <Layout title={`Pull requests · ${repo.name.owner}/${repo.name.name}`}>
@@ -35,11 +31,11 @@ const [list, open, closed] = scope
         <nav class="join" aria-label="State">
           <a class:list={['join-item btn btn-sm', { 'btn-active': state === 'open' }]} href="?state=open" aria-current={state === 'open' ? 'page' : undefined}>
             <Icon name="pull" />
-            {open.total} Open
+            {counts.open} Open
           </a>
           <a class:list={['join-item btn btn-sm', { 'btn-active': state === 'closed' }]} href="?state=closed" aria-current={state === 'closed' ? 'page' : undefined}>
             <Icon name="pull-closed" />
-            {closed.total} Closed
+            {counts.closed} Closed
           </a>
         </nav>
         {can(scope, 'pull:create') && repo.branches.length > 1 && (

@@ -5,6 +5,7 @@ import RefPicker from '../../../../components/RefPicker.astro'
 import RepoHeader from '../../../../components/RepoHeader.astro'
 import Layout from '../../../../layouts/Layout.astro'
 import { isoTime, relativeTime, shortId } from '../../../../ui/format.ts'
+import { lineHtml } from '../../../../ui/highlight.ts'
 import { blameView, parsePage } from '../../../../ui/history.ts'
 import { blameUrl, blobUrl, commitUrl, openRepository } from '../../../../ui/repository.ts'
 
@@ -29,11 +30,11 @@ const now = Math.floor(Date.now() / 1000)
         </a>
       </div>
       <div class="border border-base-300 rounded-box overflow-x-auto">
-        <table class="font-mono text-xs leading-5 w-full border-separate border-spacing-0" aria-label="Blame">
+        <table class="code-view" aria-label="Blame">
           {view.ranges.map((range) => (
             <tbody class="border-t border-base-300">
               {view.lines.slice(range.start - 1, range.start - 1 + range.count).map((line, offset) => (
-                <tr id={`L${range.start + offset}`} class="code-line target:bg-warning/20">
+                <tr id={`L${range.start + offset}`}>
                   {offset === 0 && (
                     <td rowspan={range.count} class="align-top px-3 py-0.5 w-64 max-w-64 font-sans bg-base-200 border-t border-base-300">
                       {range.commit ? (
@@ -53,12 +54,10 @@ const now = Math.floor(Date.now() / 1000)
                       )}
                     </td>
                   )}
-                  <td class="select-none text-right pr-3 pl-4 w-px text-base-content/50 align-top">
-                    <a href={`#L${range.start + offset}`} class="hover:underline">
-                      {range.start + offset}
-                    </a>
+                  <td>
+                    <a href={`#L${range.start + offset}`}>{range.start + offset}</a>
                   </td>
-                  <td class="whitespace-pre pr-4">{line.map((token) => (token.style ? <span style={token.style}>{token.content}</span> : token.content))}</td>
+                  <td class="hl" set:html={lineHtml(line)} />
                 </tr>
               ))}
             </tbody>

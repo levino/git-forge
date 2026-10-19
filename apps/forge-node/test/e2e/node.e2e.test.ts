@@ -180,7 +180,7 @@ describe('git-forge-node next to a Worker on wrangler dev', () => {
 
     await expectStatus(api(node, 'POST', '/api/repos/village/archive/mirrors', { url: repoUrl(worker, 'village/archive'), auth: 'instance' }), 201)
     await expect.poll(async () => (await lsRemote(node, 'village/archive')).get('refs/upstream/origin/heads/main'), { timeout: 45_000, interval: 250 }).toBe(tip)
-    expect(sha256((await lfsObject(node, 'village/archive', sha256(blob)))!)).toBe(sha256(blob))
+    await expect.poll(async () => ((bytes) => bytes && sha256(bytes))(await lfsObject(node, 'village/archive', sha256(blob))), { timeout: 15_000, interval: 250 }).toBe(sha256(blob))
     const clone = tempDir()
     await lfsGit(clone, ['clone', '-q', withToken(node, 'village/archive'), 'out'])
     expect((await git(join(clone, 'out'), ['rev-parse', 'HEAD'])).trim()).toBe(tip)
@@ -196,7 +196,7 @@ describe('git-forge-node next to a Worker on wrangler dev', () => {
     await lfsGit(source, ['push', '-q', withToken(worker, 'village/archive'), 'main'])
     const tip = (await git(source, ['rev-parse', 'main'])).trim()
     await expect.poll(async () => (await lsRemote(node, 'village/archive')).get('refs/upstream/origin/heads/main'), { timeout: 45_000, interval: 250 }).toBe(tip)
-    expect(sha256((await lfsObject(node, 'village/archive', sha256(blob)))!)).toBe(sha256(blob))
+    await expect.poll(async () => ((bytes) => bytes && sha256(bytes))(await lfsObject(node, 'village/archive', sha256(blob))), { timeout: 15_000, interval: 250 }).toBe(sha256(blob))
     expect(scheduledRuns(node)).toBe(ticks)
     expect(node.output()).toContain('"kind":"mirror-sync"')
     expect(node.output()).toContain('"reason":"notification"')

@@ -36,6 +36,29 @@ keeps pack indexes, pack heads and pack ranges up to 1 MiB in the colo's cache
 under a private host. Pack files are content-addressed, so entries never go
 stale.
 
+## `cacheApiPageCache`
+
+Page cache of the Worker UI over the Cache API: `cacheApiPageCache(300)` stores
+responses under a private host with `Cache-Control: public, max-age=300`
+(the original `Cache-Control` travels in `X-Forge-Cache-Control` and is
+restored on a hit), drops `Vary`, and never stores a response with
+`Set-Cookie`. Which pages may be cached is decided by the caller (design §18).
+
+## `d1Sessions`
+
+`Database` (of `@git-forge/accounts`) over a D1 binding with the Sessions API:
+`d1Sessions(env.DB, new AsyncLocalStorage())`. `run(start, callback)` runs one
+request in its own `withSession(start)`; every query of the request goes
+through that session (found via the context storage), queries outside a
+request use the binding (primary). `start` is `sessionStart(request)`:
+`first-primary` for unsafe methods, else the request's bookmark
+(`X-Forge-Bookmark` header, then the `gf_bookmark` cookie, `__Host-` on
+HTTPS), else `first-unconstrained`. `withBookmark` returns the session's
+latest bookmark in `X-Forge-Bookmark` to clients that sent one, and sets the
+cookie (5 minutes) after writes of unsafe requests, so a user reads their own
+writes on a replica. Without a context storage (no `node:async_hooks`) every
+query uses the binding.
+
 ## `createCloudflareEmailSender`
 
 `EmailSender` over a `send_email` binding (Cloudflare Email Service):

@@ -78,6 +78,9 @@ discussions.
 - [x] Headless deployment on a Raspberry Pi: `apps/forge-node` serves the Worker's router over `node:http` with an SQLite file, `FsStorage` or `S3Storage`, an in-process job queue and a cron schedule; explicit `migrate` command; single executables for `linux-x64`/`linux-arm64` (Bun) in every release, Dockerfile, systemd units; E2E with a Worker under `wrangler dev` mirroring in both directions
 - [x] Publish the `apps/forge-node` image to a container registry (multi-arch) from the release workflow (`ghcr.io/levino/git-forge-node`, `linux/amd64` and `linux/arm64`)
 - [x] Durable jobs for Node deployments (job table in SQLite, migration `0021_jobs`, leases so a crash re-runs), so queued mirror jobs survive a restart instead of waiting for the next notification or scheduled run
+- [x] libSQL database adapter (`@git-forge/libsql`, Hrana over HTTP: Bunny Database, Turso, `sqld`); accounts suite and forge-node tested against a local `sqld` (`libsql` CI job); `DATABASE=libsql` in forge-node
+- [x] Conditional writes in the database for buckets without conditional `PutObject` (`lockedStorage`, migration `0062_storage_locks`, `CONDITIONAL_WRITES=database`)
+- [ ] Bunny instance (#13): Magic Containers + Bunny Storage S3 + Bunny Database, guide in `apps/forge-node/README.md`; needs an account for the conformance run, a large push and federation with forge.levinkeller.de
 
 ## M5a — Large pushes
 
@@ -149,7 +152,12 @@ Design: [design.md §18](design.md#18-web-ui).
 - [x] Blame, syntax highlighting in diffs and Markdown code blocks
 - [x] Explore and profile listings without one access check per repository (one SQL query, stored default branch and last commit time, sort and paging)
 - [x] Search box and results page (repositories, issues and pull requests, discussions, users)
-- [x] Page load performance: shared pack caches (isolate and Cache API), parallel ref, pack list and header reads, single-request R2 ranges, lazy highlighter grammars, one-read migration check on start, `Server-Timing`
+- [x] Page load performance: shared pack caches (isolate and Cache API), parallel ref, pack list and header reads, single-request R2 ranges, lazy highlighter grammars, one-read migration check on start, `Server-Timing`, class-based highlighting and compact code rows (about 75% less HTML for large files)
+- [x] Fewer D1 round trips per page: resolved repository and access reused by the collaboration scope, instance-admin flag read with the session, header and list queries in parallel; a page test counts queries per page (#63)
+- [x] D1 read replication through the Sessions API: one session per request, bookmark cookie after writes, `X-Forge-Bookmark` for API clients, unsafe methods start at the primary (#64; needs read replication enabled on the D1 database)
+- [x] Rendered HTML of public repository pages cached for anonymous visitors (Cache API), keyed by refs ETag, repository record and a trigger-maintained change counter (migration `0060_repository_changes`) (#65)
+- [x] Repository state cache: refs, pack list and alternates per repository in the database (`storage_state`, migration `0061`, D1 primary or SQLite), bucket stays the source of truth, safe under concurrent CAS writers (design §18)
+- [x] Last commit per path precomputed after a push (`last-commits` job, `cache/last-commits/<commit>.json`): latest commit per entry on tree pages, faster path history; fallback to the walk
 - [ ] Issue/PR UI: labels, assignees, milestones, reviewer requests, suggested changes, `#N` autolinks in rendered Markdown
 
 ## M7 — Collaboration

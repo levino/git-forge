@@ -30,6 +30,7 @@ export type Session = {
   readonly method: SessionMethod
   readonly createdAt: number
   readonly expiresAt: number
+  readonly instanceAdmin?: boolean
 }
 
 export type CreatedSession = {
@@ -222,10 +223,10 @@ export const createLoginStore = (db: Database, options: { readonly now?: () => n
     authenticateSession: async (token: string): Promise<Session | null> => {
       if (!isSessionToken(token)) return null
       const at = now()
-      const row = await first<SessionRow>(
+      const row = await first<SessionRow & { instance_admin: number }>(
         db,
         sql(
-          `SELECT s.id, s.user_id, a.login, s.method, s.created_at, s.expires_at, s.last_seen_at
+          `SELECT s.id, s.user_id, a.login, s.method, s.created_at, s.expires_at, s.last_seen_at, EXISTS (SELECT 1 FROM instance_admins i WHERE i.user_id = s.user_id) AS instance_admin
            FROM sessions s JOIN accounts a ON a.id = s.user_id
            WHERE s.token_hash = ? AND s.revoked_at IS NULL AND s.expires_at > ? AND a.disabled_at IS NULL AND a.kind = 'user'`,
           await hashSessionToken(token),
@@ -234,7 +235,7 @@ export const createLoginStore = (db: Database, options: { readonly now?: () => n
       )
       if (!row) return null
       if (at - row.last_seen_at >= SESSION_TOUCH_RESOLUTION_MS) await db.run(sql('UPDATE sessions SET last_seen_at = ? WHERE id = ?', at, row.id))
-      return { id: row.id, userId: row.user_id, login: row.login, method: row.method, createdAt: row.created_at, expiresAt: row.expires_at }
+      return { id: row.id, userId: row.user_id, login: row.login, method: row.method, createdAt: row.created_at, expiresAt: row.expires_at, instanceAdmin: row.instance_admin === 1 }
     },
 
     revokeSession: async (token: string): Promise<void> => {

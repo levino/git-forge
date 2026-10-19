@@ -4,8 +4,10 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { MIGRATIONS } from '@git-forge/accounts'
 import { describeStorageConformance } from '@git-forge/core/test/storage-conformance.ts'
-import { FsStorage } from '@git-forge/node'
+import { sqldAvailable } from '@git-forge/libsql/test/sqld.ts'
+import { FsStorage, serve } from '@git-forge/node'
 import { S3Storage } from '@git-forge/s3'
+import { git, tempDir } from 'forge-worker/test/e2e/history.ts'
 import { afterAll, describe, expect, it } from 'vitest'
 import { main } from '../../src/cli.ts'
 import { parseNodeConfig } from '../../src/config.ts'
@@ -88,6 +90,38 @@ describe('node instance', () => {
     }
     await expect(main(['restore'], { DATA_DIR: RESTORED, ...backup }, () => undefined)).rejects.toThrow('empty database')
   })
+
+  it.skipIf(!sqldAvailable())('runs on libSQL with conditional writes in the database and serves real git pushes', async () => {
+    const env = {
+      DATABASE: 'libsql',
+      LIBSQL_URL: process.env.SQLD_TEST_DEFAULT_URL!,
+      LIBSQL_AUTH_TOKEN: process.env.SQLD_TEST_TOKEN!,
+      CONDITIONAL_WRITES: 'database',
+      STORAGE_DIR: fresh(),
+      BOOTSTRAP_TOKEN: 'secret',
+    }
+    expect(await main(['migrate'], env, () => undefined)).toBe(0)
+    const instance = await createInstance(env, { log: () => undefined })
+    const server = await serve(instance.forge.fetch)
+    try {
+      expect(instance.storage).not.toBeInstanceOf(FsStorage)
+      const call = (path: string, token: string, body: unknown) => instance.forge.fetch(new Request(`${server.url}${path}`, { method: 'POST', headers: { Authorization: `Bearer ${token}` }, body: JSON.stringify(body) }))
+      const { token } = (await (await call('/api/bootstrap', 'secret', { login: 'bunny' })).json()) as { token: string }
+      expect((await call('/api/repos', token, { owner: 'bunny', name: 'site' })).status).toBe(201)
+      const source = tempDir()
+      await git(source, ['init', '-q', '-b', 'main'])
+      await git(source, ['-c', 'user.name=t', '-c', 'user.email=t@example.org', 'commit', '-q', '--allow-empty', '-m', 'first'])
+      const remote = `${server.url.replace('http://', `http://git:${token}@`)}/bunny/site.git`
+      await git(source, ['push', '-q', remote, 'main'])
+      const clone = tempDir()
+      await git(clone, ['clone', '-q', remote, 'out'])
+      expect((await git(join(clone, 'out'), ['rev-parse', 'HEAD'])).trim()).toBe((await git(source, ['rev-parse', 'main'])).trim())
+      expect(await instance.db.all({ sql: 'SELECT key FROM storage_locks', params: [] })).toEqual([])
+    } finally {
+      await server.close()
+      await instance.close()
+    }
+  }, 60_000)
 
   it('sends email through SMTP when EMAIL_PROVIDER=smtp', () => {
     expect(emailSender(parseNodeConfig({ EMAIL_PROVIDER: 'smtp', EMAIL_FROM: 'forge@example.org', SMTP_HOST: 'mail.example.org' }).email)).toBeDefined()

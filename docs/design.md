@@ -318,6 +318,7 @@ the [accounts README](../packages/accounts/README.md#branch-protection).
   lfs/
     objects/<oid[0:2]>/<oid[2:4]>/<oid>   # LFS objects, release assets and Pages files
   pages/deployments/<sha256>.json   # immutable Pages manifest, keyed by its own hash (§20)
+  cache/last-commits/<commit>.json  # last commit per path from <commit>, derived, written once (§18)
   import/status.json                # progress of the last import
   import/commits.txt                # commit order of the last import
   import/blobs.txt                  # blobs of the commit an import is splitting
@@ -378,6 +379,9 @@ tmp/<repo>/<timestamp>-<uuid>/part/<nnnnn>  # its parts, 1-based, five digits
   a known id (browsing by SHA, raw downloads, pushes that reference an
   existing object) still resolve through the alternates, like GitHub's fork
   networks.
+- **Derived data** under `cache/` is a pure function of the key (a commit
+  id), written once with `ifNoneMatch: '*'` and never needed for
+  correctness: readers that miss it compute the same result themselves.
 - **Release assets** are content-addressed like LFS objects
   (`lfs/objects/…`, §16). Which asset belongs to which release lives only in
   the database; a deleted asset or release leaves its bytes in place.
@@ -1054,12 +1058,13 @@ database.
 | Building block | Cloudflare | Others |
 |---|---|---|
 | Functions | Workers | Bunny Edge Scripting, Deno Deploy, Lambda, self-hosted Node/Bun |
-| Object storage | R2 | any S3 with conditional writes: Hetzner, B2, OVH, IONOS, self-hosted (versitygw, RustFS); a local directory |
-| Database | D1 / SQLite in Durable Objects | libSQL/Turso, SQLite file (Pi) |
-| Per-repository consistency | Durable Object | conditional writes (S3 CAS), single-writer process |
+| Object storage | R2 | any S3 with conditional writes: Hetzner, B2, OVH, IONOS, self-hosted (versitygw, RustFS); S3 without them (Bunny Storage) through `lockedStorage`; a local directory |
+| Database | D1 / SQLite in Durable Objects | libSQL over Hrana HTTP (`@git-forge/libsql`: Bunny Database, Turso, `sqld`), SQLite file (Pi) |
+| Per-repository consistency | Durable Object | conditional writes (S3 CAS), per-key leases in the database (`lockedStorage`), single-writer process |
 | Scheduling, jobs | Cron Triggers, Queues (Workflows for long jobs) | `Deno.cron`, systemd timers, job table, in-process queue |
 | Public LFS bucket (`LfsPublisher`) | second R2 bucket (`CDN_BUCKET`) | any `Storage`: S3 bucket, local directory (`LFS_PUBLISH_DIR`) |
 | Backup target (§19) | second R2 bucket (`BACKUP`) with a bucket lock | any `Storage` (`BACKUP_STORAGE`): S3 bucket with Object Lock, local directory |
+| Read replicas, page cache | D1 Sessions API (`d1Sessions`), Cache API (`cacheApiPageCache`) | none (Node reads one SQLite file) |
 | Email | Cloudflare Email Service (`send_email` binding, `@git-forge/cloudflare`); Amazon SES v2 HTTP API (`@git-forge/ses`, SigV4 via `aws4fetch`, runs on Workers and Node) | SMTP for the Node deployment (`@git-forge/smtp`); a console adapter for development |
 | Compute for CI | Containers | external per-minute providers via the GHES API (WarpBuild, AWS CodeBuild, RunsOn), Fly Machines, a local process |
 
@@ -1086,14 +1091,18 @@ again (at least once delivery); the lost run counts as an attempt.
 `forge-worker/app`; it contains no Cloudflare types) in one process: `serve`
 from `@git-forge/node` adapts it to `node:http` with streaming request and
 response bodies; `FsStorage` or `S3Storage` hold repository data; the SQLite
-file is opened with `@git-forge/accounts-node` (`node:sqlite`, WAL);
+file is opened with `@git-forge/accounts-node` (`node:sqlite`, WAL), or
+`DATABASE=libsql` uses `@git-forge/libsql`; `CONDITIONAL_WRITES=database`
+wraps the storage in `lockedStorage` for buckets without conditional
+`PutObject` (Bunny Storage);
 `nodeDigests` hashes with `node:crypto`; background jobs and import steps run
 in two durable SQLite job queues (above) with the Worker's job handler and
 retry policy; email goes out through the configured `EmailSender` (SMTP, SES
 or console);
 a cron scheduler (five-field expressions in UTC) calls the same `scheduled`
 as the Worker's Cron Trigger. Configuration uses the Worker's variable names
-plus `PORT`, `HOST`, `TRUST_PROXY`, `DATA_DIR`, `DATABASE_PATH`, `STORAGE`,
+plus `PORT`, `HOST`, `TRUST_PROXY`, `DATA_DIR`, `DATABASE`, `DATABASE_PATH`,
+`LIBSQL_URL`, `LIBSQL_AUTH_TOKEN`, `CONDITIONAL_WRITES`, `STORAGE`,
 `STORAGE_DIR`, `S3_*`, `SCHEDULE`, `JOB_CONCURRENCY` and `SMTP_*`
 (`EMAIL_PROVIDER=smtp`). Like the Worker it
 never migrates implicitly: `git-forge-node migrate` applies the bundled
@@ -1143,7 +1152,13 @@ Contract every adapter must meet, checked by the shared conformance suite
 Adapters: `MemoryStorage` (core, tests), `FsStorage` (`@git-forge/node`, a
 plain directory per key, lock files for conditional writes), `R2Storage`
 (`@git-forge/cloudflare`, binding, no presigning) and `S3Storage`
-(`@git-forge/s3`, any S3 API including R2's, with presigning). Presigned LFS
+(`@git-forge/s3`, any S3 API including R2's, with presigning).
+`lockedStorage(storage, db)` (`@git-forge/accounts`) is the fallback for a
+bucket that ignores conditions: a conditional write takes a renewed per-key
+lease in `storage_locks`, checks the condition with `head` and writes
+unconditionally. It needs read-after-write consistent `head` and one
+database shared by all writers; it passes the conformance suite over a
+storage that ignores conditions and over `S3Storage` on versitygw. Presigned LFS
 uploads bind `Content-Length` and `x-amz-checksum-sha256` into the signature,
 so the bucket rejects any other content.
 
@@ -1272,7 +1287,9 @@ What was done about it:
 ## 13. Open questions
 
 - Conditional writes on B2, Hetzner, Bunny — supported? (Run the S3 conformance
-  suite against them; see `packages/s3/README.md`.)
+  suite against them; see `packages/s3/README.md`.) Bunny documents none for
+  `PutObject` (October 2026), so the Bunny deployment
+  (`apps/forge-node/README.md`) defaults to `CONDITIONAL_WRITES=database`.
 - Signed append-only log of ref/pack/LFS changes (e.g. C2SP tlog-tiles with
   cosigning instances as witnesses): still useful as audit trail, format open.
 - Name.
@@ -2481,9 +2498,105 @@ everything derived from them is cached without invalidation:
 
 Only `refs.json`, `objects/info/packs` and `alternates` are read per request,
 in parallel; `openRepository` starts them together with the header's
-database reads (scope, open counts, forks), memoized per request. R2 range
+database reads (scope, open counts, forks), memoized per request.
+
+**Repository state cache.** `stateCachedStorage` (core) keeps these three
+keys of every repository (and of its alternates) in a `StateCache` adapter,
+so a page, `info/refs` or clone reads them with one database query instead of
+R2 round trips. `createStateCache` (`@git-forge/accounts`) implements it on
+the `storage_state` table (migration `0061`), on D1 and on the Node SQLite
+file alike. The bucket stays the source of truth; the cache sits below
+`locatedStorage` (physical keys, so renames need nothing) and holds the body,
+the bucket's etag, or "absent". Protocol per key, each step one SQL
+statement on a row with a version counter:
+- *read*: a row that is committed and not pending is served as is (with the
+  bucket's etag, so compare-and-swap works unchanged); otherwise the bucket
+  is read and the result *filled* only if the row's version is still the one
+  read (or the row does not exist yet) and no write is pending.
+- *write*: `begin` marks the row pending under a fresh token (readers fall
+  back to the bucket), then the bucket write runs; a successful conditional
+  write `commit`s the new body and etag if the token is still the row's,
+  anything else (failed CAS, unconditional write, error) `abort`s to a miss.
+  A commit whose token was replaced by a later writer leaves the row alone
+  while that writer is pending and invalidates a committed row otherwise.
+- a pending mark older than 60 s no longer blocks fills, so a writer that
+  died between `begin` and `commit` costs only bucket reads for a minute.
+  Every successful bucket CAS is preceded by a `begin`, so a committed row is
+  never older than the bucket; the only gap is a writer that stalls more than
+  60 s after `begin`, then succeeds and dies before its commit.
+- If the database is unavailable, reads fall back to the bucket and writes
+  fail (a write without `begin` could leave a stale row).
+
+D1 rather than a per-repository Durable Object: the template's instances
+update by changing the release pin only (§15), and a new Durable Object class
+needs a binding and a migration in every instance's `wrangler.toml`, while a
+table migrates itself; Node uses the same SQL. A D1 query from the Worker
+(Smart Placement next to D1 and R2) costs a few ms against tens for R2, and
+repositories are independent rows, so there is no hot object. The state
+must be read from the D1 primary: a read replica could return an old etag
+that makes every CAS fail, so `stateCache` gets `d1Sessions(…).primary`,
+the plain binding outside any session (sessionless queries go to the
+primary).
+
+**Last commits.** After a push (`last-commits` job, at most ten branches)
+`precomputeLastCommits` stores, for each new branch tip, the last commit of
+every path in its tree (`cache/last-commits/<commit>.json`, up to 20 000
+paths). It is the walk of `commitLog` (date order, at most 10 000 commits,
+a path is touched when it differs from every parent) done once for all
+paths; when the walk reaches the previous tip as its only frontier, the rest
+comes from that tip's map. Tree and blob pages of a branch tip take the
+latest commit of the path and of every entry (entry commits shown for up to
+1000 entries, only where the reader may see the path) from it; the commits
+page of a path skips the touch checks until the stored first match. Missing
+maps (tags, older commits, before the job ran) fall back to the walk. R2 range
 reads are one request (the head-then-get path is only the fallback). The
 Worker adds `Server-Timing: app;dur=<ms>` to every response.
+
+**Database round trips.** `openRepository` (UI) memoizes the access check per
+request and hands the resolved repository and access to the collaboration
+scope (`openRepository(…, known)` in the collaboration package skips the
+lookup only for the same principal object). Instance-admin checks are
+memoized per principal object; the session query returns the flag. The header
+(`repositoryHeader`: open counts, fork parent and forks) runs in parallel with
+the scope; issue and pull lists count both states in one query; hydration,
+list counts and the timeline query in parallel. `test/pages/queries.test.ts`
+counts queries per page (anonymous and signed in) against a budget.
+
+**Read replicas.** On Workers the database is `d1Sessions` (§11,
+`@git-forge/cloudflare`): every request runs in its own D1 session, found
+through `AsyncLocalStorage` (`nodejs_als`; without it every query uses the
+binding, i.e. the primary). Unsafe methods start with `first-primary`, so
+read-then-write logic sees current data; other requests start at the
+client's bookmark (`X-Forge-Bookmark`, else the `gf_bookmark` cookie) or
+`first-unconstrained`. After writes of an unsafe request the response sets
+the cookie (5 minutes, HttpOnly), so the user's next pages read at least
+their own writes; clients that send the header get the latest bookmark back
+in it. Other users' changes may appear seconds late. Cron, queue and
+migration work uses the binding. Replicas only serve reads once read
+replication is enabled on the D1 database (dashboard *Settings → Enable Read
+Replication*, or the REST API `read_replication.mode = "auto"`); until then
+sessions go to the primary.
+
+**Page cache.** Rendered HTML of public repository pages (home, tree, blob,
+blame, commits, commit, branches, tags, forks, releases, issues, pulls, pull,
+discussions; not `new`/`edit` forms, settings or actions) is cached for
+anonymous visitors through a `PageCache` adapter (`cacheApiPageCache`, the
+colo's Cache API under a private host, 5 minutes). It is used only for `GET`
+without `Authorization` and without a session cookie (also an invalid one),
+after the access check found a public repository with full read access (no
+partial view). The key is a SHA-256 over the release version, the full URL,
+the repository record (visibility, description, topics, archive state), the
+ETag of `refs.json` (the bucket's, also when served from the state cache) and `repository_changes.counter`, which SQLite triggers
+(migration `0060_repository_changes`) increment on every insert, update or
+delete in the collaboration tables shown on these pages (issues, pull
+requests, comments, reviews, labels, milestones, events, statuses, checks,
+discussions, releases and assets, reactions, forks, settings, branch
+protection). Pushes and collaboration changes therefore miss at once;
+anything else (account names, mirror state, relative times) is at most five
+minutes old. Only `200` HTML responses without `Set-Cookie` and without
+`private`/`no-store` are stored; the stored copy keeps the original
+`Cache-Control`, and served pages carry `Vary: Cookie, Authorization` and
+`X-Forge-Cache: hit|miss`.
 
 Blame (`/{owner}/{repo}/blame/{ref}/{path}`) is `blame` in core: newest
 commit first, lines unchanged against a parent pass to it (the first parent
@@ -2715,11 +2828,17 @@ progress answers 409.
   directory.
 - Syntax highlighting is server-side with shiki's JavaScript regex engine (no
   WebAssembly) and a fixed set of grammars, each loaded on first use (Markdown
-  also loads the languages of its fences); tokens carry light and dark
-  colours as CSS variables. Files above 256 KiB or with unknown types are
-  shown unhighlighted. Diffs highlight the old and the new side of each hunk
-  separately. Fenced Markdown code blocks (`language-*`) are highlighted after
-  `rehype-sanitize`, so only highlighter spans carry styles.
+  also loads the languages of its fences). Token colours are classes
+  (`l<i>` light, `d<i>` dark) indexed into the two themes' palettes; their
+  rules (`HIGHLIGHT_CSS`) are appended to the stylesheet, tokens in the
+  default colour and adjacent tokens of one class are merged into plain text.
+  File rows and the code of blame and diff lines are built as strings (only
+  `&`, `<`, `>` escaped); file rows omit the optional `</td></tr>`, and
+  `.code-view` styles number and code cells instead of per-cell classes.
+  Files above 256 KiB or with unknown types are shown unhighlighted. Diffs highlight the old and
+  the new side of each hunk separately. Fenced Markdown code blocks
+  (`language-*`) are highlighted after `rehype-sanitize`, so only
+  highlighter spans carry these classes.
 - Markdown (README, `.md` files) goes through remark/rehype with GFM and
   `rehype-sanitize` (GitHub's schema); relative links point to the blob view,
   relative images to the raw endpoint.
@@ -2778,8 +2897,8 @@ only to objects that exist by the time they are copied.
 keyset by `rowid`, tables in creation order), `9999-indexes.sql` (indexes,
 FTS5 tables, the search index rebuild, triggers, views), then
 `manifest.json` when the run is complete. One statement per line (newlines
-in strings become `char(10)`). `backup_state`, `backup_objects`, FTS5
-virtual tables and their shadow tables are not dumped; the FTS5 tables are
+in strings become `char(10)`). `backup_state`, `backup_objects`,
+`storage_state` (the repository state cache, §18), `storage_locks`, FTS5 virtual tables and their shadow tables are not dumped; the FTS5 tables are
 recreated and rebuilt from their content after the data. The dump spans
 several steps, so it is not a single-instant snapshot.
 

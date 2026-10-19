@@ -74,6 +74,8 @@ import {
   type LoginPageRenderer,
   relyingParty,
   sessionUserPrincipal,
+  type Session,
+  canAdministerInstance,
   normalizeIssuer,
   parseAuthorization,
   type AppPermissions,
@@ -106,6 +108,7 @@ import {
   type LoginStore,
   type OidcProvider,
   sql,
+  first,
   type BranchProtectionRule,
   type NamedAllowances,
   validateBranchPattern,
@@ -165,6 +168,8 @@ import {
   MirrorExistsError,
   MirrorNotFoundError,
   ObjectDatabase,
+  type LastCommitsUpdate,
+  precomputeLastCommits,
   type PackfileUri,
   PermanentJobError,
   type Presigner,
@@ -187,6 +192,8 @@ import {
   withPresigner,
   locatedStorage,
   cachedStorage,
+  stateCachedStorage,
+  type StateCache,
   type ObjectCache,
   ZERO_ID,
 } from '@git-forge/core'
@@ -198,6 +205,9 @@ import {
   type Scope as CollaborationScope,
   getPullSummary,
   openRepository as openCollaborationRepository,
+  type KnownRepository,
+  type RepositoryHeader,
+  repositoryHeader,
   handleCollaborationApi,
   maintainerPushBranches,
   handlePushedRefs,
@@ -232,6 +242,7 @@ import { createJobFailures } from './admin/jobs.ts'
 import { createInstanceSettings, deriveSettingsKey } from './admin/settings.ts'
 import type { Location } from './admin/setup.ts'
 import { createUsageMeter, type UsageScanJob } from './admin/usage.ts'
+import type { PageCache } from './ui/page-cache.ts'
 import { activityEvent } from './collaboration-events.ts'
 import { parseSearchRequest, repositoryJson, runSearch, type SearchRequest, searchResponseJson } from './search.ts'
 import { type GithubProgress, githubImportStep, githubRepository } from './github-import.ts'
@@ -276,6 +287,7 @@ export type ForgeOptions = ForgeSettings & {
   readonly secretsKey?: SecretsKey
   readonly presigner?: Presigner
   readonly objectCache?: ObjectCache
+  readonly stateCache?: StateCache
   readonly scheduleImport?: ImportScheduler
   readonly email?: EmailSender
   readonly renderLoginPage?: LoginPageRenderer
@@ -286,6 +298,7 @@ export type ForgeOptions = ForgeSettings & {
   readonly location?: (request: Request) => Promise<Location>
   readonly backup?: Storage
   readonly backupBudget?: CopyBudget
+  readonly pageCache?: PageCache
 }
 
 export type LfsPublishJob = { readonly kind: 'lfs-publish'; readonly owner: string; readonly name: string; readonly oids: readonly string[] | null }
@@ -305,7 +318,11 @@ export type GitHubMirrorJob = {
   readonly sealedToken?: SealedSecret
 }
 
-export type AppJob = ForgeJob | NotificationJob | PagesJob | LfsPublishJob | ImportLfsJob | GitHubMirrorJob | BackupJob | UsageScanJob
+export type LastCommitsJob = { readonly kind: 'last-commits'; readonly owner: string; readonly name: string; readonly updates: readonly LastCommitsUpdate[] }
+
+export const MAX_LAST_COMMIT_UPDATES = 10
+
+export type AppJob = ForgeJob | NotificationJob | PagesJob | LfsPublishJob | ImportLfsJob | GitHubMirrorJob | BackupJob | UsageScanJob | LastCommitsJob
 
 export const LFS_PUBLISH_BATCH = 100
 
@@ -323,6 +340,9 @@ export const RAISE_LIMIT_HINT = 'the instance admin can raise MAX_LFS_OBJECT_BYT
 export type ForgeServices = {
   readonly storage: Storage
   readonly remoteFetch: FetchFunction
+  readonly version: string
+  readonly pageCache?: PageCache
+  readonly repositoryChanges: (repo: RepositoryName) => Promise<number | null>
   readonly store: AccountsStore
   readonly authenticate: (request: Request) => Promise<Principal | null>
   readonly issuer: (request: Request) => string
@@ -336,7 +356,8 @@ export type ForgeServices = {
   readonly repositories: RepositoryOperations
   readonly inbox: InboxOperations
   readonly releases: ReleaseReads
-  readonly collaboration: (request: Request, principal: Principal, owner: string, name: string) => Promise<CollaborationScope | null>
+  readonly collaboration: (request: Request, principal: Principal, owner: string, name: string, known?: KnownRepository) => Promise<CollaborationScope | null>
+  readonly repositoryHeader: (principal: Principal, repository: RepositorySubject) => Promise<RepositoryHeader>
   readonly actions: ActionsOperations
   readonly settings: RepositorySettingsOperations
   readonly organizations: OrganizationOperations
@@ -580,7 +601,8 @@ export const createForge = (options: ForgeOptions): Forge => {
   const now = options.now ?? (() => new Date())
   const nowMs = () => now().getTime()
   const meter = createUsageMeter(options.db, nowMs)
-  const metered = options.objectCache ? cachedStorage(meter.storage(options.storage), options.objectCache) : meter.storage(options.storage)
+  const counted = options.objectCache ? cachedStorage(meter.storage(options.storage), options.objectCache) : meter.storage(options.storage)
+  const metered = options.stateCache ? stateCachedStorage(counted, options.stateCache) : counted
   const db = meter.database(options.db)
   const store: AccountsStore = createAccountsStore(db, { now: () => now().getTime() })
   const located = (raw: Storage): Storage => locatedStorage(raw, store.locateRepository, () => now().getTime())
@@ -651,7 +673,7 @@ export const createForge = (options: ForgeOptions): Forge => {
     if (!request.headers.has('Authorization')) {
       const check = await checkSession(request, (await loginOptions(request)))
       if (check.kind === 'csrf-failed') throw new HttpError(403, 'missing or invalid CSRF token')
-      if (check.kind === 'session') return sessionUserPrincipal(check.active.session)
+      if (check.kind === 'session') return sessionPrincipal(check.active.session)
     }
     const principal = await authenticateRequest(request, authenticateOptions(request))
     if (!principal) throw new HttpError(401, 'invalid credentials', { 'WWW-Authenticate': 'Bearer' })
@@ -662,7 +684,7 @@ export const createForge = (options: ForgeOptions): Forge => {
     if (!request.headers.has('Authorization')) {
       const check = await checkSession(request, (await loginOptions(request)))
       if (check.kind === 'csrf-failed') return null
-      if (check.kind === 'session') return sessionUserPrincipal(check.active.session)
+      if (check.kind === 'session') return sessionPrincipal(check.active.session)
     }
     return authenticateRequest(request, authenticateOptions(request))
   }
@@ -683,10 +705,18 @@ export const createForge = (options: ForgeOptions): Forge => {
     return principal
   }
 
+  const admins = new WeakMap<UserPrincipal, Promise<boolean>>()
+  const isAdmin = (principal: UserPrincipal): Promise<boolean> => admins.get(principal) ?? admins.set(principal, store.isInstanceAdmin(principal.id)).get(principal)!
+  const sessionPrincipal = (session: Session): UserPrincipal => {
+    const principal = sessionUserPrincipal(session)
+    if (session.instanceAdmin !== undefined) admins.set(principal, Promise.resolve(session.instanceAdmin))
+    return principal
+  }
+
   const repositoryAccess = async (principal: Principal, repo: RepositoryName, required: Role): Promise<RepositoryAccess> => {
-    const check = await checkRepositoryAccess(store, principal, repo, required)
+    const [check, admin] = await Promise.all([checkRepositoryAccess(store, principal, repo, required), principal.kind === 'user' ? isAdmin(principal) : false])
     if (!check.repository) return { decision: check.decision === 'allow' ? 'not-found' : check.decision, access: 'none', repository: null }
-    if (principal.kind === 'user' && (await store.isInstanceAdmin(principal.id))) {
+    if (principal.kind === 'user' && admin) {
       const ceiling = principal.limits?.ceiling ?? 'admin'
       const scoped = principal.limits?.repositoryIds ?? null
       if (scoped === null || scoped.includes(check.repository.id)) {
@@ -764,7 +794,7 @@ export const createForge = (options: ForgeOptions): Forge => {
     authenticateToken: (request) => authenticateRequest(request, authenticateOptions(request)),
     sessionUser: async (request) => {
       const active = await readActiveSession(request, (await loginOptions(request)))
-      return active ? sessionUserPrincipal(active.session) : null
+      return active ? sessionPrincipal(active.session) : null
     },
     isInstanceAdmin: store.isInstanceAdmin,
     jobTokenRepository,
@@ -800,6 +830,22 @@ export const createForge = (options: ForgeOptions): Forge => {
   const scheduleLfsPublish = async (job: LfsPublishJob): Promise<void> => {
     if (options.jobs) await options.jobs.enqueue(job)
     else await publishLfs(job)
+  }
+
+  const runLastCommits = async (job: LastCommitsJob): Promise<void> => {
+    const stored = await precomputeLastCommits(new ObjectDatabase(storage, { owner: job.owner, name: job.name }), job.updates)
+    console.log(JSON.stringify({ event: 'last-commits', repository: `${job.owner}/${job.name}`, stored }))
+  }
+
+  const scheduleLastCommits = async (repo: RepositoryName, outcome: PushOutcome): Promise<void> => {
+    const updates = outcome.results
+      .filter((result) => result.ok && result.name.startsWith('refs/heads/') && result.newId !== ZERO_ID)
+      .slice(0, MAX_LAST_COMMIT_UPDATES)
+      .map((result) => ({ id: result.newId, previous: result.oldId === ZERO_ID ? null : result.oldId }))
+    if (updates.length === 0) return
+    const job: LastCommitsJob = { kind: 'last-commits', owner: repo.owner, name: repo.name, updates }
+    if (options.jobs) await options.jobs.enqueue(job)
+    else await runLastCommits(job)
   }
 
   const publishAfterPush = async (repo: RepositoryName, outcome: PushOutcome): Promise<void> => {
@@ -1014,6 +1060,7 @@ export const createForge = (options: ForgeOptions): Forge => {
   const instance: InstanceOperations = {
     ...instanceAdministration,
     ...admin,
+    isAdministrator: async (principal) => principal.kind === 'user' && canAdministerInstance(principal, await isAdmin(principal)),
     mirrors: async (principal) => {
       await instanceAdministration.view(principal)
       const overview: MirrorOverviewEntry[] = []
@@ -1244,7 +1291,7 @@ export const createForge = (options: ForgeOptions): Forge => {
     const fresh = await store.storagePathClaimed(`${account.login}/${name}`)
     const path = { owner: account.login, name: fresh ? `${name.slice(0, 90)}.${crypto.randomUUID().slice(0, 8)}` : name }
     try {
-      await createRepository(options.storage, path, defaultBranch)
+      await createRepository(metered, path, defaultBranch)
     } catch (error) {
       if (!(error instanceof RepositoryExistsError) || fresh) throw error
     }
@@ -2023,7 +2070,7 @@ export const createForge = (options: ForgeOptions): Forge => {
   const withSessionReads = (authorize: Authorize): Authorize => async (request, repo, access, ...rest) => {
     if (access === 'read' && !request.headers.has('Authorization') && !isUnsafeMethod(request.method)) {
       const active = await readActiveSession(request, (await loginOptions(request)))
-      const check = active ? await repositoryAccess(sessionUserPrincipal(active.session), repo, 'read') : null
+      const check = active ? await repositoryAccess(sessionPrincipal(active.session), repo, 'read') : null
       if (check?.decision === 'allow') return null
       if (check?.view) return check.view
     }
@@ -2033,7 +2080,7 @@ export const createForge = (options: ForgeOptions): Forge => {
   const withSessionLfs = (authorize: Authorize): Authorize => async (request, repo, access, surface) => {
     if (surface === 'lfs' && !request.headers.has('Authorization')) {
       const check = await checkSession(request, await loginOptions(request))
-      const result = check.kind === 'session' ? await repositoryAccess(sessionUserPrincipal(check.active.session), repo, access === 'write' ? 'write' : 'read') : null
+      const result = check.kind === 'session' ? await repositoryAccess(sessionPrincipal(check.active.session), repo, access === 'write' ? 'write' : 'read') : null
       if (result?.decision === 'allow') return null
     }
     return authorize(request, repo, access, surface)
@@ -2087,7 +2134,7 @@ export const createForge = (options: ForgeOptions): Forge => {
         console.error(JSON.stringify({ event: 'ref-checksum-failed', repository: `${repo.owner}/${repo.name}`, error: String(error) })),
       )
     }
-    const published = Promise.all([pages.onPush(repo, outcome, principal), publishAfterPush(repo, outcome)]).catch((error: unknown) =>
+    const published = Promise.all([pages.onPush(repo, outcome, principal), publishAfterPush(repo, outcome), scheduleLastCommits(repo, outcome)]).catch((error: unknown) =>
       console.error(JSON.stringify({ event: 'pages-or-publish-failed', repository: `${repo.owner}/${repo.name}`, error: String(error) })),
     )
     if (waitUntil && !options.jobs) waitUntil(published)
@@ -2438,6 +2485,7 @@ export const createForge = (options: ForgeOptions): Forge => {
     if (isPagesJob(job)) return pages.runJob(job)
     if (job.kind === 'lfs-publish') return publishLfs(job)
     if (job.kind === 'backup') return runBackupJob()
+    if (job.kind === 'last-commits') return runLastCommits(job)
     if (job.kind === 'mirror-github') return adoptGitHubRepository(job)
     if (job.kind === 'usage-scan') return void (await meter.scan(options.storage, job))
     if (job.kind === 'import-lfs') return void (await importLfsObject(job, { storage, fetch: remoteFetch, ...(options.digests ? { digests: options.digests } : {}) }))
@@ -2448,7 +2496,7 @@ export const createForge = (options: ForgeOptions): Forge => {
   const authenticate = async (request: Request): Promise<Principal | null> => {
     if (!request.headers.has('Authorization')) {
       const active = await readActiveSession(request, (await loginOptions(request)))
-      if (active) return sessionUserPrincipal(active.session)
+      if (active) return sessionPrincipal(active.session)
     }
     const principal = await authenticateRequest(request, authenticateOptions(request))
     return principal?.kind === 'app' && principal.installationId !== undefined ? null : principal
@@ -2468,6 +2516,15 @@ export const createForge = (options: ForgeOptions): Forge => {
     isPagesRequest: pages.isPagesRequest,
     services: {
       storage,
+      version: options.version ?? 'dev',
+      ...(options.pageCache ? { pageCache: options.pageCache } : {}),
+      repositoryChanges: async (repo) =>
+        (
+          await first<{ counter: number }>(
+            db,
+            sql('SELECT c.counter FROM repository_changes c JOIN repositories r ON r.id = c.repository_id JOIN accounts a ON a.id = r.owner_id WHERE a.login = ? AND r.name = ?', repo.owner, repo.name),
+          )
+        )?.counter ?? null,
       store,
       remoteFetch,
       authenticate,
@@ -2478,11 +2535,11 @@ export const createForge = (options: ForgeOptions): Forge => {
       isInstanceAdmin: async (principal) => principal.kind === 'user' && (await store.isInstanceAdmin(principal.id)),
       session: async (request) => {
         const active = await readActiveSession(request, (await loginOptions(request)))
-        return active ? { principal: sessionUserPrincipal(active.session), csrf: active.csrf, sessionId: active.session.id } : null
+        return active ? { principal: sessionPrincipal(active.session), csrf: active.csrf, sessionId: active.session.id } : null
       },
       verifySessionWrite: async (request) => {
         const check = await checkSession(request, (await loginOptions(request)))
-        return check.kind === 'session' ? { principal: sessionUserPrincipal(check.active.session), csrf: check.active.csrf, sessionId: check.active.session.id } : null
+        return check.kind === 'session' ? { principal: sessionPrincipal(check.active.session), csrf: check.active.csrf, sessionId: check.active.session.id } : null
       },
       loginMethods: async () => ({ oidcName: (await oidcProvider())?.config.name ?? null, passkeys: options.login?.passkeys ?? true }),
       observe,
@@ -2525,14 +2582,15 @@ export const createForge = (options: ForgeOptions): Forge => {
         markAllRead: (user) => notifications.store.markAllRead(user.id, now().getTime()),
       },
       githubApps: githubApps.ui,
-      collaboration: async (request, principal, owner, name) => {
+      collaboration: async (request, principal, owner, name, known) => {
         try {
-          return await openCollaborationRepository(collaborationOptions(request), principal, owner, name)
+          return await openCollaborationRepository(collaborationOptions(request), principal, owner, name, known)
         } catch (error) {
           if (error instanceof CollaborationError && error.status === 404) return null
           throw error
         }
       },
+      repositoryHeader: (principal, repository) => repositoryHeader({ db, accounts: store }, principal, repository),
       settings,
       actions,
       releases: {

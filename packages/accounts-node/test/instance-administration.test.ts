@@ -8,10 +8,10 @@ import {
   type Principal,
   type UserPrincipal,
 } from '@git-forge/accounts'
-import { openSqliteDatabase } from '../src/index.ts'
+import { testDatabase } from './database.ts'
 
 const setup = async () => {
-  const { db } = openSqliteDatabase()
+  const db = await testDatabase()
   await applyMigrations(db, MIGRATIONS)
   const store = createAccountsStore(db)
   const user = async (login: string): Promise<UserPrincipal> => ({ kind: 'user', id: (await store.createUser({ login })).id, login, limits: null, tokenId: null })

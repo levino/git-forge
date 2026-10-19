@@ -127,6 +127,14 @@ export const nodeId = (prefix: string): string => `${prefix}_${base64UrlEncode(r
 export const actorRefOf = (principal: Principal): ActorRef | null =>
   principal.kind === 'user' ? { kind: 'user', id: principal.id } : principal.kind === 'app' ? { kind: 'app', id: principal.id } : null
 
+export type KnownRepository = { readonly repository: RepositorySubject; readonly access: Access }
+
+const knownActor = (principal: Principal, { repository, access }: KnownRepository): Actor => {
+  const limits = principal.kind === 'user' || principal.kind === 'app' ? principal.limits : null
+  const writable = principal.kind !== 'anonymous' && !repository.archived && (limits === null || atLeast(limits.ceiling, 'write'))
+  return { principal, access, writable, ref: actorRefOf(principal) }
+}
+
 export const resolveActor = async (accounts: AccountsDirectory, principal: Principal, repository: RepositorySubject): Promise<Actor> => {
   if (principal.kind === 'instance') return { principal, access: resolveAccess({ kind: 'anonymous' }, repository), writable: false, ref: null }
   let access = resolveAccess(principal, repository, await accounts.grantsFor(principal, repository))
@@ -135,8 +143,7 @@ export const resolveActor = async (accounts: AccountsDirectory, principal: Princ
     const restricted = limits?.repositoryIds && !limits.repositoryIds.includes(repository.id)
     if (!restricted) access = limits ? minAccess('admin', limits.ceiling) : 'admin'
   }
-  const writable = principal.kind !== 'anonymous' && !repository.archived && (limits === null || atLeast(limits.ceiling, 'write'))
-  return { principal, access, writable, ref: actorRefOf(principal) }
+  return knownActor(principal, { repository, access })
 }
 
 type SettingsRow = {
@@ -161,10 +168,11 @@ export const readSettings = async (db: Database, repositoryId: string): Promise<
   }
 }
 
-export const openRepository = async (options: CollaborationOptions, principal: Principal, owner: string, name: string): Promise<Scope> => {
-  const repository = await options.accounts.findRepository(owner, name)
+export const openRepository = async (options: CollaborationOptions, principal: Principal, owner: string, name: string, known?: KnownRepository): Promise<Scope> => {
+  const usable = known && principal.kind !== 'instance' && known.repository.owner === owner && known.repository.name === name ? known : undefined
+  const repository = usable?.repository ?? (await options.accounts.findRepository(owner, name))
   if (!repository) throw notFound()
-  const [actor, settings] = await Promise.all([resolveActor(options.accounts, principal, repository), readSettings(options.db, repository.id)])
+  const [actor, settings] = await Promise.all([usable ? knownActor(principal, usable) : resolveActor(options.accounts, principal, repository), readSettings(options.db, repository.id)])
   if (!atLeast(actor.access, 'read')) throw notFound()
   return {
     db: options.db,

@@ -10,10 +10,10 @@ import {
   resolveAccess,
   type UserPrincipal,
 } from '@git-forge/accounts'
-import { openSqliteDatabase } from '../src/index.ts'
+import { testDatabase } from './database.ts'
 
 const setup = async () => {
-  const { db } = openSqliteDatabase()
+  const db = await testDatabase()
   await applyMigrations(db, MIGRATIONS)
   const store = createAccountsStore(db)
   const operations = createOrganizationOperations(store)

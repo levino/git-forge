@@ -5,6 +5,7 @@ import {
   type AccountsStore,
   applyMigrations,
   createAccountsStore,
+  createStateCache,
   generateSigningKey,
   importSigningKey,
   MIGRATIONS,
@@ -179,6 +180,7 @@ export const startInstance = async (name: string, options: InstanceOptions = {})
   const forgeOptions: ForgeOptions = {
     storage: counting,
     db,
+    stateCache: createStateCache(db),
     publicUrl: url,
     instanceKey: key,
     bootstrapToken: BOOTSTRAP_TOKEN,

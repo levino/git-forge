@@ -11,10 +11,10 @@ import {
   parseScimFilter,
   syncMemberships,
 } from '@git-forge/accounts'
-import { openSqliteDatabase } from '../src/index.ts'
+import { testDatabase } from './database.ts'
 
 const setup = async () => {
-  const { db } = openSqliteDatabase()
+  const db = await testDatabase()
   await applyMigrations(db, MIGRATIONS)
   const store = createAccountsStore(db)
   return { db, store }

@@ -1,4 +1,7 @@
-import stylesheet from '../styles/global.css?inline'
+import tailwind from '../styles/global.css?inline'
+import { HIGHLIGHT_CSS } from './highlight.ts'
+
+const stylesheet = `${tailwind}${HIGHLIGHT_CSS}`
 
 const fnv1a = (text: string): string => {
   let hash = 0x811c9dc5

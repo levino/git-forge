@@ -43,8 +43,54 @@ jobs:
           fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
-  release:
+  runner:
     needs: prepare
+    if: needs.prepare.outputs.tag != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.image.outputs.image }}
+    env:
+      TAG: ${{ needs.prepare.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: name
+        env:
+          OWNER: ${{ github.repository_owner }}
+        run: echo "image=ghcr.io/$(echo "$OWNER" | tr '[:upper:]' '[:lower:]')/git-forge-runner:${TAG#v}" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: apps/forge-worker/runner
+          platforms: linux/amd64
+          push: true
+          provenance: false
+          tags: ${{ steps.name.outputs.image }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.version=${{ env.TAG }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.licenses=MIT
+            org.opencontainers.image.description=git-forge CI runner (apps/forge-worker/runner)
+      - id: image
+        env:
+          IMAGE: ${{ steps.name.outputs.image }}
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          echo "$DIGEST" | grep -qE '^sha256:[0-9a-f]{64}$'
+          echo "image=$IMAGE@$DIGEST" >> "$GITHUB_OUTPUT"
+
+  release:
+    needs: [prepare, runner]
     if: needs.prepare.outputs.tag != ''
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -74,8 +120,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           SHA256: ${{ steps.build.outputs.sha256 }}
+          RUNNER_IMAGE: ${{ needs.runner.outputs.image }}
         run: |
           version=${TAG#v}
+          echo "$RUNNER_IMAGE" > "$RUNNER_TEMP/runner-image"
           command=$(sed -n -E "s/^command = \"V=[^ ]+ S=[0-9a-f]{64} /command = \"V=$version S=$SHA256 /p" templates/instance/wrangler.toml)
           if [ -z "$command" ]; then
             echo "templates/instance/wrangler.toml has no pinned build command" >&2
@@ -97,6 +145,12 @@ jobs:
             echo
             echo '`S` is the SHA-256 of the `SHA256SUMS` asset, which lists the checksums of the Worker bundle and the migrations.'
             echo
+            echo 'Instances with CI set the runner image in every `[[containers]]` entry (also in the `runner-image` asset):'
+            echo
+            echo '```toml'
+            echo "image_vars = { RUNNER_IMAGE = \"$RUNNER_IMAGE\" }"
+            echo '```'
+            echo
             echo 'The `git-forge-<os>-<arch>` assets are single executables of the `git-forge` CLI (`git forge push`); `CLI-SHA256SUMS` lists their checksums.'
             echo
             echo 'The `git-forge-node-linux-<arch>` assets run an instance without Cloudflare (Raspberry Pi, any Linux server; see `apps/forge-node/README.md`); `NODE-SHA256SUMS` lists their checksums.'
@@ -108,6 +162,7 @@ jobs:
           gh release create "$TAG" \
             "$RUNNER_TEMP/release/git-forge-worker.mjs" \
             "$RUNNER_TEMP/release/migrations.tar.gz" \
+            "$RUNNER_TEMP/runner-image" \
             "$RUNNER_TEMP/release/SHA256SUMS" \
             "$RUNNER_TEMP"/cli/* \
             "$RUNNER_TEMP"/node/* \
@@ -159,12 +214,13 @@ jobs:
           cache-to: type=gha,mode=max
 
   pin-template:
-    needs: [prepare, release]
+    needs: [prepare, runner, release]
     if: ${{ !contains(needs.prepare.outputs.tag, '-') }}
     runs-on: ubuntu-latest
     env:
       TAG: ${{ needs.prepare.outputs.tag }}
       SHA256: ${{ needs.release.outputs.sha256 }}
+      RUNNER_IMAGE: ${{ needs.runner.outputs.image }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -174,6 +230,8 @@ jobs:
           version=${TAG#v}
           sed -i -E "s/^command = \"V=[^ ]+ S=[0-9a-f]{64} /command = \"V=$version S=$SHA256 /" templates/instance/wrangler.toml
           grep -q "^command = \"V=$version S=$SHA256 " templates/instance/wrangler.toml
+          sed -i -E "s#ghcr\.io/[a-z0-9-]+/git-forge-runner:[^\"]+#$RUNNER_IMAGE#g" templates/instance/wrangler.toml templates/instance/README.md
+          grep -q "RUNNER_IMAGE = \"$RUNNER_IMAGE\"" templates/instance/README.md
           if git diff --quiet; then
             echo "templates/instance already pins $TAG"
             exit 0

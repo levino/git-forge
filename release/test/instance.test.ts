@@ -157,10 +157,13 @@ describe('instance template', () => {
     expect(buildCommand(toml)).toContain('https://github.com/levino/git-forge/releases/download/v$V')
   })
 
-  it('ships the same runner image as the app', () => {
-    const appRunner = resolve(releaseRoot, '../apps/forge-worker/runner')
-    expect(readdirSync(join(templateRoot, 'runner')).sort()).toEqual(['Dockerfile', 'hook.js'])
-    for (const file of readdirSync(appRunner)) expect(readFileSync(join(templateRoot, 'runner', file), 'utf8')).toBe(readFileSync(join(appRunner, file), 'utf8'))
+  it('builds the CI runner from the image the release pins', () => {
+    expect(readdirSync(join(templateRoot, 'runner'))).toEqual(['Dockerfile'])
+    expect(readFileSync(join(templateRoot, 'runner/Dockerfile'), 'utf8')).toBe('ARG RUNNER_IMAGE\nFROM ${RUNNER_IMAGE}\n')
+    const readme = readFileSync(join(templateRoot, 'README.md'), 'utf8')
+    const images = [...readme.matchAll(/^image = "\.\/runner\/Dockerfile"\nimage_vars = \{ RUNNER_IMAGE = "([^"]+)" \}$/gm)].map((match) => match[1])
+    expect(images).toHaveLength(2)
+    for (const image of images) expect(image).toMatch(/^ghcr\.io\/levino\/git-forge-runner:\d+\.\d+\.\d+@sha256:[0-9a-f]{64}$/)
   })
 
   it('declares every resource by name only, so the first deploy provisions it', () => {

@@ -100,7 +100,7 @@ Design: [design.md §15](design.md#ci).
 - [x] Spike, part 1: dispatch on push, one ephemeral JIT runner per job via `RunnerLauncher`, `needs` with skip on failure; job tokens (`GITHUB_TOKEN` read over Git HTTP, runtime token per job), instance secrets
 - [x] Spike, part 1: Cloudflare Container definition for the runner (Dockerfile, `wrangler.jsonc`)
 - [x] Spike, part 2: the real-runner integration test runs in GitHub CI
-- [x] Runner container on Cloudflare Containers from the instance repository: Workers Builds builds `runner/Dockerfile`, `basic` instance type by default, inactivity timeout for jobs longer than 15 minutes
+- [x] Runner container on Cloudflare Containers from the instance repository: Workers Builds builds `runner/Dockerfile` `FROM` the release's `ghcr.io/levino/git-forge-runner` image (pinned by digest), `basic` instance type by default, inactivity timeout for jobs longer than 15 minutes
 - [ ] Hello-world workflow on the production instance; deploy a Worker with `wrangler` from our own CI
 - [x] `uses:` actions: `ActionDownloadInfo` with tarballs streamed from repositories on the forge (mirrors of `actions/checkout`, …), name mapping, optional fallback to github.com tarballs; shallow fetch (`deepen`) for `actions/checkout`
 - [x] Expressions server-side: job-level `if`, `runs-on` expressions, `strategy`/`matrix` (include/exclude, fail-fast, max-parallel), job outputs across `needs`, `env`/`defaults`, step `if`/`continue-on-error`/`timeout-minutes`, workflow `concurrency`
@@ -116,7 +116,7 @@ Design: [design.md §15](design.md#ci).
 - [x] Self-hosted runners and providers: `config.sh` registration (repository and organization), remove tokens, org-level runners, labels, the default runner group, label routing (`ACTIONS_RUNNER_LABELS`), signed `workflow_job` webhooks (`queued`, `in_progress`, `completed`) to repository and organization hooks
 - [ ] External providers against real accounts: WarpBuild Enterprise, AWS CodeBuild, RunsOn (App auth: design §16)
 - [x] `container:` and `services:` through a container hook (host networking, service names in `/etc/hosts`, health checks, registry credentials), optional bigger instance type for Docker jobs (`RUNNER_DOCKER`)
-- [ ] Verify Docker-in-Docker jobs on Cloudflare Containers
+- [x] Verify Docker-in-Docker jobs on Cloudflare Containers (2026-10-19 on forge.levinkeller.de: `node:22` job container and a `postgres:17` service, 52 s on `standard-2`)
 - [x] Web UI for runs and live logs (runs per workflow, jobs, log polling, cancel, re-run all, failed or one job)
 - [x] "Deploy to Cloudflare" button in the README pointing at the instance template; template wired to accounts (`BOOTSTRAP_TOKEN`)
 - [x] Release artifact (bundled worker + migrations + checksums) and instance template with pinned version

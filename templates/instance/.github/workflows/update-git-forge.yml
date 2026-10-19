@@ -24,6 +24,11 @@ jobs:
           fi
           S=$(curl -fsSL "https://github.com/levino/git-forge/releases/download/v$V/SHA256SUMS" | sha256sum | cut -d' ' -f1)
           sed -i -E "s/V=[0-9A-Za-z.+-]+ S=[0-9a-f]{64}/V=$V S=$S/" wrangler.toml
+          if grep -q 'ghcr.io/levino/git-forge-runner:' wrangler.toml; then
+            R=$(curl -fsSL "https://github.com/levino/git-forge/releases/download/v$V/runner-image")
+            echo "$R" | grep -qE "^ghcr\.io/levino/git-forge-runner:$V@sha256:[0-9a-f]{64}$"
+            sed -i -E "s#ghcr\.io/levino/git-forge-runner:[^\"]+#$R#g" wrangler.toml
+          fi
           echo "version=$V" >> "$GITHUB_OUTPUT"
       - if: steps.pin.outputs.version != ''
         env:

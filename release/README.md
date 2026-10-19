@@ -32,9 +32,13 @@ that commit unless the release exists already) and on manual dispatch, and
 publishes the three files as release assets with `GITHUB_TOKEN`; the release
 notes contain the pin `V=<version> S=<sha256>` and the complete `[build]`
 command line taken from `templates/instance/wrangler.toml` with that pin.
+Before that, the `runner` job pushes `apps/forge-worker/runner/` (linux/amd64)
+to `ghcr.io/levino/git-forge-runner:<version>` with `GITHUB_TOKEN`
+(`packages: write`); the digest-pinned reference goes into the release notes
+and the `runner-image` asset.
 Tags with a `-` (`v0.2.0-rc.1`) are marked as pre-releases. For every other
-release the `pin-template` job then writes the new pin into
-`templates/instance/wrangler.toml` and pushes that commit to `main`, so the
+release the `pin-template` job then writes the new pin and the runner
+reference into `templates/instance` and pushes that commit to `main`, so the
 Deploy button (which deploys `templates/instance` from `main` as is) always
 gets a published release.
 

@@ -10,6 +10,8 @@ import { BOOTSTRAP_TOKEN, bootstrap, call, type NodeForge, nodeForge } from '../
 const BASE = 'https://forge.example'
 const SUMS = new TextEncoder().encode('abc  git-forge-worker.mjs\n')
 const TOML = 'name = "x"\n[build]\ncommand = "V=0.8.3 S=' + 'a'.repeat(64) + ' && U=… && curl"\n'
+const RUNNER = (version: string, digest: string) => `ghcr.io/levino/git-forge-runner:${version}@sha256:${digest.repeat(64)}`
+const CI_TOML = `${TOML}[[containers]]\nimage_vars = { RUNNER_IMAGE = "${RUNNER('0.8.3', 'c')}" }\n`
 
 const json = async <T>(response: Response): Promise<T> => (await response.json()) as T
 
@@ -22,6 +24,8 @@ describe('update helpers', () => {
     expect(repin(TOML, { version: '0.9.0', sha256: 'b'.repeat(64) })).toContain(`V=0.9.0 S=${'b'.repeat(64)} && U=`)
     expect(() => repin('no pin', { version: '0.9.0', sha256: 'b'.repeat(64) })).toThrow(/exactly one/)
     expect(() => repin(TOML + TOML, { version: '0.9.0', sha256: 'b'.repeat(64) })).toThrow(/exactly one/)
+    expect(repin(CI_TOML, { version: '0.9.0', sha256: 'b'.repeat(64) }, RUNNER('0.9.0', 'd'))).toContain(`RUNNER_IMAGE = "${RUNNER('0.9.0', 'd')}"`)
+    expect(() => repin(CI_TOML, { version: '0.9.0', sha256: 'b'.repeat(64) }, RUNNER('0.8.3', 'd'))).toThrow(/runner image/)
   })
 
   it('classifies stored keys and estimates the monthly cost', () => {
@@ -60,6 +64,7 @@ describe('admin operations', () => {
     const url = new URL(request.url)
     if (url.href === 'https://github.com/levino/git-forge/releases/latest') return new Response(null, { status: 302, headers: { Location: `https://github.com/levino/git-forge/releases/tag/v${latest}` } })
     if (url.pathname.endsWith('/SHA256SUMS')) return new Response(SUMS)
+    if (url.pathname.endsWith('/v0.9.0/runner-image')) return new Response(`${RUNNER('0.9.0', 'd')}\n`)
     if (url.href === 'https://api.github.com/repos/ada/instance/contents/wrangler.toml') {
       if (request.headers.get('Authorization') !== 'Bearer ghp_good') return new Response('{"message":"Bad credentials"}', { status: 401 })
       if (request.method === 'PUT') {
@@ -67,8 +72,8 @@ describe('admin operations', () => {
         commits.push({ content: Buffer.from(body.content, 'base64').toString('utf8'), sha: body.sha })
         return Response.json({ commit: { html_url: 'https://github.com/ada/instance/commit/1' } })
       }
-      if (request.headers.get('Accept') === 'application/vnd.github.raw+json') return new Response(TOML)
-      return Response.json({ content: Buffer.from(TOML).toString('base64'), sha: 'blob-1' })
+      if (request.headers.get('Accept') === 'application/vnd.github.raw+json') return new Response(CI_TOML)
+      return Response.json({ content: Buffer.from(CI_TOML).toString('base64'), sha: 'blob-1' })
     }
     if (url.href === 'https://id.example/.well-known/openid-configuration') {
       return Response.json({ issuer: 'https://id.example', authorization_endpoint: 'https://id.example/auth', token_endpoint: 'https://id.example/token', jwks_uri: 'https://id.example/jwks' })
@@ -102,7 +107,7 @@ describe('admin operations', () => {
     const stored = await forge.db.all<{ value: string }>(sql("SELECT value FROM instance_settings WHERE name = 'update:token'"))
     expect(stored[0]?.value).not.toContain('ghp_good')
     expect(await json(await call(forge, BASE, 'POST', '/api/admin/update', ada))).toEqual({ version: '0.9.0', commitUrl: 'https://github.com/ada/instance/commit/1' })
-    expect(commits).toEqual([{ content: TOML.replace(`V=0.8.3 S=${'a'.repeat(64)}`, `V=0.9.0 S=${sha256}`), sha: 'blob-1' }])
+    expect(commits).toEqual([{ content: CI_TOML.replace(`V=0.8.3 S=${'a'.repeat(64)}`, `V=0.9.0 S=${sha256}`).replace(RUNNER('0.8.3', 'c'), RUNNER('0.9.0', 'd')), sha: 'blob-1' }])
     latest = '0.8.3'
     expect((await call(forge, BASE, 'POST', '/api/admin/update', ada)).status).toBe(409)
   })

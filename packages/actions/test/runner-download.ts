@@ -14,7 +14,7 @@ const FALLBACK_RUNNER_VERSION = '2.329.0'
 
 export const CHECKOUT_TAG = 'v4'
 
-export const CONTAINER_HOOK = fileURLToPath(new URL('../../../templates/instance/runner/hook.js', import.meta.url))
+export const CONTAINER_HOOK = fileURLToPath(new URL('../../../apps/forge-worker/runner/hook.js', import.meta.url))
 
 const latestRunnerVersion = async (): Promise<string> => {
   try {

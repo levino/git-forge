@@ -17,9 +17,9 @@ import {
   verifyLfsObject,
 } from './lfs.ts'
 import type { DigestFactory } from './digest.ts'
-import { readRefs, type RepositoryName } from './repository.ts'
+import { alternateRepositories, readRefs, type RepositoryName } from './repository.ts'
 import type { Storage } from './storage.ts'
-import { readableLfsObjects, refusal } from './visibility.ts'
+import { type ReadView, readableLfsObjects, refusal } from './visibility.ts'
 
 export type LfsHttpOptions = {
   readonly expiresInSeconds?: number
@@ -85,6 +85,17 @@ const selfLinks = (request: Request, base: string, storage: Storage, repo: Repos
   }
 }
 
+const ALL: ReadView = { reach: () => 'inside' }
+
+const readable = async (storage: Storage, repo: RepositoryName, view: ReadView | null | undefined, oids: readonly string[]): Promise<Set<string> | null> => {
+  if (view) return readableLfsObjects(storage, repo, view, oids)
+  if ((await alternateRepositories(storage, repo)).length === 0) return null
+  const borrowed: string[] = []
+  for (const oid of oids) if (isLfsOid(oid) && !(await storage.head(lfsObjectKey(repo, oid)))) borrowed.push(oid)
+  const referenced = borrowed.length > 0 ? await readableLfsObjects(storage, repo, ALL, borrowed) : new Set<string>()
+  return new Set(oids.filter((oid) => !borrowed.includes(oid) || referenced.has(oid)))
+}
+
 const declaredLength = (request: Request): number | null => {
   const value = request.headers.get('Content-Length')
   return value !== null && /^(0|[1-9][0-9]*)$/.test(value) ? Number(value) : null
@@ -107,7 +118,7 @@ export const handleLfsRequest = async (request: Request, repo: RepositoryName, p
         ...(context.lfs?.maxObjectBytes !== undefined ? { maxObjectBytes: context.lfs.maxObjectBytes } : {}),
         ...(context.lfs?.oversizeHint ? { oversizeHint: context.lfs.oversizeHint } : {}),
       }
-      const visible = granted ? await readableLfsObjects(storage, repo, granted, batch.objects.map((object) => String(object.oid))) : null
+      const visible = batch.operation === 'download' ? await readable(storage, repo, granted, batch.objects.map((object) => String(object.oid))) : null
       const shown = visible ? batch.objects.filter((object) => visible.has(String(object.oid))) : batch.objects
       const result = await lfsBatch(storage, repo, { ...batch, objects: shown }, selfLinks(request, base, storage, repo, expiresIn), limits)
       const hidden = batch.objects.filter((object) => !shown.includes(object)).map((object) => ({ ...object, error: { code: 404, message: 'object does not exist' } }))
@@ -146,7 +157,7 @@ export const handleLfsRequest = async (request: Request, repo: RepositoryName, p
     if (request.method === 'GET' || request.method === 'HEAD') {
       const granted = await context.authorize?.(request, repo, 'read', 'lfs')
       if (granted instanceof Response) return granted
-      if (granted && !(await readableLfsObjects(storage, repo, granted, [oid])).has(oid)) return failure(404, 'object does not exist')
+      if ((await readable(storage, repo, granted, [oid]))?.has(oid) === false) return failure(404, 'object does not exist')
       const key = (await locateLfsObject(storage, repo, oid))?.key ?? lfsObjectKey(repo, oid)
       const stored = request.method === 'GET' ? await storage.get(key) : await storage.head(key)
       if (!stored) return failure(404, 'object does not exist')

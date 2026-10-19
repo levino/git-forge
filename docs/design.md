@@ -360,10 +360,16 @@ tmp/<repo>/<timestamp>-<uuid>/part/<nnnnn>  # its parts, 1-based, five digits
   (recursively, at most five levels); LFS lookups fall back to the
   alternates' `lfs/objects/`. Because packs are never deleted, the upstream's
   objects stay readable for the fork whatever happens upstream. Compaction
-  only merges a repository's own packs. Over dumb HTTP a fork serves a
-  combined `objects/info/packs` and falls back to the alternates for
-  `objects/pack/*`, so dumb clients and copy-only mirrors get a
-  self-contained repository; the alternates file itself is not served.
+  only merges a repository's own packs. A fork serves only what its own refs
+  reach: upload-pack never streams stored packs of a repository that borrows
+  packs, accepts wants that are advertised or reachable from advertised refs
+  (like `uploadpack.allowReachableSHA1InWant`) and haves only when reachable,
+  and builds the pack from that walk; dumb HTTP is refused (404, so `auto`
+  mirrors fall back to fetch), and LFS objects found only in an alternate are
+  served when a pointer reachable from the fork's refs names them. Lookups by
+  a known id (browsing by SHA, raw downloads, pushes that reference an
+  existing object) still resolve through the alternates, like GitHub's fork
+  networks.
 - **Release assets** are content-addressed like LFS objects
   (`lfs/objects/…`, §16). Which asset belongs to which release lives only in
   the database; a deleted asset or release leaves its bytes in place.
@@ -2268,6 +2274,13 @@ Issues, pull requests, reviews, commit statuses, check runs and discussions
   their own account or an organization they own; the fork has the
   upstream's visibility and is an independent repository (its own
   collaborators; upstream collaborators get no access to a private fork).
+  A private fork is readable only by principals who can also read its parent
+  (checked recursively, token limits aside; `grantsFor` sets
+  `upstreamDenied`), so losing access upstream denies the fork, which
+  GitHub would delete. A fork of a private repository cannot be made public
+  (`422`). When a repository turns private, its public forks are detached
+  (their `repository_forks` rows go, descendants get them as root) and keep
+  serving only what their own refs reach.
   Pull requests may use a head from another repository of the same fork
   network (`head: owner:branch`, `head_repo` when an owner has several).
   Their head objects are copied into the base repository when the pull

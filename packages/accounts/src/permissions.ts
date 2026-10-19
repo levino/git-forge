@@ -28,6 +28,7 @@ export type Grants = {
   readonly teamRoles: readonly Role[]
   readonly appRole: Role | null
   readonly instanceRole: 'read' | null
+  readonly upstreamDenied?: boolean
 }
 
 export const NO_GRANTS: Grants = { organizationRole: null, collaboratorRole: null, teamRoles: [], appRole: null, instanceRole: null }
@@ -102,6 +103,7 @@ const applyLimits = (limits: TokenLimits | null, repo: RepositorySubject, access
 
 export const resolveAccess = (principal: Principal, repo: RepositorySubject, grants: Grants = NO_GRANTS): Access => {
   const floor: Access = repo.visibility === 'public' ? 'read' : 'none'
+  if (grants.upstreamDenied) return floor
   return maxAccess(floor, applyLimits(limitsOf(principal), repo, grantFor(principal, repo, grants)))
 }
 

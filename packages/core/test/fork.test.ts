@@ -47,7 +47,7 @@ const seed = async () => {
 }
 
 describe('forks', () => {
-  it('share the upstream objects through alternates and clone with smart and dumb HTTP', async () => {
+  it('share the upstream objects through alternates and clone over smart HTTP only', async () => {
     const source = await seed()
     const state = await forkRepository(storage, upstream, fork)
     expect(Object.keys(state.refs).sort()).toEqual(['refs/heads/main', 'refs/tags/v1'])
@@ -55,12 +55,39 @@ describe('forks', () => {
     expect(new TextDecoder().decode((await (await storage.get(alternatesKey(fork)))!.body.getReader().read()).value)).toBe('../../../../acme/site/git/objects\n')
     expect(await new ObjectDatabase(storage, fork).packNames()).toEqual([])
     const head = (await gitAsync(source, ['rev-parse', 'HEAD'])).trim()
-    for (const protocol of ['2', '0']) {
-      const clone = tempDir()
-      await gitAsync(clone, ['-c', `protocol.version=${protocol}`, 'clone', '-q', remote(fork), 'out'])
-      expect((await gitAsync(`${clone}/out`, ['rev-parse', 'HEAD'])).trim()).toBe(head)
-      expect(await gitAsync(`${clone}/out`, ['fsck', '--full', '--strict'])).toBe('')
-    }
+    const clone = tempDir()
+    await gitAsync(clone, ['clone', '-q', remote(fork), 'out'])
+    expect((await gitAsync(`${clone}/out`, ['rev-parse', 'HEAD'])).trim()).toBe(head)
+    expect(await gitAsync(`${clone}/out`, ['fsck', '--full', '--strict'])).toBe('')
+    const pack = (await new ObjectDatabase(storage, upstream).packNames())[0]!
+    for (const path of ['info/refs', 'objects/info/packs', `objects/pack/${pack}`]) expect((await fetch(`${remote(fork)}/${path}`)).status).toBe(404)
+    await expect(gitAsync(tempDir(), ['-c', 'protocol.version=0', 'clone', '-q', remote(fork), 'out'])).rejects.toThrow()
+  })
+
+  it('serves only objects reachable from its own refs', async () => {
+    const source = await seed()
+    await forkRepository(storage, upstream, fork)
+    const forked = (await gitAsync(source, ['rev-parse', 'HEAD'])).trim()
+    const parent = (await gitAsync(source, ['rev-parse', 'HEAD~1'])).trim()
+    writeFile(source, 'later.txt', 'pushed upstream after the fork\n')
+    commitAll(source, 'later')
+    await gitAsync(source, ['push', '-q', remote(upstream), 'main'])
+    const later = (await gitAsync(source, ['rev-parse', 'HEAD'])).trim()
+    const blob = (await gitAsync(source, ['rev-parse', 'HEAD:later.txt'])).trim()
+    const clone = `${tempDir()}/out`
+    await gitAsync(tempDir(), ['clone', '-q', '--bare', remote(fork), clone])
+    expect((await gitAsync(clone, ['rev-parse', 'main'])).trim()).toBe(forked)
+    expect(await gitAsync(clone, ['fsck', '--full', '--strict'])).toBe('')
+    for (const id of [later, blob]) await expect(gitAsync(clone, ['cat-file', '-e', id])).rejects.toThrow()
+    await expect(gitAsync(clone, ['fetch', '-q', 'origin', later])).rejects.toThrow(/not our ref/)
+    const shallow = `${tempDir()}/shallow`
+    await gitAsync(tempDir(), ['clone', '-q', '--bare', '--depth=1', remote(fork), shallow])
+    await gitAsync(shallow, ['fetch', '-q', '--depth=1', 'origin', parent])
+    expect((await gitAsync(shallow, ['cat-file', '-t', parent])).trim()).toBe('commit')
+    await expect(gitAsync(shallow, ['fetch', '-q', 'origin', later])).rejects.toThrow(/not our ref/)
+    await gitAsync(source, ['push', '-q', remote(fork), 'main'])
+    await gitAsync(clone, ['fetch', '-q', 'origin', 'main:main'])
+    expect((await gitAsync(clone, ['cat-file', '-t', blob])).trim()).toBe('blob')
   })
 
   it('accepts pushes that build on upstream objects, compacts only its own packs and moves objects back', async () => {
@@ -85,6 +112,34 @@ describe('forks', () => {
     expect(moved.objects).toBe(9)
     expect(await new ObjectDatabase(storage, upstream).has(tip)).toBe(true)
     expect((await transferObjects(compacted, new ObjectDatabase(storage, upstream), [tip], [main])).objects).toBe(0)
+  })
+
+  it('serves upstream LFS objects only when its own refs point at them', async () => {
+    const source = await seed()
+    await forkRepository(storage, upstream, fork)
+    const objects = ['in the fork\n', 'upstream only\n'].map((text) => new TextEncoder().encode(text))
+    const specs = []
+    for (const content of objects) {
+      const oid = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', content)), (byte) => byte.toString(16).padStart(2, '0')).join('')
+      expect((await storeLfsObject(storage, upstream, { oid, size: content.length }, new Blob([content]).stream())).ok).toBe(true)
+      specs.push({ oid, size: content.length })
+    }
+    writeFile(source, 'a.bin', `version https://git-lfs.github.com/spec/v1\noid sha256:${specs[0]!.oid}\nsize ${specs[0]!.size}\n`)
+    commitAll(source, 'pointer')
+    await gitAsync(source, ['push', '-q', remote(fork), 'HEAD:refs/heads/lfs'])
+    const response = await fetch(`${remote(fork)}/info/lfs/objects/batch`, {
+      method: 'POST',
+      headers: { Accept: 'application/vnd.git-lfs+json', 'Content-Type': 'application/vnd.git-lfs+json' },
+      body: JSON.stringify({ operation: 'download', objects: specs }),
+    })
+    const { objects: described } = (await response.json()) as { objects: { oid: string; actions?: unknown; error?: { code: number } }[] }
+    expect(described.map((object) => [object.oid, object.actions ? 'ok' : object.error?.code])).toEqual([
+      [specs[0]!.oid, 'ok'],
+      [specs[1]!.oid, 404],
+    ])
+    expect((await fetch(`${remote(fork)}/info/lfs/objects/${specs[0]!.oid}`)).status).toBe(200)
+    expect((await fetch(`${remote(fork)}/info/lfs/objects/${specs[1]!.oid}`)).status).toBe(404)
+    expect((await fetch(`${remote(upstream)}/info/lfs/objects/${specs[1]!.oid}`)).status).toBe(200)
   })
 
   it('finds LFS objects of the upstream repository', async () => {

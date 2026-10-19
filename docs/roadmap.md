@@ -165,7 +165,7 @@ Design: [design.md §17](design.md#17-collaboration).
 - [x] Discussions: categories, threads, answers
 - [x] REST API under `/api/v3` with GitHub-compatible shapes, wired into the Worker
 - [x] Web UI: issues (list, new, timeline, comment, close/reopen), pull requests (list, new, conversation with reviews, checks and merge box, commits, files with inline line comments), discussions (categories, threads, replies, answers)
-- [x] Forks on the same instance (object sharing through alternates, fork network listing) and pull requests from forks (head objects and their LFS objects copied into the base, maintainers can modify, untrusted CI)
+- [x] Forks on the same instance (object sharing through alternates, fork network listing) and pull requests from forks (head objects and their LFS objects copied into the base, maintainers can modify, untrusted CI); forks serve only what their refs reach, private forks need read on the parent, public forks detach when the upstream turns private
 - [x] Web UI for forks: Fork button, fork list, *forked from*, pull requests from forks
 - [ ] Forks across instances (fork a mirror, pull requests between instances)
 - [ ] Forks keep resolving their upstream after it is renamed again over a reused name or deleted (alternates name the upstream by its name; private forks do not inherit upstream collaborators)

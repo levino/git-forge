@@ -1349,6 +1349,8 @@ export const createForge = (options: ForgeOptions): Forge => {
     setVisibility: async (principal, repo, visibility) => {
       const admin = await adminOf(principal, repo)
       if (visibility !== 'private' && visibility !== 'public') throw new HttpError(400, 'visibility must be private or public')
+      const fork = visibility === 'public' ? await store.forkInfo(admin.repository.id) : null
+      if (fork && (fork.parent.visibility === 'private' || fork.root.visibility === 'private')) throw new HttpError(422, 'A fork of a private repository cannot be made public')
       await store.setRepositoryVisibility(admin.repository.id, visibility, { kind: 'user', id: admin.principal.id })
       return { owner: admin.repository.owner, name: admin.repository.name, visibility }
     },

@@ -41,7 +41,7 @@ Environment variables. The names shared with the Worker mean the same
 `ACTIONS_ARTIFACT_RETENTION_DAYS`, `ACTIONS_CACHE_LIMIT_BYTES`,
 `ACTIONS_CACHE_UNUSED_DAYS`, `ACTIONS_CACHE_MAX_DAYS`, and the login settings `OIDC_ISSUER`,
 `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`, `OIDC_NAME`, `OIDC_SCOPES`,
-`SELF_SIGNUP`, `PASSKEYS`, `BREAK_GLASS_PUBLIC_KEY`, and the Pages settings
+`SELF_SIGNUP`, `PASSKEYS`, `MEMBERSHIP_SOURCE`, `OIDC_GROUPS_CLAIM`, `BREAK_GLASS_PUBLIC_KEY`, and the Pages settings
 `PAGES_HOST`, `PAGES_DOMAINS`, `PAGES_MAX_AGE` (point the Pages hosts at the
 same process; behind a proxy keep the `Host` header). Email: `EMAIL_PROVIDER`
 (`none`, `console`, `ses`, `smtp`), `EMAIL_FROM`, `SES_*`. Push notifications need `PUBLIC_URL` and

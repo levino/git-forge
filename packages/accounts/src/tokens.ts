@@ -5,6 +5,8 @@ export const TOKEN_SCOPES = ['repo:read', 'repo:write', 'repo:admin'] as const
 
 export type TokenScope = (typeof TOKEN_SCOPES)[number]
 
+export const SCIM_SCOPE = 'scim'
+
 export type TokenKind = 'personal' | 'app'
 
 const PREFIXES: Record<TokenKind, string> = { personal: 'gfp_', app: 'gfa_' }

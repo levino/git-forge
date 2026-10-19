@@ -19,6 +19,7 @@ import {
   hashToken,
   MAX_APP_TOKEN_SECONDS,
   parseScopes,
+  SCIM_SCOPE,
   scopeCeiling,
   shouldRecordUse,
   tokenKindOf,
@@ -64,7 +65,7 @@ export const LOGIN_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/
 
 export const TEAM_SLUG_PATTERN = LOGIN_PATTERN
 
-export const RESERVED_LOGINS: ReadonlySet<string> = new Set(['api', 'explore', 'login', 'logout', 'settings', 'notifications', 'organizations', 'orgs', 'new', 'search'])
+export const RESERVED_LOGINS: ReadonlySet<string> = new Set(['api', 'explore', 'login', 'logout', 'settings', 'notifications', 'organizations', 'orgs', 'new', 'search', 'scim'])
 
 export const isReservedLogin = (login: string): boolean => RESERVED_LOGINS.has(login.toLowerCase())
 
@@ -393,6 +394,64 @@ export const createAccountsStore = (db: Database, options: AccountsStoreOptions 
       ])
     },
 
+    setUserActive: async (userId: string, active: boolean, actor: AuditActor = SYSTEM): Promise<void> => {
+      const at = now()
+      await write(
+        actor,
+        { action: active ? 'account.enable' : 'account.disable', subjectKind: 'user', subjectId: userId },
+        active
+          ? [sql("UPDATE accounts SET disabled_at = NULL WHERE id = ? AND kind = 'user'", userId)]
+          : [
+              sql("UPDATE accounts SET disabled_at = ? WHERE id = ? AND kind = 'user' AND disabled_at IS NULL", at, userId),
+              sql('UPDATE sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL', at, userId),
+              sql('UPDATE tokens SET revoked_at = ? WHERE account_id = ? AND revoked_at IS NULL', at, userId),
+            ],
+      )
+    },
+
+    replaceMemberships: async (
+      userId: string,
+      organizations: readonly { readonly id: string; readonly role: OrganizationRole }[],
+      teamIds: readonly string[],
+      actor: AuditActor = SYSTEM,
+    ): Promise<boolean> => {
+      const [currentOrganizations, currentTeams] = await Promise.all([
+        db.all<{ organization_id: string; role: string }>(sql('SELECT organization_id, role FROM organization_members WHERE user_id = ?', userId)),
+        db.all<{ team_id: string }>(sql('SELECT team_id FROM team_members WHERE user_id = ?', userId)),
+      ])
+      const at = now()
+      const wanted = new Map(organizations.map((entry) => [entry.id, entry.role]))
+      const teams = new Set(teamIds)
+      const statements = [
+        ...currentTeams.filter((row) => !teams.has(row.team_id)).map((row) => sql('DELETE FROM team_members WHERE team_id = ? AND user_id = ?', row.team_id, userId)),
+        ...currentOrganizations
+          .filter((row) => !wanted.has(row.organization_id))
+          .map((row) => sql('DELETE FROM organization_members WHERE organization_id = ? AND user_id = ?', row.organization_id, userId)),
+        ...[...wanted]
+          .filter(([id, role]) => currentOrganizations.find((row) => row.organization_id === id)?.role !== role)
+          .map(([id, role]) =>
+            sql(
+              'INSERT INTO organization_members (organization_id, user_id, role, created_at) VALUES (?, ?, ?, ?) ON CONFLICT (organization_id, user_id) DO UPDATE SET role = excluded.role',
+              id,
+              userId,
+              role,
+              at,
+            ),
+          ),
+        ...[...teams]
+          .filter((id) => !currentTeams.some((row) => row.team_id === id))
+          .map((id) => sql("INSERT INTO team_members (team_id, user_id, role, created_at) VALUES (?, ?, 'member', ?) ON CONFLICT (team_id, user_id) DO NOTHING", id, userId, at)),
+      ]
+      if (statements.length === 0) return false
+      await write(actor, { action: 'membership.sync', subjectKind: 'user', subjectId: userId, data: { organizations: Object.fromEntries(wanted), teams: [...teams] } }, statements)
+      return true
+    },
+
+    teamsOf: async (userId: string): Promise<{ readonly id: string; readonly organizationId: string }[]> =>
+      db.all<{ id: string; organizationId: string }>(
+        sql('SELECT t.id, t.organization_id AS organizationId FROM team_members m JOIN teams t ON t.id = m.team_id WHERE m.user_id = ?', userId),
+      ),
+
     linkExternalIdentity: async (
       userId: string,
       identity: { readonly issuer: string; readonly subject: string; readonly email?: string },
@@ -448,6 +507,27 @@ export const createAccountsStore = (db: Database, options: AccountsStoreOptions 
            WHERE e.issuer = ? AND e.subject = ? AND a.disabled_at IS NULL`,
           issuer,
           subject,
+        ),
+      ),
+
+    findProvisionedUser: async (identity: {
+      readonly issuer: string
+      readonly subject: string
+      readonly email: string | null
+      readonly username: string | null
+    }): Promise<{ readonly id: string; readonly login: string } | null> =>
+      first<{ id: string; login: string }>(
+        db,
+        sql(
+          `SELECT a.id, a.login FROM scim_users s JOIN accounts a ON a.id = s.account_id
+           WHERE a.disabled_at IS NULL AND (s.external_id = ? OR s.user_name IN (?, ?))
+             AND NOT EXISTS (SELECT 1 FROM external_identities e WHERE e.account_id = a.id AND e.issuer = ?)
+           ORDER BY s.external_id = ? DESC LIMIT 1`,
+          identity.subject,
+          identity.email ?? '',
+          identity.username ?? '',
+          identity.issuer,
+          identity.subject,
         ),
       ),
 
@@ -967,7 +1047,7 @@ export const createAccountsStore = (db: Database, options: AccountsStoreOptions 
         ),
       )
       const at = now()
-      if (!row || row.kind !== kind || tokenStatus({ expiresAt: row.expires_at, revokedAt: row.revoked_at }, at) !== 'active') return null
+      if (!row || row.kind !== kind || tokenStatus({ expiresAt: row.expires_at, revokedAt: row.revoked_at }, at) !== 'active' || row.scopes.split(' ').includes(SCIM_SCOPE)) return null
       if (shouldRecordUse(row.last_used_at, at)) await db.run(sql('UPDATE tokens SET last_used_at = ? WHERE id = ?', at, row.id))
       const limits = {
         ceiling: scopeCeiling(parseScopes(row.scopes)),
@@ -980,6 +1060,40 @@ export const createAccountsStore = (db: Database, options: AccountsStoreOptions 
         return { kind: 'app', id: row.app_id, slug: row.slug, limits, tokenId: row.id }
       }
       return null
+    },
+
+    createScimToken: async (userId: string, name: string, actor: AuditActor = SYSTEM): Promise<CreatedToken> => {
+      const generated = await generateToken('personal')
+      const id = randomId()
+      await write(actor, { action: 'token.create', subjectKind: 'token', subjectId: id, data: { kind: 'personal', owner: userId, name, scopes: SCIM_SCOPE } }, [
+        sql(
+          "INSERT INTO tokens (id, kind, account_id, name, token_hash, display_prefix, scopes, created_at) VALUES (?, 'personal', ?, ?, ?, ?, ?, ?)",
+          id,
+          userId,
+          name,
+          generated.hash,
+          generated.displayPrefix,
+          SCIM_SCOPE,
+          now(),
+        ),
+      ])
+      return { id, token: generated.token, expiresAt: null }
+    },
+
+    authenticateScimToken: async (token: string): Promise<boolean> => {
+      if (tokenKindOf(token) !== 'personal') return false
+      const row = await first<{ id: string }>(
+        db,
+        sql(
+          `SELECT t.id FROM tokens t JOIN accounts a ON a.id = t.account_id JOIN instance_admins i ON i.user_id = a.id
+           WHERE t.token_hash = ? AND t.scopes = ? AND t.revoked_at IS NULL AND (t.expires_at IS NULL OR t.expires_at > ?) AND a.disabled_at IS NULL`,
+          await hashToken(token),
+          SCIM_SCOPE,
+          now(),
+        ),
+      )
+      if (row) await db.run(sql('UPDATE tokens SET last_used_at = ? WHERE id = ?', now(), row.id))
+      return row !== null
     },
 
     trustInstance: async (input: { readonly issuer: string; readonly pinnedThumbprint?: string | null }, actor: AuditActor = SYSTEM): Promise<void> => {

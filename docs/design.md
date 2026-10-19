@@ -729,11 +729,12 @@ SQLite database. A new instance works without an external identity provider.
 | Method | When |
 |---|---|
 | Passkeys (WebAuthn) | Default, built in; passkey-only accounts need no IdP |
-| OIDC (ZITADEL, Keycloak, Authentik, Pocket ID, Google, …) | Connect existing identities; one provider per instance; groups → teams later |
+| OIDC (ZITADEL, Keycloak, Authentik, Pocket ID, Google, …) | Connect existing identities; one provider per instance; optionally the source of memberships |
 | Personal access tokens | Git over HTTPS (as HTTP Basic password), JSON API |
 | Command-line login (`git forge auth login`) | Paste a one-time code from the browser (PKCE), optionally a loopback redirect or the RFC 8628 device flow; issues a token with the chosen scope, git uses it through the credential helper |
 | Break-glass key | Offline Ed25519 key, opens a short admin session when the IdP is down |
-| SAML, SCIM | Later, for organizations that require them |
+| SCIM 2.0 | Provisioning and deprovisioning of users and teams from the identity provider |
+| SAML | Deferred (see *SAML* below) |
 
 Typical setup: people log in via OIDC or passkeys; apps and automations use
 app tokens; mirrors use instance federation (§4).
@@ -798,6 +799,47 @@ of the bootstrap token: the operator inserts a verified email address or
 OIDC subject into `instance_admin_claims` (migration 0010) with
 `wrangler d1 execute`; the first matching OIDC sign-in creates the account
 (even without self-signup), makes it an instance admin and deletes the claim.
+
+**Membership source.** `MEMBERSHIP_SOURCE` is `forge` (default: organizations,
+teams and memberships are managed in the forge) or `idp`; there is no mixing.
+With `idp`, every OIDC sign-in sets the user's organization and team
+memberships exactly from the claim `OIDC_GROUPS_CLAIM` (default `groups`; a
+string, a string array, or an object whose keys are the values, as in ZITADEL's
+`urn:zitadel:iam:org:project:roles`), read from the ID token or, when absent
+there, from userinfo. `org` makes a member, `org:owner` an owner, `org/team` a
+member of team `team` and of `org`; other values are ignored. Unknown
+organizations and teams are created; a value naming a user or a reserved login
+is ignored. Memberships missing from the claim, or all when the claim is
+absent, are removed (`replaceMemberships`, one batch, audited only on change).
+Membership edits, organization creation and organization renames are refused
+with `409` in the API and hidden in the UI; teams and team repository roles
+stay editable by owners.
+
+**SCIM.** `/scim/v2` (`createScimHandler`, `scim.ts`) answers only with
+`MEMBERSHIP_SOURCE=idp`. The bearer token is a personal access token with the
+sole scope `scim`, issued by an instance admin (`POST /api/admin/scim/tokens`),
+valid while its owner is an enabled instance admin, and never accepted
+anywhere else. Supported: `ServiceProviderConfig`, `Users` and `Groups` with
+`GET` (filter `attr eq "value"`, `startIndex`, `count`, `excludedAttributes=members`),
+`POST`, `PUT`, `PATCH` (Entra ID's and Okta's op shapes, string booleans) and
+`DELETE`. Users live in `scim_users` (migration `0040`: `userName`,
+`externalId`); `POST` adopts an account whose OIDC identity has
+`subject = externalId` or the verified email `= userName`, otherwise creates
+one. `active: false` disables the account and revokes its sessions and tokens;
+`DELETE` does the same and forgets the SCIM row. The first OIDC sign-in of an
+unlinked identity links a SCIM user with `externalId = sub`, `userName` = the
+verified email or `preferred_username`, when that account has no identity of
+this issuer yet. Groups are teams named `org/team` (id = team id; renames are
+refused; `DELETE` empties the team); a member added joins the organization,
+and leaving the last team of an organization removes a plain member from it.
+SCIM and the claim both write memberships; the next sign-in wins, so an IdP
+that provisions groups should also send the claim.
+
+**SAML.** Deferred. A safe SP needs a namespace-aware XML parser that rejects
+DTDs and entities, exclusive canonicalization and XML-DSig reference
+resolution that withstands signature wrapping; Workers have no `DOMParser`,
+so all of that would be our own code and our own attack surface. Every IdP we
+target (ZITADEL, Entra ID, Okta, Keycloak) also speaks OIDC.
 
 **Passkeys.** Registration asks for a discoverable credential, user
 verification and attestation `none`; attestation statements are never
@@ -2315,7 +2357,8 @@ Organizations are managed through `createOrganizationOperations` of
 `@git-forge/accounts`: any signed-in user (session, or a token with
 `repo:admin`) may create one and becomes its first owner; owners and instance
 admins (`canAdministerOrganization`) add and remove members, change roles
-(the last owner cannot be demoted or removed), create teams, and set team
+(the last owner cannot be demoted or removed; with `MEMBERSHIP_SOURCE=idp`
+membership edits are refused, §8), create teams, and set team
 members and team repository roles; members see people and teams, everyone
 else gets 404. `/organizations/new`, `/orgs/{org}` and
 `/orgs/{org}/teams/{slug}` call these operations, and so does the JSON API

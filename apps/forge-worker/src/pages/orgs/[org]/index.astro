@@ -37,7 +37,7 @@ try {
             {view.members.map((member) => (
               <li class="flex flex-wrap items-center gap-2 px-4 py-2">
                 <a href={`/${member.login}`} class="link link-hover font-semibold flex-1">{member.login}</a>
-                {view!.canAdminister && session ? (
+                {view!.canAdminister && !view!.managed && session ? (
                   <>
                     <form method="post" class="flex gap-1">
                       <input type="hidden" name="csrf" value={session.csrf} />
@@ -62,7 +62,8 @@ try {
               </li>
             ))}
           </ul>
-          {view.canAdminister && session && (
+          {view.managed && <p class="text-sm text-base-content/70 mt-2">Members come from the identity provider.</p>}
+          {view.canAdminister && !view.managed && session && (
             <form method="post" class="flex flex-wrap items-end gap-2" aria-label="Add a member">
               <input type="hidden" name="csrf" value={session.csrf} />
               <input type="hidden" name="action" value="member" />
@@ -99,7 +100,7 @@ try {
             </form>
           )}
         </section>
-        {view.canAdminister && session && (
+        {view.canAdminister && !view.managed && session && (
           <section aria-labelledby="rename">
             <h2 id="rename" class="text-xl font-semibold mb-2">Rename</h2>
             <form method="post" class="flex flex-wrap items-end gap-2">

@@ -44,8 +44,9 @@ discussions.
 - [x] One read / write / admin access choice for tokens and consent pages
 - [x] Break-glass key (offline Ed25519, one-hour admin session)
 - [x] Session list and revocation, list and unlink linked OIDC identities (account page)
-- [ ] Login follow-ups: OIDC groups → teams
-- [ ] SAML, SCIM
+- [x] Memberships from the identity provider (`MEMBERSHIP_SOURCE=idp`, `OIDC_GROUPS_CLAIM`, ZITADEL role claim)
+- [x] SCIM 2.0 (Users, Groups as `org/team` teams, admin-issued `scim` tokens)
+- [ ] SAML (deferred, design §8)
 - [x] Branch protection rules (patterns, force push, deletion, push restrictions, admin bypass) enforced in `receive-pack`, API under `/api/repos/{owner}/{repo}/branches/{branch}/protection`
 - [x] Branch protection API and push policy wired into the Worker app (accounts on D1), API with browser sessions and CSRF
 

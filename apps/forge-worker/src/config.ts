@@ -1,8 +1,11 @@
 import { type CacheLimits, DEFAULT_ARTIFACT_RETENTION_DAYS, DEFAULT_CACHE_LIMITS, type Es256PrivateJwk, type IdTokenKey, idTokenKeyFromInstanceKey, importEs256Key, importSecretsKey, type SecretsKey } from '@git-forge/actions'
 import {
   BreakGlassError,
+  DEFAULT_GROUPS_CLAIM,
   DEFAULT_OIDC_SCOPES,
   importSigningKey,
+  isMembershipSource,
+  type MembershipSource,
   normalizeIssuer,
   normalizeOidcIssuer,
   type OidcClientConfig,
@@ -56,6 +59,8 @@ export type ForgeVars = {
   readonly OIDC_SCOPES?: string
   readonly SELF_SIGNUP?: string
   readonly PASSKEYS?: string
+  readonly MEMBERSHIP_SOURCE?: string
+  readonly OIDC_GROUPS_CLAIM?: string
   readonly BREAK_GLASS_PUBLIC_KEY?: string
   readonly R2_S3_ENDPOINT?: string
   readonly R2_BUCKET_NAME?: string
@@ -84,6 +89,8 @@ export type LoginSettings = {
   readonly selfSignup: boolean
   readonly breakGlassKey: OkpPublicJwk | undefined
   readonly passkeys?: boolean
+  readonly membershipSource?: MembershipSource
+  readonly groupsClaim?: string
 }
 
 export type ForgeSettings = {
@@ -241,7 +248,16 @@ export const parseLoginSettings = (vars: ForgeVars): LoginSettings => {
     if (error instanceof BreakGlassError) throw new ConfigurationError(error.message)
     throw error
   }
-  return { oidc: parseOidcSettings(vars), selfSignup: vars.SELF_SIGNUP === 'true', breakGlassKey, passkeys: present(vars.PASSKEYS) !== 'false' }
+  const membershipSource = present(vars.MEMBERSHIP_SOURCE) ?? 'forge'
+  if (!isMembershipSource(membershipSource)) throw new ConfigurationError('MEMBERSHIP_SOURCE must be forge or idp')
+  return {
+    oidc: parseOidcSettings(vars),
+    selfSignup: vars.SELF_SIGNUP === 'true',
+    breakGlassKey,
+    passkeys: present(vars.PASSKEYS) !== 'false',
+    membershipSource,
+    groupsClaim: present(vars.OIDC_GROUPS_CLAIM) ?? DEFAULT_GROUPS_CLAIM,
+  }
 }
 
 export const DEFAULT_PAGES_MAX_AGE = 60

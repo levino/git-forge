@@ -1,4 +1,5 @@
 import type { OrganizationRole, Principal, UserPrincipal } from './permissions.ts'
+import type { MembershipSource } from './memberships.ts'
 import { isRole, type Role } from './roles.ts'
 import { type AccountsStore, isReservedLogin } from './store.ts'
 
@@ -44,6 +45,7 @@ export type OrganizationView = {
   readonly organization: { readonly id: string; readonly login: string }
   readonly membership: OrganizationRole | null
   readonly canAdminister: boolean
+  readonly managed: boolean
   readonly members: readonly { readonly id: string; readonly login: string; readonly role: OrganizationRole }[]
   readonly teams: readonly { readonly id: string; readonly slug: string; readonly name: string; readonly members: number }[]
 }
@@ -51,6 +53,7 @@ export type OrganizationView = {
 export type TeamView = {
   readonly team: { readonly id: string; readonly slug: string; readonly name: string }
   readonly canAdminister: boolean
+  readonly managed: boolean
   readonly members: readonly { readonly id: string; readonly login: string; readonly role: 'member' | 'maintainer' }[]
   readonly repositories: readonly { readonly id: string; readonly name: string; readonly role: Role }[]
 }
@@ -61,7 +64,14 @@ const userOf = (principal: Principal): UserPrincipal => {
   return principal
 }
 
-export const createOrganizationOperations = (store: OrganizationStore) => {
+export const IDP_MANAGED = 'memberships come from the identity provider on this instance'
+
+export const createOrganizationOperations = (store: OrganizationStore, options: { readonly membershipSource?: MembershipSource } = {}) => {
+  const managed = options.membershipSource === 'idp'
+  const editable = () => {
+    if (managed) throw new OrganizationError(409, IDP_MANAGED)
+  }
+
   const organization = async (login: string) => {
     const account = await store.findAccount(login)
     if (!account || account.kind !== 'organization') throw new OrganizationError(404, 'organization not found')
@@ -98,6 +108,7 @@ export const createOrganizationOperations = (store: OrganizationStore) => {
   return {
     create: async (principal: Principal, login: string): Promise<{ readonly id: string; readonly login: string }> => {
       const creator = userOf(principal)
+      editable()
       if (isReservedLogin(login)) throw new OrganizationError(422, `${login} is reserved`)
       if (await store.findAccount(login)) throw new OrganizationError(409, `${login} already exists`)
       let created: { readonly id: string }
@@ -119,6 +130,7 @@ export const createOrganizationOperations = (store: OrganizationStore) => {
         organization: { id: org.id, login: org.login },
         membership,
         canAdminister: viewer !== null && (viewer.limits === null || viewer.limits.ceiling === 'admin') && canAdministerOrganization(membership, instanceAdmin),
+        managed,
         members: visible ? await store.listOrganizationMembers(org.id) : [],
         teams: visible ? await store.listTeams(org.id) : [],
       }
@@ -126,6 +138,7 @@ export const createOrganizationOperations = (store: OrganizationStore) => {
 
     setMember: async (principal: Principal, login: string, memberLogin: string, role: string): Promise<void> => {
       const { user: admin, org } = await administer(principal, login)
+      editable()
       if (!isOrganizationRole(role)) throw new OrganizationError(422, 'role must be member or owner')
       const member = await user(memberLogin)
       if (role === 'member') {
@@ -137,6 +150,7 @@ export const createOrganizationOperations = (store: OrganizationStore) => {
 
     removeMember: async (principal: Principal, login: string, memberLogin: string): Promise<void> => {
       const { user: admin, org } = await administer(principal, login)
+      editable()
       const member = await user(memberLogin)
       const owners = (await store.listOrganizationMembers(org.id)).filter((entry) => entry.role === 'owner')
       if (owners.length === 1 && owners[0]!.id === member.id) throw new OrganizationError(422, 'an organization needs at least one owner')
@@ -162,6 +176,7 @@ export const createOrganizationOperations = (store: OrganizationStore) => {
       return {
         team: found,
         canAdminister: viewer !== null && (viewer.limits === null || viewer.limits.ceiling === 'admin') && canAdministerOrganization(membership, instanceAdmin),
+        managed,
         members: await store.listTeamMembers(found.id),
         repositories: await store.listTeamRepositories(found.id),
       }
@@ -169,6 +184,7 @@ export const createOrganizationOperations = (store: OrganizationStore) => {
 
     setTeamMember: async (principal: Principal, login: string, slug: string, memberLogin: string, role: string): Promise<void> => {
       const { user: admin, org } = await administer(principal, login)
+      editable()
       if (!isTeamRole(role)) throw new OrganizationError(422, 'role must be member or maintainer')
       const found = await team(org.id, slug)
       const member = await user(memberLogin)
@@ -178,6 +194,7 @@ export const createOrganizationOperations = (store: OrganizationStore) => {
 
     removeTeamMember: async (principal: Principal, login: string, slug: string, memberLogin: string): Promise<void> => {
       const { user: admin, org } = await administer(principal, login)
+      editable()
       const found = await team(org.id, slug)
       await store.removeTeamMember(found.id, (await user(memberLogin)).id, actor(admin))
     },

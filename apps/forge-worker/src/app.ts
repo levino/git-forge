@@ -76,6 +76,7 @@ import {
   type CreatedToken,
   type CredentialSummary,
   createOrganizationOperations,
+  createScimHandler,
   type OrganizationOperations,
   OrganizationError,
   createInstanceAdministration,
@@ -588,6 +589,8 @@ export const createForge = (options: ForgeOptions): Forge => {
     verifyInstance: createInstanceVerifier({ audience: issuerFor(request), trust: store.lookupTrustedIssuer, jwks }),
   })
 
+  const membershipSource = options.login?.membershipSource ?? 'forge'
+
   const loginOptions = async (request: Request): Promise<LoginHttpOptions> => {
     const origin = new URL(issuerFor(request)).origin
     const context: LoginContext = {
@@ -599,6 +602,8 @@ export const createForge = (options: ForgeOptions): Forge => {
       selfSignup: options.login?.selfSignup ?? false,
       breakGlassKey: options.login?.breakGlassKey ?? null,
       passkeys: options.login?.passkeys ?? true,
+      membershipSource: membershipSource,
+      ...(options.login?.groupsClaim ? { groupsClaim: options.login.groupsClaim } : {}),
       fetch: outbound,
       now: () => now().getTime(),
     }
@@ -1096,7 +1101,12 @@ export const createForge = (options: ForgeOptions): Forge => {
     return json(result.failures.length === 0 ? 200 : 409, result)
   }
 
-  const organizations = createOrganizationOperations(store)
+  const organizations = createOrganizationOperations(store, { membershipSource })
+
+  const createScimToken = async (request: Request): Promise<Response> => {
+    const actor = await requireInstanceAdmin(request)
+    return json(201, await store.createScimToken(actor.id, optionalString(await readBody(request), 'name') ?? 'SCIM', { kind: 'user', id: actor.id }))
+  }
 
   const createOrganizationRoute = async (request: Request): Promise<Response> =>
     json(201, await organizations.create(await principalOf(request), requiredString(await readBody(request), 'login')))
@@ -1456,6 +1466,7 @@ export const createForge = (options: ForgeOptions): Forge => {
     if (!canManage(principal)) throw new HttpError(403, 'this needs a personal access token with the repo:admin scope')
     const account = await store.findAccount(login)
     if (!account) throw new HttpError(404, 'account not found')
+    if (account.kind === 'organization' && membershipSource === 'idp') throw new HttpError(409, 'organization names come from the identity provider on this instance')
     const allowed = account.kind === 'user' ? account.id === principal.id : await store.isOrganizationOwner(account.id, principal.id)
     if (!allowed && !(await store.isInstanceAdmin(principal.id))) throw new HttpError(403, `you cannot rename ${account.login}`)
     if (!LOGIN_PATTERN.test(newLogin)) throw new HttpError(422, 'a login has letters, digits and single hyphens (at most 39 characters)')
@@ -2111,6 +2122,7 @@ export const createForge = (options: ForgeOptions): Forge => {
     { method: 'POST', pattern: /^\/api\/admin\/backup$/, handler: runBackupRoute },
     { method: 'POST', pattern: /^\/api\/admin\/backup\/verify$/, handler: verifyBackupRoute },
     { method: 'POST', pattern: /^\/api\/admin\/invites$/, handler: createInvite },
+    { method: 'POST', pattern: /^\/api\/admin\/scim\/tokens$/, handler: createScimToken },
     { method: 'POST', pattern: /^\/api\/admin\/email\/test$/, handler: sendTestEmailRoute },
     { method: 'GET', pattern: /^\/api\/user$/, handler: currentUser },
     { method: 'POST', pattern: /^\/api\/orgs$/, handler: createOrganizationRoute },
@@ -2206,6 +2218,15 @@ export const createForge = (options: ForgeOptions): Forge => {
     if (federated) return federated
     const login = await createLoginHandler((await loginOptions(request)))(request)
     if (login) return login
+    const scim = await createScimHandler({
+      db,
+      store,
+      origin: new URL(issuerFor(request)).origin,
+      enabled: membershipSource === 'idp',
+      authenticate: store.authenticateScimToken,
+      now: nowMs,
+    })(request)
+    if (scim) return scim
     const authentication = authenticateOptions(request)
     const protection = await handleBranchProtectionRequest(request, { store, authenticate: apiPrincipal })
     if (protection) return protection

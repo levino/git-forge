@@ -307,6 +307,85 @@ describe('OIDC', () => {
     await signIn(victim)
     expect(await json(await victim.fetch('/api/session'))).toMatchObject({ login: 'alice-2' })
   })
+
+  const ZITADEL_ROLES = 'urn:zitadel:iam:org:project:roles'
+
+  const orgsOf = async (forge: NodeForge, login: string) => {
+    const store = createAccountsStore(forge.db)
+    const user = (await store.findAccount(login))!
+    const organizations = await store.organizationsOf(user.id)
+    const teams = await Promise.all(
+      organizations.map(async (org) => {
+        const all = await store.listTeams(org.id)
+        const mine = await Promise.all(all.map(async (team) => ((await store.listTeamMembers(team.id)).some((member) => member.id === user.id) ? [`${org.login}/${team.slug}`] : [])))
+        return mine.flat()
+      }),
+    )
+    return [...organizations.map((org) => `${org.login}:${org.role}`), ...teams.flat()]
+  }
+
+  it('sets organization and team memberships from the ZITADEL roles claim on every sign-in', async () => {
+    expect(parseLoginSettings({})).toMatchObject({ membershipSource: 'forge', groupsClaim: 'groups' })
+    expect(parseLoginSettings({ MEMBERSHIP_SOURCE: 'idp', OIDC_GROUPS_CLAIM: ZITADEL_ROLES })).toMatchObject({ membershipSource: 'idp', groupsClaim: ZITADEL_ROLES })
+    expect(() => parseLoginSettings({ MEMBERSHIP_SOURCE: 'both' })).toThrow(/forge or idp/)
+    const forge = await loginForge({ ...oidcSettings(true), membershipSource: 'idp', groupsClaim: ZITADEL_ROLES }, mock)
+    const admin = await bootstrap(forge, BASE)
+    mock.claimOverrides = { [ZITADEL_ROLES]: { 'acme:owner': { '2871': 'zitadel.example' }, 'acme/dev': { '2871': 'zitadel.example' }, 'forge-user': {} } }
+    const browser = new Browser(forge)
+    expect((await signIn(browser)).status).toBe(303)
+    expect(await orgsOf(forge, 'alice')).toEqual(['acme:owner', 'forge-user:member', 'acme/dev'])
+
+    const csrf = await browser.csrf()
+    const refused = await browser.fetch('/api/orgs/acme/members/admin', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ role: 'member' }), csrf })
+    expect(refused.status).toBe(409)
+    expect((await call(forge, BASE, 'POST', '/api/orgs', admin, { login: 'manual' })).status).toBe(409)
+    expect((await browser.fetch('/api/accounts/acme', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ login: 'acme2' }), csrf })).status).toBe(409)
+
+    mock.claimOverrides = { [ZITADEL_ROLES]: { 'acme/ops': {} } }
+    await signIn(new Browser(forge))
+    expect(await orgsOf(forge, 'alice')).toEqual(['acme:member', 'acme/ops'])
+    mock.claimOverrides = {}
+    await signIn(new Browser(forge))
+    expect(await orgsOf(forge, 'alice')).toEqual([])
+  })
+
+  it('reads a groups array from userinfo and leaves memberships alone in forge mode', async () => {
+    mock.userinfoOnly = true
+    mock.user = { ...mock.user, groups: ['acme', 'acme/dev'] } as typeof mock.user
+    const idp = await loginForge({ ...oidcSettings(true), membershipSource: 'idp' }, mock)
+    await signIn(new Browser(idp))
+    expect(await orgsOf(idp, 'alice')).toEqual(['acme:member', 'acme/dev'])
+    const forgeMode = await loginForge(oidcSettings(true), mock)
+    await signIn(new Browser(forgeMode))
+    expect(await orgsOf(forgeMode, 'alice')).toEqual([])
+  })
+
+  it('links provisioned SCIM users on their first sign-in and ends their sessions on deactivation', async () => {
+    const forge = await loginForge({ ...oidcSettings(false), membershipSource: 'idp' }, mock)
+    const admin = await bootstrap(forge, BASE)
+    const issued = await call(forge, BASE, 'POST', '/api/admin/scim/tokens', admin, {})
+    expect(issued.status).toBe(201)
+    const { token } = await json<{ token: string }>(issued)
+    expect((await call(forge, BASE, 'GET', '/api/user', token)).status).toBe(401)
+    const scim = (method: string, path: string, body?: unknown) =>
+      forge.fetch(new Request(`${BASE}/scim/v2${path}`, { method, headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/scim+json' }, ...(body ? { body: JSON.stringify(body) } : {}) }))
+    const created = await json<{ id: string }>(await scim('POST', '/Users', { userName: 'alice@example.org', externalId: 'user-1', displayName: 'Alice' }))
+    expect((await scim('POST', '/Groups', { displayName: 'acme/dev', members: [{ value: created.id }] })).status).toBe(201)
+
+    const browser = new Browser(forge)
+    expect((await signIn(browser)).status).toBe(303)
+    expect(await json(await browser.fetch('/api/session'))).toMatchObject({ login: 'alice' })
+    expect(await orgsOf(forge, 'alice')).toEqual([])
+
+    expect((await scim('PATCH', `/Users/${created.id}`, { Operations: [{ op: 'replace', path: 'active', value: false }] })).status).toBe(200)
+    expect((await browser.fetch('/api/session')).status).not.toBe(200)
+    expect((await signIn(new Browser(forge))).status).toBe(403)
+
+    const forgeMode = await loginForge(oidcSettings(false), mock)
+    const other = await bootstrap(forgeMode, BASE)
+    const otherToken = await json<{ token: string }>(await call(forgeMode, BASE, 'POST', '/api/admin/scim/tokens', other, {}))
+    expect((await forgeMode.fetch(new Request(`${BASE}/scim/v2/Users`, { headers: { Authorization: `Bearer ${otherToken.token}` } }))).status).toBe(404)
+  })
 })
 
 describe('device flow', () => {

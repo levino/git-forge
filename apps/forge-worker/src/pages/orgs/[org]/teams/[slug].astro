@@ -38,7 +38,7 @@ try {
               <li class="flex items-center gap-2 px-4 py-2">
                 <a href={`/${member.login}`} class="link link-hover font-semibold flex-1">{member.login}</a>
                 <span class="badge badge-sm">{member.role}</span>
-                {view!.canAdminister && session && (
+                {view!.canAdminister && !view!.managed && session && (
                   <form method="post">
                     <input type="hidden" name="csrf" value={session.csrf} />
                     <input type="hidden" name="action" value="remove-team-member" />
@@ -50,7 +50,8 @@ try {
               </li>
             ))}
           </ul>
-          {view.canAdminister && session && (
+          {view.managed && <p class="text-sm text-base-content/70 mt-2">Members come from the identity provider.</p>}
+          {view.canAdminister && !view.managed && session && (
             <form method="post" class="flex flex-wrap items-end gap-2" aria-label="Add a team member">
               <input type="hidden" name="csrf" value={session.csrf} />
               <input type="hidden" name="action" value="team-member" />

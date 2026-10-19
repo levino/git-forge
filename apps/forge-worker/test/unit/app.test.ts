@@ -1,5 +1,5 @@
 import { generateSigningKey, type SigningKey } from '@git-forge/accounts'
-import { type ImportJob, lfsObjectKey, readImportState, readRefs, sha256Hex, startImport, ZERO_ID } from '@git-forge/core'
+import { type ImportJob, lfsObjectKey, listMirrors, readImportState, readRefs, sha256Hex, startImport, ZERO_ID } from '@git-forge/core'
 import { basicAuth, chain, fakeLfs, lfsPointer, requireAuthorization } from '@git-forge/core/test/mirror-helpers.ts'
 import { S3Storage } from '@git-forge/s3'
 import { commitAll, gitBytes, initRepo, sampleHistory, tempDir, writeFile } from '@git-forge/core/test/git-helpers.ts'
@@ -427,6 +427,16 @@ describe('federation between two instances', () => {
     expect((await call(upstream, upstreamServer.url, 'GET', '/.well-known/openid-configuration')).status).toBe(404)
   })
 
+  it('lets only instance admins add mirrors with instance authentication', async () => {
+    await call(downstream, downstreamServer.url, 'POST', '/api/admin/users', downstreamAdmin, { login: 'carol' })
+    const carol = (await json<{ token: string }>(await call(downstream, downstreamServer.url, 'POST', '/api/admin/users/carol/tokens', downstreamAdmin, { scopes: ['repo:admin'] }))).token
+    await call(downstream, downstreamServer.url, 'POST', '/api/repos', carol, { owner: 'carol', name: 'copy' })
+    const url = `${upstreamServer.url}/admin/archive.git`
+    expect((await call(downstream, downstreamServer.url, 'POST', '/api/repos/carol/copy/mirrors', carol, { url, auth: 'instance' })).status).toBe(403)
+    expect(await listMirrors(downstream.storage, { owner: 'carol', name: 'copy' })).toEqual([])
+    expect((await call(downstream, downstreamServer.url, 'POST', '/api/repos/carol/copy/mirrors', carol, { url, mode: 'manual' })).status).toBe(201)
+  })
+
   it('mirrors a private repository only after trust and grant', async () => {
     const added = await call(downstream, downstreamServer.url, 'POST', '/api/repos/admin/archive/mirrors', downstreamAdmin, {
       url: `${upstreamServer.url}/admin/archive.git`,
@@ -456,6 +466,20 @@ describe('federation between two instances', () => {
     expect(listed[0]?.status.lastSuccessAt).toBeDefined()
     expect((await call(downstream, downstreamServer.url, 'POST', '/api/repos/admin/archive/mirrors/origin/detach', downstreamAdmin)).status).toBe(200)
     expect(await downstream.scheduled(new Date(Date.now() + 120 * 60_000))).toEqual([])
+  })
+})
+
+describe('outbound remotes', () => {
+  it('refuses private upstreams unless explicitly allowed', async () => {
+    const forge = await nodeForge({ allowPrivateRemotes: false, scheduleImport: async () => {} })
+    const admin = await bootstrap(forge, BASE)
+    await call(forge, BASE, 'POST', '/api/repos', admin, { owner: 'admin', name: 'copy' })
+    for (const url of ['http://127.0.0.1:9/a.git', 'http://169.254.169.254/a.git', 'http://[::1]/a.git']) {
+      expect((await call(forge, BASE, 'POST', '/api/repos/admin/copy/mirrors', admin, { url })).status).toBe(400)
+      expect((await call(forge, BASE, 'POST', '/api/repos/admin/fresh/import', admin, { url })).status).toBe(400)
+    }
+    expect((await call(forge, BASE, 'POST', '/api/repos/admin/copy/mirrors', admin, { url: 'https://example.com/a.git', lfsUrl: 'http://10.0.0.1/lfs' })).status).toBe(400)
+    expect(await listMirrors(forge.storage, { owner: 'admin', name: 'copy' })).toEqual([])
   })
 })
 

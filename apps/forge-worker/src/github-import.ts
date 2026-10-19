@@ -50,7 +50,7 @@ export type GithubImportOptions = {
   readonly digests?: DigestFactory
 }
 
-type User = { readonly login: string; readonly email?: string | null } | null
+type User = { readonly login: string } | null
 type Label = { readonly name: string; readonly color: string; readonly description?: string | null }
 type Issue = {
   readonly number: number
@@ -152,9 +152,10 @@ export const githubImportStep = async (options: GithubImportOptions, previous: G
   }
   let waitUntil: number | null = null
   const users = new Map<string, Promise<ImportedUser>>()
+  const matchLogin = repository.api === 'https://api.github.com'
   const user = (value: User): Promise<ImportedUser> => {
     const login = value?.login ?? 'ghost'
-    if (!users.has(login)) users.set(login, mapImportedUser(scope, login, value?.email))
+    if (!users.has(login)) users.set(login, mapImportedUser(scope, login, matchLogin))
     return users.get(login)!
   }
   const origin = async (source: string, item: Comment): Promise<ImportOrigin> => ({

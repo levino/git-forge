@@ -106,6 +106,7 @@ beforeAll(async () => {
     PUBLIC_URL: nodeUrl,
     INSTANCE_KEY: JSON.stringify(nodeKey.privateJwk),
     ALLOW_INSECURE_FEDERATION: 'true',
+    ALLOW_PRIVATE_REMOTES: 'true',
     MIRROR_INTERVAL_MINUTES: '0',
     MAX_PUSH_BYTES: String(64 * 1024 * 1024),
   }
@@ -115,7 +116,7 @@ beforeAll(async () => {
     startWranglerDev({
       env: 'alpha',
       port: workerPort,
-      vars: { BOOTSTRAP_TOKEN, PUBLIC_URL: workerUrl, INSTANCE_KEY: JSON.stringify(workerKey.privateJwk), ALLOW_INSECURE_FEDERATION: 'true', MIRROR_INTERVAL_MINUTES: '0' },
+      vars: { BOOTSTRAP_TOKEN, PUBLIC_URL: workerUrl, INSTANCE_KEY: JSON.stringify(workerKey.privateJwk), ALLOW_INSECURE_FEDERATION: 'true', ALLOW_PRIVATE_REMOTES: 'true', MIRROR_INTERVAL_MINUTES: '0' },
     }),
     startNodeInstance(nodeEnv),
   ])

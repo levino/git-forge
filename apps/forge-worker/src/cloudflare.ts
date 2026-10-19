@@ -116,6 +116,7 @@ export const backgroundHandlers = {
       const jobs = env.JOBS ? new QueueJobs(env.JOBS) : null
       const state = await continueImport(message.body, {
         storage: instance.services.storage,
+        fetch: instance.services.remoteFetch,
         digests: digestStreams,
         schedule: importScheduler(queue),
         metadata: async (job, state) => (await forgeFor(env)).importMetadata(job, state),

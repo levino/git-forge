@@ -46,6 +46,7 @@ export type ForgeVars = {
   readonly MIRROR_UNIT_BYTES?: string
   readonly UI?: string
   readonly ALLOW_INSECURE_WEBHOOKS?: string
+  readonly ALLOW_PRIVATE_REMOTES?: string
   readonly EMAIL_PROVIDER?: string
   readonly EMAIL_FROM?: string
   readonly SES_REGION?: string
@@ -107,6 +108,7 @@ export type ForgeSettings = {
   readonly deepCheckDays: number
   readonly mirrorUnitBytes: number
   readonly allowInsecureWebhooks?: boolean
+  readonly allowPrivateRemotes?: boolean
   readonly login?: LoginSettings
   readonly pages?: PagesSettings
 }
@@ -288,6 +290,7 @@ export const parseSettings = async (vars: ForgeVars): Promise<ForgeSettings> => 
     deepCheckDays: positiveInteger(vars.MIRROR_DEEP_CHECK_DAYS, DEFAULT_DEEP_CHECK_DAYS, true),
     mirrorUnitBytes: positiveInteger(vars.MIRROR_UNIT_BYTES, 0, true),
     allowInsecureWebhooks: vars.ALLOW_INSECURE_WEBHOOKS === 'true',
+    allowPrivateRemotes: vars.ALLOW_PRIVATE_REMOTES === 'true',
     login: parseLoginSettings(vars),
     pages: parsePagesSettings(vars),
   }

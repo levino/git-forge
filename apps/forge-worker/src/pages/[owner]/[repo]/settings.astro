@@ -26,11 +26,13 @@ if (repo.kind === 'ok' && Astro.request.method === 'POST') {
 let data: RepositorySettings | null = null
 let rules: Awaited<ReturnType<typeof forge.settings.branchProtection>> = []
 let owners: string[] = []
+let instanceAdmin = false
 if (repo.kind === 'ok' && session) {
   try {
     data = await forge.settings.read(session.principal, repo.name)
     rules = await forge.settings.branchProtection(session.principal, repo.name)
     owners = await forge.repositories.owners(session.principal)
+    instanceAdmin = await forge.instance.isAdministrator(session.principal)
   } catch (error) {
     if (!(error instanceof ForgeError)) throw error
   }
@@ -212,10 +214,12 @@ Astro.response.headers.set('Cache-Control', 'no-store')
             Sync
             <select name="mode" class="select select-sm"><option value="auto">automatic</option><option value="manual">manual</option></select>
           </label>
-          <label class="field">
-            Authentication
-            <select name="auth" class="select select-sm"><option value="none">none</option><option value="instance">instance token</option></select>
-          </label>
+          {instanceAdmin && (
+            <label class="field">
+              Authentication
+              <select name="auth" class="select select-sm"><option value="none">none</option><option value="instance">instance token</option></select>
+            </label>
+          )}
           <label class="flex items-center gap-2 text-sm pb-2"><input type="checkbox" class="checkbox checkbox-sm" name="lfs" checked /> Git LFS</label>
           <button class="btn btn-sm">Add mirror</button>
         </form>

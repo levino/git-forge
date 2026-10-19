@@ -44,7 +44,7 @@ export default async function setup(): Promise<() => Promise<void>> {
   const port = await freePort()
   const dev = await startWranglerDev({
     port,
-    vars: { BOOTSTRAP_TOKEN: bootstrapToken, PUBLIC_URL: `http://localhost:${port}`, PAGES_HOST: `http://{owner}.pages.localhost:${port}` },
+    vars: { BOOTSTRAP_TOKEN: bootstrapToken, ALLOW_PRIVATE_REMOTES: 'true', PUBLIC_URL: `http://localhost:${port}`, PAGES_HOST: `http://{owner}.pages.localhost:${port}` },
   })
   const post = async (path: string, token: string, body: unknown) => {
     const response = await fetch(`${dev.url}${path}`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body) })

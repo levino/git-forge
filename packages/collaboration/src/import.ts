@@ -81,11 +81,9 @@ const origin = (scope: Scope, node: string, item: ImportOrigin, assignees: reado
     JSON.stringify(assignees),
   )
 
-export const mapImportedUser = async (scope: Scope, login: string, email?: string | null): Promise<ImportedUser> => {
-  const account = await scope.accounts.findAccount(login)
-  if (account?.kind === 'user') return { login, ref: { kind: 'user', id: account.id } }
-  const match = email ? await first<{ id: string }>(scope.db, sql("SELECT id FROM accounts WHERE kind = 'user' AND email = ? COLLATE NOCASE AND disabled_at IS NULL LIMIT 1", email)) : null
-  return { login, ref: match ? { kind: 'user', id: match.id } : null }
+export const mapImportedUser = async (scope: Scope, login: string, matchLogin: boolean): Promise<ImportedUser> => {
+  const account = matchLogin ? await scope.accounts.findAccount(login) : null
+  return { login, ref: account?.kind === 'user' ? { kind: 'user', id: account.id } : null }
 }
 
 export const importedNode = async (scope: Scope, source: string): Promise<string | null> =>

@@ -128,6 +128,8 @@ import {
   type ReadView,
   compactRepository,
   configureMirror,
+  outboundFetch,
+  outboundUrlError,
   createRepository,
   deepCheckMirror,
   detachMirror,
@@ -320,6 +322,7 @@ export const RAISE_LIMIT_HINT = 'the instance admin can raise MAX_LFS_OBJECT_BYT
 
 export type ForgeServices = {
   readonly storage: Storage
+  readonly remoteFetch: FetchFunction
   readonly store: AccountsStore
   readonly authenticate: (request: Request) => Promise<Principal | null>
   readonly issuer: (request: Request) => string
@@ -592,6 +595,8 @@ export const createForge = (options: ForgeOptions): Forge => {
   const mirrorSecrets = createMirrorSecrets(db, options.secretsKey ?? options.actions?.secretsKey, () => now().getTime())
   const logins = createLoginStore(db, { now: () => now().getTime() })
   const outbound = (input: string, init?: RequestInit) => (options.fetch ? options.fetch(new Request(input, init)) : fetch(input, init))
+  const remotePolicy = { allowPrivateHosts: options.allowPrivateRemotes ?? false }
+  const remoteFetch = outboundFetch({ ...remotePolicy, ...(options.fetch ? { fetch: options.fetch } : {}) })
   let settingsKey: Promise<SecretsKey | null> | undefined
   const explicitKey = options.secretsKey ?? options.actions?.secretsKey
   const instanceSettings = createInstanceSettings(db, () => (settingsKey ??= explicitKey ? Promise.resolve(explicitKey) : options.bootstrapToken ? deriveSettingsKey(options.bootstrapToken) : Promise.resolve(null)), nowMs)
@@ -870,7 +875,7 @@ export const createForge = (options: ForgeOptions): Forge => {
     store,
     issuer,
     instanceKey: options.instanceKey,
-    ...(options.fetch ? { fetch: options.fetch } : {}),
+    fetch: remoteFetch,
     ...(options.digests ? { digests: options.digests } : {}),
     secrets: mirrorSecrets,
     onSynced: async (repo, config, result) => {
@@ -1263,6 +1268,8 @@ export const createForge = (options: ForgeOptions): Forge => {
     if (!options.scheduleImport) throw new HttpError(503, 'imports need a queue (IMPORTS binding)')
     const { url, lfsUrl, token, commitsPerStep } = input
     if (!isValidImportUrl(url) || (lfsUrl !== undefined && !isValidImportUrl(lfsUrl))) throw new HttpError(400, 'url and lfsUrl must be http(s) URLs without credentials; pass a token instead')
+    const blocked = outboundUrlError(url, remotePolicy) ?? (lfsUrl !== undefined ? outboundUrlError(lfsUrl, remotePolicy) : null)
+    if (blocked) throw new HttpError(400, blocked)
     if (input.metadata && !githubRepository(url)) throw new HttpError(400, 'importing issues, pull requests and releases needs a GitHub repository URL (https://github.com/owner/repo)')
     let target: RepositoryName
     if (await store.findRepository(input.owner, input.name)) {
@@ -1339,7 +1346,7 @@ export const createForge = (options: ForgeOptions): Forge => {
         releases: releaseStore,
         url: state.url,
         token: basic.slice(basic.indexOf(':') + 1) || null,
-        ...(options.fetch ? { fetch: options.fetch } : {}),
+        fetch: remoteFetch,
         ...(options.digests ? { digests: options.digests } : {}),
       },
       (state.metadata?.progress as GithubProgress | null | undefined) ?? null,
@@ -1398,7 +1405,10 @@ export const createForge = (options: ForgeOptions): Forge => {
       await store.revokeInstanceRepository(normalizeIssuer(issuerInput), admin.repository.id, { kind: 'user', id: admin.principal.id })
     },
     addMirror: async (principal, repo, input, token) => {
-      const { repository } = await adminOf(principal, repo)
+      const { repository, principal: user } = await adminOf(principal, repo)
+      if (input.auth === 'instance' && !(await store.isInstanceAdmin(user.id))) throw new HttpError(403, 'only an instance admin can add a mirror with instance authentication')
+      const blocked = outboundUrlError(input.url, remotePolicy) ?? (input.lfsUrl !== undefined ? outboundUrlError(input.lfsUrl, remotePolicy) : null)
+      if (blocked) throw new HttpError(400, blocked)
       const name = { owner: repository.owner, name: repository.name }
       try {
         if (token) await mirrorSecrets.put(name, input.remote ?? 'origin', 'token', token)
@@ -2430,7 +2440,7 @@ export const createForge = (options: ForgeOptions): Forge => {
     if (job.kind === 'backup') return runBackupJob()
     if (job.kind === 'mirror-github') return adoptGitHubRepository(job)
     if (job.kind === 'usage-scan') return void (await meter.scan(options.storage, job))
-    if (job.kind === 'import-lfs') return void (await importLfsObject(job, { storage, ...(options.fetch ? { fetch: options.fetch } : {}), ...(options.digests ? { digests: options.digests } : {}) }))
+    if (job.kind === 'import-lfs') return void (await importLfsObject(job, { storage, fetch: remoteFetch, ...(options.digests ? { digests: options.digests } : {}) }))
     if (!federation) throw new Error('jobs need PUBLIC_URL, INSTANCE_KEY and a job queue')
     await runJob(federation, job)
   }
@@ -2459,6 +2469,7 @@ export const createForge = (options: ForgeOptions): Forge => {
     services: {
       storage,
       store,
+      remoteFetch,
       authenticate,
       renameAccount,
       redirect,

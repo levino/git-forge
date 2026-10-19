@@ -59,6 +59,7 @@ read functions of `@git-forge/core` and check access with the same
 | `ACTIONS_CACHE_MAX_DAYS` | var, optional | Cache entries are evicted this many days after creation, default 30 (bucket lifecycle rule: `docs/design.md` §15). |
 | `UI` | var | `false` turns the web UI off: every request goes to the forge and `/` answers the health JSON. For headless instances such as backup mirrors. Default: on. |
 | `ALLOW_INSECURE_WEBHOOKS` | var | `true` allows webhook URLs over plain HTTP and to local or private hosts. Only for local tests. |
+| `ALLOW_PRIVATE_REMOTES` | var | `true` lets mirrors and imports reach local or private hosts. Only for local tests. |
 | `EMAIL` | `send_email` binding, optional | Cloudflare Email Service. |
 | `EMAIL_PROVIDER` | var | `none`, `console` (logs each email as a JSON line; the default of the test environments), `cloudflare` (the `EMAIL` binding; default when it exists) or `ses` (Amazon SES v2, `@git-forge/ses`). Without a binding the default is `none`. |
 | `EMAIL_FROM` | var | Sender address, e.g. `Forge <forge@example.org>`; required with a provider, except `cloudflare`, which defaults to `Forge <forge@<PUBLIC_URL host>>`. |

@@ -125,6 +125,7 @@ beforeAll(async () => {
           PUBLIC_URL: url,
           INSTANCE_KEY: JSON.stringify(privateJwk),
           ALLOW_INSECURE_FEDERATION: 'true',
+          ALLOW_PRIVATE_REMOTES: 'true',
           MIRROR_INTERVAL_MINUTES: '0',
         },
       })

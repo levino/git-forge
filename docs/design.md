@@ -234,12 +234,20 @@ OIDC-style, modelled on GitHub Actions OIDC:
   authorization hook whether a request is a Git or an LFS request, so both are
   checked separately.
 - A mirror marks in its config (`auth: "instance"`) that it presents an
-  instance token to its upstream; otherwise it fetches anonymously. A mirror
+  instance token to its upstream; otherwise it fetches anonymously. Only an
+  instance admin may add such a mirror, since peers grant per issuer. A mirror
   of a mirror reads the upstream's `refs/upstream/{remote}/*` by setting the
   namespace to `upstream/{remote}/`.
 - JWKS documents are fetched without following redirects (`redirect:
   "manual"`, any 3xx is an error), because Workers do not implement
   `redirect: "error"`.
+- Outbound requests of mirrors, imports and mirror notifications go through
+  `outboundFetch` (core): only `http(s)`, no loopback, private, link-local or
+  `.local`/`.internal` hosts (the check webhooks use), redirects followed by
+  hand for at most 5 hops with each hop re-checked and `Authorization`
+  dropped on another origin. Upstream and LFS URLs are checked when a mirror
+  or import is configured. `ALLOW_PRIVATE_REMOTES=true` lifts the host check
+  for tests.
 - There are no push certificates. The instance signs; trust is
   server-to-server.
 
@@ -2308,10 +2316,11 @@ Issues, pull requests, reviews, commit statuses, check runs and discussions
 - **Imported data** (§7 *metadata*). Numbers, authors and times are kept.
   Every imported item has an `imported_items` row (node id, source key
   such as `issue:7` or `review-comment:301`, original URL, author login,
-  time, unmapped assignees), which also makes re-runs idempotent. GitHub
-  users map to forge users by login, else by an `email` in the payload;
+  time, unmapped assignees), which also makes re-runs idempotent. Users
+  from github.com map to forge users by login; other hosts map no one;
   unmapped authors are stored as `github:<login>` and shown by login,
-  unmapped assignees from `imported_items`. A pull request stays one when
+  unmapped assignees from `imported_items`. Imported reviews never count
+  as approvals for branch protection. A pull request stays one when
   its head and base commits exist (and it is closed or from the same
   repository); otherwise it becomes an issue with a note. Review comments
   that do not anchor (`validateAnchor` on their original commit and line)

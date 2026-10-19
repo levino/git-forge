@@ -31,6 +31,8 @@ export default defineConfig({
       miniflare: {
         compatibilityDate: '2026-10-01',
         r2Buckets: ['BUCKET'],
+        d1Databases: ['DB'],
+        compatibilityFlags: ['nodejs_als'],
       },
     }),
   ],

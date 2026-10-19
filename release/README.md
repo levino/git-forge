@@ -11,7 +11,7 @@ writes into `out-dir` (default `release/dist`):
 
 | File | Content |
 |---|---|
-| `git-forge-worker.mjs` | `apps/forge-worker` built by `astro build` (web UI included, stylesheet compiled in) and bundled by `wrangler deploy dist/server/entry.mjs --dry-run --containers-rollout=none` (no container image build) into one ES module whose only imports are workerd built-ins (`cloudflare:workers`). Instances upload it with `no_bundle: true`, unchanged. |
+| `git-forge-worker.mjs` | `apps/forge-worker` built by `astro build` (web UI included, stylesheet compiled in) and bundled by `wrangler deploy dist/server/entry.mjs --dry-run --containers-rollout=none` (no container image build) into one ES module whose only imports are workerd built-ins (`cloudflare:workers`, and `node:async_hooks` loaded dynamically for D1 sessions). Instances upload it with `no_bundle: true`, unchanged. |
 | `migrations.tar.gz` | `migrations/*.sql` for D1, collected from the packages listed in `migration_dirs`. Built reproducibly (sorted, zero mtime, `gzip -n`). |
 | `SHA256SUMS` | `sha256sum` output for the two files above. |
 

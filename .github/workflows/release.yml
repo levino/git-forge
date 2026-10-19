@@ -95,7 +95,7 @@ jobs:
             printf '%s\n' "$command"
             echo '```'
             echo
-            echo '`S` is the SHA-256 of the `SHA256SUMS` asset, which lists the checksums of the Worker bundle and the migrations.'
+            echo '`S` is the SHA-256 of the `SHA256SUMS` asset, which lists the checksums of the Worker bundle, the migrations and the CI runner image (`runner.tar.gz`, extracted to `dist/runner/`).'
             echo
             echo 'The `git-forge-<os>-<arch>` assets are single executables of the `git-forge` CLI (`git forge push`); `CLI-SHA256SUMS` lists their checksums.'
             echo
@@ -108,6 +108,7 @@ jobs:
           gh release create "$TAG" \
             "$RUNNER_TEMP/release/git-forge-worker.mjs" \
             "$RUNNER_TEMP/release/migrations.tar.gz" \
+            "$RUNNER_TEMP/release/runner.tar.gz" \
             "$RUNNER_TEMP/release/SHA256SUMS" \
             "$RUNNER_TEMP"/cli/* \
             "$RUNNER_TEMP"/node/* \

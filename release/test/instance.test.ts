@@ -128,13 +128,14 @@ afterAll(async () => {
 })
 
 describe('release bundle', () => {
-  it('publishes the bundle, the migrations and their checksums', async () => {
-    expect(readdirSync(release).sort()).toEqual(['SHA256SUMS', 'git-forge-worker.mjs', 'migrations.tar.gz'])
+  it('publishes the bundle, the migrations, the runner image and their checksums', async () => {
+    expect(readdirSync(release).sort()).toEqual(['SHA256SUMS', 'git-forge-worker.mjs', 'migrations.tar.gz', 'runner.tar.gz'])
     expect(pinned).toBe(sha256(join(release, 'SHA256SUMS')))
     const sums = readFileSync(join(release, 'SHA256SUMS'), 'utf8').trim().split('\n')
     expect(sums).toEqual([
       `${sha256(join(release, 'git-forge-worker.mjs'))}  git-forge-worker.mjs`,
       `${sha256(join(release, 'migrations.tar.gz'))}  migrations.tar.gz`,
+      `${sha256(join(release, 'runner.tar.gz'))}  runner.tar.gz`,
     ])
     const bundle = readFileSync(join(release, 'git-forge-worker.mjs'), 'utf8')
     expect(bundle).toMatch(/export\s*\{[^}]*\bas default\b/)
@@ -143,6 +144,7 @@ describe('release bundle', () => {
     expect(bundle).not.toMatch(/\bimport\(\s*["'](?!cloudflare:)/)
     const { stdout } = await run('tar', ['-tzf', join(release, 'migrations.tar.gz')])
     expect(stdout.split('\n')).toContain('migrations/0001_initial.sql')
+    expect((await run('tar', ['-tzf', join(release, 'runner.tar.gz')])).stdout.trim().split('\n')).toEqual(['runner/', 'runner/Dockerfile', 'runner/hook.js'])
   })
 })
 
@@ -150,17 +152,11 @@ describe('instance template', () => {
   const toml = readFileSync(join(templateRoot, 'wrangler.toml'), 'utf8')
 
   it('consists of one wrangler.toml that pins a published release', () => {
-    expect(readdirSync(templateRoot).sort()).toEqual(['.dev.vars.example', '.github', '.gitignore', 'README.md', 'runner', 'wrangler.toml'])
+    expect(readdirSync(templateRoot).sort()).toEqual(['.dev.vars.example', '.github', '.gitignore', 'README.md', 'wrangler.toml'])
     const pins = toml.match(new RegExp(PIN, 'g')) ?? []
     expect(pins).toHaveLength(1)
     expect(pins[0]).toMatch(/^V=\d+\.\d+\.\d+ S=(?!0{64})[0-9a-f]{64}$/)
     expect(buildCommand(toml)).toContain('https://github.com/levino/git-forge/releases/download/v$V')
-  })
-
-  it('ships the same runner image as the app', () => {
-    const appRunner = resolve(releaseRoot, '../apps/forge-worker/runner')
-    expect(readdirSync(join(templateRoot, 'runner')).sort()).toEqual(['Dockerfile', 'hook.js'])
-    for (const file of readdirSync(appRunner)) expect(readFileSync(join(templateRoot, 'runner', file), 'utf8')).toBe(readFileSync(join(appRunner, file), 'utf8'))
   })
 
   it('declares every resource by name only, so the first deploy provisions it', () => {
@@ -201,6 +197,7 @@ describe('instance template build command', () => {
     }
     expect(readFileSync(join(instance, 'dist/git-forge-worker.mjs'))).toEqual(readFileSync(join(release, 'git-forge-worker.mjs')))
     expect(existsSync(join(instance, 'dist/migrations.tar.gz'))).toBe(false)
+    for (const file of ['Dockerfile', 'hook.js']) expect(readFileSync(join(instance, 'dist/runner', file))).toEqual(readFileSync(resolve(releaseRoot, '../apps/forge-worker/runner', file)))
   })
 })
 

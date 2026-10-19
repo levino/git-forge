@@ -13,7 +13,8 @@ writes into `out-dir` (default `release/dist`):
 |---|---|
 | `git-forge-worker.mjs` | `apps/forge-worker` built by `astro build` (web UI included, stylesheet compiled in) and bundled by `wrangler deploy dist/server/entry.mjs --dry-run --containers-rollout=none` (no container image build) into one ES module whose only imports are workerd built-ins (`cloudflare:workers`). Instances upload it with `no_bundle: true`, unchanged. |
 | `migrations.tar.gz` | `migrations/*.sql` for D1, collected from the packages listed in `migration_dirs`. Built reproducibly (sorted, zero mtime, `gzip -n`). |
-| `SHA256SUMS` | `sha256sum` output for the two files above. |
+| `runner.tar.gz` | `runner/` (`Dockerfile`, `hook.js`) from `apps/forge-worker`, the CI runner image; instances extract it to `dist/runner/`. Built reproducibly. |
+| `SHA256SUMS` | `sha256sum` output for the three files above. |
 
 and prints the SHA-256 of `SHA256SUMS`, which is the `S` an instance pins at
 the start of its `[build]` command (`V=<version> S=<sha256>` in
@@ -29,7 +30,7 @@ in a separate `CLI-SHA256SUMS`, and the single executables of
 `.github/workflows/release.yml` runs the script on every `v*` tag, on a push to
 `main` that changes `release/VERSION` (it then creates the tag `v<VERSION>` on
 that commit unless the release exists already) and on manual dispatch, and
-publishes the three files as release assets with `GITHUB_TOKEN`; the release
+publishes the four files as release assets with `GITHUB_TOKEN`; the release
 notes contain the pin `V=<version> S=<sha256>` and the complete `[build]`
 command line taken from `templates/instance/wrangler.toml` with that pin.
 Tags with a `-` (`v0.2.0-rc.1`) are marked as pre-releases. For every other

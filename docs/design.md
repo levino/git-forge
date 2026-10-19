@@ -1654,8 +1654,9 @@ and stays queued for any registered runner with matching labels.
   it also sets the container's inactivity timeout to 6 hours (GitHub's job
   limit, the platform maximum) and watches the container again when the
   object is recreated (after a deploy or an eviction); the runner exits after
-  its one job and the container stops then. The image (`runner/Dockerfile`,
-  in the app and in the instance template, 2.4 GB unpacked) is the official
+  its one job and the container stops then. The image (`runner/Dockerfile`
+  of the app, shipped to instances as `runner.tar.gz` of the release, 2.4 GB
+  unpacked) is the official
   `ghcr.io/actions/actions-runner` image plus Git and Node.js. Like every other
   resource it comes from the wrangler config (`containers`, the `RUNNER`
   Durable Object binding and its migration, in every environment of
@@ -1825,14 +1826,17 @@ update themselves.
     directory.
   - `migrations.tar.gz`: the D1 migrations (`migrations/*.sql`, currently from
     `packages/accounts`), built reproducibly.
-  - `SHA256SUMS`: `sha256sum` output for both files.
+  - `runner.tar.gz`: `runner/` of `apps/forge-worker` (`Dockerfile`,
+    `hook.js`), the CI runner image, built reproducibly.
+  - `SHA256SUMS`: `sha256sum` output for all three files.
   - The release notes contain the pin `V=<version> S=<sha256 of SHA256SUMS>`
     and the complete `[build]` command line of the template with it. Tags
     with a `-` are pre-releases.
 - **One pin covers everything:** `V` and `S` at the start of the instance's
-  `[build]` command. The command downloads `SHA256SUMS` and
-  `git-forge-worker.mjs`, checks `SHA256SUMS` against `S` and the bundle
-  against `SHA256SUMS` (`sha256sum -c --ignore-missing`, so assets the
+  `[build]` command. The command downloads `SHA256SUMS`,
+  `git-forge-worker.mjs` and `runner.tar.gz` (extracted to `dist/runner/`, so
+  runner changes reach instances with the pin), checks `SHA256SUMS` against
+  `S` and both files against `SHA256SUMS` (`sha256sum -c --ignore-missing`, so assets the
   instance does not download are skipped); any mismatch fails the build
   before anything is deployed. Asset names and the archive layout are a
   durable format: later releases may add assets, never rename or remove
@@ -1842,9 +1846,11 @@ update themselves.
   monorepo): a single `wrangler.toml` (Worker name, `main =
   "dist/git-forge-worker.mjs"`, `no_bundle`, the pinned `[build]` command,
   bindings by name, queues, cron, `limits.cpu_ms`), `.dev.vars.example`
-  (`BOOTSTRAP_TOKEN`), the optional `runner/Dockerfile` for CI and a README.
+  (`BOOTSTRAP_TOKEN`) and a README. CI is an opt-in snippet with
+  `image = "./dist/runner/Dockerfile"`; wrangler validates that path before
+  it runs `[build]`, so an opting instance commits an empty placeholder there.
   No `package.json`, no lockfile, no scripts, nothing from npm in the Worker;
-  the command needs only `sh`, `curl` and `sha256sum`. All vars (OIDC,
+  the command needs only `sh`, `curl`, `sha256sum` and `tar`. All vars (OIDC,
   `PUBLIC_URL`, email, …) are optional and documented in the README, not
   declared. `GIT_FORGE_RELEASE_URL` overrides the download base for mirrors
   and tests. The production instance `levino/levins-git-forge` is a copy of it

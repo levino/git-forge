@@ -1,4 +1,4 @@
-import { atLeast, checkRepositoryAccess, type Database, type Principal, type RepositoryDirectory, type RepositorySubject } from '@git-forge/accounts'
+import { atLeast, checkRepositoryAccess, workflowGuard, type Database, type Principal, type RepositoryDirectory, type RepositorySubject } from '@git-forge/accounts'
 import { type DigestFactory, isLfsOid, isValidName, mediaPath, type PushOutcome, type RepositoryName, type Storage } from '@git-forge/core'
 import { ApiError, apiUrl, type EventActor, type ForgeEvent, htmlUrl, json, empty, linkHeader, pagination, readJson, releaseEvent, type ReleaseAction, userObject } from '@git-forge/notifications'
 import { AssetUploadError, createTag, defaultBranchOf, isValidTagName, storeAsset, tagExists, TargetError } from './git.ts'
@@ -154,9 +154,9 @@ const ensureTag = async (context: Context, access: Access, input: ReleaseInput):
   if (await tagExists(context.options.storage, repo, input.tagName)) return
   let outcome: PushOutcome | null
   try {
-    outcome = await createTag(context.options.storage, repo, input.tagName, input.targetCommitish)
+    outcome = await createTag(context.options.storage, repo, input.tagName, input.targetCommitish, (odb) => workflowGuard(access.principal, context.options.storage, repo, odb))
   } catch (error) {
-    if (error instanceof TargetError) throw new ApiError(422, error.message)
+    if (error instanceof TargetError) throw new ApiError(error.status, error.message)
     throw error
   }
   if (outcome && context.options.onTagCreated) await context.options.onTagCreated(repo, outcome, access.principal)

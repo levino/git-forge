@@ -26,14 +26,13 @@ import {
   streamOf,
   entryAt,
   treeOfCommit,
-  updateRefs,
   validRefName,
   ZERO_ID,
   normalizePath,
 } from '@git-forge/core'
 import { type ActorRef, can, CollaborationError, type EventActor, invalid, notFound, openRepository, type Scope, scopeOptions } from './context.ts'
 import { createFork } from './forks.ts'
-import { BRANCH_PREFIX, branchName, branchRef, branchTip, currentRefs, defaultBranch, objectDatabase, resolveCommitish } from './git.ts'
+import { BRANCH_PREFIX, branchName, branchRef, branchTip, currentRefs, defaultBranch, objectDatabase, resolveCommitish, updateBranches } from './git.ts'
 import { createPull, handlePushedRefs, type PullDetails, signatureFor, systemScope } from './pulls.ts'
 
 export type EditMode = 'direct' | 'branch' | 'fork'
@@ -189,7 +188,7 @@ export const commitChanges = async (scope: Scope, input: CommitInput): Promise<C
     return commitFileChanges(odb, { parent, changes, message, author: signature, committer: signature })
   })
   await storeObjects(odb, built.objects)
-  const update = await updateRefs(target.storage, target.repo, [{ name: ref, oldId, newId: built.commit }], odb)
+  const update = await updateBranches(target, target.repo, [{ name: ref, oldId, newId: built.commit }], odb)
   if (!update.ok) throw new CollaborationError(409, `${branchName(ref)} was modified; reload and try again`)
   await afterBranchUpdate(target, ref, oldId, built.commit, actor)
   const wantsPull = plan.mode === 'fork' || (newBranch !== null && input.pull)

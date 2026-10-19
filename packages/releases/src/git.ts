@@ -6,6 +6,7 @@ import {
   ObjectDatabase,
   type ObjectId,
   type PushOutcome,
+  type RefCheck,
   readRefs,
   type RepositoryName,
   stagingPrefix,
@@ -42,7 +43,14 @@ export const defaultBranchOf = async (storage: Storage, repo: RepositoryName): P
   return (refs?.state.head ?? 'refs/heads/main').replace(/^refs\/heads\//, '')
 }
 
-export class TargetError extends Error {}
+export class TargetError extends Error {
+  constructor(
+    message: string,
+    readonly status: 403 | 422 = 422,
+  ) {
+    super(message)
+  }
+}
 
 const resolveTarget = async (odb: ObjectDatabase, refs: Readonly<Record<string, ObjectId>>, target: string): Promise<ObjectId> => {
   const named = refs[`refs/heads/${target}`] ?? refs[target.startsWith('refs/') ? target : '']
@@ -53,13 +61,15 @@ const resolveTarget = async (odb: ObjectDatabase, refs: Readonly<Record<string, 
   return id
 }
 
-export const createTag = async (storage: Storage, repo: RepositoryName, tag: string, target: string): Promise<PushOutcome | null> => {
+export const createTag = async (storage: Storage, repo: RepositoryName, tag: string, target: string, check?: (odb: ObjectDatabase) => RefCheck | null): Promise<PushOutcome | null> => {
   for (let attempt = 0; attempt < 5; attempt++) {
     const current = await readRefs(storage, repo)
     if (!current) throw new TargetError('repository has no Git data')
     if (current.state.refs[tagRef(tag)] !== undefined) return null
     const odb = new ObjectDatabase(storage, repo)
     const id = await resolveTarget(odb, current.state.refs, target)
+    const problem = await check?.(odb)?.({ name: tagRef(tag), oldId: ZERO, newId: id, fastForward: true })
+    if (problem) throw new TargetError(problem, 403)
     const state = { ...current.state, refs: { ...current.state.refs, [tagRef(tag)]: id } }
     if (await writeRefs(storage, repo, state, current.etag)) {
       await writeServerInfo(storage, repo, state, odb)

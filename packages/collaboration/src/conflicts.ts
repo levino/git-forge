@@ -1,8 +1,8 @@
 import { type Access, atLeast } from '@git-forge/accounts'
-import { type ConflictFile, copyLfsObjects, mergeConflictFiles, ObjectDatabase, type ObjectId, resolveMergeConflicts, storeObjects, transferObjects, updateRefs } from '@git-forge/core'
+import { type ConflictFile, copyLfsObjects, mergeConflictFiles, ObjectDatabase, type ObjectId, resolveMergeConflicts, storeObjects, transferObjects } from '@git-forge/core'
 import { afterBranchUpdate, branchProblems, editErrors } from './contents.ts'
 import { CollaborationError, resolveActor, type Scope, scopeOptions } from './context.ts'
-import { branchName, branchTip, currentRefs, objectDatabase } from './git.ts'
+import { branchName, branchTip, currentRefs, objectDatabase, updateBranches } from './git.ts'
 import { headRefsState, headRepositoryName, type PullRow, pullRow, refreshPull } from './pull-rows.ts'
 import { signatureFor, systemScope } from './pulls.ts'
 
@@ -65,7 +65,7 @@ export const resolvePullConflicts = async (scope: Scope, number: number, input: 
     await copyLfsObjects(scope.storage, scope.repo, headName, lfsPointers)
   }
   await storeObjects(headOdb, built.objects)
-  const update = await updateRefs(scope.storage, headName, [{ name: row.head_ref, oldId: head, newId: built.commit }], headOdb)
+  const update = await updateBranches(scope, headName, [{ name: row.head_ref, oldId: head, newId: built.commit }], headOdb)
   if (!update.ok) throw new CollaborationError(409, 'Head branch was modified. Review and try again.')
   const headScope = row.head_repository_id === null ? scope : await systemScope(scopeOptions(scope), headName.owner, headName.name)
   if (headScope) await afterBranchUpdate(headScope, row.head_ref, head, built.commit, actor)

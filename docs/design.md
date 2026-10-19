@@ -2291,10 +2291,11 @@ Issues, pull requests, reviews, commit statuses, check runs and discussions
 - **Imported data** (§7 *metadata*). Numbers, authors and times are kept.
   Every imported item has an `imported_items` row (node id, source key
   such as `issue:7` or `review-comment:301`, original URL, author login,
-  time, unmapped assignees), which also makes re-runs idempotent. GitHub
-  users map to forge users by login, else by an `email` in the payload;
+  time, unmapped assignees), which also makes re-runs idempotent. Users
+  from github.com map to forge users by login; other hosts map no one;
   unmapped authors are stored as `github:<login>` and shown by login,
-  unmapped assignees from `imported_items`. A pull request stays one when
+  unmapped assignees from `imported_items`. Imported reviews never count
+  as approvals for branch protection. A pull request stays one when
   its head and base commits exist (and it is closed or from the same
   repository); otherwise it becomes an issue with a note. Review comments
   that do not anchor (`validateAnchor` on their original commit and line)

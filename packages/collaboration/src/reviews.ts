@@ -566,7 +566,7 @@ export type ReviewEvidence = {
 
 export const reviewEvidence = async (scope: Scope, pull: PullRow): Promise<ReviewEvidence> => {
   const rows = await scope.db.all<{ author_kind: string; author_id: string; state: ReviewState; commit_id: string }>(
-    sql("SELECT author_kind, author_id, state, commit_id FROM pull_request_reviews WHERE issue_id = ? AND state IN ('APPROVED', 'CHANGES_REQUESTED', 'DISMISSED') ORDER BY submitted_at, id", pull.id),
+    sql("SELECT author_kind, author_id, state, commit_id FROM pull_request_reviews WHERE issue_id = ? AND state IN ('APPROVED', 'CHANGES_REQUESTED', 'DISMISSED') AND node_id NOT IN (SELECT node_id FROM imported_items) ORDER BY submitted_at, id", pull.id),
   )
   const latest = new Map<string, { ref: ActorRef; state: ReviewState; commit: string }>()
   for (const row of rows) {

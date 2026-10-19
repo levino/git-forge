@@ -140,14 +140,14 @@ describe('GitHub metadata import', () => {
     const fork = await api<Record<string, any>>('/issues/3')
     expect(fork.pull_request).toBeUndefined()
     expect(fork.body).toBe('_Imported from pull request https://github.com/acme/site/pull/3; its commits are not in this repository._\n\nPlease merge')
-    expect(await api('/pulls/4')).toMatchObject({ number: 4, state: 'open', draft: true, user: { login: 'carl' }, head: { ref: 'topic', sha: shas.topic }, milestone: { number: 1 } })
+    expect(await api('/pulls/4')).toMatchObject({ number: 4, state: 'open', draft: true, user: { login: 'carlgh' }, head: { ref: 'topic', sha: shas.topic }, milestone: { number: 1 } })
     const reviewComments = await api<Record<string, any>[]>('/pulls/4/comments')
     expect(reviewComments).toMatchObject([
       { path: 'src.txt', line: 3, side: 'RIGHT', commit_id: shas.topic, user: { login: 'stranger' }, body: 'Why?' },
       { path: 'src.txt', line: 3, user: { login: 'carlgh' }, in_reply_to_id: reviewComments[0]!.id },
     ])
     expect((await api<{ body: string }[]>('/issues/4/comments')).map((comment) => comment.body)).toEqual(['> On `README.md` line 1:\n\nUnrelated line'])
-    expect(await api('/issues/5')).toMatchObject({ state: 'closed', state_reason: 'not_planned', user: { login: 'carl' }, closed_at: '2026-02-10T08:00:00Z' })
+    expect(await api('/issues/5')).toMatchObject({ state: 'closed', state_reason: 'not_planned', user: { login: 'carlgh' }, closed_at: '2026-02-10T08:00:00Z' })
     expect((await api<{ name: string }[]>('/labels')).map((label) => label.name).sort()).toEqual(['bug', 'enhancement'])
 
     const [release] = await api<Record<string, any>[]>('/releases')

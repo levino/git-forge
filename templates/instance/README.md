@@ -63,7 +63,8 @@ location, only the jurisdiction `eu`; without it their consumers (mirror
 syncs, notifications) may run on another continent. `[placement] mode =
 "smart"` moves requests next to the data once it has seen some traffic; after
 the first deploy (Cloudflare refuses it on the one that creates the Worker)
-add `hint = "weur"` (your location) for immediate effect. A resource cannot
+add `hint = "weur"` (your location) for immediate effect; Cloudflare refuses
+the hint on Workers with a runner container (`ACTIONS`). A resource cannot
 be moved later, only recreated under a new name. With the Deploy button,
 create them under the names you are going to enter.
 

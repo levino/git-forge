@@ -469,6 +469,20 @@ describe('federation between two instances', () => {
   })
 })
 
+describe('outbound remotes', () => {
+  it('refuses private upstreams unless explicitly allowed', async () => {
+    const forge = await nodeForge({ allowPrivateRemotes: false, scheduleImport: async () => {} })
+    const admin = await bootstrap(forge, BASE)
+    await call(forge, BASE, 'POST', '/api/repos', admin, { owner: 'admin', name: 'copy' })
+    for (const url of ['http://127.0.0.1:9/a.git', 'http://169.254.169.254/a.git', 'http://[::1]/a.git']) {
+      expect((await call(forge, BASE, 'POST', '/api/repos/admin/copy/mirrors', admin, { url })).status).toBe(400)
+      expect((await call(forge, BASE, 'POST', '/api/repos/admin/fresh/import', admin, { url })).status).toBe(400)
+    }
+    expect((await call(forge, BASE, 'POST', '/api/repos/admin/copy/mirrors', admin, { url: 'https://example.com/a.git', lfsUrl: 'http://10.0.0.1/lfs' })).status).toBe(400)
+    expect(await listMirrors(forge.storage, { owner: 'admin', name: 'copy' })).toEqual([])
+  })
+})
+
 describe('import endpoint', () => {
   let forge: NodeForge
   let admin: string

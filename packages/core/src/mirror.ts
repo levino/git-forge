@@ -173,6 +173,7 @@ export const configureMirror = async (storage: Storage, repo: RepositoryName, se
   const namespace = settings.namespace ?? ''
   if (!isValidName(remote)) throw new Error(`invalid remote name ${remote}`)
   if (!validUrl(settings.url)) throw new Error(`invalid upstream URL ${settings.url}`)
+  if (settings.lfsUrl && !validUrl(settings.lfsUrl)) throw new Error(`invalid LFS URL ${settings.lfsUrl}`)
   if (!validNamespace(namespace)) throw new Error(`invalid upstream namespace ${namespace}`)
   if (settings.auth !== undefined && settings.auth !== 'none' && settings.auth !== 'instance' && settings.auth !== 'token') throw new Error(`invalid mirror auth ${String(settings.auth)}`)
   if (!(await readRefs(storage, repo))) throw new Error(`repository ${repo.owner}/${repo.name} not found`)

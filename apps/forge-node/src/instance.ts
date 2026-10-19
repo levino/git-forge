@@ -148,6 +148,7 @@ export const createInstance = async (vars: NodeVars, overrides: InstanceOverride
     handler: async (job) => {
       const state = await continueImport(job, {
         storage: forge!.services.storage,
+        fetch: forge!.services.remoteFetch,
         digests: nodeDigests,
         schedule: (next, delaySeconds) => imports.enqueue(next, { delaySeconds }),
         scheduleLfs: (lfs) => jobs.enqueue(lfs),

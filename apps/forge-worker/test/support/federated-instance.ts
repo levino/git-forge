@@ -188,6 +188,7 @@ export const startInstance = async (name: string, options: InstanceOptions = {})
     maxLfsObjectBytes: DEFAULT_MAX_LFS_OBJECT_BYTES,
     mirrorIntervalMinutes: 24 * 60,
     allowInsecureFederation: true,
+    allowPrivateRemotes: true,
     deepCheckDays: 0,
     mirrorUnitBytes: options.unitBytes ?? 0,
     fetch: outbound,

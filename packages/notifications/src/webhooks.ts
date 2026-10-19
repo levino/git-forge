@@ -1,4 +1,5 @@
 import { toHex, utf8 } from '@git-forge/accounts'
+import { isPrivateHost } from '@git-forge/core'
 import { apiUrl, htmlUrl, userObject } from './events.ts'
 import type { HookRow, RepositoryRow } from './store.ts'
 
@@ -29,16 +30,6 @@ export const verifySignature = async (secret: string, body: string, header: stri
   let difference = 0
   for (let i = 0; i < expected.length; i++) difference |= expected.charCodeAt(i) ^ header.charCodeAt(i)
   return difference === 0
-}
-
-const PRIVATE_V4 = [/^10\./, /^127\./, /^169\.254\./, /^192\.168\./, /^172\.(1[6-9]|2\d|3[01])\./, /^0\./, /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./]
-
-const isPrivateHost = (hostname: string): boolean => {
-  const host = hostname.replace(/^\[|\]$/g, '').toLowerCase()
-  if (host === 'localhost' || host.endsWith('.localhost') || host.endsWith('.local') || host.endsWith('.internal')) return true
-  if (/^\d+\.\d+\.\d+\.\d+$/.test(host)) return PRIVATE_V4.some((pattern) => pattern.test(host)) || host === '255.255.255.255'
-  if (host.includes(':')) return host === '::' || host === '::1' || /^f[cd]/.test(host) || /^fe[89ab]/.test(host) || host.startsWith('::ffff:')
-  return false
 }
 
 export const validateWebhookUrl = (value: string, options: { readonly allowInsecure: boolean }): string | null => {

@@ -241,6 +241,13 @@ OIDC-style, modelled on GitHub Actions OIDC:
 - JWKS documents are fetched without following redirects (`redirect:
   "manual"`, any 3xx is an error), because Workers do not implement
   `redirect: "error"`.
+- Outbound requests of mirrors, imports and mirror notifications go through
+  `outboundFetch` (core): only `http(s)`, no loopback, private, link-local or
+  `.local`/`.internal` hosts (the check webhooks use), redirects followed by
+  hand for at most 5 hops with each hop re-checked and `Authorization`
+  dropped on another origin. Upstream and LFS URLs are checked when a mirror
+  or import is configured. `ALLOW_PRIVATE_REMOTES=true` lifts the host check
+  for tests.
 - There are no push certificates. The instance signs; trust is
   server-to-server.
 

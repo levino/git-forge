@@ -1,4 +1,5 @@
 import { AGENT } from './receive-pack.ts'
+import { outboundFetch } from './outbound.ts'
 import type { ObjectId } from './hash.ts'
 
 export type FetchFunction = (request: Request) => Promise<Response>
@@ -54,7 +55,7 @@ export const remoteRequest = async (remote: Remote, url: string, init: RemoteReq
     headers,
     ...(init.body ? { body: init.body as Uint8Array<ArrayBuffer> } : {}),
   })
-  return (remote.fetch ?? globalThis.fetch)(request)
+  return (remote.fetch ?? outboundFetch({ allowPrivateHosts: true }))(request)
 }
 
 export const expectOk = async (response: Response, what: string): Promise<Response> => {

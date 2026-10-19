@@ -34,7 +34,7 @@ const requestsSince = (mark: number) =>
     .filter((line) => /\b(GET|POST|HEAD) \//.test(line))
 
 beforeAll(async () => {
-  dev = await startWranglerDev({ vars: { BOOTSTRAP_TOKEN, MAX_PUSH_BYTES: String(16 * 1024 * 1024) } })
+  dev = await startWranglerDev({ vars: { BOOTSTRAP_TOKEN, ALLOW_PRIVATE_REMOTES: 'true', MAX_PUSH_BYTES: String(16 * 1024 * 1024) } })
   source = tempDir()
   await git(source, ['init', '-q', '-b', 'main'])
   generateHistory(source, { commits: 120, files: 40, binaryBytes: 48 * 1024, seed: 1 })

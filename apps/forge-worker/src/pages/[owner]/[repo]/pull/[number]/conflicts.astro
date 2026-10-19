@@ -1,0 +1,73 @@
+---
+import { getPullSummary, pullConflicts, resolvePullConflicts } from '@git-forge/collaboration'
+import NotFound from '../../../../../components/NotFound.astro'
+import PullHeader from '../../../../../components/PullHeader.astro'
+import RepoHeader from '../../../../../components/RepoHeader.astro'
+import Layout from '../../../../../layouts/Layout.astro'
+import { field, type FormOutcome, parseNumber, runForm, scopeFor, unlessMissing } from '../../../../../ui/collaboration.ts'
+import { openRepository, repoUrl } from '../../../../../ui/repository.ts'
+
+const { forge, principal, session } = Astro.locals
+const repo = await openRepository(forge, principal, Astro.params.owner!, Astro.params.repo!)
+const number = parseNumber(Astro.params.number)
+if (repo.kind === 'ok' && !session) return Astro.redirect(`/login?return_to=${encodeURIComponent(Astro.url.pathname)}`)
+let outcome: FormOutcome | null = null
+if (repo.kind === 'ok' && number !== null && Astro.request.method === 'POST') {
+  outcome = await runForm(forge, Astro.request, repo, async (scope, form) => {
+    const paths = form.getAll('path').map(String)
+    const contents = form.getAll('content').map((value) => String(value).replace(/\r\n/g, '\n'))
+    await resolvePullConflicts(scope, number, { resolutions: new Map(paths.map((path, index) => [path, contents[index] ?? ''])), sha: field(form, 'sha'), message: field(form, 'message') })
+    return repoUrl(repo.name, 'pull', String(number))
+  })
+  if (outcome.kind === 'redirect') return Astro.redirect(outcome.location, 303)
+  Astro.response.status = outcome.status
+}
+const scope = repo.kind === 'ok' && session ? await scopeFor(forge, Astro.request, session.principal, repo) : null
+const pull = scope && number !== null ? await unlessMissing(getPullSummary(scope, number)) : null
+const conflicts = scope && pull && pull.state === 'open' ? await pullConflicts(scope, pull.number).catch(() => null) : null
+const blocked = conflicts?.files.filter((file) => file.text === null) ?? []
+---
+
+{
+  repo.kind !== 'ok' || !session || !pull ? (
+    <NotFound />
+  ) : (
+    <Layout title={`Resolve conflicts · Pull request #${pull.number} · ${repo.name.owner}/${repo.name.name}`}>
+      <RepoHeader repo={repo} tab="pulls" />
+      <PullHeader repo={repo} pull={pull} tab="conversation" />
+      {outcome?.kind === 'error' && <div role="alert" class="alert alert-error mb-4">{outcome.message}</div>}
+      {!conflicts || conflicts.files.length === 0 ? (
+        <div role="status" class="alert">This pull request has no conflicts to resolve.</div>
+      ) : blocked.length > 0 ? (
+        <div role="alert" class="alert alert-warning flex flex-col items-start gap-2">
+          <p>These conflicts cannot be resolved in the browser. Merge {conflicts.baseBranch} into {conflicts.headBranch} with git and push the result:</p>
+          <ul class="list-disc pl-6 font-mono text-sm">{blocked.map((file) => <li>{file.path} ({file.reason})</li>)}</ul>
+        </div>
+      ) : !conflicts.writable ? (
+        <div role="alert" class="alert alert-warning">
+          {conflicts.problems.length > 0 ? `${conflicts.headBranch} is protected: ${conflicts.problems.join('; ')}.` : `You cannot push to ${conflicts.headBranch}.`} Ask the author to resolve the conflicts.
+        </div>
+      ) : (
+        <form method="post" class="flex flex-col gap-4" aria-label="Resolve conflicts">
+          <input type="hidden" name="csrf" value={session.csrf} />
+          <input type="hidden" name="sha" value={conflicts.head} />
+          <p class="text-sm">
+            Edit each file until no conflict markers remain. The resolution is committed to <code class="font-mono">{conflicts.headBranch}</code> as a merge of <code class="font-mono">{conflicts.baseBranch}</code>.
+          </p>
+          {conflicts.files.map((file) => (
+            <label class="flex flex-col gap-1 text-sm font-semibold">
+              <span class="font-mono">{file.path}</span>
+              <input type="hidden" name="path" value={file.path} />
+              <textarea name="content" rows={Math.min(30, Math.max(8, file.text!.split('\n').length + 1))} class="textarea w-full font-mono text-sm font-normal" spellcheck="false">{file.text}</textarea>
+            </label>
+          ))}
+          <label class="flex flex-col gap-1 text-sm font-semibold max-w-3xl">
+            Commit message
+            <input name="message" class="input w-full" value={`Merge branch '${conflicts.baseBranch}' into ${conflicts.headBranch}`} />
+          </label>
+          <button class="btn btn-sm btn-primary self-start">Commit merge</button>
+        </form>
+      )}
+    </Layout>
+  )
+}

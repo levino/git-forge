@@ -6,6 +6,7 @@ import { type LfsObjectSpec, parseLfsPointer } from './lfs.ts'
 import { isSubmodule, isTreeMode, parseCommitMetadata, parseTag, parseTree, type Signature, type TreeEntry } from './objects.ts'
 import { advertisedRefs, ObjectDatabase, readRefs, type RefsState, type RepositoryName } from './repository.ts'
 import type { Storage } from './storage.ts'
+import type { ObjectSource } from './walk.ts'
 
 export type CommitInfo = {
   readonly id: ObjectId
@@ -85,7 +86,7 @@ export const resolveTarget = async (odb: ObjectDatabase, commit: ObjectId, path:
   return { kind: 'blob', entry: current }
 }
 
-export const entryAt = async (odb: ObjectDatabase, tree: ObjectId, path: readonly string[]): Promise<TreeEntry | null> => {
+export const entryAt = async (odb: ObjectSource, tree: ObjectId, path: readonly string[]): Promise<TreeEntry | null> => {
   let current: TreeEntry = { mode: '40000', name: '', id: tree }
   for (const segment of path) {
     if (!isTreeMode(current.mode)) return null

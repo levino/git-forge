@@ -6,8 +6,9 @@ rationale: [docs/design.md §17](../../docs/design.md#17-collaboration).
 
 Collaboration data lives only in the instance's SQLite database (D1, libSQL,
 a file). It is never written to the bucket and never synced to mirrors; the
-only Git writes are merge results (new objects in a new pack, then a
-compare-and-swap of the base branch), which are ordinary repository content.
+only Git writes are merge results, commits from the browser and the contents
+API, and conflict resolutions (new objects in a new pack, then a
+compare-and-swap of the branch), which are ordinary repository content.
 
 Everything in `src/` uses web-standard APIs and SQLite SQL only. Git work
 (tree and line diffs, merge bases, merges, conflicts) is done by pure
@@ -176,6 +177,45 @@ caller can read; `GET /repos/{o}/{r}` adds `fork`, `parent` and `source`.
 Pushes to a fork refresh the open pull requests whose head lives there
 (`handlePushedRefs`).
 
+## Commits from the browser
+
+`commitChanges(scope, { branch, message, files, newBranch?, propose?, pull? })`
+commits file changes (`{ path, content: Uint8Array | Blob | { oid, size } | null, sha? }`,
+`{ oid, size }` commits a pointer to an already uploaded LFS object (it must
+exist in the target repository), `null` deletes, `sha` is the expected blob, `null` for a new file) on top of
+`branch`. `editPlan(scope, branch)` says how: `direct` for writers, `branch`
+when branch protection refuses a direct push (a `newBranch` is required and
+`pull` opens a pull request), `fork` for users without write access (only
+with `propose: true`): the change lands on `patch-N` of the user's fork
+(created with `createFork` when missing) and a pull request opens. Commits
+are built by core's `commitFileChanges`, author and committer are the
+session's user. Paths that `.gitattributes` of `branch` marks `filter=lfs`
+are stored as LFS objects (`lfs.maxObjectBytes`, hashed and verified while
+streaming) and committed as pointers; other files are limited to
+`MAX_WEB_FILE_BYTES` (10 MiB). After the ref moves, `handlePushedRefs` and
+`onBranchUpdated` run as for a push. `uploadTarget(scope, branch, paths)`
+returns the repository that receives the change (creating the fork for a
+proposal) and which paths are LFS-tracked, for clients that upload LFS
+objects first. `getContents`, `putContents` and
+`deleteContents` are the contents API on the same function (writers only).
+
+`pullConflicts(scope, n)` lists the conflicts of merging the base into the
+head with git's conflict markers (`text: null` for binary, LFS, non-UTF-8 or
+structural conflicts); `resolvePullConflicts(scope, n, { resolutions, sha?,
+message? })` commits the resolution as a merge commit (parents head, base)
+onto the head branch. It needs write access to the head repository (or
+`maintainer_can_modify` and write access to the base) and respects the head
+branch's protection; markers left in a file are refused.
+
+## Reactions
+
+`createReaction`, `listReactions`, `deleteReaction` (own reactions only) and
+`toggleReaction` on `{ kind: 'issue' | 'issue_comment' | 'review_comment', id }`
+(the issue number or the comment id) with GitHub's eight contents. Reacting
+needs `reaction:create` (like commenting, respects locks). Issues, comments
+and review comments carry a `reactions` rollup. Reactions emit no activity;
+GitHub has no webhook event for them.
+
 ## Reviews and line comments
 
 A review is `PENDING` (visible only to its author), `COMMENTED`, `APPROVED`,
@@ -232,6 +272,8 @@ repositories (accounts use UUIDs). Pagination with `page`/`per_page`
 | `GET\|POST …/discussion-categories`, `GET\|PATCH\|DELETE …/discussion-categories/{slug}` | not in GitHub's REST API (GraphQL only there) |
 | `GET\|POST …/discussions`, `GET\|PATCH …/discussions/{n}`, `PUT\|DELETE …/discussions/{n}/lock`, `PUT\|DELETE …/discussions/{n}/answer` | |
 | `GET\|POST …/discussions/{n}/comments` (`reply_to_id`), `GET\|PATCH\|DELETE …/discussions/comments/{id}` | |
+| `GET …/contents/{path}?ref=`, `PUT\|DELETE …/contents/{path}` | `message`, `content` (Base64), `sha` of the current blob (required to update or delete), `branch`; author from the token; `409` when `sha` is stale or the branch is protected |
+| `GET\|POST …/issues/{n}/reactions`, `…/issues/comments/{id}/reactions`, `…/pulls/comments/{id}/reactions`, `DELETE …/reactions/{id}` | `content` filter; `POST` answers `200` for an existing reaction |
 
 ## Tests
 

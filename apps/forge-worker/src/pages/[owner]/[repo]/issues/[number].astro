@@ -4,9 +4,10 @@ import { can, createComment, getIssue, timeline, updateIssue } from '@git-forge/
 import IssueHeader from '../../../../components/IssueHeader.astro'
 import NotFound from '../../../../components/NotFound.astro'
 import RepoHeader from '../../../../components/RepoHeader.astro'
+import Reactions from '../../../../components/Reactions.astro'
 import Timeline from '../../../../components/Timeline.astro'
 import Layout from '../../../../layouts/Layout.astro'
-import { field, type FormOutcome, parseNumber, renderBody, renderTimeline, runForm, scopeFor, unlessMissing } from '../../../../ui/collaboration.ts'
+import { field, type FormOutcome, parseNumber, reactionsFor, reactTo, renderBody, renderTimeline, runForm, scopeFor, unlessMissing } from '../../../../ui/collaboration.ts'
 import { openRepository, repoUrl } from '../../../../ui/repository.ts'
 
 const { forge, principal, session } = Astro.locals
@@ -17,6 +18,10 @@ if (repo.kind === 'ok' && number !== null && Astro.request.method === 'POST') {
   const here = repoUrl(repo.name, 'issues', String(number))
   outcome = await runForm(forge, Astro.request, repo, async (scope, form) => {
     const action = field(form, 'action')
+    if (action === 'react') {
+      await reactTo(scope, form)
+      return here
+    }
     const body = field(form, 'body').trim()
     if (body !== '') {
       const comment = await createComment(scope, number, body)
@@ -32,7 +37,11 @@ if (repo.kind === 'ok' && number !== null && Astro.request.method === 'POST') {
 const scope = repo.kind === 'ok' ? await scopeFor(forge, Astro.request, principal, repo) : null
 const issue = scope && number !== null ? await unlessMissing(getIssue(scope, number)) : null
 if (repo.kind === 'ok' && issue?.isPull) return Astro.redirect(repoUrl(repo.name, 'pull', String(issue.number)))
-const items = repo.kind === 'ok' && scope && issue ? await renderTimeline(repo, await timeline(scope, issue.number)) : []
+const entries = scope && issue ? await timeline(scope, issue.number) : []
+const items = repo.kind === 'ok' ? await renderTimeline(repo, entries) : []
+const csrf = session?.csrf ?? null
+const commentReactions = scope && issue ? await reactionsFor(scope, 'issue_comment', entries.flatMap((entry) => (entry.kind === 'comment' ? [{ id: entry.comment.id, subject: entry.comment.id, reactions: entry.comment.reactions }] : [])), csrf, issue.locked) : new Map()
+const ownReactions = scope && issue ? (await reactionsFor(scope, 'issue', [{ id: issue.id, subject: issue.number, reactions: issue.reactions }], csrf, issue.locked)).get(issue.id) : undefined
 const body = repo.kind === 'ok' && issue ? await renderBody(repo, issue.body) : null
 const canComment = scope && issue ? can(scope, 'comment:create', { locked: issue.locked }) : false
 const canClose = scope && issue ? can(scope, 'issue:close', { author: issue.authorRef }) : false
@@ -52,8 +61,9 @@ const canClose = scope && issue ? can(scope, 'issue:close', { author: issue.auth
           <span class="font-semibold">{issue.author.login}</span> wrote
         </header>
         {body ? <div class="markdown-body p-4 overflow-x-auto" set:html={body} /> : <p class="p-4 text-sm text-base-content/70">No description provided.</p>}
+        {ownReactions && <Reactions {...ownReactions} />}
       </article>
-      <Timeline items={items} />
+      <Timeline items={items} reactions={commentReactions} />
       {session && (canComment || canClose) ? (
         <form method="post" class="mt-6 flex flex-col gap-2" aria-label="Add a comment">
           <input type="hidden" name="csrf" value={session.csrf} />

@@ -24,9 +24,12 @@ export type MergeConflict = {
   readonly reason: ConflictReason
 }
 
+export type ConflictSides = { readonly base: ObjectId | null; readonly ours: ObjectId; readonly theirs: ObjectId }
+
 export type TreeMerge = {
   readonly tree: ObjectId
   readonly conflicts: readonly MergeConflict[]
+  readonly sides: ReadonlyMap<string, ConflictSides>
 }
 
 const EMPTY_TREE_DATA = new Uint8Array(0)
@@ -124,6 +127,8 @@ type Context = {
   readonly conflicts: MergeConflict[]
   readonly overlays: readonly [Overlay, Overlay, Overlay]
   readonly dirty: readonly [Set<string>, Set<string>, Set<string>]
+  readonly resolutions: ReadonlyMap<string, Uint8Array>
+  readonly sides: Map<string, ConflictSides>
 }
 
 const mergeFile = async (context: Context, path: string, base: Slot, ours: TreeEntry, theirs: TreeEntry): Promise<TreeEntry | null> => {
@@ -148,8 +153,12 @@ const mergeFile = async (context: Context, path: string, base: Slot, ours: TreeE
     const theirsData = await readObject(context.source, theirs.id, 'blob')
     if (isBinaryContent(baseData) || isBinaryContent(oursData) || isBinaryContent(theirsData)) return conflict('binary')
     const merged = mergeLines(splitLines(baseData), splitLines(oursData), splitLines(theirsData))
-    if (!merged.clean) return conflict('content')
-    id = context.staged.add('blob', concat(merged.lines))
+    const resolution = context.resolutions.get(path)
+    if (!merged.clean && resolution) id = context.staged.add('blob', resolution)
+    else if (!merged.clean) {
+      context.sides.set(path, { base: base && isRegular(base.mode) ? base.id : null, ours: ours.id, theirs: theirs.id })
+      return conflict('content')
+    } else id = context.staged.add('blob', concat(merged.lines))
   }
   return { mode, name: ours.name, id }
 }
@@ -341,26 +350,26 @@ const applyRenames = async (context: Context, base: ObjectId | null, ours: Objec
   }
 }
 
-export const mergeTrees = async (staged: StagedObjects, base: ObjectId | null, ours: ObjectId, theirs: ObjectId): Promise<TreeMerge> => {
-  const context: Context = { source: staged, staged, conflicts: [], overlays: [new Map(), new Map(), new Map()], dirty: [new Set(), new Set(), new Set()] }
+export const mergeTrees = async (staged: StagedObjects, base: ObjectId | null, ours: ObjectId, theirs: ObjectId, resolutions: ReadonlyMap<string, Uint8Array> = new Map()): Promise<TreeMerge> => {
+  const context: Context = { source: staged, staged, conflicts: [], overlays: [new Map(), new Map(), new Map()], dirty: [new Set(), new Set(), new Set()], resolutions, sides: new Map() }
   await applyRenames(context, base, ours, theirs)
   const tree =
     (await mergeLevel(context, '', base === null ? null : { id: base, path: '' }, { id: ours, path: '' }, { id: theirs, path: '' })) ??
     staged.add('tree', EMPTY_TREE_DATA)
   const conflicts = [...new Map(context.conflicts.map((conflict) => [`${conflict.path}\0${conflict.reason}`, conflict])).values()]
-  return { tree, conflicts }
+  return { tree, conflicts, sides: context.sides }
 }
 
 const treeOf = async (source: ObjectSource, commit: ObjectId): Promise<ObjectId> => parseCommit(await readObject(source, commit, 'commit')).tree
 
 export type CommitMerge =
   | { readonly ok: true; readonly tree: ObjectId; readonly bases: readonly ObjectId[] }
-  | { readonly ok: false; readonly reason: 'conflict'; readonly conflicts: readonly MergeConflict[] }
+  | { readonly ok: false; readonly reason: 'conflict'; readonly conflicts: readonly MergeConflict[]; readonly sides?: ReadonlyMap<string, ConflictSides> }
   | { readonly ok: false; readonly reason: 'unrelated' }
 
 const VIRTUAL_SIGNATURE: Signature = { name: 'git-forge', email: 'git-forge', timestamp: 0, timezone: '+0000' }
 
-export const mergeCommitTrees = async (staged: StagedObjects, ours: ObjectId, theirs: ObjectId, depth = 0): Promise<CommitMerge> => {
+export const mergeCommitTrees = async (staged: StagedObjects, ours: ObjectId, theirs: ObjectId, depth = 0, resolutions?: ReadonlyMap<string, Uint8Array>): Promise<CommitMerge> => {
   const bases = await mergeBases(staged, ours, theirs)
   if (bases.length === 0) return { ok: false, reason: 'unrelated' }
   let base = bases[bases.length - 1]!
@@ -370,8 +379,8 @@ export const mergeCommitTrees = async (staged: StagedObjects, ours: ObjectId, th
     if (!inner.ok) return { ok: false, reason: 'conflict', conflicts: [{ path: '', reason: 'merge-base' }] }
     base = staged.add('commit', serializeCommit({ tree: inner.tree, parents: [base, bases[i]!], author: VIRTUAL_SIGNATURE, committer: VIRTUAL_SIGNATURE, message: 'merged tree' }))
   }
-  const merged = await mergeTrees(staged, await treeOf(staged, base), await treeOf(staged, ours), await treeOf(staged, theirs))
-  if (merged.conflicts.length > 0) return { ok: false, reason: 'conflict', conflicts: merged.conflicts }
+  const merged = await mergeTrees(staged, await treeOf(staged, base), await treeOf(staged, ours), await treeOf(staged, theirs), resolutions)
+  if (merged.conflicts.length > 0) return { ok: false, reason: 'conflict', conflicts: merged.conflicts, sides: merged.sides }
   return { ok: true, tree: merged.tree, bases }
 }
 
@@ -401,7 +410,7 @@ export type MergeOutcome =
   | { readonly ok: false; readonly reason: 'conflict'; readonly conflicts: readonly MergeConflict[] }
   | { readonly ok: false; readonly reason: 'up-to-date' | 'unrelated' | 'merge-commits' }
 
-const reachableObjects = (staged: StagedObjects, tip: ObjectId): (GitObject & { readonly id: ObjectId })[] => {
+export const reachableObjects = (staged: StagedObjects, tip: ObjectId): (GitObject & { readonly id: ObjectId })[] => {
   const all = new Map(staged.objects().map((object) => [object.id, object]))
   const keep = new Map<ObjectId, GitObject & { readonly id: ObjectId }>()
   const stack = [tip]

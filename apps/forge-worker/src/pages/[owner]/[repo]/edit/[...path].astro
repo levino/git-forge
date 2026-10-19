@@ -1,0 +1,163 @@
+---
+import NotFound from '../../../../components/NotFound.astro'
+import RepoHeader from '../../../../components/RepoHeader.astro'
+import Layout from '../../../../layouts/Layout.astro'
+import { CollaborationError } from '@git-forge/collaboration'
+import { type FormOutcome, runForm, scopeFor } from '../../../../ui/collaboration.ts'
+import { defaultMessage, editMode, loadEditView, oversizedForm, prepareUpload, submitEdit } from '../../../../ui/edit.ts'
+import { blobUrl, openRepository, treeUrl } from '../../../../ui/repository.ts'
+
+const { forge, principal, session } = Astro.locals
+const repo = await openRepository(forge, principal, Astro.params.owner!, Astro.params.repo!)
+if (repo.kind === 'ok' && !session) return Astro.redirect(`/login?return_to=${encodeURIComponent(Astro.url.pathname + Astro.url.search)}`)
+const mode = editMode(Astro.url.searchParams.get('mode'))
+const segments = (Astro.params.path ?? '').split('/').filter((segment) => segment !== '')
+const scope = repo.kind === 'ok' && session ? await scopeFor(forge, Astro.request, session.principal, repo) : null
+const view = repo.kind === 'ok' && scope && session ? await loadEditView(repo, scope, segments, mode, session.principal.login) : null
+let outcome: FormOutcome | null = null
+if (repo.kind === 'ok' && view && Astro.request.method === 'POST' && Astro.url.searchParams.get('prepare') === '1') {
+  const verified = await forge.verifySessionWrite(Astro.request)
+  const writer = verified ? await scopeFor(forge, Astro.request, verified.principal, repo) : null
+  const reply = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } })
+  if (!writer) return reply(403, { message: 'The form expired or you are not signed in. Reload the page and try again.' })
+  try {
+    return reply(200, await prepareUpload(writer, view, await Astro.request.formData()))
+  } catch (error) {
+    if (error instanceof CollaborationError) return reply(error.status, { message: error.message })
+    throw error
+  }
+}
+if (repo.kind === 'ok' && view && Astro.request.method === 'POST') {
+  const oversized = oversizedForm(Astro.request)
+  outcome = oversized ? { kind: 'error', status: 413, message: oversized } : await runForm(forge, Astro.request, repo, (verified, form) => submitEdit(verified, view, form))
+  if (outcome.kind === 'redirect') return Astro.redirect(outcome.location, 303)
+  Astro.response.status = outcome.status
+}
+const path = view?.path.join('/') ?? ''
+const titles = { edit: `Edit ${path}`, new: 'New file', upload: 'Upload files', delete: `Delete ${path}` }
+const back = repo.kind === 'ok' && view ? (view.mode === 'edit' || view.mode === 'delete' ? blobUrl(repo.name, view.branch, view.path) : treeUrl(repo.name, view.branch, view.path)) : '/'
+---
+
+{
+  repo.kind !== 'ok' || !session || !view ? (
+    <NotFound />
+  ) : (
+    <Layout title={`${titles[view.mode]} · ${repo.name.owner}/${repo.name.name}`}>
+      <RepoHeader repo={repo} tab="code" />
+      {outcome?.kind === 'error' && <div role="alert" class="alert alert-error mb-4">{outcome.message}</div>}
+      {!view.plan ? (
+        <div role="alert" class="alert alert-warning">You cannot change files in this repository.</div>
+      ) : (
+        <form method="post" enctype={view.mode === 'upload' ? 'multipart/form-data' : 'application/x-www-form-urlencoded'} class="flex flex-col gap-4" aria-label={titles[view.mode]} data-lfs-upload={view.mode === 'upload' ? `${Astro.url.pathname}?mode=upload&prepare=1` : undefined}>
+          <input type="hidden" name="csrf" value={session.csrf} />
+          {view.sha && <input type="hidden" name="sha" value={view.sha} />}
+          <h2 class="text-lg font-semibold">{titles[view.mode]} <span class="badge badge-outline font-mono">{view.branch}</span></h2>
+          {view.plan.mode === 'fork' && <div role="status" class="alert alert-info">You do not have write access to this repository. Your change is committed to a new branch of your fork and proposed as a pull request.</div>}
+          {view.plan.mode === 'branch' && <div role="status" class="alert alert-info">{view.branch} is protected ({view.plan.problems.join('; ')}). Your change is committed to a new branch with a pull request.</div>}
+          {(view.mode === 'edit' || view.mode === 'new') && (
+            <>
+              <label class="flex flex-col gap-1 text-sm font-semibold">
+                File path
+                <input name="path" class="input w-full font-mono" required value={view.mode === 'edit' ? path : path === '' ? '' : `${path}/`} />
+              </label>
+              <label class="flex flex-col gap-1 text-sm font-semibold">
+                Content
+                <textarea name="content" rows="20" class="textarea w-full font-mono text-sm" spellcheck="false">{view.text ?? ''}</textarea>
+              </label>
+            </>
+          )}
+          {view.mode === 'upload' && (
+            <label class="flex flex-col gap-1 text-sm font-semibold">
+              Files{path !== '' && <span class="font-normal text-base-content/70">into {path}/</span>}
+              <input type="file" name="files" multiple required class="file-input w-full" />
+              <output class="font-normal text-base-content/70" data-upload-status />
+            </label>
+          )}
+          {view.mode === 'delete' && <p>Delete <span class="font-mono">{path}</span> from {view.branch}.</p>}
+          <section class="panel max-w-3xl" aria-labelledby="commit-title">
+            <h3 id="commit-title" class="panel-title">Commit changes</h3>
+            <label class="flex flex-col gap-1 text-sm font-semibold">
+              Commit message
+              <input name="message" class="input w-full" placeholder={defaultMessage(view)} />
+            </label>
+            <label class="flex flex-col gap-1 text-sm font-semibold">
+              Extended description
+              <textarea name="description" rows="3" class="textarea w-full" />
+            </label>
+            {view.plan.mode === 'direct' && (
+              <div class="flex flex-col gap-2 text-sm">
+                <label class="flex items-center gap-2"><input type="radio" class="radio radio-sm" name="target" value="direct" checked /> Commit directly to the {view.branch} branch</label>
+                <label class="flex items-center gap-2"><input type="radio" class="radio radio-sm" name="target" value="branch" /> Create a new branch for this commit</label>
+              </div>
+            )}
+            {view.plan.mode !== 'fork' && (
+              <div class="flex flex-wrap items-center gap-3 text-sm">
+                <label class="flex items-center gap-2">
+                  New branch
+                  <input name="branch" class="input input-sm font-mono" value={view.suggestedBranch} />
+                </label>
+                {view.plan.mode === 'direct' && <label class="flex items-center gap-2"><input type="checkbox" class="checkbox checkbox-sm" name="pull" value="1" checked /> Open a pull request</label>}
+              </div>
+            )}
+            <div class="flex gap-2">
+              <button class:list={['btn btn-sm', view.mode === 'delete' ? 'btn-error' : 'btn-primary']}>{view.plan.mode === 'fork' ? 'Propose changes' : 'Commit changes'}</button>
+              <a class="btn btn-sm btn-ghost" href={back}>Cancel</a>
+            </div>
+          </section>
+        </form>
+      )}
+      <script is:inline>
+        document.querySelector('form[data-lfs-upload]')?.addEventListener('submit', async (event) => {
+          const form = event.currentTarget
+          if (form.dataset.ready) return
+          event.preventDefault()
+          const status = form.querySelector('[data-upload-status]')
+          const input = form.querySelector('input[name=files]')
+          const csrf = form.querySelector('input[name=csrf]').value
+          const files = [...input.files]
+          const post = (url, body, headers = {}) => fetch(url, { method: 'POST', body, headers: { 'X-CSRF-Token': csrf, ...headers } })
+          try {
+            const names = new URLSearchParams(files.map((file) => ['name', file.name]))
+            const prepared = await post(form.dataset.lfsUpload, names)
+            const target = await prepared.json()
+            if (!prepared.ok) throw new Error(target.message)
+            const lfs = files.filter((file) => target.lfs.includes(file.name))
+            const kept = new DataTransfer()
+            for (const file of files) if (!lfs.includes(file)) kept.items.add(file)
+            for (const file of lfs) {
+              status.textContent = `Uploading ${file.name} to Git LFS…`
+              const oid = [...new Uint8Array(await crypto.subtle.digest('SHA-256', await file.arrayBuffer()))].map((byte) => byte.toString(16).padStart(2, '0')).join('')
+              const json = { Accept: 'application/vnd.git-lfs+json', 'Content-Type': 'application/vnd.git-lfs+json' }
+              const batch = await post(`/${target.repository}.git/info/lfs/objects/batch`, JSON.stringify({ operation: 'upload', transfers: ['basic'], objects: [{ oid, size: file.size }] }), json)
+              const object = (await batch.json()).objects?.[0]
+              if (!batch.ok || !object || object.error) throw new Error(object?.error?.message ?? `Git LFS refused ${file.name}`)
+              const same = (href) => new URL(href, location.href).origin === location.origin
+              const upload = object.actions?.upload
+              if (upload) {
+                const put = await fetch(upload.href, { method: 'PUT', body: file, headers: { ...(upload.header ?? {}), ...(same(upload.href) ? { 'X-CSRF-Token': csrf } : {}) } })
+                if (!put.ok) throw new Error(`Uploading ${file.name} failed (${put.status})`)
+              }
+              const verify = object.actions?.verify
+              if (verify) {
+                const checked = await post(verify.href, JSON.stringify({ oid, size: file.size }), { ...json, ...(verify.header ?? {}) })
+                if (!checked.ok) throw new Error(`Verifying ${file.name} failed (${checked.status})`)
+              }
+              const pointer = document.createElement('input')
+              pointer.type = 'hidden'
+              pointer.name = 'lfs'
+              pointer.value = `${oid} ${file.size} ${file.name}`
+              form.append(pointer)
+            }
+            input.files = kept.files
+            input.required = false
+            form.dataset.ready = '1'
+            status.textContent = ''
+            form.requestSubmit()
+          } catch (error) {
+            status.textContent = error.message
+          }
+        })
+      </script>
+    </Layout>
+  )
+}

@@ -1,8 +1,11 @@
 import {
+  type AttributeRule,
   type BlobContent,
   type CommitInfo,
   type DirectoryEntry,
   lastCommitFor,
+  lfsAttributeRules,
+  matchesLfs,
   readBlobContent,
   type RefTarget,
   resolveRefAndPath,
@@ -58,37 +61,17 @@ const readmeFor = async (repo: OpenRepository, target: RefTarget, entries: reado
   return { name: entry.name, html, text: content.text }
 }
 
-const globPattern = (glob: string): RegExp =>
-  new RegExp(`^${glob.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*\*\/?|\*|\?/g, (token) => (token === '?' ? '[^/]' : token === '*' ? '[^/]*' : '.*'))}$`)
-
-const lfsPatterns = async (repo: OpenRepository, commit: string, directory: readonly string[]): Promise<{ readonly base: string; readonly pattern: RegExp; readonly anchored: boolean }[]> => {
+const lfsRules = async (repo: OpenRepository, commit: string, directory: readonly string[]): Promise<AttributeRule[]> => {
   const target = await resolveTarget(repo.odb, commit, [...directory, '.gitattributes'])
   const content = target?.kind === 'blob' ? await readBlobContent(repo.odb, target.entry) : null
-  if (content?.kind !== 'text') return []
-  return content.text
-    .split('\n')
-    .map((line) => line.trim().split(/\s+/))
-    .filter(([glob, ...attributes]) => glob && !glob.startsWith('#') && attributes.includes('filter=lfs'))
-    .map(([glob]) => ({ base: directory.join('/'), pattern: globPattern(glob!.replace(/^\//, '')), anchored: glob!.includes('/') }))
+  return content?.kind === 'text' ? lfsAttributeRules(content.text, directory.join('/')) : []
 }
 
 const lfsEntries = async (repo: OpenRepository, target: RefTarget, entries: readonly DirectoryEntry[]): Promise<Set<string>> => {
   const directories = target.path.map((_, index) => target.path.slice(0, index + 1))
-  const patterns = (await Promise.all([[], ...directories].map((directory) => lfsPatterns(repo, target.commit, directory)))).flat()
-  if (patterns.length === 0) return new Set()
-  const path = target.path.join('/')
-  return new Set(
-    entries
-      .filter((entry) => entry.kind === 'blob')
-      .filter((entry) =>
-        patterns.some(({ base, pattern, anchored }) => {
-          const full = [path, entry.name].filter(Boolean).join('/')
-          const relative = base === '' ? full : full.slice(base.length + 1)
-          return anchored ? pattern.test(relative) : pattern.test(entry.name)
-        }),
-      )
-      .map((entry) => entry.name),
-  )
+  const rules = (await Promise.all([[], ...directories].map((directory) => lfsRules(repo, target.commit, directory)))).flat()
+  if (rules.length === 0) return new Set()
+  return new Set(entries.filter((entry) => entry.kind === 'blob' && matchesLfs(rules, [...target.path, entry.name].join('/'))).map((entry) => entry.name))
 }
 
 export const browse = async (repo: OpenRepository, segments: readonly string[], expect: 'tree' | 'blob' | 'any' = 'any'): Promise<BrowseView> => {

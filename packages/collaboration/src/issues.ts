@@ -14,6 +14,7 @@ import {
   type Scope,
 } from './context.ts'
 import { localNumbers, parseClosingReferences, parseReferences } from './references.ts'
+import { EMPTY_ROLLUP, type ReactionRollup, reactionRollups } from './reactions.ts'
 
 export type IssueState = 'open' | 'closed'
 
@@ -64,6 +65,7 @@ export type Issue = {
   readonly updatedAt: number
   readonly closedAt: number | null
   readonly closedBy: UserSummary | null
+  readonly reactions: ReactionRollup
 }
 
 export type IssueComment = {
@@ -75,6 +77,7 @@ export type IssueComment = {
   readonly body: string
   readonly createdAt: number
   readonly updatedAt: number
+  readonly reactions: ReactionRollup
 }
 
 export type IssueEvent = {
@@ -259,6 +262,7 @@ export const hydrateIssues = async (db: Database, rows: readonly IssueRow[]): Pr
     ...milestoneRows.map((row) => ({ kind: row.creator_kind, id: row.creator_id })),
   ])
   const milestones = await hydrateMilestones(db, milestoneRows, users)
+  const reactions = await reactionRollups(db, 'issue', ids)
   return rows.map((row) => ({
     id: row.id,
     nodeId: row.node_id,
@@ -283,6 +287,7 @@ export const hydrateIssues = async (db: Database, rows: readonly IssueRow[]): Pr
     updatedAt: row.updated_at,
     closedAt: row.closed_at,
     closedBy: row.closed_by_kind ? users({ kind: row.closed_by_kind, id: row.closed_by_id }) : null,
+    reactions: reactions.get(row.id) ?? EMPTY_ROLLUP,
   }))
 }
 
@@ -655,10 +660,12 @@ const COMMENT_SELECT = 'SELECT c.id, c.node_id, c.issue_id, i.number, c.author_k
 
 const hydrateComments = async (db: Database, rows: readonly CommentRow[]): Promise<IssueComment[]> => {
   const users = await loadUsers(db, rows.map((row) => ({ kind: row.author_kind, id: row.author_id })))
+  const reactions = await reactionRollups(db, 'issue_comment', rows.map((row) => row.id))
   return rows.map((row) => ({
     id: row.id,
     nodeId: row.node_id,
     issueNumber: row.number,
+    reactions: reactions.get(row.id) ?? EMPTY_ROLLUP,
     author: users({ kind: row.author_kind, id: row.author_id }),
     authorRef: refFromColumns(row.author_kind, row.author_id),
     body: row.body,

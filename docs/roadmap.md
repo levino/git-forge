@@ -172,10 +172,10 @@ Design: [design.md §17](design.md#17-collaboration).
 - [x] CODEOWNERS parsing for `require_code_owner_reviews` (owners of every changed file must approve, user owners are requested as reviewers)
 - [x] Rename detection in merges (port of git's `diffcore-rename` scoring and pairing; edits follow renamed files, rename/rename and rename/delete conflicts)
 - [x] Directory renames in merges: adds into a renamed directory conflict like git's default, adds into a deleted directory merge
-- [ ] In-browser conflict resolution
+- [x] In-browser conflict resolution (text conflicts with git's markers, committed as a merge of the base into the head; binary and LFS conflicts refused)
 - [x] Search (FTS5): repositories, issues, pull requests, discussions with comments, users; access-filtered; `/api/search`, `/api/v3/search/*`
-- [ ] Reactions, notifications
-- [ ] Submit via form
+- [x] Reactions on issues, pull requests, comments and review comments (API, rollups, UI; migration `0050_reactions`)
+- [x] Submit via form: edit, create, delete and upload files in the browser and the contents API (`PUT|DELETE …/contents/{path}`), direct commits, new branch with pull request on protected branches, proposals through an automatic fork; LFS-tracked uploads as LFS objects
 
 ## Later
 

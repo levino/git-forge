@@ -440,11 +440,11 @@ const appendMerge = (regions: MergeRegion[], mode: number, i0: number, chg0: num
 
 export type TextMerge = { readonly clean: true; readonly lines: readonly Uint8Array[] } | { readonly clean: false; readonly conflicts: number }
 
-export const mergeLines = (base: readonly Uint8Array[], ours: readonly Uint8Array[], theirs: readonly Uint8Array[]): TextMerge => {
+const mergeRegions = (base: readonly Uint8Array[], ours: readonly Uint8Array[], theirs: readonly Uint8Array[]): { readonly lines: readonly Uint8Array[] } | { readonly regions: MergeRegion[] } => {
   const script1 = diffLines(base, ours)
   const script2 = diffLines(base, theirs)
-  if (script1.length === 0) return { clean: true, lines: theirs }
-  if (script2.length === 0) return { clean: true, lines: ours }
+  if (script1.length === 0) return { lines: theirs }
+  if (script2.length === 0) return { lines: ours }
   const regions: MergeRegion[] = []
   let a = 0
   let b = 0
@@ -506,17 +506,57 @@ export const mergeLines = (base: readonly Uint8Array[], ours: readonly Uint8Arra
     }
     for (const change of inner) refined.push({ mode: 0, i0: region.i0, chg0: region.chg0, i1: change.i1 + region.i1, chg1: change.chg1, i2: change.i2 + region.i2, chg2: change.chg2 })
   }
-  const conflicts = refined.filter((region) => region.mode === 0).length
-  if (conflicts > 0) return { clean: false, conflicts }
+  const simplified: MergeRegion[] = []
+  for (const region of refined) {
+    const last = simplified[simplified.length - 1]
+    if (last && last.mode === 0 && region.mode === 0 && region.i1 - (last.i1 + last.chg1) <= 3) {
+      last.chg0 = region.i0 + region.chg0 - last.i0
+      last.chg1 = region.i1 + region.chg1 - last.i1
+      last.chg2 = region.i2 + region.chg2 - last.i2
+    } else simplified.push({ ...region })
+  }
+  return { regions: simplified }
+}
+
+const fillMerge = (regions: readonly MergeRegion[], ours: readonly Uint8Array[], theirs: readonly Uint8Array[], conflict: (region: MergeRegion) => Uint8Array[]): Uint8Array[] => {
   const lines: Uint8Array[] = []
   let position = 0
-  for (const region of refined) {
-    if ((region.mode & 3) === 0) continue
+  for (const region of regions) {
+    if (region.mode !== 0 && (region.mode & 3) === 0) continue
     lines.push(...ours.slice(position, region.i1))
+    if (region.mode === 0) lines.push(...conflict(region))
     if (region.mode & 1) lines.push(...ours.slice(region.i1, region.i1 + region.chg1))
     if (region.mode & 2) lines.push(...theirs.slice(region.i2, region.i2 + region.chg2))
     position = region.i1 + region.chg1
   }
   lines.push(...ours.slice(position))
-  return { clean: true, lines }
+  return lines
+}
+
+export const mergeLines = (base: readonly Uint8Array[], ours: readonly Uint8Array[], theirs: readonly Uint8Array[]): TextMerge => {
+  const merged = mergeRegions(base, ours, theirs)
+  if ('lines' in merged) return { clean: true, lines: merged.lines }
+  const conflicts = merged.regions.filter((region) => region.mode === 0).length
+  if (conflicts > 0) return { clean: false, conflicts }
+  return { clean: true, lines: fillMerge(merged.regions, ours, theirs, () => []) }
+}
+
+const marker = (text: string): Uint8Array => new TextEncoder().encode(text)
+
+const terminated = (lines: readonly Uint8Array[]): Uint8Array[] => {
+  const last = lines[lines.length - 1]
+  if (!last || last[last.length - 1] === 0x0a) return [...lines]
+  return [...lines.slice(0, -1), new Uint8Array([...last, 0x0a])]
+}
+
+export const conflictLines = (base: readonly Uint8Array[], ours: readonly Uint8Array[], theirs: readonly Uint8Array[], labels: readonly [string, string]): Uint8Array[] => {
+  const merged = mergeRegions(base, ours, theirs)
+  if ('lines' in merged) return [...merged.lines]
+  return fillMerge(merged.regions, ours, theirs, (region) => [
+    marker(`<<<<<<< ${labels[0]}\n`),
+    ...terminated(ours.slice(region.i1, region.i1 + region.chg1)),
+    marker('=======\n'),
+    ...terminated(theirs.slice(region.i2, region.i2 + region.chg2)),
+    marker(`>>>>>>> ${labels[1]}\n`),
+  ])
 }

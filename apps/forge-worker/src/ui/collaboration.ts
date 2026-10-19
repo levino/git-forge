@@ -1,4 +1,17 @@
-import { CollaborationError, type Scope, type TimelineItem } from '@git-forge/collaboration'
+import {
+  can,
+  CollaborationError,
+  invalid,
+  REACTION_KINDS,
+  REACTIONS,
+  type ReactionContent,
+  type ReactionKind,
+  type ReactionRollup,
+  type Scope,
+  type TimelineItem,
+  toggleReaction,
+  viewerReactions,
+} from '@git-forge/collaboration'
 import type { Principal } from '@git-forge/accounts'
 import type { ForgeServices, UiSession } from '../app.ts'
 import { renderMarkdown } from './markdown.ts'
@@ -38,6 +51,22 @@ export const runForm = async (
 }
 
 export const field = (form: FormData, name: string): string => String(form.get(name) ?? '')
+
+export const reactTo = (scope: Scope, form: FormData): Promise<void> => {
+  const kind = field(form, 'kind')
+  if (!(REACTION_KINDS as readonly string[]).includes(kind)) throw invalid('Unknown reaction subject')
+  return toggleReaction(scope, { kind: kind as ReactionKind, id: Number(field(form, 'subject')) }, field(form, 'content'))
+}
+
+export type ReactionProps = { readonly kind: ReactionKind; readonly subject: number; readonly rollup: ReactionRollup; readonly mine: readonly ReactionContent[]; readonly csrf: string | null }
+
+export type Reactable = { readonly id: number; readonly subject: number; readonly reactions: ReactionRollup }
+
+export const reactionsFor = async (scope: Scope, kind: ReactionKind, items: readonly Reactable[], csrf: string | null, locked = false): Promise<Map<number, ReactionProps>> => {
+  const viewer = await viewerReactions(scope, kind, items.map((item) => item.id))
+  const allowed = csrf !== null && can(scope, 'reaction:create', { locked }) ? csrf : null
+  return new Map(items.map((item) => [item.id, { kind, subject: item.subject, rollup: item.reactions, mine: REACTIONS.filter((content) => viewer.has(`${item.id}:${content}`)), csrf: allowed }]))
+}
 
 const nested = (data: Readonly<Record<string, unknown>>, key: string, inner: string): string | null => {
   const value = data[key]

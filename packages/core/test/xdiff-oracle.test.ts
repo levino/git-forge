@@ -3,7 +3,7 @@ import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { diffBlobs, formatHunks } from '../src/diff.ts'
-import { mergeLines, splitLines } from '../src/xdiff.ts'
+import { conflictLines, mergeLines, splitLines } from '../src/xdiff.ts'
 import { tempDir } from './git-helpers.ts'
 
 const random = (seed: number) => () => {
@@ -65,7 +65,11 @@ describe('xdiff oracle', () => {
         clean++
         expect(merged.clean, `round ${round}`).toBe(true)
         if (merged.clean) expect(Buffer.concat(merged.lines.map((l) => Buffer.from(l))).toString('latin1'), `round ${round}`).toBe(result.stdout.toString('latin1'))
-      } else expect(merged.clean, `round ${round}`).toBe(false)
+      } else {
+        expect(merged.clean, `round ${round}`).toBe(false)
+        const marked = conflictLines(splitLines(files.base), splitLines(files.ours), splitLines(files.theirs), ['ours', 'theirs'])
+        expect(Buffer.concat(marked.map((l) => Buffer.from(l))).toString('latin1'), `round ${round}`).toBe(result.stdout.toString('latin1'))
+      }
     }
     expect(clean).toBeGreaterThan(50)
   }, 60_000)

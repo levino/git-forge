@@ -2,6 +2,7 @@
 import { cloneUrl, commitsUrl, type OpenRepository, repoUrl, treeUrl } from '../ui/repository.ts'
 import type { ReleaseRow } from '@git-forge/releases'
 import type { TreeView } from '../ui/browse.ts'
+import { editUrl } from '../ui/edit.ts'
 import { releaseUrl } from '../ui/releases.ts'
 import Breadcrumbs from './Breadcrumbs.astro'
 import CopyField from './CopyField.astro'
@@ -15,6 +16,8 @@ type Props = { repo: OpenRepository; view: TreeView | { kind: 'empty' }; importi
 
 const { repo, view, importing = false, latest = null } = Astro.props
 const origin = Astro.url.origin
+const session = Astro.locals.session
+const editable = session !== null && repo.view === null && (view.kind === 'empty' ? repo.canWrite : repo.branches.some((branch) => branch.name === view.target.ref))
 ---
 
 {
@@ -34,6 +37,11 @@ const origin = Astro.url.origin
       <div>
         <CopyField id="empty-clone-url" value={cloneUrl(origin, repo.name)} label="Clone over HTTPS" />
       </div>
+      {editable && (
+        <p>
+          <a class="btn btn-sm" href={editUrl(repo, 'new', '', [])}>Create a new file</a>
+        </p>
+      )}
       <p class="text-base-content/70">Push an existing repository from the command line:</p>
       <pre class="bg-base-200 border border-base-300 rounded-box p-4 text-xs overflow-x-auto"><code>{`git remote add origin ${cloneUrl(origin, repo.name)}\ngit push -u origin ${repo.refs.head.replace(/^refs\/heads\//, '')}`}</code></pre>
     </section>
@@ -42,6 +50,12 @@ const origin = Astro.url.origin
       <div class="flex flex-wrap items-center gap-x-3 gap-y-2 mb-3">
         <RefPicker repo={repo} current={view.target.ref} link={(ref: string) => treeUrl(repo.name, ref, view.target.path)} />
         <Breadcrumbs repo={repo} refName={view.target.ref} path={view.target.path} />
+        {editable && (
+          <div class="flex gap-2">
+            <a class="btn btn-sm" href={editUrl(repo, 'new', view.target.ref, view.target.path)}>Add file</a>
+            <a class="btn btn-sm" href={editUrl(repo, 'upload', view.target.ref, view.target.path)}>Upload files</a>
+          </div>
+        )}
         {view.target.path.length === 0 && (
           <div class="flex items-center gap-4 ml-auto text-base-content/70">
             <a href={repoUrl(repo.name, 'branches')} class="flex items-center gap-1 hover:text-primary">

@@ -2000,6 +2000,15 @@ export const createForge = (options: ForgeOptions): Forge => {
     return authorize(request, repo, access, ...rest)
   }
 
+  const withSessionLfs = (authorize: Authorize): Authorize => async (request, repo, access, surface) => {
+    if (surface === 'lfs' && !request.headers.has('Authorization')) {
+      const check = await checkSession(request, await loginOptions(request))
+      const result = check.kind === 'session' ? await repositoryAccess(sessionUserPrincipal(check.active.session), repo, access === 'write' ? 'write' : 'read') : null
+      if (result?.decision === 'allow') return null
+    }
+    return authorize(request, repo, access, surface)
+  }
+
   const emitRunEvents = async (serverUrl: string, job: JobRow): Promise<void> => {
     const run = await getRun(db, job.run_id)
     if (!run) return
@@ -2067,9 +2076,12 @@ export const createForge = (options: ForgeOptions): Forge => {
     storage,
     accounts: store,
     now: () => now().getTime(),
+    lfs: { maxObjectBytes: options.maxLfsObjectBytes, onStored: storedObject, ...(options.digests ? { digests: options.digests } : {}) },
     onBranchUpdated: async (update: BranchUpdate) => {
       const outcome: PushOutcome = { unpack: 'ok', results: [{ name: update.ref, oldId: update.oldId, newId: update.newId, ok: true }], pack: null, objectCount: 0, archived: [] }
-      await afterPush(request, update.repo, outcome, waitUntil, await apiPrincipal(request))
+      const user = update.actor.kind === 'user' ? await store.findUserById(update.actor.id) : null
+      const principal: Principal | null = user ? { kind: 'user', id: user.id, login: user.login, limits: null, tokenId: null } : request.bodyUsed ? null : await apiPrincipal(request)
+      await afterPush(request, update.repo, outcome, waitUntil, principal)
     },
     onActivity: async (scope, activity) => {
       await emit(await activityEvent(scope, activity, issuerFor(request)))
@@ -2358,7 +2370,7 @@ export const createForge = (options: ForgeOptions): Forge => {
     if (content) return content
     const git = await handleGitRequest(request, {
       storage: presigningStorage,
-      authorize,
+      authorize: withSessionLfs(authorize),
       pushPolicy: access.pushPolicy,
       pushCheck: async (incoming, repo) => {
         const permissions = await installationPermissions(incoming)

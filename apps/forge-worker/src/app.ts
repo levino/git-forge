@@ -39,6 +39,7 @@ import {
   readJobLog,
   RerunError,
   rerunRun,
+  runnerStopped,
   type RunRow,
   type RunWorkflow,
   verifyToken,
@@ -533,6 +534,7 @@ export type Forge = {
   readonly services: ForgeServices
   readonly scheduled: (at?: Date) => Promise<ScheduledMirrorRun[]>
   readonly actionsTick: () => Promise<ActionsTick | null>
+  readonly runnerStopped: (jobId: string) => Promise<boolean>
   readonly runJob: (job: AppJob, attempt?: number) => Promise<void>
   readonly refreshRepository: (repo: RepositoryName) => Promise<void>
   readonly importMetadata: (job: ImportJob, state: ImportState) => Promise<ImportMetadataResult>
@@ -2685,6 +2687,7 @@ export const createForge = (options: ForgeOptions): Forge => {
         log: (event) => console.log(JSON.stringify(event)),
       })
     }),
+    runnerStopped: (jobId) => scope.fresh(async () => options.actions !== undefined && runnerStopped(dispatchOptionsFor(options.publicUrl ?? 'http://localhost'), jobId)),
     runJob: (job, attempt = 1) => scope.fresh(async () => {
       try {
         await runAppJob(job)

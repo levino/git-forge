@@ -1631,7 +1631,7 @@ Reaper (`reapActions`, from `actionsTick` on the `*/5 * * * *` cron):
   not acknowledged within 5 min are completed as `cancelled`;
 - `in_progress` jobs whose lock was not renewed for 5 min past its expiry
   (the runner renews every minute, the lock lasts 10 min) are failed
-  (`runner-lost`);
+  (`runner-lost`, "Runner lost: lost communication with the runner");
 - jobs delivered but not started within 10 min, and queued jobs whose
   ephemeral runner never connected within 10 min, are requeued and get a new
   runner, up to three launches per job; then they fail;
@@ -1838,7 +1838,13 @@ and stays queued for any registered runner with matching labels.
   it also sets the container's inactivity timeout to 6 hours (GitHub's job
   limit, the platform maximum) and watches the container again when the
   object is recreated (after a deploy or an eviction); the runner exits after
-  its one job and the container stops then. The image (`runner/Dockerfile`
+  its one job and the container stops then. The object keeps the job ID and a
+  30 s alarm that checks `container.running`; when `monitor()` settles or the
+  alarm finds the container gone, it calls `runnerStopped(jobId)`, which fails
+  a still `in_progress` job of that ephemeral runner at once (`runner-stopped`,
+  check-run title "Runner lost: container stopped"; `cancelled` if a
+  cancellation was pending). Jobs are never requeued for this; the lock reaper
+  stays the fallback. The image (`runner/Dockerfile`
   of the app, published with every release as
   `ghcr.io/levino/git-forge-runner:<version>`, 2.4 GB unpacked) is the official
   `ghcr.io/actions/actions-runner` image plus Git and Node.js. Like every other

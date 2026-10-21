@@ -13,6 +13,7 @@ import {
   queueRunsForPullRequest,
   reapActions,
   type RunnerLaunch,
+  runnerStopped,
 } from '../src/index.ts'
 import { ADMIN_TOKEN, createTestForge, REVIEWER_TOKEN, SERVICE_PATH, type TestForge, type TestForgeOptions } from './forge.ts'
 import { FakeRunner } from './runner-client.ts'
@@ -278,6 +279,25 @@ jobs:
       ['a', 'completed', 'failure'],
       ['b', 'completed', 'success'],
     ])
+  })
+
+  it('fails a running job at once when its runner container stops, without requeueing it', async () => {
+    const h = await harness()
+    await h.push({ '.github/workflows/ci.yml': 'on: push\njobs:\n  a:\n    runs-on: self-hosted\n    steps: [{ run: echo a }]\n' })
+    const runId = h.forge.runs[0]!.runId
+    const jobId = h.launches[0]!.jobId
+    expect(await runnerStopped(h.forge.dispatch(h.server.url), jobId)).toBe(false)
+    const runner = await h.runner(0)
+    const a = await runner.take()
+    await runner.renew(a)
+    expect(await runnerStopped(h.forge.dispatch(h.server.url), jobId)).toBe(true)
+    expect(await getJob(h.forge.db, a.requestId)).toMatchObject({ status: 'completed', conclusion: 'failure', cancel_reason: 'runner-stopped' })
+    expect(await getRun(h.forge.db, runId)).toMatchObject({ conclusion: 'failure' })
+    expect(h.forge.checks.at(-1)).toMatchObject({ conclusion: 'failure', title: 'Runner lost: container stopped' })
+    expect(await runnerStopped(h.forge.dispatch(h.server.url), jobId)).toBe(false)
+    h.clock.offset = 30 * 60_000
+    await reapActions(h.forge.dispatch(h.server.url))
+    expect(h.launches).toHaveLength(1)
   })
 
   it('applies concurrency groups with cancel-in-progress', async () => {

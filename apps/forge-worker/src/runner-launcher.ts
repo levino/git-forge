@@ -4,7 +4,7 @@ export const containerLauncher = (namespace: DurableObjectNamespace, docker: Dur
   ...(labels ? { labels } : {}),
   launch: async (launch) => {
     const target = (launch.docker && docker) || namespace
-    const response = await target.get(target.idFromName(launch.jobId)).fetch('https://runner.internal/launch', { method: 'POST', body: launch.encodedJitConfig })
+    const response = await target.get(target.idFromName(launch.jobId)).fetch(`https://runner.internal/launch?job=${encodeURIComponent(launch.jobId)}`, { method: 'POST', body: launch.encodedJitConfig })
     if (response.status !== 202) throw new Error(`runner container did not start: ${response.status} ${await response.text()}`)
   },
 })

@@ -60,6 +60,7 @@ import {
   expandPlaceholder,
   finishPending,
   getJob,
+  getJobById,
   getRun,
   getRunnerIncludingRemoved,
   type JobGroup,
@@ -198,6 +199,8 @@ const checkStatusOf = (job: JobRow): CheckRunStatus => (job.status === 'complete
 
 const CHECK_CONCLUSIONS: ReadonlySet<string> = new Set(['success', 'failure', 'neutral', 'cancelled', 'skipped', 'timed_out', 'action_required', 'stale'])
 
+const RUNNER_LOST_TITLES: Readonly<Record<string, string>> = { 'runner-lost': 'Runner lost: lost communication with the runner', 'runner-stopped': 'Runner lost: container stopped' }
+
 const checkConclusionOf = (job: JobRow): CheckRunConclusion | undefined => {
   if (job.status !== 'completed') return undefined
   if (job.conclusion === 'cancelled' && job.cancel_reason === 'timeout') return 'timed_out'
@@ -214,7 +217,7 @@ export const recordCheck = async (db: Database, checks: CheckRunSink | undefined
     conclusion: checkConclusionOf(job) ?? null,
     externalId: job.id,
     detailsUrl: jobHtmlUrl(serverUrl, run, job),
-    title: definition.error ?? (job.approval === 'waiting' ? `Waiting for review: ${job.environment} needs approval` : null),
+    title: definition.error ?? (job.approval === 'waiting' ? `Waiting for review: ${job.environment} needs approval` : (RUNNER_LOST_TITLES[job.cancel_reason ?? ''] ?? null)),
   }
   const repo = { owner: run.owner, name: run.repo }
   if (job.check_run_id !== null) return checks.update(repo, job.check_run_id, report)
@@ -1044,6 +1047,14 @@ const relaunch = async (options: DispatchOptions, job: JobRow): Promise<boolean>
   const run = await getRun(options.db, job.run_id)
   if (run) await launchJob(options, (await getJob(options.db, job.request_id))!, run.owner, run.repo)
   return true
+}
+
+export const runnerStopped = async (options: DispatchOptions, jobId: string): Promise<boolean> => {
+  const job = await getJobById(options.db, jobId)
+  if (job?.status !== 'in_progress' || job.runner_id === null) return false
+  const runner = await getRunnerIncludingRemoved(options.db, job.runner_id)
+  if (!runner?.ephemeral || runner.jobId !== job.id) return false
+  return abandon(options, job, job.cancel_requested_at === null ? 'failure' : 'cancelled', 'runner-stopped')
 }
 
 export const reapActions = async (options: DispatchOptions): Promise<ReapReport> => {

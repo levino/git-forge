@@ -112,7 +112,7 @@ Design: [design.md §15](design.md#ci).
 - [ ] Hello-world workflow on the production instance; deploy a Worker with `wrangler` from our own CI
 - [x] `uses:` actions: `ActionDownloadInfo` with tarballs streamed from repositories on the forge (mirrors of `actions/checkout`, …), name mapping, optional fallback to github.com tarballs; shallow fetch (`deepen`) for `actions/checkout`
 - [x] Expressions server-side: job-level `if`, `runs-on` expressions, `strategy`/`matrix` (include/exclude, fail-fast, max-parallel), job outputs across `needs`, `env`/`defaults`, step `if`/`continue-on-error`/`timeout-minutes`, workflow `concurrency`
-- [x] Cancellation (`JobCancellation`), job timeouts, reaper for expired locks, dead runners and lost launches, re-runs (all, failed, one job) as new attempts
+- [x] Cancellation (`JobCancellation`), job timeouts, reaper for expired locks, dead runners and lost launches, jobs failed within 30 s when their runner container stops, re-runs (all, failed, one job) as new attempts
 - [x] Per-repository and per-environment secrets (AES-GCM in SQLite under an instance key), environments with required reviewers (`pending_deployments`), no secrets for untrusted runs
 - [x] `workflow_dispatch` (typed inputs), `schedule` (cron table + Worker cron), `pull_request` trigger function (`queueRunsForPullRequest`, wired to collaboration's events); check runs per job through a `CheckRunSink`
 - [x] `pull_request` runs from the collaboration package's pull request events; check runs written with its store

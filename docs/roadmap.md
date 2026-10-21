@@ -42,6 +42,8 @@ discussions.
 - [x] CLI login: paste a PKCE-bound code (default), `--browser-redirect`, `--device`; `--scopes`; consent with host, IP, time, phishing warning
 - [x] `git forge repo create`
 - [x] Rate limits on login and device endpoints; purging expired challenges and device codes
+- [x] Agent connections: remote MCP endpoint `/mcp` with OAuth 2.1 (DCR, PKCE, resource indicators, rotating refresh tokens), tool `token` for short-lived scoped tokens, "Connected agents" in settings
+- [ ] Agent connections: Client ID metadata documents
 - [x] One read / write / admin access choice for tokens and consent pages
 - [x] Break-glass key (offline Ed25519, one-hour admin session)
 - [x] Session list and revocation, list and unlink linked OIDC identities (account page)

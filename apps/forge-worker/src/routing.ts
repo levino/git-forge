@@ -2,7 +2,7 @@ import { matchContentRoute, matchGitRoute } from '@git-forge/core'
 
 const FORGE_PREFIXES = ['/api/', '/_services/', '/_pages/', '/.well-known/', '/login/', '/twirp/', '/scim/']
 
-const FORGE_PATHS = new Set(['/api', '/login', '/logout'])
+const FORGE_PATHS = new Set(['/api', '/login', '/logout', '/mcp'])
 
 const GIT_SUBPATH = /^\/(HEAD|info\/refs|git-upload-pack|git-receive-pack|objects\/.+|info\/lfs(\/.*)?|forge\/uploads(\/.*)?|releases\/download\/.+|archive\/.+\.(tar\.gz|zip))$/
 

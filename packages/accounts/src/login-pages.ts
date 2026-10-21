@@ -22,6 +22,15 @@ export type CliConsent = {
   readonly scope: TokenScope
 }
 
+export type AgentConsent = {
+  readonly clientName: string
+  readonly clientUri: string | null
+  readonly redirectHost: string
+  readonly formAction: string
+  readonly scope: TokenScope
+  readonly request: string
+}
+
 export type LoginPage =
   | {
       readonly kind: 'login'
@@ -53,6 +62,7 @@ export type LoginPage =
   | { readonly kind: 'device-result'; readonly approved: boolean }
   | { readonly kind: 'cli'; readonly request: CliConsent; readonly user: ConsentUser; readonly instance: string }
   | { readonly kind: 'cli-code'; readonly code: string; readonly expiresAt: number }
+  | { readonly kind: 'agent'; readonly consent: AgentConsent; readonly user: ConsentUser; readonly instance: string; readonly message?: string }
   | { readonly kind: 'break-glass'; readonly message?: string }
   | { readonly kind: 'error'; readonly status: number; readonly message: string }
 
@@ -68,7 +78,16 @@ export const accessLabel = (scope: TokenScope): string => ACCESS_CHOICES.find((c
 
 export const LOOPBACK_FORM_ACTION = 'http://127.0.0.1:* http://localhost:*'
 
-export const loginFormAction = (page: LoginPage): string => (page.kind === 'cli' && page.request.redirect === 'loopback' ? `'self' ${LOOPBACK_FORM_ACTION}` : "'self'")
+export const loginFormAction = (page: LoginPage): string => {
+  if (page.kind === 'cli' && page.request.redirect === 'loopback') return `'self' ${LOOPBACK_FORM_ACTION}`
+  if (page.kind === 'agent') return `'self' ${page.consent.formAction}`
+  return "'self'"
+}
+
+export const AGENT_CONSENT_PATH = '/login/oauth/authorize'
+
+export const agentConsentSummary = (page: Extract<LoginPage, { kind: 'agent' }>): string =>
+  `${page.consent.clientName} wants to act as ${page.user.login} on ${page.instance}. It can then ask for short-lived tokens for Git and the API with at most the access you choose here, until you revoke it in your settings.`
 
 export const formatRequestTime = (ms: number): string => `${new Date(ms).toISOString().slice(0, 19).replace('T', ' ')} UTC`
 
@@ -223,6 +242,21 @@ ${accessRadios(device.scope)}
 <p><strong>${escapeHtml(CONSENT_WARNING)}</strong></p>
 <form method="post" action="/login/cli/${escapeHtml(request.id)}">${csrfField(page.user.csrf)}
 ${accessRadios(request.scope)}
+<button name="decision" value="approve">Approve</button> <button name="decision" value="deny">Deny</button></form>`,
+        config: null,
+      }
+    }
+    case 'agent': {
+      const consent = page.consent
+      return {
+        title: 'Connect an agent',
+        body: `${page.message ? `<p>${escapeHtml(page.message)}</p>` : ''}<p>${escapeHtml(agentConsentSummary(page))}</p>
+<ul><li>Returns to: ${escapeHtml(consent.redirectHost)}</li>${consent.clientUri ? `<li>Says it is from: ${escapeHtml(consent.clientUri)} (not verified)</li>` : ''}</ul>
+<p><strong>${escapeHtml(CONSENT_WARNING)}</strong></p>
+<form method="post" action="${AGENT_CONSENT_PATH}">${csrfField(page.user.csrf)}<input type="hidden" name="request" value="${escapeHtml(consent.request)}">
+<p><label>Name: <input name="name" value="${escapeHtml(consent.clientName)}" maxlength="100" required></label></p>
+${accessRadios(consent.scope)}
+<p><label>Only these repositories (optional, owner/name separated by spaces): <input name="repositories"></label></p>
 <button name="decision" value="approve">Approve</button> <button name="decision" value="deny">Deny</button></form>`,
         config: null,
       }

@@ -46,6 +46,7 @@ export type UserPrincipal = {
   readonly login: string
   readonly limits: TokenLimits | null
   readonly tokenId: string | null
+  readonly via?: { readonly connectionId: string; readonly name: string }
 }
 
 export type AppPrincipal = {

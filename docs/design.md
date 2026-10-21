@@ -966,12 +966,55 @@ needs a local browser; the device code is the only secret of the device flow.
 The token goes to `hosts.json` (0600) and the git credential helper.
 `git forge repo create` uses it against `POST /api/repos` (needs `repo:admin`).
 
+**Agent connections (MCP).** `/mcp` is a remote MCP server used only to hand
+agents (Claude Code, Codex, Cursor, …) short-lived tokens; REST and Git stay
+the real interfaces. The forge is its own OAuth 2.1 authorization server
+(`agents.ts`, `agent-http.ts`, `mcp.ts`, migration `0065`):
+
+- Discovery: `401` on `/mcp` carries `WWW-Authenticate: Bearer
+  resource_metadata="…/.well-known/oauth-protected-resource/mcp"` (RFC 9728;
+  the root document names the origin); `/.well-known/oauth-authorization-server`
+  (RFC 8414) with `authorization_response_iss_parameter_supported`.
+- Clients register with RFC 7591 at `/login/oauth/register` (public clients,
+  `token_endpoint_auth_method: none`; redirect URIs `https`, loopback `http`
+  with any port per RFC 8252, or a private-use scheme). Client ID metadata
+  documents are not supported (they need outbound fetches).
+- `/login/oauth/authorize` needs PKCE `S256` and a `resource` naming this
+  forge's `/mcp` (RFC 8707, default when absent, `invalid_target` otherwise).
+  The consent page (normal session, CSRF) shows the client name, where the
+  redirect goes and the requested access; the user may lower the scope, name
+  the connection ("Claude Code on laptop") and limit it to repositories. The
+  CSP `form-action` allows only the redirect's origin or scheme. The response
+  carries `iss` (RFC 9207).
+- `/login/oauth/token` redeems a 5-minute one-time code (a replay revokes the
+  connection) and creates the connection (`agent_connections`: user, client,
+  name, granted maximum scope, optional repository list, created, last used).
+  It returns a one-hour access token (`gfm_`) bound to the resource and a
+  90-day refresh token (`gfr_`) that rotates on every use; replaying a rotated
+  one revokes the connection. All secrets are stored as SHA-256 only.
+- `/mcp` speaks Streamable HTTP with JSON responses only, no sessions, no SSE:
+  stateless 2026-07-28 requests (`_meta` protocol version, `MCP-Protocol-Version`,
+  `Mcp-Method` and `Mcp-Name` checked against the body, `server/discover`) and
+  the legacy `initialize` handshake (2025-03-26 to 2025-11-25). A foreign
+  `Origin` gets `403`. Tools: `token {scope, repositories?, ttl_minutes?}`
+  issues a personal access token (default 60 minutes, at most a day) clamped
+  to the connection's scope and repositories, rate-limited per connection;
+  `whoami` describes the connection.
+- Issued tokens carry `tokens.connection_id`; the principal gets `via`
+  (connection id and name), audit entries written for it carry `via`, and
+  `GET /api/user` reports `agent`. `gfm_` tokens are not accepted by REST or
+  Git, `gfp_` tokens not by `/mcp`. They do not appear among personal access
+  tokens; the settings page lists connections under "Connected agents".
+  Disconnecting revokes the connection, its access and refresh tokens and every
+  token it issued at once.
+
 **Rate limits and purging.** Login, consent and token endpoints are limited
 per client address (`LOGIN_RATE_LIMITS`, sliding window in `rate_limits`,
 `429` with `Retry-After`). The address is `CF-Connecting-IP` on Cloudflare and
 the socket (or last `X-Forwarded-For` hop with `TRUST_PROXY`) on Node. The
 scheduled handler deletes challenges, device and CLI authorizations an hour
-after expiry and stale rate-limit windows.
+after expiry and stale rate-limit windows, and expired or used agent codes
+and tokens.
 
 **Break-glass.** An Ed25519 key pair generated offline
 (`pnpm --filter forge-worker break-glass keygen`); only the public JWK is

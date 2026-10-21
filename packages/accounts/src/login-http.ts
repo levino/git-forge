@@ -147,9 +147,9 @@ const readText = async (request: Request): Promise<string> => {
   }
 }
 
-const readForm = async (request: Request): Promise<URLSearchParams> => new URLSearchParams(await readText(request))
+export const readForm = async (request: Request): Promise<URLSearchParams> => new URLSearchParams(await readText(request))
 
-const readJson = async (request: Request): Promise<Record<string, unknown>> => {
+export const readJson = async (request: Request): Promise<Record<string, unknown>> => {
   const text = await readText(request)
   if (text.trim() === '') return {}
   try {
@@ -159,7 +159,7 @@ const readJson = async (request: Request): Promise<Record<string, unknown>> => {
   throw new LoginError('invalid_request', 'expected a JSON object')
 }
 
-const readParams = async (request: Request): Promise<URLSearchParams> => {
+export const readParams = async (request: Request): Promise<URLSearchParams> => {
   if ((request.headers.get('Content-Type') ?? '').startsWith('application/json')) {
     const body = await readJson(request)
     return new URLSearchParams(Object.entries(body).flatMap(([key, value]) => (typeof value === 'string' ? [[key, value]] : [])))

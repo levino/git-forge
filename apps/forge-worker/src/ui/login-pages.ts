@@ -32,6 +32,8 @@ export const loginPageTitle = (page: LoginPage): string => {
       return 'Authorize the command line'
     case 'cli-code':
       return 'Paste this code'
+    case 'agent':
+      return 'Connect an agent'
     case 'break-glass':
       return 'Break-glass login'
     case 'error':

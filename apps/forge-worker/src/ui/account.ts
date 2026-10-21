@@ -7,6 +7,7 @@ export type AccountAction =
   | { readonly kind: 'passkey-removed' }
   | { readonly kind: 'identity-unlinked' }
   | { readonly kind: 'session-revoked' }
+  | { readonly kind: 'agent-revoked' }
   | { readonly kind: 'renamed'; readonly login: string }
   | { readonly kind: 'error'; readonly message: string }
 
@@ -58,6 +59,9 @@ export const accountAction = async (forge: ForgeServices, session: UiSession, fo
   }
   if (action === 'revoke-session') {
     return (await forge.account.revokeSession(user, String(form.get('id') ?? ''))) ? { kind: 'session-revoked' } : { kind: 'error', message: 'Unknown session.' }
+  }
+  if (action === 'revoke-agent') {
+    return (await forge.account.revokeAgent(user, String(form.get('id') ?? ''))) ? { kind: 'agent-revoked' } : { kind: 'error', message: 'Unknown agent.' }
   }
   return { kind: 'error', message: 'Unknown action.' }
 }

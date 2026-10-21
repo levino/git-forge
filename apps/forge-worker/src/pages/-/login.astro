@@ -1,5 +1,5 @@
 ---
-import { accessLabel, CONSENT_WARNING, COPY_SCRIPT, formatRequestTime, PASSKEY_SCRIPT } from '@git-forge/accounts'
+import { accessLabel, AGENT_CONSENT_PATH, agentConsentSummary, CONSENT_WARNING, COPY_SCRIPT, formatRequestTime, PASSKEY_SCRIPT } from '@git-forge/accounts'
 import AccessChoice from '../../components/AccessChoice.astro'
 import NotFound from '../../components/NotFound.astro'
 import Icon from '../../components/Icon.astro'
@@ -210,6 +210,40 @@ const configJson = config ? JSON.stringify(config).replace(/</g, '\\u003c') : nu
               <form method="post" action={`/login/cli/${page.request.id}`} class="flex flex-col gap-3">
                 <input type="hidden" name="csrf" value={page.user.csrf} />
                 <AccessChoice max={page.request.scope} />
+                <div class="flex gap-2">
+                  <button class="btn btn-primary" name="decision" value="approve">
+                    Approve
+                  </button>
+                  <button class="btn" name="decision" value="deny">
+                    Deny
+                  </button>
+                </div>
+              </form>
+            </>
+          )}
+          {page.kind === 'agent' && (
+            <>
+              {page.message && <div role="alert" class="alert alert-warning">{page.message}</div>}
+              <p>{agentConsentSummary(page)}</p>
+              <dl class="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm" aria-label="Request details">
+                <dt class="font-semibold">Returns to</dt>
+                <dd class="break-all">{page.consent.redirectHost}</dd>
+                {page.consent.clientUri && (
+                  <>
+                    <dt class="font-semibold">Says it is from</dt>
+                    <dd class="break-all">{page.consent.clientUri} (not verified)</dd>
+                  </>
+                )}
+              </dl>
+              <div role="alert" class="alert alert-warning">{CONSENT_WARNING}</div>
+              <form method="post" action={AGENT_CONSENT_PATH} class="flex flex-col gap-3">
+                <input type="hidden" name="csrf" value={page.user.csrf} />
+                <input type="hidden" name="request" value={page.consent.request} />
+                <label class="text-sm font-semibold" for="agent-name">Name</label>
+                <input id="agent-name" name="name" class="input w-full" maxlength="100" required value={page.consent.clientName} />
+                <AccessChoice max={page.consent.scope} />
+                <label class="text-sm font-semibold" for="agent-repositories">Only these repositories (optional)</label>
+                <input id="agent-repositories" name="repositories" class="input w-full font-mono" placeholder="owner/name owner/other" />
                 <div class="flex gap-2">
                   <button class="btn btn-primary" name="decision" value="approve">
                     Approve

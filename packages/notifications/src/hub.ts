@@ -266,9 +266,8 @@ export const createNotifications = (options: NotificationsOptions) => {
   }
 
   const emit = async (event: ForgeEvent): Promise<number | null> => {
-    const repository = await store.repositoryByName(event.repository.owner, event.repository.name)
-    if (!repository) return null
-    const eventId = await store.insertEvent(event, repository.id)
+    const eventId = await store.insertRepositoryEvent(event)
+    if (eventId === null) return null
     if (!(await schedule({ kind: 'notification-event', eventId }))) await processEvent(eventId)
     return eventId
   }

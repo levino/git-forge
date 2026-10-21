@@ -1,5 +1,5 @@
 import { isValidName, LOCATION_CACHE_MS, type RepositoryLocation, type RepositoryName, type Surface } from '@git-forge/core'
-import { type Database, first, sql, type Statement } from './database.ts'
+import { type Database, first, reused, sql, type Statement } from './database.ts'
 import { randomId } from './encoding.ts'
 import { normalizeIssuer, type TrustedIssuer } from './federation.ts'
 import type { Grants, OrganizationRole, OwnerKind, Principal, RepositorySubject, Visibility } from './permissions.ts'
@@ -775,7 +775,7 @@ export const createAccountsStore = (db: Database, options: AccountsStoreOptions 
     },
 
     findRepositoryById: async (repositoryId: string): Promise<RepositorySubject | null> => {
-      const row = await first<RepositoryRow>(db, sql(`${REPOSITORY_SELECT} WHERE r.id = ? AND ${LIVE}`, repositoryId))
+      const row = await first<RepositoryRow>(db, reused(sql(`${REPOSITORY_SELECT} WHERE r.id = ? AND ${LIVE}`, repositoryId)))
       return row ? toSubject(row) : null
     },
 
@@ -794,7 +794,7 @@ export const createAccountsStore = (db: Database, options: AccountsStoreOptions 
     locateRepository: async (owner: string, name: string): Promise<RepositoryLocation | null> => {
       const row = await first<{ path: string | null; live: number }>(
         db,
-        sql(
+        reused(sql(
           `SELECT path, live FROM (
              SELECT ${STORAGE_PATH} AS path, 1 AS live, 0 AS rank FROM repositories r JOIN accounts a ON a.id = r.owner_id WHERE a.login = ? AND r.name = ? AND ${LIVE}
              UNION ALL SELECT ${STORAGE_PATH}, 0, 1 FROM repository_redirects d JOIN repositories r ON r.id = d.repository_id JOIN accounts a ON a.id = r.owner_id WHERE d.owner = ? AND d.name = ? AND ${LIVE}
@@ -805,7 +805,7 @@ export const createAccountsStore = (db: Database, options: AccountsStoreOptions 
           owner,
           name,
           `${owner}/${name}`,
-        ),
+        )),
       )
       return row ? { path: row.path, live: row.live === 1 } : null
     },
@@ -892,7 +892,7 @@ export const createAccountsStore = (db: Database, options: AccountsStoreOptions 
     },
 
     findRepository: async (owner: string, name: string): Promise<RepositorySubject | null> => {
-      const row = await first<RepositoryRow>(db, sql(`${REPOSITORY_SELECT} WHERE a.login = ? AND r.name = ? AND ${LIVE}`, owner, name))
+      const row = await first<RepositoryRow>(db, reused(sql(`${REPOSITORY_SELECT} WHERE a.login = ? AND r.name = ? AND ${LIVE}`, owner, name)))
       return row ? toSubject(row) : null
     },
 
@@ -933,7 +933,7 @@ export const createAccountsStore = (db: Database, options: AccountsStoreOptions 
     },
 
     isInstanceAdmin: async (userId: string): Promise<boolean> =>
-      (await first(db, sql('SELECT 1 AS ok FROM instance_admins i JOIN accounts a ON a.id = i.user_id WHERE i.user_id = ? AND a.disabled_at IS NULL', userId))) !== null,
+      (await first(db, reused(sql('SELECT 1 AS ok FROM instance_admins i JOIN accounts a ON a.id = i.user_id WHERE i.user_id = ? AND a.disabled_at IS NULL', userId)))) !== null,
 
     listInstanceAdmins: async (): Promise<{ readonly id: string; readonly login: string }[]> =>
       db.all<{ id: string; login: string }>(sql('SELECT a.id, a.login FROM instance_admins i JOIN accounts a ON a.id = i.user_id WHERE a.disabled_at IS NULL ORDER BY a.login')),
@@ -1077,13 +1077,13 @@ export const createAccountsStore = (db: Database, options: AccountsStoreOptions 
       if (!kind) return null
       const row = await first<TokenRow>(
         db,
-        sql(
+        reused(sql(
           `SELECT t.id, t.kind, t.account_id, t.app_id, t.scopes, t.repository_ids, t.expires_at, t.revoked_at, t.last_used_at, t.installation_id, t.permissions, t.connection_id, c.name AS connection_name,
                   a.login, a.disabled_at AS account_disabled_at, ap.slug, ap.disabled_at AS app_disabled_at
            FROM tokens t LEFT JOIN accounts a ON a.id = t.account_id LEFT JOIN apps ap ON ap.id = t.app_id LEFT JOIN agent_connections c ON c.id = t.connection_id AND c.revoked_at IS NULL
            WHERE t.token_hash = ?`,
           await hashToken(token),
-        ),
+        )),
       )
       const at = now()
       if (!row || row.kind !== kind || tokenStatus({ expiresAt: row.expires_at, revokedAt: row.revoked_at }, at) !== 'active' || row.scopes.split(' ').includes(SCIM_SCOPE)) return null
@@ -1247,14 +1247,14 @@ export const createAccountsStore = (db: Database, options: AccountsStoreOptions 
       })),
 
     grantsFor: async (principal: Principal, repo: RepositorySubject): Promise<Grants> => {
-      const grants = await store.directGrants(principal, repo)
-      return repo.visibility === 'private' && !(await store.readsParent(principal, repo.id)) ? { ...grants, upstreamDenied: true } : grants
+      const [grants, upstream] = await Promise.all([store.directGrants(principal, repo), repo.visibility === 'private' ? store.readsParent(principal, repo.id) : true])
+      return upstream ? grants : { ...grants, upstreamDenied: true }
     },
 
     readsParent: async (principal: Principal, repositoryId: string): Promise<boolean> => {
-      const fork = await first<{ parent_id: string }>(db, sql('SELECT parent_id FROM repository_forks WHERE repository_id = ?', repositoryId))
+      const fork = await first<{ parent_id: string }>(db, reused(sql('SELECT parent_id FROM repository_forks WHERE repository_id = ?', repositoryId)))
       if (!fork) return true
-      const row = await first<RepositoryRow>(db, sql(`${REPOSITORY_SELECT} WHERE r.id = ?`, fork.parent_id))
+      const row = await first<RepositoryRow>(db, reused(sql(`${REPOSITORY_SELECT} WHERE r.id = ?`, fork.parent_id)))
       if (!row) return false
       const parent = toSubject(row)
       const subject: Principal =
@@ -1268,7 +1268,7 @@ export const createAccountsStore = (db: Database, options: AccountsStoreOptions 
           return NO_GRANTS
         case 'user': {
           const rows = await db.all<GrantRow>(
-            sql(
+            reused(sql(
               `SELECT 'organization' AS source, role FROM organization_members WHERE organization_id = ? AND user_id = ?
                UNION ALL SELECT 'collaborator' AS source, role FROM repository_collaborators WHERE repository_id = ? AND user_id = ?
                UNION ALL SELECT 'team' AS source, rt.role AS role FROM repository_teams rt JOIN team_members tm ON tm.team_id = rt.team_id
@@ -1279,7 +1279,7 @@ export const createAccountsStore = (db: Database, options: AccountsStoreOptions 
               principal.id,
               repo.id,
               principal.id,
-            ),
+            )),
           )
           const organization = rows.find((row) => row.source === 'organization')?.role
           const collaborator = rows.find((row) => row.source === 'collaborator')?.role
@@ -1294,15 +1294,15 @@ export const createAccountsStore = (db: Database, options: AccountsStoreOptions 
           const row = await first<{ role: string }>(
             db,
             principal.installationId === undefined
-              ? sql('SELECT role FROM app_repositories WHERE app_id = ? AND repository_id = ?', principal.id, repo.id)
-              : sql(
+              ? reused(sql('SELECT role FROM app_repositories WHERE app_id = ? AND repository_id = ?', principal.id, repo.id))
+              : reused(sql(
                   `SELECT i.role FROM app_installations i WHERE i.id = ? AND i.app_id = ? AND i.account_id = ? AND i.deleted_at IS NULL AND i.suspended_at IS NULL
                      AND (i.repository_selection = 'all' OR EXISTS (SELECT 1 FROM app_installation_repositories r WHERE r.installation_id = i.id AND r.repository_id = ?))`,
                   principal.installationId,
                   principal.id,
                   repo.ownerId,
                   repo.id,
-                ),
+                )),
           )
           return { ...NO_GRANTS, appRole: isRole(row?.role) ? row.role : null }
         }
@@ -1310,11 +1310,13 @@ export const createAccountsStore = (db: Database, options: AccountsStoreOptions 
           if (principal.installation) return { ...NO_GRANTS, instanceRole: (await store.installationReads(principal, repo)) ? 'read' : null }
           const row = await first<{ role: string }>(
             db,
-            sql(
-              `SELECT ir.role FROM instance_repositories ir JOIN trusted_instances ti ON ti.issuer = ir.issuer
-               WHERE ir.issuer = ? AND ir.repository_id = ? AND ti.disabled_at IS NULL`,
-              principal.issuer,
-              repo.id,
+            reused(
+              sql(
+                `SELECT ir.role FROM instance_repositories ir JOIN trusted_instances ti ON ti.issuer = ir.issuer
+                 WHERE ir.issuer = ? AND ir.repository_id = ? AND ti.disabled_at IS NULL`,
+                principal.issuer,
+                repo.id,
+              ),
             ),
           )
           return { ...NO_GRANTS, instanceRole: row?.role === 'read' ? 'read' : null }
@@ -1387,22 +1389,23 @@ export const createAccountsStore = (db: Database, options: AccountsStoreOptions 
     },
 
     branchProtectionRules: async (repositoryId: string): Promise<BranchProtectionRule[]> => {
-      const rows = await db.all<ProtectionRow>(sql('SELECT * FROM branch_protection_rules WHERE repository_id = ? ORDER BY created_at, rowid', repositoryId))
-      if (rows.length === 0) return []
-      const allowances = await db.all<AllowanceRow>(
-        sql(
-          `SELECT a.rule_id, a.kind, a.subject FROM branch_protection_push_allowances a JOIN branch_protection_rules r ON r.id = a.rule_id
-           WHERE r.repository_id = ? ORDER BY a.kind, a.subject`,
-          repositoryId,
+      const [rows, allowances, checks] = (await db.read([
+        reused(sql('SELECT * FROM branch_protection_rules WHERE repository_id = ? ORDER BY created_at, rowid', repositoryId)),
+        reused(
+          sql(
+            `SELECT a.rule_id, a.kind, a.subject FROM branch_protection_push_allowances a JOIN branch_protection_rules r ON r.id = a.rule_id
+             WHERE r.repository_id = ? ORDER BY a.kind, a.subject`,
+            repositoryId,
+          ),
         ),
-      )
-      const checks = await db.all<StatusCheckRow>(
-        sql(
-          `SELECT c.rule_id, c.context FROM branch_protection_status_checks c JOIN branch_protection_rules r ON r.id = c.rule_id
-           WHERE r.repository_id = ? ORDER BY c.context`,
-          repositoryId,
+        reused(
+          sql(
+            `SELECT c.rule_id, c.context FROM branch_protection_status_checks c JOIN branch_protection_rules r ON r.id = c.rule_id
+             WHERE r.repository_id = ? ORDER BY c.context`,
+            repositoryId,
+          ),
         ),
-      )
+      ])) as [ProtectionRow[], AllowanceRow[], StatusCheckRow[]]
       return rows.map((row) => toRule(row, allowances, checks))
     },
 

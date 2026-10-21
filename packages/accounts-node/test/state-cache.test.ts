@@ -5,5 +5,5 @@ import { openSqliteDatabase } from '../src/index.ts'
 stateCacheConformance('sqlite', async (now) => {
   const { db } = openSqliteDatabase(':memory:')
   await applyMigrations(db, MIGRATIONS)
-  return createStateCache(db, now)
+  return createStateCache(db, { now })
 })

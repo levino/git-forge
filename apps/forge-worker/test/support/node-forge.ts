@@ -1,4 +1,5 @@
-import { applyMigrations, createStateCache, type Database, MIGRATIONS } from '@git-forge/accounts'
+import { AsyncLocalStorage } from 'node:async_hooks'
+import { applyMigrations, createStateCache, type Database, MIGRATIONS, requestScope, type ScopeState } from '@git-forge/accounts'
 import { openSqliteDatabase } from '@git-forge/accounts-node'
 import { MemoryStorage } from '@git-forge/core'
 import { createForge, type Forge, type ForgeOptions } from '../../src/app.ts'
@@ -8,14 +9,17 @@ export const BOOTSTRAP_TOKEN = 'bootstrap-secret'
 
 export type NodeForge = Forge & { readonly storage: MemoryStorage; readonly db: Database }
 
-export const nodeForge = async (overrides: Partial<ForgeOptions> = {}): Promise<NodeForge> => {
+export type NodeForgeSetup = { readonly locks?: boolean; readonly windowMs?: number }
+
+export const nodeForge = async (overrides: Partial<ForgeOptions> = {}, setup: NodeForgeSetup = {}): Promise<NodeForge> => {
   const storage = new MemoryStorage()
-  const { db } = openSqliteDatabase()
-  await applyMigrations(db, MIGRATIONS)
+  const opened = overrides.db ?? openSqliteDatabase().db
+  if (!overrides.db) await applyMigrations(opened, MIGRATIONS)
+  const scope = requestScope(new AsyncLocalStorage<ScopeState>(), setup.windowMs ?? 0)
+  const db = scope.database(opened)
   const forge = createForge({
     storage,
-    db,
-    stateCache: createStateCache(db),
+    stateCache: createStateCache(db, setup.locks ? { locks: {} } : {}),
     publicUrl: undefined,
     instanceKey: undefined,
     bootstrapToken: BOOTSTRAP_TOKEN,
@@ -29,6 +33,8 @@ export const nodeForge = async (overrides: Partial<ForgeOptions> = {}): Promise<
     deepCheckDays: 0,
     mirrorUnitBytes: 0,
     ...overrides,
+    db,
+    requestScope: scope,
   })
   return { ...forge, storage, db }
 }

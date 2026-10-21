@@ -35,13 +35,15 @@ if (repo.kind === 'ok' && number !== null && Astro.request.method === 'POST') {
   Astro.response.status = outcome.status
 }
 const scope = repo.kind === 'ok' ? await scopeFor(forge, Astro.request, principal, repo) : null
+const early = scope && number !== null ? timeline(scope, number) : null
+early?.catch(() => undefined)
 const issue = scope && number !== null ? await unlessMissing(getIssue(scope, number)) : null
 if (repo.kind === 'ok' && issue?.isPull) return Astro.redirect(repoUrl(repo.name, 'pull', String(issue.number)))
 const csrf = session?.csrf ?? null
 const [entries, ownReactions, body] =
-  scope && issue && repo.kind === 'ok'
+  scope && issue && repo.kind === 'ok' && early
     ? await Promise.all([
-        timeline(scope, issue.number),
+        early,
         reactionsFor(scope, 'issue', [{ id: issue.id, subject: issue.number, reactions: issue.reactions }], csrf, issue.locked).then((mine) => mine.get(issue.id)),
         renderBody(repo, issue.body),
       ])

@@ -87,23 +87,28 @@ export const createGitAccess = (
   const denyAll: RefPolicy = () => 'permission denied'
   return {
     authorize: async (request, repo, access, surface) => {
-      const principal = await principalOf(request)
+      const found = options.directory.findRepository(repo.owner, repo.name)
+      if (access === 'write') found.then((repository) => repository && options.directory.branchProtectionRules(repository.id)).catch(() => undefined)
+      const [principal] = await Promise.all([principalOf(request), found])
       if (!principal) return challenge('invalid credentials\n')
       const check = await checkRepositoryAccess(options.directory, principal, repo, access === 'write' ? 'write' : 'read', surface)
       if (check.decision !== 'allow' && check.repository && !check.repository.archived && options.delegatedBranches && (await options.delegatedBranches(principal, check.repository)).length > 0) return null
       return grantedView(check, principal)
     },
     pushPolicy: async (request, repo) => {
+      const found = options.directory.findRepository(repo.owner, repo.name)
+      const protection = found.then((repository) => (repository ? options.directory.branchProtectionRules(repository.id) : []))
+      protection.catch(() => undefined)
       const principal = await principalOf(request)
       if (!principal) return denyAll
       const check = await checkRepositoryAccess(options.directory, principal, repo, 'write')
       if (!check.repository || (check.decision !== 'allow' && check.repository.archived)) return denyAll
       const delegated = check.decision === 'allow' || !options.delegatedBranches ? null : await options.delegatedBranches(principal, check.repository)
       if (check.decision !== 'allow' && (!delegated || delegated.length === 0)) return denyAll
-      const rules = await options.directory.branchProtectionRules(check.repository.id)
-      const protection = rules.length === 0 ? null : branchProtectionPolicy(rules, await protectionActor(options.directory, principal, check.repository, check.access))
-      if (!delegated) return protection
-      return (command) => delegatedBranchPolicy(delegated)(command) ?? protection?.(command) ?? null
+      const rules = (await found)?.id === check.repository.id ? await protection : await options.directory.branchProtectionRules(check.repository.id)
+      const policy = rules.length === 0 ? null : branchProtectionPolicy(rules, await protectionActor(options.directory, principal, check.repository, check.access))
+      if (!delegated) return policy
+      return (command) => delegatedBranchPolicy(delegated)(command) ?? policy?.(command) ?? null
     },
   }
 }

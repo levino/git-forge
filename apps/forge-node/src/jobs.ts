@@ -9,6 +9,7 @@ export type SqliteJobQueueOptions<J> = {
   readonly concurrency?: number
   readonly leaseMs?: number
   readonly pollMs?: number
+  readonly minPollMs?: number
   readonly delayMs?: (seconds: number) => number
   readonly now?: () => number
   readonly onOutcome?: (outcome: JobOutcome<J>) => void
@@ -42,6 +43,8 @@ export const createSqliteJobQueue = <J>(options: SqliteJobQueueOptions<J>): Sqli
   const concurrency = options.concurrency ?? 1
   const leaseMs = options.leaseMs ?? DEFAULT_LEASE_MS
   const pollMs = options.pollMs ?? DEFAULT_POLL_MS
+  const minPollMs = Math.min(options.minPollMs ?? pollMs, pollMs)
+  let idleMs = minPollMs
   const delayMs = options.delayMs ?? ((seconds: number) => seconds * 1000)
   const now = options.now ?? Date.now
   const report = options.onOutcome ?? (() => undefined)
@@ -141,7 +144,9 @@ export const createSqliteJobQueue = <J>(options: SqliteJobQueueOptions<J>): Sqli
     const [row] = await db.all<{ next: number | null }>(
       sql('SELECT MIN(CASE WHEN lease_until IS NULL THEN run_at ELSE MAX(run_at, lease_until) END) AS next FROM jobs WHERE queue = ?', queue),
     )
-    const wait = row?.next == null ? pollMs : Math.min(pollMs, Math.max(0, Number(row.next) - now()))
+    const poll = idleMs
+    idleMs = Math.min(pollMs, idleMs * 2)
+    const wait = row?.next == null ? poll : Math.min(poll, Math.max(0, Number(row.next) - now()))
     if (stopped) return
     timer = setTimeout(pump, wait)
     timer.unref?.()
@@ -151,6 +156,7 @@ export const createSqliteJobQueue = <J>(options: SqliteJobQueueOptions<J>): Sqli
     while (!stopped && running.size < concurrency) {
       const claimed = await claim()
       if (!claimed) break
+      idleMs = minPollMs
       launch(claimed)
     }
     if (running.size >= concurrency) {
@@ -205,6 +211,7 @@ export const createSqliteJobQueue = <J>(options: SqliteJobQueueOptions<J>): Sqli
           at,
         ),
       )
+      idleMs = minPollMs
       pump()
     },
     start: () => {

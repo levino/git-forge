@@ -115,7 +115,7 @@ describe('migrations on node:sqlite', () => {
     const db = await testDatabase()
     expect(await migrateOnStart(db, MIGRATIONS)).toEqual(MIGRATIONS.map((migration) => migration.name))
     const statements: string[] = []
-    const counted: Database = { all: (s) => (statements.push(s.sql), db.all(s)), run: (s) => (statements.push(s.sql), db.run(s)), batch: (s) => (statements.push('batch'), db.batch(s)) }
+    const counted: Database = { all: (s) => (statements.push(s.sql), db.all(s)), run: (s) => (statements.push(s.sql), db.run(s)), batch: (s) => (statements.push('batch'), db.batch(s)), read: (s) => (statements.push('read'), db.read(s)) }
     expect(await migrateOnStart(counted, MIGRATIONS)).toEqual([])
     expect(statements).toEqual(['SELECT name, sha256 FROM schema_migrations'])
     expect(await migrateOnStart(counted, [...MIGRATIONS, { name: '9998_extra', sql: 'CREATE TABLE extra (x);' }])).toEqual(['9998_extra'])

@@ -51,6 +51,7 @@ export type AdminOverview = {
   readonly update: UpdateView
   readonly imports: readonly ImportEntry[]
   readonly failures: readonly JobFailure[]
+  readonly runnerSeenAt: number | null
   readonly usage: readonly RepositoryUsage[]
   readonly cost: CostEstimate
 }
@@ -63,6 +64,7 @@ export type AdminOperationsOptions = {
   readonly storage: Storage
   readonly settings: InstanceSettings
   readonly failures: JobFailures
+  readonly runnerSeenAt: () => Promise<number | null>
   readonly meter: UsageMeter
   readonly fetch: Outbound
   readonly now: () => number
@@ -232,6 +234,7 @@ export const createAdminOperations = (options: AdminOperationsOptions) => {
         update: await updateView(false),
         imports: await imports(),
         failures: await options.failures.list(50),
+        runnerSeenAt: await options.runnerSeenAt(),
         usage,
         cost: estimateMonthlyCost(stored, await options.meter.counters(now()), now()),
       }

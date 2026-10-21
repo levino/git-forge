@@ -1,5 +1,5 @@
 import { fromUtf8, readAll, streamOf, utf8 } from './bytes.ts'
-import type { Storage, StoredObject } from './storage.ts'
+import type { PutBody, PutOptions, PutResult, Storage, StoredObject } from './storage.ts'
 
 export type StateValue = { readonly etag: string; readonly text: string } | null
 
@@ -11,6 +11,8 @@ export interface StateCache {
   begin(key: string, token: string): Promise<void>
   commit(key: string, token: string, value: StateValue): Promise<void>
   abort(key: string, token: string): Promise<void>
+  lock?(key: string, token: string): Promise<StateEntry | undefined>
+  release?(key: string, token: string, value: StateValue | undefined): Promise<void>
 }
 
 export const STATE_KEY = /^repos\/[^/]+\/[^/]+\/(refs\.json|git\/objects\/info\/(packs|alternates))$/
@@ -23,16 +25,44 @@ const textOf = (bytes: Uint8Array): string | null => {
   return utf8(text).length === bytes.length ? text : null
 }
 
+const cancel = async (body: PutBody): Promise<void> => {
+  if (!(body instanceof Uint8Array)) await body.cancel().catch(() => undefined)
+}
+
+const lockedPut = async (storage: Storage, cache: Required<Pick<StateCache, 'lock' | 'release'>>, key: string, body: PutBody, size: number, options: PutOptions): Promise<PutResult> => {
+  const token = crypto.randomUUID()
+  const entry = await cache.lock(key, token).catch(async (error: unknown) => {
+    await cancel(body)
+    throw error
+  })
+  let value: StateValue | undefined
+  try {
+    const etag = entry?.hit ? (entry.value?.etag ?? null) : ((await storage.head(key))?.etag ?? null)
+    if ((options.ifNoneMatch === '*' && etag !== null) || (options.ifMatch !== undefined && etag !== options.ifMatch)) {
+      if (entry?.hit) value = entry.value
+      await cancel(body)
+      return { ok: false, reason: 'precondition-failed' }
+    }
+    const { ifMatch: _, ifNoneMatch: __, ...rest } = options
+    const text = body instanceof Uint8Array ? textOf(body) : null
+    const result = await storage.put(key, body, size, rest)
+    if (result.ok && text !== null) value = { etag: result.info.etag, text }
+    return result
+  } finally {
+    await cache.release(key, token, value).catch(() => {})
+  }
+}
+
 export const stateCachedStorage = (storage: Storage, cache: StateCache): Storage => {
   let batch: { readonly keys: Set<string>; readonly result: Promise<ReadonlyMap<string, StateEntry>> } | null = null
   const lookup = (key: string): Promise<StateEntry | undefined> => {
     if (!batch) {
       const keys = new Set<string>()
       const result = new Promise<ReadonlyMap<string, StateEntry>>((resolve) =>
-        setTimeout(() => {
+        queueMicrotask(() => {
           batch = null
           cache.get([...keys]).then(resolve, () => resolve(new Map()))
-        }, 0),
+        }),
       )
       batch = { keys, result }
     }
@@ -61,6 +91,7 @@ export const stateCachedStorage = (storage: Storage, cache: StateCache): Storage
     head: (key) => storage.head(key),
     put: async (key, body, size, options) => {
       if (!STATE_KEY.test(key)) return storage.put(key, body, size, options)
+      if (cache.lock && cache.release && (options?.ifMatch !== undefined || options?.ifNoneMatch !== undefined)) return lockedPut(storage, { lock: cache.lock, release: cache.release }, key, body, size, options)
       const token = crypto.randomUUID()
       await cache.begin(key, token)
       const text = body instanceof Uint8Array && (options?.ifMatch !== undefined || options?.ifNoneMatch !== undefined) ? textOf(body) : null

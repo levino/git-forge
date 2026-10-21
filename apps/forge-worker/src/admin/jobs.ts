@@ -2,6 +2,18 @@ import { type Database, sha256Hex, sql } from '@git-forge/accounts'
 import { DEFAULT_MAX_ATTEMPTS, PermanentJobError } from '@git-forge/core'
 import type { InstanceSettings } from './settings.ts'
 
+export const RUNNER_HEARTBEAT = 'runner:jobs'
+
+export const RUNNER_STALE_MS = 10 * 60_000
+
+export const runnerHeartbeat = (at: number) =>
+  sql("INSERT INTO jobs (id, queue, payload, attempts, run_at, created_at) VALUES (?, 'runner', '{}', 0, ?, ?) ON CONFLICT (id) DO UPDATE SET run_at = excluded.run_at", RUNNER_HEARTBEAT, at, at)
+
+export const runnerSeenAt = async (db: Database): Promise<number | null> => {
+  const [row] = await db.all<{ run_at: number }>(sql("SELECT run_at FROM jobs WHERE id = ? AND queue = 'runner'", RUNNER_HEARTBEAT))
+  return row ? Number(row.run_at) : null
+}
+
 export type JobFailure = {
   readonly id: string
   readonly kind: string

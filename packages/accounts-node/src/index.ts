@@ -1,17 +1,23 @@
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite'
-import type { Database, Row, RunResult, Statement } from '@git-forge/accounts'
+import type { BatchResult, Database, Row, Statement } from '@git-forge/accounts'
 
 const bind = (statement: Statement): SQLInputValue[] => statement.params as SQLInputValue[]
 
 export const nodeSqliteDatabase = (db: DatabaseSync): Database => {
-  const runSync = (statement: Statement): RunResult => ({ changes: Number(db.prepare(statement.sql).run(...bind(statement)).changes) })
+  const all = (statement: Statement) => db.prepare(statement.sql).all(...bind(statement)) as Row[]
+  const count = (query: string) => Number((db.prepare(query).get() as { n: number }).n)
+  const step = (statement: Statement): BatchResult => {
+    const before = count('SELECT total_changes() AS n')
+    const rows = all(statement)
+    return { changes: count('SELECT total_changes() AS n') === before ? 0 : count('SELECT changes() AS n'), rows }
+  }
   return {
-    all: async <T extends Row>(statement: Statement) => db.prepare(statement.sql).all(...bind(statement)) as T[],
-    run: async (statement) => runSync(statement),
+    all: async <T extends Row>(statement: Statement) => all(statement) as T[],
+    run: async (statement) => ({ changes: Number(db.prepare(statement.sql).run(...bind(statement)).changes) }),
     batch: async (statements) => {
       db.exec('BEGIN IMMEDIATE')
       try {
-        const results = statements.map(runSync)
+        const results = statements.map(step)
         db.exec('COMMIT')
         return results
       } catch (error) {
@@ -19,6 +25,7 @@ export const nodeSqliteDatabase = (db: DatabaseSync): Database => {
         throw error
       }
     },
+    read: async (statements) => statements.map(all),
   }
 }
 

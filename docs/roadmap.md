@@ -84,8 +84,8 @@ discussions.
 - [x] libSQL database adapter (`@git-forge/libsql`, Hrana over HTTP: Bunny Database, Turso, `sqld`); accounts suite and forge-node tested against a local `sqld` (`libsql` CI job); `DATABASE=libsql` in forge-node
 - [x] Conditional writes in the database for buckets without conditional `PutObject` (`lockedStorage`, migration `0062_storage_locks`, `CONDITIONAL_WRITES=database`)
 - [ ] Bunny instance (#13): Magic Containers + Bunny Storage S3 + Bunny Database, guide in `apps/forge-node/README.md`; needs an account for the conformance run, a large push and federation with forge.levinkeller.de
-- [x] Serverless Bunny prototype (`apps/forge-bunny`): one Edge Script with the UI, Bunny Database and Bunny Storage; jobs and schedules run in `waitUntil` of incoming requests; S3 conformance on Bunny Storage passes except conditional `PutObject` (listing skips directory markers)
-- [ ] Bunny serverless out of the box: fewer database round trips per request (read batches in the `Database` interface, merged lock and state writes), Cache API page and object caches on named caches with own-origin keys, a request-independent trigger for schedules, pushes that answer within 60 s
+- [x] Serverless Bunny prototype (`apps/forge-bunny`): one Edge Script with the UI, Bunny Database and Bunny Storage; S3 conformance on Bunny Storage passes except conditional `PutObject` (listing skips directory markers)
+- [x] Bunny serverless out of the box (`apps/forge-bunny/README.md`): read batches in the `Database` interface and a request scope that coalesces and reuses lookups (clone 2–3, pages 1–9, issue 8, push ≈25 subrequests instead of 7–28 and 55–82), merged lock and state writes, Cache API page and object caches on named caches with own-origin keys, `Cache-Control` on every response, pushes that answer within 60 s, one `createWorker` host entry for Cloudflare and Bunny, `git-forge-node jobs` on Magic Containers for queues and schedules (heartbeat on the admin page, edge fallback), `git-forge-bunny.js` in every release
 
 ## M5a — Large pushes
 

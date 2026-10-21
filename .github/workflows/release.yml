@@ -116,6 +116,11 @@ jobs:
         run: sh packages/cli/build-executables.sh "$RUNNER_TEMP/cli"
       - name: Build the git-forge-node executables
         run: sh apps/forge-node/build-executables.sh "$RUNNER_TEMP/node"
+      - name: Build the Bunny Edge Script
+        run: |
+          GIT_FORGE_VERSION=${TAG#v} sh apps/forge-bunny/build.sh
+          mkdir "$RUNNER_TEMP/bunny" && cp apps/forge-bunny/dist/edge.js "$RUNNER_TEMP/bunny/git-forge-bunny.js"
+          (cd "$RUNNER_TEMP/bunny" && sha256sum git-forge-bunny.js >BUNNY-SHA256SUMS)
       - name: Publish release assets
         env:
           GH_TOKEN: ${{ github.token }}
@@ -154,6 +159,8 @@ jobs:
             echo 'The `git-forge-<os>-<arch>` assets are single executables of the `git-forge` CLI (`git forge push`); `CLI-SHA256SUMS` lists their checksums.'
             echo
             echo 'The `git-forge-node-linux-<arch>` assets run an instance without Cloudflare (Raspberry Pi, any Linux server; see `apps/forge-node/README.md`); `NODE-SHA256SUMS` lists their checksums.'
+            echo
+            echo '`git-forge-bunny.js` is the Bunny Edge Script (see `apps/forge-bunny/README.md`); `BUNNY-SHA256SUMS` lists its checksum.'
           } > "$RUNNER_TEMP/notes.md"
           prerelease=""
           case "$version" in *-*) prerelease="--prerelease" ;; esac
@@ -166,6 +173,7 @@ jobs:
             "$RUNNER_TEMP/release/SHA256SUMS" \
             "$RUNNER_TEMP"/cli/* \
             "$RUNNER_TEMP"/node/* \
+            "$RUNNER_TEMP"/bunny/* \
             $verify --title "$TAG" --notes-file "$RUNNER_TEMP/notes.md" $prerelease
 
   image:

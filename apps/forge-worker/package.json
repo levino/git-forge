@@ -9,6 +9,10 @@
     "./config": "./src/config.ts",
     "./mirror-federation": "./src/mirror-federation.ts",
     "./backup": "./src/backup.ts",
+    "./cache-control": "./src/cache-control.ts",
+    "./jobs": "./src/admin/jobs.ts",
+    "./host": "./src/host.ts",
+    "./page-cache": "./src/ui/page-cache.ts",
     "./test/*": "./test/*"
   },
   "scripts": {

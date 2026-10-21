@@ -15,6 +15,7 @@ import {
   type ObjectId,
   type PathReach,
   type ReadView,
+  UPSTREAM_PREFIX,
   visibleRefs,
 } from '@git-forge/core'
 import { type ForkInfo, type Scope } from '@git-forge/collaboration'
@@ -89,7 +90,9 @@ export const openRepository = async (forge: ForgeServices, principal: Principal,
     resolvedFor.set(early, resolved)
     headerData(forge, options.request, principal, early).catch(() => {})
   }
-  const [stored, mirrors] = await Promise.all([readRefs(forge.storage, repo), view ? [] : listMirrors(forge.storage, repo)])
+  const stored = await readRefs(forge.storage, repo)
+  const mirrored = !view && Object.keys(stored?.state.refs ?? {}).some((name) => name.startsWith(UPSTREAM_PREFIX))
+  const mirrors = mirrored ? await listMirrors(forge.storage, repo) : []
   const refs: RefsState = view ? visibleRefs(stored?.state ?? EMPTY_REFS, view) : (stored?.state ?? EMPTY_REFS)
   const named = namedRefs(refs)
   const opened: OpenRepository = {

@@ -1,8 +1,10 @@
 import { generateSigningKey } from '@git-forge/accounts'
 import { serve } from '@git-forge/node'
 import { ACTIONS_CRON, ConfigurationError, generateEs256Key, importEs256Key } from 'forge-worker/config'
+import { cacheControlled } from 'forge-worker/cache-control'
 import { parseCron } from './cron.ts'
 import { createInstance, jsonLog, type Log, migrate, restore, restoreSqlFrom, verify } from './instance.ts'
+import { startRunner } from './runner.ts'
 import { startScheduler } from './scheduler.ts'
 
 declare const GIT_FORGE_VERSION: string | undefined
@@ -13,6 +15,7 @@ const USAGE = `usage: git-forge-node <command>
 
 commands:
   serve          run the forge: HTTP server, job runner and mirror schedule (default)
+  jobs           run only the job queues and the schedules (no HTTP server), next to a serverless edge
   migrate        apply pending database migrations and exit
   instance-key   print a new Ed25519 instance key (private JWK) for INSTANCE_KEY
   oidc-key       print a new P-256 key (private JWK) for ACTIONS_OIDC_KEY
@@ -27,10 +30,46 @@ Configuration comes from environment variables; see the README.`
 
 export type Env = Record<string, string | undefined>
 
+const stopSignal = (log: Log) =>
+  new Promise<void>((resolve) => {
+    const stop = (signal: string) => {
+      log({ event: 'stopping', signal })
+      resolve()
+    }
+    process.once('SIGTERM', () => stop('SIGTERM'))
+    process.once('SIGINT', () => stop('SIGINT'))
+  })
+
+const runJobs = async (env: Env, log: Log): Promise<number> => {
+  const instance = await createInstance(env, { log, jobPolling: true })
+  const { config, forge } = instance
+  const runner = startRunner({
+    db: instance.db,
+    crons: [
+      { id: 'mirror-sync', schedule: config.schedule, task: async (at) => log({ event: 'scheduled', cron: config.schedule.source, at: at.toISOString(), task: 'mirror-sync', runs: await forge.scheduled(at) }) },
+      {
+        id: 'actions',
+        schedule: parseCron(ACTIONS_CRON),
+        task: async (at) => {
+          const tick = await forge.actionsTick()
+          if (tick && (tick.scheduled.length > 0 || Object.values(tick.reaped).some((count) => count > 0))) log({ event: 'scheduled', cron: ACTIONS_CRON, at: at.toISOString(), task: 'actions', scheduled: tick.scheduled.length, reaped: tick.reaped })
+        },
+      },
+    ],
+    onError: (error, cron) => log({ event: 'scheduled', cron, error: error instanceof Error ? error.message : String(error) }),
+  })
+  log({ event: 'jobs', version: VERSION, database: config.database.kind === 'sqlite' ? config.database.path : config.database.url, storage: config.storage.kind, schedule: config.schedule.source, pollSeconds: config.jobPollMs / 1000 })
+  await stopSignal(log)
+  await runner.stop()
+  await instance.close()
+  log({ event: 'stopped' })
+  return 0
+}
+
 const runServe = async (env: Env, log: Log): Promise<number> => {
   const instance = await createInstance(env, { log })
   const { config, forge } = instance
-  const server = await serve(forge.fetch, {
+  const server = await serve(async (request) => cacheControlled(request, await forge.fetch(request)), {
     port: config.port,
     host: config.host,
     trustProxy: config.trustProxy,
@@ -66,14 +105,7 @@ const runServe = async (env: Env, log: Log): Promise<number> => {
     schedule: config.schedule.source,
     nextScheduledRun: scheduler.next()?.toISOString(),
   })
-  await new Promise<void>((resolve) => {
-    const stop = (signal: string) => {
-      log({ event: 'stopping', signal })
-      resolve()
-    }
-    process.once('SIGTERM', () => stop('SIGTERM'))
-    process.once('SIGINT', () => stop('SIGINT'))
-  })
+  await stopSignal(log)
   await Promise.all([server.close(), scheduler.stop(), actions.stop()])
   await instance.close()
   log({ event: 'stopped' })
@@ -90,6 +122,8 @@ export const main = async (args: readonly string[], env: Env = process.env, log:
     switch (command) {
       case 'serve':
         return await runServe(env, log)
+      case 'jobs':
+        return await runJobs(env, log)
       case 'migrate': {
         const applied = await migrate(env)
         log({ event: 'migrated', applied })

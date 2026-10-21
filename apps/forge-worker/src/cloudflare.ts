@@ -1,4 +1,4 @@
-import { createStateCache, MIGRATIONS, migrateOnStart } from '@git-forge/accounts'
+import { createStateCache, MIGRATIONS, migrateOnStart, REMOTE_WINDOW_MS, requestScope, type ScopeState } from '@git-forge/accounts'
 import { cacheApiObjectCache, cacheApiPageCache, consumeJobs, type ContextStorage, createCloudflareEmailSender, type D1Sessions, d1Sessions, type RequestSession, digestStreams, QueueJobs, R2Storage } from '@git-forge/cloudflare'
 import { continueImport, createConsoleEmailSender, type EmailSender, type ImportJob, type ImportScheduler, storagePublisher } from '@git-forge/core'
 import { S3Storage } from '@git-forge/s3'
@@ -40,22 +40,25 @@ let forge: Promise<Forge> | undefined
 
 let sessions: Promise<D1Sessions> | undefined
 
-const contextStorage = async (): Promise<ContextStorage<RequestSession> | null> => {
+const contextStorage = async <T>(): Promise<ContextStorage<T> | null> => {
   try {
-    const { AsyncLocalStorage } = (await import('node:async_hooks')) as { AsyncLocalStorage: new <T>() => ContextStorage<T> }
-    return new AsyncLocalStorage<RequestSession>()
+    const { AsyncLocalStorage } = (await import('node:async_hooks')) as { AsyncLocalStorage: new <S>() => ContextStorage<S> }
+    return new AsyncLocalStorage<T>()
   } catch {
     return null
   }
 }
 
-export const sessionsFor = (env: Env): Promise<D1Sessions> => (sessions ??= contextStorage().then((context) => d1Sessions(env.DB, context)))
+export const sessionsFor = (env: Env): Promise<D1Sessions> => (sessions ??= contextStorage<RequestSession>().then((context) => d1Sessions(env.DB, context)))
 
 export const forgeFor = (env: Env): Promise<Forge> => {
   forge ??= parseSettings(env)
     .then(async (settings) => {
-      const { database, primary } = await sessionsFor(env)
-      await migrateOnStart(primary, MIGRATIONS)
+      const sessions = await sessionsFor(env)
+      await migrateOnStart(sessions.primary, MIGRATIONS)
+      const scope = requestScope(await contextStorage<ScopeState>(), REMOTE_WINDOW_MS)
+      const database = scope.database(sessions.database)
+      const primary = scope.database(sessions.primary)
       const actions = parseActionsSettings(env)
       const secretsKey = await loadSecretsKey(actions, env)
       const idTokenKeys = await loadIdTokenKeys(actions, settings.instanceKey)
@@ -68,6 +71,7 @@ export const forgeFor = (env: Env): Promise<Forge> => {
         pageCache: cacheApiPageCache(PAGE_CACHE_SECONDS),
         stateCache: createStateCache(primary),
         db: database,
+        requestScope: scope,
         digests: digestStreams,
         version: typeof GIT_FORGE_VERSION === 'string' ? GIT_FORGE_VERSION : 'dev',
         location: async (request) => {

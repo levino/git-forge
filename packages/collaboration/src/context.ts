@@ -11,7 +11,9 @@ import {
   type RepositorySubject,
   resolveAccess,
   sql,
+  reused,
 } from '@git-forge/accounts'
+import type { Issue } from './issues.ts'
 import type { DigestFactory, RepositoryName, Storage } from '@git-forge/core'
 import { allowed, type CollaborationSettings, DEFAULT_SETTINGS, type Permission } from './permissions.ts'
 
@@ -70,6 +72,7 @@ export type Activity = {
   readonly before?: string
   readonly after?: string
   readonly deleted?: boolean
+  readonly issue?: Issue
 }
 
 export type ActivityHandler = (scope: Scope, activity: Activity) => Promise<void>
@@ -137,9 +140,10 @@ const knownActor = (principal: Principal, { repository, access }: KnownRepositor
 
 export const resolveActor = async (accounts: AccountsDirectory, principal: Principal, repository: RepositorySubject): Promise<Actor> => {
   if (principal.kind === 'instance') return { principal, access: resolveAccess({ kind: 'anonymous' }, repository), writable: false, ref: null }
-  let access = resolveAccess(principal, repository, await accounts.grantsFor(principal, repository))
+  const [grants, admin] = await Promise.all([accounts.grantsFor(principal, repository), principal.kind === 'user' ? accounts.isInstanceAdmin(principal.id) : false])
+  let access = resolveAccess(principal, repository, grants)
   const limits = principal.kind === 'user' || principal.kind === 'app' ? principal.limits : null
-  if (principal.kind === 'user' && (await accounts.isInstanceAdmin(principal.id))) {
+  if (principal.kind === 'user' && admin) {
     const restricted = limits?.repositoryIds && !limits.repositoryIds.includes(repository.id)
     if (!restricted) access = limits ? minAccess('admin', limits.ceiling) : 'admin'
   }
@@ -156,7 +160,7 @@ type SettingsRow = {
 }
 
 export const readSettings = async (db: Database, repositoryId: string): Promise<CollaborationSettings> => {
-  const row = await first<SettingsRow>(db, sql('SELECT * FROM collaboration_settings WHERE repository_id = ?', repositoryId))
+  const row = await first<SettingsRow>(db, reused(sql('SELECT * FROM collaboration_settings WHERE repository_id = ?', repositoryId)))
   if (!row) return DEFAULT_SETTINGS
   return {
     hasIssues: row.has_issues === 1,

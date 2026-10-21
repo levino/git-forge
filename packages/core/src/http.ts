@@ -1,4 +1,5 @@
-import { readAll, SizeLimitError } from './bytes.ts'
+import { concat as concatBytes, readAll, SizeLimitError, utf8 } from './bytes.ts'
+import { FLUSH, pkt, sideband as sidebandPackets, SIDEBAND_ERROR } from './pktline.ts'
 import { parseRange } from './content.ts'
 import { advertiseReceivePack, type PushOutcome, receivePack, type ReceiveOptions, type RefCheck, type RefPolicy } from './receive-pack.ts'
 import { handleLfsRequest, type LfsHttpOptions } from './lfs-http.ts'
@@ -66,6 +67,10 @@ const DUMB_PATHS = [/^\/HEAD$/, /^\/info\/refs$/, /^\/objects\/info\/packs$/, /^
 const binary = (bytes: Uint8Array): BodyInit => bytes as Uint8Array<ArrayBuffer>
 
 const noCache = { 'Cache-Control': 'no-cache, max-age=0, must-revalidate' }
+
+const KEEPALIVE = utf8('0005\u0001')
+
+const KEEPALIVE_MS = 5_000
 const immutable = { 'Cache-Control': 'public, max-age=31536000, immutable' }
 
 const text = (status: number, body: string, headers: Record<string, string> = {}) =>
@@ -195,12 +200,16 @@ export const handleGitRequest = async (request: Request, options: GitHttpOptions
   const isReceive = service === 'git-receive-pack' || path === '/git-receive-pack'
   const isGitPath = path === '/git-upload-pack' || path === '/git-receive-pack' || DUMB_PATHS.some((pattern) => pattern.test(path))
   if (!isGitPath) return null
+  const early = readRefs(storage, repo)
+  const alternates = isReceive || path === '/git-upload-pack' ? Promise.resolve([]) : alternateRepositories(storage, repo)
+  early.catch(() => undefined)
+  alternates.catch(() => undefined)
   const granted = await options.authorize?.(request, repo, isReceive ? 'write' : 'read', 'git')
   if (granted instanceof Response || (isReceive && granted)) return refusal(granted)!
   const view = granted ?? null
-  const smartOnly = view !== null || (!isReceive && path !== '/git-upload-pack' && (await alternateRepositories(storage, repo)).length > 0)
+  const smartOnly = view !== null || (await alternates).length > 0
   if (smartOnly && path !== '/git-upload-pack' && !(path === '/info/refs' && service === 'git-upload-pack' && isProtocolV2(request))) return text(404, 'not found\n')
-  const refs = await readRefs(storage, repo)
+  const refs = await early
   if (!refs) return text(404, 'repository not found\n')
 
   if (request.method === 'GET' && path === '/info/refs' && service === 'git-receive-pack') {
@@ -237,20 +246,40 @@ export const handleGitRequest = async (request: Request, options: GitHttpOptions
   }
   if (request.method === 'POST' && path === '/git-receive-pack') {
     const pushLimit = options.maxPushBytes ?? options.maxRequestBytes ?? Number.POSITIVE_INFINITY
+    const tooLarge = `push exceeds ${pushLimit} bytes; use Git LFS for large files\n`
+    if (Number(request.headers.get('Content-Length') ?? 0) > pushLimit) return text(413, tooLarge)
     const policy = combinePolicies(options.receive?.policy, await options.pushPolicy?.(request, repo))
-    let received: Awaited<ReturnType<typeof receivePack>>
-    try {
-      received = await receivePack(
-        { ...options.receive, storage, repo, policy, ...(await withCheck(options, request, repo)), beforeUpdate: withLfsCheck(options, repo) },
-        limited(bodyStream(request), pushLimit),
-      )
-    } catch (error) {
-      if (error instanceof SizeLimitError) return text(413, `push exceeds ${pushLimit} bytes; use Git LFS for large files\n`)
-      throw error
+    const receive = { ...options.receive, storage, repo, policy, ...(await withCheck(options, request, repo)), beforeUpdate: withLfsCheck(options, repo) }
+    const output = new TransformStream<Uint8Array, Uint8Array>()
+    const writer = output.writable.getWriter()
+    let sideband = false
+    let keepalive: ReturnType<typeof setInterval> | undefined
+    const respond = async () => {
+      try {
+        const received = await receivePack(
+          {
+            ...receive,
+            onCommands: (capabilities) => {
+              sideband = capabilities.has('side-band-64k')
+              if (sideband) keepalive = setInterval(() => void writer.write(KEEPALIVE).catch(() => undefined), KEEPALIVE_MS)
+            },
+          },
+          limited(bodyStream(request), pushLimit),
+        )
+        clearInterval(keepalive)
+        await writer.write(received.response)
+        if (options.onPush) await options.onPush(repo, received.outcome)
+        await writer.close()
+      } catch (error) {
+        clearInterval(keepalive)
+        const message = error instanceof SizeLimitError ? tooLarge : `${(error as Error).message}\n`
+        await writer.write(sideband ? concatBytes([...sidebandPackets(SIDEBAND_ERROR, utf8(message)), FLUSH]) : concatBytes([pkt(`unpack error ${message}`), FLUSH])).catch(() => undefined)
+        await writer.close().catch(() => undefined)
+        if (!(error instanceof SizeLimitError)) console.error(JSON.stringify({ event: 'receive-pack-failed', repository: `${repo.owner}/${repo.name}`, error: String(error) }))
+      }
     }
-    const { response, outcome } = received
-    if (options.onPush) await options.onPush(repo, outcome)
-    return new Response(binary(response), { headers: { 'Content-Type': 'application/x-git-receive-pack-result', ...noCache } })
+    void respond()
+    return new Response(output.readable, { headers: { 'Content-Type': 'application/x-git-receive-pack-result', ...noCache } })
   }
   return text(405, 'method not allowed\n')
 }

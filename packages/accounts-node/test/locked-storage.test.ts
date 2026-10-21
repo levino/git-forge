@@ -1,5 +1,5 @@
-import { applyMigrations, lockedStorage, MIGRATIONS, sql, StorageLockTimeoutError } from '@git-forge/accounts'
-import { MemoryStorage, type Storage, utf8 } from '@git-forge/core'
+import { applyMigrations, createStateCache, lockedStorage, MIGRATIONS, sql, StorageLockTimeoutError } from '@git-forge/accounts'
+import { fromUtf8, MemoryStorage, readAll, stateCachedStorage, type Storage, utf8 } from '@git-forge/core'
 import { describeStorageConformance } from '@git-forge/core/test/storage-conformance.ts'
 import { makeS3TestStorage, s3TestConfig } from '@git-forge/s3/test/env.ts'
 import { describe, expect, it } from 'vitest'
@@ -43,6 +43,27 @@ describe('lockedStorage', () => {
     await expect(storage.put('refs.json', utf8('{}'), 2, { ifNoneMatch: '*' })).rejects.toThrow(StorageLockTimeoutError)
     clock.now += 1000
     expect((await storage.put('refs.json', utf8('{}'), 2, { ifNoneMatch: '*' })).ok).toBe(true)
+    expect(await db.all(sql('SELECT key FROM storage_locks'))).toEqual([])
+  })
+
+  it('takes the lease for state keys in the state cache and checks the cached etag', async () => {
+    const db = await migrated()
+    const statements: string[] = []
+    const counted = { ...db, batch: (batch: Parameters<typeof db.batch>[0]) => (statements.push('batch'), db.batch(batch)), run: (statement: Parameters<typeof db.run>[0]) => (statements.push('run'), db.run(statement)) }
+    const storage = stateCachedStorage(lockedStorage(ignoringConditions(new MemoryStorage()), db), createStateCache(counted, { locks: {} }))
+    const key = 'repos/a/b/refs.json'
+    expect((await storage.put(key, utf8('v0'), 2, { ifNoneMatch: '*' })).ok).toBe(true)
+    const first = await storage.get(key)
+    statements.length = 0
+    const results = await Promise.all([1, 2, 3].map((i) => storage.put(key, utf8(`v${i}`), 2, { ifMatch: first!.etag })))
+    expect(results.filter((result) => result.ok)).toHaveLength(1)
+    const winner = results.findIndex((result) => result.ok) + 1
+    expect(fromUtf8(await readAll((await storage.get(key))!.body))).toBe(`v${winner}`)
+    expect((await storage.put(key, utf8('v9'), 2, { ifNoneMatch: '*' })).ok).toBe(false)
+    const current = await storage.get(key)
+    statements.length = 0
+    expect((await storage.put(key, utf8('v8'), 2, { ifMatch: current!.etag })).ok).toBe(true)
+    expect(statements).toEqual(['batch', 'batch'])
     expect(await db.all(sql('SELECT key FROM storage_locks'))).toEqual([])
   })
 })

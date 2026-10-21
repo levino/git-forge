@@ -1,7 +1,8 @@
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { mkdir } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import type { DatabaseSync } from 'node:sqlite'
-import { applyMigrations, createStateCache, type Database, lockedStorage, MIGRATIONS, pendingMigrations } from '@git-forge/accounts'
+import { applyMigrations, createStateCache, type Database, lockedStorage, MIGRATIONS, pendingMigrations, REMOTE_WINDOW_MS, requestScope, type ScopeState } from '@git-forge/accounts'
 import { openSqliteDatabase } from '@git-forge/accounts-node'
 import { libsqlDatabase } from '@git-forge/libsql'
 import { continueImport, createConsoleEmailSender, type EmailSender, type FetchFunction, type ImportJob, type JobOutcome, type Storage, storagePublisher } from '@git-forge/core'
@@ -16,6 +17,8 @@ import { type DatabaseConfig, type NodeConfig, type NodeEmailSettings, type Node
 import { createSqliteJobQueue, type SqliteJobQueue } from './jobs.ts'
 
 declare const GIT_FORGE_VERSION: string | undefined
+
+export const JOB_MIN_POLL_MS = 2_000
 
 export type Log = (event: Record<string, unknown>) => void
 
@@ -36,6 +39,7 @@ export type InstanceOverrides = {
   readonly email?: EmailSender
   readonly jobLeaseMs?: number
   readonly jobDelayMs?: (seconds: number) => number
+  readonly jobPolling?: boolean
 }
 
 export class PendingMigrationsError extends ConfigurationError {
@@ -127,7 +131,9 @@ export const createInstance = async (vars: NodeVars, overrides: InstanceOverride
   const actions = parseActionsSettings(vars)
   const secretsKey = await loadSecretsKey(actions, vars)
   const idTokenKeys = await loadIdTokenKeys(actions, settings.instanceKey)
-  const { db, close: closeDatabase } = await openDatabase(config.database)
+  const { db: opened, close: closeDatabase } = await openDatabase(config.database)
+  const scope = requestScope(new AsyncLocalStorage<ScopeState>(), config.database.kind === 'libsql' ? REMOTE_WINDOW_MS : 0)
+  const db = scope.database(opened)
   try {
     const pending = await pendingMigrations(db, MIGRATIONS)
     if (pending.length > 0) throw new PendingMigrationsError(pending)
@@ -143,6 +149,7 @@ export const createInstance = async (vars: NodeVars, overrides: InstanceOverride
     onError: (error: unknown) => log({ event: 'error', error: error instanceof Error ? error.stack : String(error) }),
     ...(overrides.jobLeaseMs ? { leaseMs: overrides.jobLeaseMs } : {}),
     ...(overrides.jobDelayMs ? { delayMs: overrides.jobDelayMs } : {}),
+    ...(overrides.jobPolling ? { minPollMs: JOB_MIN_POLL_MS, pollMs: config.jobPollMs } : {}),
   }
   const jobs = createSqliteJobQueue<AppJob>({
     ...queueOptions,
@@ -176,7 +183,8 @@ export const createInstance = async (vars: NodeVars, overrides: InstanceOverride
     ...(email ? { email } : {}),
     storage,
     db,
-    stateCache: createStateCache(db),
+    stateCache: createStateCache(db, config.conditionalWrites === 'database' ? { locks: {} } : {}),
+    requestScope: scope,
     digests: nodeDigests,
     version: typeof GIT_FORGE_VERSION === 'string' ? GIT_FORGE_VERSION : 'dev',
     ...(secretsKey ? { secretsKey } : {}),

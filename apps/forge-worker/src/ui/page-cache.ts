@@ -1,4 +1,5 @@
-import { cookieNames, type Principal, sha256Hex } from '@git-forge/accounts'
+import { type Principal, sha256Hex } from '@git-forge/accounts'
+import { isAnonymousRequest } from '../cache-control.ts'
 import { isValidName, readRefs } from '@git-forge/core'
 import type { ForgeServices } from '../app.ts'
 import { accessFor } from './repository.ts'
@@ -17,14 +18,6 @@ export const cacheablePath = (pathname: string): { readonly owner: string; reado
   if (empty !== '' || !owner || !name || !isValidName(owner) || !isValidName(name)) return null
   if (section === undefined) return { owner, name }
   return SECTIONS.has(section) && !(next !== undefined && FORMS.has(next)) ? { owner, name } : null
-}
-
-const SESSION_COOKIES = [cookieNames(true).session, cookieNames(false).session]
-
-export const isAnonymousRequest = (request: Request): boolean => {
-  if (request.headers.has('Authorization')) return false
-  const cookies = (request.headers.get('Cookie') ?? '').split(';').map((part) => part.trim().split('=', 1)[0])
-  return !cookies.some((name) => SESSION_COOKIES.includes(name!))
 }
 
 const isStorable = (response: Response): boolean =>

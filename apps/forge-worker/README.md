@@ -159,7 +159,7 @@ There is no global "public read" switch any more.
 | `POST /api/admin/invites` `{login?, user?, email?, expiresInDays?}` | instance admin | Invite for a new account (`login` fixed or chosen by the invitee) or for an existing `user` (to add a passkey or link OIDC). Returns `{code, url, expiresAt, emailed}`; the URL is `/login/invite/{code}`, valid once, 7 days by default. With `email` and a provider the link is also emailed. |
 | `POST /api/admin/scim/tokens` `{name?}` | instance admin | Token with the sole scope `scim` for `/scim/v2` (`MEMBERSHIP_SOURCE=idp`); revoked like any personal access token. Returns `{id, token}`. |
 | `POST /api/admin/email/test` `{to?}` | instance admin | Sends a test email to `to` or the admin's address. Returns `{id}`; `422` without a provider or when the provider rejects it. |
-| `GET /api/user` | token or session | The authenticated user: `{id, login, admin, via, ceiling}`. |
+| `GET /api/user` | token or session | The authenticated user: `{id, login, admin, via, ceiling, agent}`; `agent` names the agent connection that issued the token, else `null`. |
 | `GET /api/health` | anyone | `{"ok": true}` |
 
 Instance admins count as admins of every repository.
@@ -266,6 +266,34 @@ When OIDC is down, sign a token for an existing instance admin (valid at most
 pnpm --filter forge-worker break-glass sign --key break-glass.private.jwk \
   --url https://forge.example --login alice
 ```
+
+## Agents (MCP)
+
+Agents sign in once through OAuth and then fetch short-lived tokens with an MCP
+tool, so nobody pastes a token (design §8, *Agent connections*):
+
+```sh
+claude mcp add --transport http forge https://<instance>/mcp
+```
+
+Then `/mcp` in Claude Code (or `claude mcp login forge`) opens the consent
+page; sign in as usual, choose the access, optionally a name and repositories.
+Codex, Cursor and other clients with remote MCP and OAuth work the same way.
+The agent calls `token` with `scope` (`repo:read`, `repo:write`, `repo:admin`),
+optional `repositories` (`owner/name`) and `ttl_minutes` (default 60, at most
+1440) and uses the result as Git password (any user name) or as `Bearer`
+token for the API; `whoami` shows the connection. "Connected agents" in
+`/settings` lists connections and disconnects them, which revokes every token
+they issued immediately.
+
+| Route | Purpose |
+|---|---|
+| `POST /mcp` | MCP Streamable HTTP (JSON responses, no sessions); needs a `gfm_` access token, otherwise `401` with `resource_metadata`. |
+| `GET /.well-known/oauth-protected-resource[/mcp]` | RFC 9728 metadata. |
+| `GET /.well-known/oauth-authorization-server` | RFC 8414 metadata. |
+| `POST /login/oauth/register` | RFC 7591 dynamic client registration (public clients). |
+| `GET\|POST /login/oauth/authorize` | Authorization code with PKCE `S256` and `resource`; consent page. |
+| `POST /login/oauth/token` | `authorization_code` and `refresh_token` (rotating); one-hour access tokens. |
 
 ## Media and raw URLs
 
@@ -716,6 +744,12 @@ argument.
   once.
 - `test/browser/cli-login.spec.ts`: CLI consent in Chromium (code page,
   loopback redirect under the CSP).
+- `test/unit/agents.test.ts` drives agent connections through `createForge`:
+  metadata, DCR, consent with PKCE, both MCP protocol eras, the `token` tool
+  clamped to the grant, audiences, refresh rotation and replay, revocation and
+  expiry; `test/e2e/agents.e2e.test.ts` does the same on `wrangler dev` and
+  pushes with plain `git`; `test/browser/agent-consent.spec.ts` approves in
+  Chromium under the CSP and disconnects in the settings.
 - `test/unit/events.test.ts` pushes with
   the real `git` client into a forge without a job queue and checks the push
   webhook (commits read from the object database), watcher notifications and

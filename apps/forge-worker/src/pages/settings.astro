@@ -24,7 +24,14 @@ Astro.response.headers.set('Cache-Control', 'no-store')
 const user = session.principal
 const methods = await forge.loginMethods()
 const passkeysEnabled = methods.passkeys
-const [tokens, passkeys, identities, sessions] = await Promise.all([forge.account.listTokens(user), passkeysEnabled ? forge.account.listPasskeys(user) : [], forge.account.listIdentities(user), forge.account.listSessions(user)])
+const [tokens, passkeys, identities, sessions, agents] = await Promise.all([
+  forge.account.listTokens(user),
+  passkeysEnabled ? forge.account.listPasskeys(user) : [],
+  forge.account.listIdentities(user),
+  forge.account.listSessions(user),
+  forge.account.listAgents(user),
+])
+const mcpUrl = `${forge.issuer(Astro.request).replace(/\/+$/, '')}/mcp`
 const oidcName = methods.oidcName
 const day = (ms: number | null) => (ms === null ? 'never' : isoTime(Math.floor(ms / 1000)).slice(0, 10))
 const configJson = JSON.stringify({ returnTo: '/settings', csrf: session.csrf }).replace(/</g, '\\u003c')
@@ -50,6 +57,7 @@ const configJson = JSON.stringify({ returnTo: '/settings', csrf: session.csrf })
   {result?.kind === 'passkey-removed' && <div role="status" class="alert alert-success mb-6">Passkey removed.</div>}
   {result?.kind === 'identity-unlinked' && <div role="status" class="alert alert-success mb-6">Account unlinked.</div>}
   {result?.kind === 'session-revoked' && <div role="status" class="alert alert-success mb-6">Session ended.</div>}
+  {result?.kind === 'agent-revoked' && <div role="status" class="alert alert-success mb-6">Agent disconnected; its tokens stopped working.</div>}
   {result?.kind === 'renamed' && <div role="status" class="alert alert-success mb-6">Your account is now {result.login}.</div>}
   {result?.kind === 'error' && <div role="alert" class="alert alert-error mb-6">{result.message}</div>}
 
@@ -184,6 +192,37 @@ const configJson = JSON.stringify({ returnTo: '/settings', csrf: session.csrf })
         <a class="btn btn-sm self-start" href={`/login/oidc?link=1&return_to=${encodeURIComponent('/settings')}`}>
           Link a {oidcName} account
         </a>
+      )
+    }
+  </section>
+
+  <section class="panel" aria-labelledby="agents">
+    <h2 id="agents" class="panel-title">Connected agents</h2>
+    <p class="text-base-content/70">
+      Agents connected through <code class="font-mono">{mcpUrl}</code> get short-lived tokens with at most the access shown. Add it with
+      <code class="font-mono">claude mcp add --transport http forge {mcpUrl}</code>.
+    </p>
+    {
+      agents.length > 0 && (
+        <ul class="border border-base-300 rounded-box divide-y divide-base-300">
+          {agents.map((agent) => (
+            <li class="flex flex-wrap items-center gap-3 px-4 py-3">
+              <span class="font-semibold">{agent.name}</span>
+              <span class="text-sm text-base-content/70">{agent.clientName}, returns to {agent.redirectHost}</span>
+              <span class="font-mono text-xs">{agent.scope}</span>
+              <span class="text-sm text-base-content/70">
+                {agent.repositoryIds === null ? 'all repositories' : `${agent.repositoryIds.length} repositories`}, connected {day(agent.createdAt)}, last used {day(agent.lastUsedAt)},
+                {' '}{agent.activeTokens} active tokens
+              </span>
+              <form method="post" class="ml-auto">
+                <input type="hidden" name="csrf" value={session.csrf} />
+                <input type="hidden" name="action" value="revoke-agent" />
+                <input type="hidden" name="id" value={agent.id} />
+                <button class="btn btn-xs btn-error btn-outline" aria-label={`Disconnect ${agent.name}`}>Disconnect</button>
+              </form>
+            </li>
+          ))}
+        </ul>
       )
     }
   </section>

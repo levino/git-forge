@@ -282,7 +282,7 @@ const render = async (store: ProtectionStore, rule: BranchProtectionRule, url: s
 export const protectionAuditActor = (principal: Principal): AuditActor => {
   switch (principal.kind) {
     case 'user':
-      return { kind: 'user', id: principal.id }
+      return principal.via ? { kind: 'user', id: principal.id, via: principal.via.connectionId } : { kind: 'user', id: principal.id }
     case 'app':
       return { kind: 'app', id: principal.id }
     case 'instance':

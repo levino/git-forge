@@ -29,7 +29,7 @@ import {
 
 export type AuditActor =
   | { readonly kind: 'system' }
-  | { readonly kind: 'user'; readonly id: string }
+  | { readonly kind: 'user'; readonly id: string; readonly via?: string }
   | { readonly kind: 'app'; readonly id: string }
   | { readonly kind: 'instance'; readonly id: string }
 
@@ -92,6 +92,7 @@ export type TokenOptions = {
   readonly repositoryIds?: readonly string[] | null
   readonly installationId?: number | null
   readonly permissions?: Readonly<Record<string, string>> | null
+  readonly connectionId?: string | null
 }
 
 export type AccountsStoreOptions = {
@@ -128,6 +129,8 @@ type TokenRow = {
   app_disabled_at: number | null
   installation_id: number | null
   permissions: string | null
+  connection_id: string | null
+  connection_name: string | null
 }
 
 type GrantRow = { source: 'organization' | 'collaborator' | 'team'; role: string }
@@ -307,7 +310,7 @@ export const auditStatement = (actor: AuditActor, entry: AuditInput, at: number)
     entry.subjectKind ?? null,
     entry.subjectId ?? null,
     entry.repositoryId ?? null,
-    JSON.stringify(entry.data ?? {}),
+    JSON.stringify(actor.kind === 'user' && actor.via ? { ...entry.data, via: actor.via } : (entry.data ?? {})),
   )
 
 export const createAccountsStore = (db: Database, options: AccountsStoreOptions = {}) => {
@@ -370,11 +373,11 @@ export const createAccountsStore = (db: Database, options: AccountsStoreOptions 
         action: `token.create`,
         subjectKind: 'token',
         subjectId: id,
-        data: { kind, owner: ownerId, name: options.name, scopes, expiresAt: options.expiresAt, repositoryIds: options.repositoryIds ?? null },
+        data: { kind, owner: ownerId, name: options.name, scopes, expiresAt: options.expiresAt, repositoryIds: options.repositoryIds ?? null, ...(options.connectionId ? { connectionId: options.connectionId } : {}) },
       },
       [
         sql(
-          `INSERT INTO tokens (id, kind, ${ownerColumn}, name, token_hash, display_prefix, scopes, repository_ids, created_at, expires_at, installation_id, permissions) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO tokens (id, kind, ${ownerColumn}, name, token_hash, display_prefix, scopes, repository_ids, created_at, expires_at, installation_id, permissions, connection_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           id,
           kind,
           ownerId,
@@ -387,6 +390,7 @@ export const createAccountsStore = (db: Database, options: AccountsStoreOptions 
           options.expiresAt,
           options.installationId ?? null,
           options.permissions ? JSON.stringify(options.permissions) : null,
+          options.connectionId ?? null,
         ),
       ],
     )
@@ -1054,7 +1058,7 @@ export const createAccountsStore = (db: Database, options: AccountsStoreOptions 
       (
         await db.all<{ id: string; name: string; display_prefix: string; scopes: string; created_at: number; expires_at: number | null; last_used_at: number | null; revoked_at: number | null }>(
           'accountId' in owner
-            ? sql('SELECT id, name, display_prefix, scopes, created_at, expires_at, last_used_at, revoked_at FROM tokens WHERE account_id = ? ORDER BY created_at', owner.accountId)
+            ? sql('SELECT id, name, display_prefix, scopes, created_at, expires_at, last_used_at, revoked_at FROM tokens WHERE account_id = ? AND connection_id IS NULL ORDER BY created_at', owner.accountId)
             : sql('SELECT id, name, display_prefix, scopes, created_at, expires_at, last_used_at, revoked_at FROM tokens WHERE app_id = ? ORDER BY created_at', owner.appId),
         )
       ).map((row) => ({
@@ -1074,9 +1078,9 @@ export const createAccountsStore = (db: Database, options: AccountsStoreOptions 
       const row = await first<TokenRow>(
         db,
         sql(
-          `SELECT t.id, t.kind, t.account_id, t.app_id, t.scopes, t.repository_ids, t.expires_at, t.revoked_at, t.last_used_at, t.installation_id, t.permissions,
+          `SELECT t.id, t.kind, t.account_id, t.app_id, t.scopes, t.repository_ids, t.expires_at, t.revoked_at, t.last_used_at, t.installation_id, t.permissions, t.connection_id, c.name AS connection_name,
                   a.login, a.disabled_at AS account_disabled_at, ap.slug, ap.disabled_at AS app_disabled_at
-           FROM tokens t LEFT JOIN accounts a ON a.id = t.account_id LEFT JOIN apps ap ON ap.id = t.app_id
+           FROM tokens t LEFT JOIN accounts a ON a.id = t.account_id LEFT JOIN apps ap ON ap.id = t.app_id LEFT JOIN agent_connections c ON c.id = t.connection_id AND c.revoked_at IS NULL
            WHERE t.token_hash = ?`,
           await hashToken(token),
         ),
@@ -1089,7 +1093,9 @@ export const createAccountsStore = (db: Database, options: AccountsStoreOptions 
         repositoryIds: row.repository_ids ? (JSON.parse(row.repository_ids) as string[]) : null,
       }
       if (row.kind === 'personal' && row.account_id && row.login && row.account_disabled_at === null) {
-        return { kind: 'user', id: row.account_id, login: row.login, limits, tokenId: row.id }
+        if (row.connection_id === null) return { kind: 'user', id: row.account_id, login: row.login, limits, tokenId: row.id }
+        if (row.connection_name === null) return null
+        return { kind: 'user', id: row.account_id, login: row.login, limits, tokenId: row.id, via: { connectionId: row.connection_id, name: row.connection_name } }
       }
       if (row.kind === 'app' && row.app_id && row.slug && row.app_disabled_at === null) {
         if (row.installation_id === null) return { kind: 'app', id: row.app_id, slug: row.slug, limits, tokenId: row.id }

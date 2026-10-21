@@ -55,6 +55,9 @@ import {
   createAccountsStore,
   createAppsStore,
   createMirrorVerificationStore,
+  createAgentHandler,
+  createAgentStore,
+  type AgentConnectionSummary,
   createLoginHandler,
   createLoginStore,
   createOidcProvider,
@@ -509,6 +512,8 @@ export type AccountOperations = {
   readonly unlinkIdentity: (user: UserPrincipal, issuer: string, subject: string) => Promise<boolean>
   readonly listSessions: (user: UserPrincipal) => ReturnType<LoginStore['listSessions']>
   readonly revokeSession: (user: UserPrincipal, id: string) => Promise<boolean>
+  readonly listAgents: (user: UserPrincipal) => Promise<AgentConnectionSummary[]>
+  readonly revokeAgent: (user: UserPrincipal, id: string) => Promise<boolean>
 }
 
 export type RepositoryAccess = {
@@ -619,6 +624,7 @@ export const createForge = (options: ForgeOptions): Forge => {
   const verification = createMirrorVerificationStore(db, { now: () => now().getTime() })
   const mirrorSecrets = createMirrorSecrets(db, options.secretsKey ?? options.actions?.secretsKey, () => now().getTime())
   const logins = createLoginStore(db, { now: () => now().getTime() })
+  const agents = createAgentStore(db, { now: () => now().getTime() })
   const outbound = (input: string, init?: RequestInit) => (options.fetch ? options.fetch(new Request(input, init)) : fetch(input, init))
   const remotePolicy = { allowPrivateHosts: options.allowPrivateRemotes ?? false }
   const remoteFetch = outboundFetch({ ...remotePolicy, ...(options.fetch ? { fetch: options.fetch } : {}) })
@@ -1015,7 +1021,7 @@ export const createForge = (options: ForgeOptions): Forge => {
     const principal = await principalOf(request)
     if (principal.kind !== 'user') throw new HttpError(401, 'authentication required', { 'WWW-Authenticate': 'Bearer' })
     const via = request.headers.has('Authorization') ? 'token' : 'session'
-    return json(200, { id: principal.id, login: principal.login, admin: await store.isInstanceAdmin(principal.id), via, ceiling: principal.limits?.ceiling ?? null })
+    return json(200, { id: principal.id, login: principal.login, admin: await store.isInstanceAdmin(principal.id), via, ceiling: principal.limits?.ceiling ?? null, agent: principal.via?.name ?? null })
   }
 
   const sendInviteEmail = async (sender: EmailSender, to: string, url: string, days: number): Promise<boolean> => {
@@ -2423,7 +2429,15 @@ export const createForge = (options: ForgeOptions): Forge => {
     if (wellKnown) return wellKnown
     const federated = federation ? await handleFederationRequest(federation, request) : null
     if (federated) return federated
-    const login = await createLoginHandler((await loginOptions(request)))(request)
+    const loginHttp = await loginOptions(request)
+    const agent = await createAgentHandler({
+      login: loginHttp,
+      agents,
+      version: options.version ?? 'dev',
+      canRead: async (principal, repository) => (await repositoryAccess(principal, repository, 'read')).decision === 'allow',
+    })(request)
+    if (agent) return agent
+    const login = await createLoginHandler(loginHttp)(request)
     if (login) return login
     const scim = await createScimHandler({
       db,
@@ -2597,6 +2611,8 @@ export const createForge = (options: ForgeOptions): Forge => {
         },
         listSessions: (user) => logins.listSessions(user.id),
         revokeSession: (user, id) => logins.revokeUserSession(user.id, id),
+        listAgents: (user) => agents.listConnections(user.id),
+        revokeAgent: (user, id) => agents.revokeConnection(user.id, id),
       },
       organizations,
       instance,
@@ -2645,6 +2661,8 @@ export const createForge = (options: ForgeOptions): Forge => {
       console.log(JSON.stringify({ event: 'notification-sweep', ...sweep }))
       const purged = await logins.purgeExpired().catch((error: unknown) => ({ error: String(error) }))
       console.log(JSON.stringify({ event: 'login-purge', ...purged }))
+      const purgedAgents = await agents.purgeExpired().catch((error: unknown) => ({ error: String(error) }))
+      console.log(JSON.stringify({ event: 'agent-purge', ...purgedAgents }))
       if (options.backup) {
         const backup = await startBackup(db, at)
           .then(async (state) => (await scheduleBackup(), { run: state.run?.id }))

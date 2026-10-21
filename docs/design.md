@@ -1061,7 +1061,7 @@ database.
 | Object storage | R2 | any S3 with conditional writes: Hetzner, B2, OVH, IONOS, self-hosted (versitygw, RustFS); S3 without them (Bunny Storage) through `lockedStorage`; a local directory |
 | Database | D1 / SQLite in Durable Objects | libSQL over Hrana HTTP (`@git-forge/libsql`: Bunny Database, Turso, `sqld`), SQLite file (Pi) |
 | Per-repository consistency | Durable Object | conditional writes (S3 CAS), per-key leases in the database (`lockedStorage`), single-writer process |
-| Scheduling, jobs | Cron Triggers, Queues (Workflows for long jobs) | `Deno.cron`, systemd timers, job table, in-process queue |
+| Scheduling, jobs | Cron Triggers, Queues (Workflows for long jobs) | `Deno.cron`, systemd timers, job table, in-process queue, job table drained in `waitUntil` of incoming requests (Bunny Edge Scripting, `apps/forge-bunny`) |
 | Public LFS bucket (`LfsPublisher`) | second R2 bucket (`CDN_BUCKET`) | any `Storage`: S3 bucket, local directory (`LFS_PUBLISH_DIR`) |
 | Backup target (§19) | second R2 bucket (`BACKUP`) with a bucket lock | any `Storage` (`BACKUP_STORAGE`): S3 bucket with Object Lock, local directory |
 | Read replicas, page cache | D1 Sessions API (`d1Sessions`), Cache API (`cacheApiPageCache`) | none (Node reads one SQLite file) |

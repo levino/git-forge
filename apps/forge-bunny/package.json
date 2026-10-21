@@ -1,0 +1,27 @@
+{
+  "name": "forge-bunny",
+  "version": "0.0.0",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "build": "sh build.sh",
+    "deploy": "sh deploy.sh",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@git-forge/accounts": "workspace:*",
+    "@git-forge/core": "workspace:*",
+    "@git-forge/libsql": "workspace:*",
+    "@git-forge/node": "workspace:*",
+    "@git-forge/s3": "workspace:*",
+    "@git-forge/ses": "workspace:*",
+    "forge-node": "workspace:*",
+    "forge-worker": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.5",
+    "esbuild": "0.28.2",
+    "typescript": "6.0.3"
+  }
+}

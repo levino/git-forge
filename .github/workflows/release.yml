@@ -20,7 +20,7 @@ concurrency:
 
 jobs:
   prepare:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       tag: ${{ steps.tag.outputs.tag }}
     steps:
@@ -46,7 +46,7 @@ jobs:
   runner:
     needs: prepare
     if: needs.prepare.outputs.tag != ''
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
       contents: read
@@ -92,7 +92,7 @@ jobs:
   release:
     needs: [prepare, runner]
     if: needs.prepare.outputs.tag != ''
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     outputs:
       sha256: ${{ steps.build.outputs.sha256 }}
@@ -178,7 +178,7 @@ jobs:
 
   image:
     needs: [prepare, release]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
       contents: read
@@ -224,7 +224,7 @@ jobs:
   pin-template:
     needs: [prepare, runner, release]
     if: ${{ !contains(needs.prepare.outputs.tag, '-') }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       TAG: ${{ needs.prepare.outputs.tag }}
       SHA256: ${{ needs.release.outputs.sha256 }}

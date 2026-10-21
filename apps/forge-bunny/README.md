@@ -46,8 +46,10 @@ settings) and a release `V` of git-forge (`git-forge-bunny.js` and the
    code and publish it:
 
    ```sh
-   curl -fsSLO https://github.com/levino/git-forge/releases/download/v$V/git-forge-bunny.js
-   BUNNY_API_KEY=… BUNNY_SCRIPT_ID=<id> sh deploy.sh git-forge-bunny.js
+   curl -fsSLO https://github.com/levino/git-forge/releases/download/v$V/git-forge-bunny.js -fsSLO https://github.com/levino/git-forge/releases/download/v$V/BUNNY-SHA256SUMS
+   sha256sum -c BUNNY-SHA256SUMS
+   jq -Rs '{Code: .}' git-forge-bunny.js | curl -fsS -X POST -H "AccessKey: $BUNNY_API_KEY" -H 'content-type: application/json' --data-binary @- https://api.bunny.net/compute/script/$BUNNY_SCRIPT_ID/code
+   curl -fsS -X POST -H "AccessKey: $BUNNY_API_KEY" -H 'content-type: application/json' -d '{}' https://api.bunny.net/compute/script/$BUNNY_SCRIPT_ID/publish
    ```
 
 5. **Pull zone.** Under Caching set "Cache expiration time" to "Respect

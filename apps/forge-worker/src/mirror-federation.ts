@@ -1,11 +1,10 @@
 import {
   ATTESTATIONS_PATH,
   authorizeSubscription,
-  createInstanceVerifier,
+  type FederationInstallationStore,
   type InstancePrincipal,
   isMirrorOf,
   type JwksSource,
-  mintInstanceToken,
   mintMirrorNotification,
   type MirrorVerificationStore,
   NOTIFICATION_MEDIA_TYPE,
@@ -40,7 +39,7 @@ import {
   visibleRefs,
 } from '@git-forge/core'
 import { handleAttestation, type InstanceRead, recordChecksums, runSpotCheck, sendAttestation } from './mirror-verification.ts'
-import { type MirrorContext, mirrorUnitOptions, runMirrorSync, type ScheduledMirrorRun } from './mirrors.ts'
+import { type MirrorContext, mirrorAuthorization, mirrorUnitOptions, runMirrorSync, type ScheduledMirrorRun } from './mirrors.ts'
 
 export type ForgeJob =
   | { readonly kind: 'mirror-sync'; readonly repository: string; readonly remote: string; readonly reason: 'notification' | 'schedule' | 'configure' | 'units' | 'webhook' | 'continue' }
@@ -56,6 +55,9 @@ export type MirrorFederation = MirrorContext & {
   readonly issuer: string
   readonly instanceKey: SigningKey
   readonly jwks: JwksSource
+  readonly openJwks: JwksSource
+  readonly installations: FederationInstallationStore
+  readonly verifyToken: (token: string) => Promise<InstancePrincipal | null>
   readonly jobs: JobQueue<ForgeJob>
   readonly verification: MirrorVerificationStore
   readonly canRead: (principal: InstancePrincipal, repo: RepositoryName) => Promise<InstanceRead>
@@ -107,11 +109,13 @@ export const notifyAfterPush =
 
 const deliverNotification = async (federation: MirrorFederation, job: Extract<ForgeJob, { kind: 'mirror-notify' }>): Promise<void> => {
   const subscriptions = await federation.store.mirrorSubscriptions(job.repository)
-  if (!subscriptions.some((subscription) => subscription.issuer === job.issuer && subscription.callback === job.callback)) return
+  const subscription = subscriptions.find((candidate) => candidate.issuer === job.issuer && candidate.callback === job.callback)
+  if (!subscription) return
   const repo = repositoryOf(job.repository)
   const refs = await readRefs(federation.storage, repo)
   if (!refs) throw new PermanentJobError(`repository ${job.repository} not found`)
-  const read = await federation.canRead({ kind: 'instance', issuer: job.issuer, repositories: [job.repository], scopes: ['git:read'], tokenId: '' }, repo)
+  const principal: InstancePrincipal = { kind: 'instance', issuer: job.issuer, repositories: [job.repository.toLowerCase()], scopes: ['git:read'], tokenId: '' }
+  const read = await federation.canRead(subscription.installation ? { ...principal, installation: subscription.installation } : principal, repo)
   if (!read) throw new PermanentJobError(`${job.issuer} may no longer read ${job.repository}`)
   const token = await mintMirrorNotification({
     key: federation.instanceKey,
@@ -175,14 +179,13 @@ const mirrorConfigOf = async (federation: MirrorFederation, repository: string, 
 
 const subscribeUpstream = async (federation: MirrorFederation, repo: RepositoryName, remote: string): Promise<void> => {
   const config = await readMirrorConfig(federation.storage, repo, remote)
-  if (!config || config.detachedAt || config.auth !== 'instance') return
+  if (!config || config.detachedAt || (config.auth !== 'instance' && config.auth !== 'installation')) return
   const upstream = upstreamOf(config)
-  const token = await mintInstanceToken({ key: federation.instanceKey, issuer: federation.issuer, audience: upstream.issuer, repositories: [upstream.repository] })
   const response = await send(
     federation,
     new Request(`${upstream.issuer}${SUBSCRIPTIONS_PATH}`, {
       method: 'POST',
-      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      headers: { Authorization: (await mirrorAuthorization(federation, config, repo)!()) ?? '', 'Content-Type': 'application/json' },
       body: JSON.stringify({ repository: upstream.repository, callback: notifyCallback(federation, repo, remote) }),
     }),
   )
@@ -226,7 +229,7 @@ export const runJob = async (federation: MirrorFederation, job: ForgeJob): Promi
 }
 
 export const enqueueMirrorSetup = async (federation: MirrorFederation, repo: RepositoryName, config: MirrorConfig): Promise<void> => {
-  if (config.auth === 'instance') await federation.jobs.enqueue({ kind: 'mirror-subscribe', repository: nameOf(repo), remote: config.remote })
+  if (config.auth === 'instance' || config.auth === 'installation') await federation.jobs.enqueue({ kind: 'mirror-subscribe', repository: nameOf(repo), remote: config.remote })
   if (config.mode === 'auto') await federation.jobs.enqueue({ kind: 'mirror-sync', repository: nameOf(repo), remote: config.remote, reason: 'configure' })
 }
 
@@ -266,9 +269,8 @@ const readText = async (request: Request, limit: number): Promise<string | null>
 const handleSubscription = async (federation: MirrorFederation, request: Request): Promise<Response> => {
   if (request.method !== 'POST' && request.method !== 'DELETE') return json(405, { error: 'method not allowed' })
   const token = bearer(request)
-  const verify = createInstanceVerifier({ audience: federation.issuer, trust: federation.store.lookupTrustedIssuer, jwks: federation.jwks })
-  const principal = token ? await verify(token) : null
-  if (!principal) return json(401, { error: 'a valid instance token of a trusted instance is required' })
+  const principal = token ? await federation.verifyToken(token) : null
+  if (!principal) return json(401, { error: 'a valid instance token of a trusted instance or an installation is required' })
   const text = await readText(request, 16 * 1024)
   if (text === null) return json(413, { error: 'request body too large' })
   let body: { repository?: unknown; callback?: unknown }
@@ -283,6 +285,14 @@ const handleSubscription = async (federation: MirrorFederation, request: Request
   const repo = repositoryOf(body.repository)
   if (!(await readRefs(federation.storage, repo)) || !(await federation.canRead(principal, repo))) return json(404, { error: 'repository not found' })
   const subscription = { issuer: principal.issuer, repository: body.repository, callback: body.callback }
+  const { installation } = principal
+  if (installation) {
+    if (request.method === 'DELETE') {
+      return (await federation.installations.unsubscribe(installation.id, body.repository, body.callback)) ? new Response(null, { status: 204 }) : json(404, { error: 'no such subscription' })
+    }
+    await federation.installations.subscribe(installation.id, body.repository, body.callback)
+    return json(201, { ...subscription, repository: body.repository.toLowerCase(), installation: installation.id })
+  }
   if (request.method === 'DELETE') {
     return (await federation.store.unsubscribeMirror(subscription, { kind: 'instance', id: principal.issuer }))
       ? new Response(null, { status: 204 })
@@ -301,7 +311,11 @@ const handleNotification = async (federation: MirrorFederation, request: Request
   if (!match || !isValidName(owner) || !isValidName(name) || !isValidName(remote)) return json(404, { error: 'not found' })
   const token = (await readText(request, 256 * 1024))?.trim()
   if (!token) return json(400, { error: 'expected a signed notification' })
-  const verified = await verifyMirrorNotification(token, { audience: federation.issuer, trust: federation.store.lookupTrustedIssuer, jwks: federation.jwks })
+  const trusted = await verifyMirrorNotification(token, { audience: federation.issuer, trust: federation.store.lookupTrustedIssuer, jwks: federation.jwks })
+  const verified =
+    trusted.ok || trusted.reason !== 'unknown-issuer'
+      ? trusted
+      : await verifyMirrorNotification(token, { audience: federation.issuer, trust: federation.installations.connectedIssuer, jwks: federation.openJwks })
   if (!verified.ok) return json(401, { error: `notification rejected: ${verified.reason}` })
   const { notification } = verified
   const repo = { owner, name }

@@ -298,7 +298,7 @@ const failed = (reason: VerifyFailure, detail?: string): FederationTokenCheck =>
 export const verifyFederationToken = async (
   token: string,
   options: VerifyInstanceTokenOptions,
-  subject: string,
+  subject: string | ((sub: unknown) => boolean),
   validate: (payload: Record<string, unknown>) => string | null,
 ): Promise<FederationTokenCheck> => {
   const jwt = decodeJwt(token)
@@ -319,7 +319,7 @@ export const verifyFederationToken = async (
   const trusted = await options.trust(issuer)
   if (!trusted) return failed('unknown-issuer', issuer)
   if (!audienceMatches(claims.aud, normalizeIssuer(options.audience))) return failed('wrong-audience')
-  if (claims.sub !== subject) return failed('invalid-subject')
+  if (typeof subject === 'string' ? claims.sub !== subject : !subject(claims.sub)) return failed('invalid-subject')
   const { iat, nbf, exp, jti } = claims
   if (!isNumericDate(iat) || !isNumericDate(exp) || (nbf !== undefined && !isNumericDate(nbf))) return failed('invalid-claims', 'time')
   if (typeof jti !== 'string') return failed('invalid-claims', 'jti')

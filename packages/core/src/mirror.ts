@@ -35,7 +35,7 @@ import { isAncestor, MissingObjectError, type ObjectSource } from './walk.ts'
 
 export type MirrorMode = 'auto' | 'manual'
 
-export type MirrorAuth = 'none' | 'instance' | 'token'
+export type MirrorAuth = 'none' | 'instance' | 'token' | 'installation'
 
 export type MirrorConfig = {
   readonly version: 1
@@ -46,6 +46,7 @@ export type MirrorConfig = {
   readonly lfs: boolean
   readonly lfsUrl?: string
   readonly auth?: MirrorAuth
+  readonly installation?: string
   readonly createdAt: string
   readonly detachedAt?: string
 }
@@ -155,6 +156,7 @@ export type MirrorSettings = {
   readonly lfs?: boolean
   readonly lfsUrl?: string
   readonly auth?: MirrorAuth
+  readonly installation?: string
 }
 
 const validNamespace = (namespace: string): boolean => /^([A-Za-z0-9_][A-Za-z0-9._-]*\/)*$/.test(namespace) && !namespace.includes('..') && !/\.lock\//.test(namespace)
@@ -175,7 +177,8 @@ export const configureMirror = async (storage: Storage, repo: RepositoryName, se
   if (!validUrl(settings.url)) throw new Error(`invalid upstream URL ${settings.url}`)
   if (settings.lfsUrl && !validUrl(settings.lfsUrl)) throw new Error(`invalid LFS URL ${settings.lfsUrl}`)
   if (!validNamespace(namespace)) throw new Error(`invalid upstream namespace ${namespace}`)
-  if (settings.auth !== undefined && settings.auth !== 'none' && settings.auth !== 'instance' && settings.auth !== 'token') throw new Error(`invalid mirror auth ${String(settings.auth)}`)
+  if (settings.auth !== undefined && !['none', 'instance', 'token', 'installation'].includes(settings.auth)) throw new Error(`invalid mirror auth ${String(settings.auth)}`)
+  if ((settings.auth === 'installation') !== (settings.installation !== undefined)) throw new Error('auth installation needs an installation and an installation needs auth installation')
   if (!(await readRefs(storage, repo))) throw new Error(`repository ${repo.owner}/${repo.name} not found`)
   const config: MirrorConfig = {
     version: 1,
@@ -186,6 +189,7 @@ export const configureMirror = async (storage: Storage, repo: RepositoryName, se
     lfs: settings.lfs ?? true,
     ...(settings.lfsUrl ? { lfsUrl: settings.lfsUrl } : {}),
     ...(settings.auth && settings.auth !== 'none' ? { auth: settings.auth } : {}),
+    ...(settings.installation !== undefined ? { installation: settings.installation } : {}),
     createdAt: now.toISOString(),
   }
   const result = await writeJson(storage, mirrorConfigKey(repo, remote), config, { ifNoneMatch: '*' })

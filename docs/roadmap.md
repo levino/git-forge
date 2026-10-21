@@ -37,6 +37,7 @@ discussions.
 - [x] Git and LFS as separate authorization surfaces (`git:read` / `lfs:read`)
 - [x] Instance keys (Ed25519), `/.well-known/openid-configuration`, `/.well-known/jwks.json`
 - [x] Short-lived instance JWTs, trust table "issuer X may read repo Y", optional pinned thumbprint
+- [x] Federation installations: per-user consent (authorization code + PKCE, no registration), installation tokens with `sub`, revocation and lost access stop sync, UI on both sides
 - [x] Device flow (`git forge auth login`, RFC 8628) and git credential helper (`git forge auth git-credential`)
 - [x] CLI login: paste a PKCE-bound code (default), `--browser-redirect`, `--device`; `--scopes`; consent with host, IP, time, phishing warning
 - [x] `git forge repo create`

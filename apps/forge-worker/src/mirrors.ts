@@ -1,4 +1,4 @@
-import { type AccountsStore, mintInstanceToken, normalizeIssuer, type SigningKey } from '@git-forge/accounts'
+import { type AccountsStore, type FederationInstallationStore, mintInstallationToken, mintInstanceToken, normalizeIssuer, type SigningKey } from '@git-forge/accounts'
 import {
   type AuthorizationSupplier,
   type DigestFactory,
@@ -25,6 +25,7 @@ export type MirrorContext = {
   readonly fetch?: FetchFunction
   readonly digests?: DigestFactory
   readonly secrets?: MirrorSecrets
+  readonly installations?: FederationInstallationStore
   readonly onSynced?: (repo: RepositoryName, config: MirrorConfig, result: SyncResult) => Promise<void>
 }
 
@@ -57,13 +58,20 @@ const storedToken = (context: MirrorContext, repo: RepositoryName, config: Mirro
 
 export const mirrorAuthorization = (context: MirrorContext, config: MirrorConfig, repo?: RepositoryName): AuthorizationSupplier | undefined => {
   if (config.auth === 'token' && repo) return storedToken(context, repo, config)
-  if (config.auth !== 'instance') return undefined
+  if (config.auth !== 'instance' && config.auth !== 'installation') return undefined
   const { issuer, instanceKey } = context
   if (!issuer || !instanceKey) throw new MirrorAuthError('instance federation needs PUBLIC_URL and INSTANCE_KEY')
   const repository = upstreamRepository(config.url)
   if (!repository) throw new MirrorAuthError(`cannot derive owner/name from ${config.url}`)
   const audience = normalizeIssuer(new URL(config.url).origin)
-  return async () => `Bearer ${await mintInstanceToken({ key: instanceKey, issuer, audience, repositories: [repository] })}`
+  if (config.auth === 'instance') return async () => `Bearer ${await mintInstanceToken({ key: instanceKey, issuer, audience, repositories: [repository] })}`
+  const installation = config.installation ?? ''
+  let lookup: Promise<{ readonly userId: string } | null> | undefined
+  return async () => {
+    const connection = await (lookup ??= context.installations?.connection(audience, installation) ?? Promise.resolve(null))
+    if (!connection) throw new MirrorAuthError(`no installation ${installation} at ${audience}`)
+    return `Bearer ${await mintInstallationToken({ key: instanceKey, issuer, audience, subject: connection.userId, installation, repositories: [repository] })}`
+  }
 }
 
 export const mirrorUnitOptions = (context: MirrorContext, repo: RepositoryName, config: MirrorConfig, maxUnitBytes?: number): UnitOptions => {

@@ -1,0 +1,27 @@
+---
+import Layout from '../../layouts/Layout.astro'
+import { type FederationOutcome, federationFailure } from '../../ui/federation.ts'
+
+const { forge, session } = Astro.locals
+if (!session) return Astro.redirect(`/login?return_to=${encodeURIComponent(Astro.url.pathname + Astro.url.search)}`)
+Astro.response.headers.set('Cache-Control', 'no-store')
+const params = Astro.url.searchParams
+let outcome: FederationOutcome = { kind: 'error', status: 400, message: params.get('error') === 'access_denied' ? 'The other forge declined the authorization.' : 'The authorization is incomplete.' }
+const code = params.get('code')
+const state = params.get('state')
+if (code && state) {
+  try {
+    const connection = await forge.federation.complete(session.principal, session.sessionId, state, code)
+    return Astro.redirect(`/new?installation=${encodeURIComponent(connection.installation)}`, 303)
+  } catch (error) {
+    outcome = federationFailure(error)
+  }
+}
+if (outcome.kind === 'error') Astro.response.status = outcome.status
+---
+
+<Layout title="Mirror from another forge" narrow>
+  <h1 class="text-xl font-semibold mb-5">Mirror from another forge</h1>
+  {outcome.kind === 'error' && <div role="alert" class="alert alert-error mb-4">{outcome.message}</div>}
+  <a class="btn btn-sm" href="/new">Back</a>
+</Layout>

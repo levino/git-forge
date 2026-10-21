@@ -141,7 +141,8 @@ LFS and sync all call the same function.
   role wins.
 - Apps get exactly their `app_repositories` role.
 - Instances get `read` if the trust table grants the repository *and* the
-  token names it.
+  token names it; with an `installation` claim instead if that federation
+  installation covers it and its granting user can read it.
 - Tokens narrow, never widen: scopes cap access (`repo:read` → read,
   `repo:write` → write, `repo:admin` → admin, none → public only) and an
   optional repository list restricts the token to those repositories.

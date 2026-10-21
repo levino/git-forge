@@ -1,0 +1,71 @@
+---
+import type { AuthorizeRequest } from '@git-forge/accounts'
+import Layout from '../../layouts/Layout.astro'
+import RepositoryAccess from '../../components/RepositoryAccess.astro'
+import { type FederationOutcome, federationFailure, handleConsentPost } from '../../ui/federation.ts'
+
+const { forge, session } = Astro.locals
+if (!session) return Astro.redirect(`/login?return_to=${encodeURIComponent(Astro.url.pathname + Astro.url.search)}`)
+let outcome: FederationOutcome | null = null
+if (Astro.request.method === 'POST') {
+  outcome = await handleConsentPost(forge, Astro.request, Astro.url.searchParams)
+  if (outcome.kind === 'redirect') return Astro.redirect(outcome.location, 303)
+  if (outcome.kind === 'error') Astro.response.status = outcome.status
+}
+Astro.response.headers.set('Cache-Control', 'no-store')
+let request: AuthorizeRequest | null = null
+try {
+  request = forge.federation.authorizeRequest(Astro.url.searchParams)
+} catch (error) {
+  outcome = federationFailure(error)
+  if (outcome.kind === 'error') Astro.response.status = outcome.status
+}
+const accounts = await forge.federation.managedAccounts(session.principal)
+const account = accounts.find((candidate) => candidate.login === Astro.url.searchParams.get('account')) ?? accounts[0]!
+const repositories = request ? (await forge.listRepositories(session.principal, { owner: account.login, perPage: 100, sort: 'name' })).items : []
+const cancel = request ? `${request.redirectUri}?${new URLSearchParams({ error: 'access_denied', state: request.state })}` : null
+const keep = [...Astro.url.searchParams].filter(([name]) => name !== 'account')
+---
+
+<Layout title="Authorize a forge" narrow>
+  <h1 class="text-xl font-semibold mb-5">Authorize a forge to mirror repositories</h1>
+  {outcome?.kind === 'error' && <div role="alert" class="alert alert-error mb-4">{outcome.message}</div>}
+  {
+    request && (
+      <>
+        <section class="panel" aria-labelledby="client">
+          <h2 id="client" class="panel-title">{new URL(request.issuer).host}</h2>
+          <p>
+            <span class="font-mono">{request.issuer}</span> asks to read repositories on behalf of its user
+            <strong>{request.login ?? request.subject}</strong> (as claimed by that forge).
+          </p>
+          <ul class="text-sm list-disc pl-5">
+            {request.scopes.includes('git:read') && <li>Read Git content (git:read)</li>}
+            {request.scopes.includes('lfs:read') && <li>Read Git LFS objects (lfs:read)</li>}
+          </ul>
+          <p class="text-sm text-base-content/70">Access ends when you revoke it under Settings, Installed forges, or when you lose read access yourself.</p>
+        </section>
+        <form method="get" class="flex flex-wrap items-end gap-2 mb-4" aria-label="Choose account">
+          {keep.map(([name, value]) => <input type="hidden" name={name} value={value} />)}
+          <label class="flex flex-col gap-1 text-sm">
+            Account
+            <select name="account" class="select select-sm">
+              {accounts.map((candidate) => <option value={candidate.login} selected={candidate.id === account.id}>{candidate.login}</option>)}
+            </select>
+          </label>
+          <button class="btn btn-sm">Choose</button>
+        </form>
+        <form method="post" class="panel" aria-label="Authorize forge">
+          <input type="hidden" name="csrf" value={session.csrf} />
+          <input type="hidden" name="account" value={account.login} />
+          <p>Repositories of <strong>{account.login}</strong></p>
+          <RepositoryAccess selection="selected" repositories={repositories} chosen={[]} />
+          <div class="flex gap-2">
+            <button class="btn btn-primary">Authorize</button>
+            <a class="btn" href={cancel}>Cancel</a>
+          </div>
+        </form>
+      </>
+    )
+  }
+</Layout>

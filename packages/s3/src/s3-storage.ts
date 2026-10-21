@@ -198,7 +198,7 @@ export class S3Storage implements Storage {
       if (response.status !== 200) await this.#fail(response, 'LIST', prefix)
       const page = parseListObjectsV2(await response.text())
       for (const entry of page.contents) {
-        if (!entry.key.startsWith(this.#prefix)) continue
+        if (!entry.key.startsWith(this.#prefix) || entry.key.endsWith('/')) continue
         yield { key: entry.key.slice(this.#prefix.length), size: entry.size, etag: entry.etag }
       }
       token = page.isTruncated ? page.nextContinuationToken : undefined

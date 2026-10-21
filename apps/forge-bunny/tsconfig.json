@@ -1,0 +1,7 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "include": ["src/**/*", "astro.config.ts", "../../packages/core/src/pako-internals.d.ts"],
+  "compilerOptions": {
+    "types": ["node"]
+  }
+}

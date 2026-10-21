@@ -64,6 +64,7 @@ export type InstancePrincipal = {
   readonly repositories: readonly string[]
   readonly scopes: readonly string[]
   readonly tokenId: string
+  readonly installation?: { readonly id: string; readonly subject: string }
 }
 
 export type Principal = AnonymousPrincipal | UserPrincipal | AppPrincipal | InstancePrincipal

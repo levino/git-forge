@@ -139,7 +139,14 @@ There is no global "public read" switch any more.
 | `PUT /api/repos/{owner}/{name}/collaborators/{login}` `{role}` | repository admin | Sets a collaborator role. |
 | `POST /api/repos/{owner}/{name}/instances` `{issuer}` | repository admin | Lets a trusted instance read this repository (Git and LFS). |
 | `GET /api/repos/{owner}/{name}/mirrors` | repository admin | Mirror configs and status (last run, alarms, pending LFS objects). |
-| `POST /api/repos/{owner}/{name}/mirrors` `{url, remote?, mode?, namespace?, lfs?, lfsUrl?, auth?}` | repository admin | Configures a mirror. `auth: "instance"` presents an instance token to the upstream and, with jobs enabled, subscribes to its push notifications. The first sync is enqueued. |
+| `POST /api/repos/{owner}/{name}/mirrors` `{url, remote?, mode?, namespace?, lfs?, lfsUrl?, auth?}` | repository admin | Configures a mirror. `auth: "instance"` presents an instance token to the upstream and, with jobs enabled, subscribes to its push notifications. `auth: "installation"` with `installation` uses a federation installation of the caller instead (own or owned organization's repositories only). The first sync is enqueued. |
+| `POST /api/federation/connections` `{upstream}` | signed-in user | Starts a federation installation at another forge: `{authorizeUrl}` to open in the browser (design §4 *Federation installations*). |
+| `POST /api/federation/connections/complete` `{state, code}` | the user who started it | Exchanges the code from the callback; `{upstream, installation, createdAt}`. `/federation/callback` does the same in the browser. |
+| `GET /api/federation/connections[/{installation}]` | signed-in user | Own connections; one with `active`, `account`, `selection` and the readable `repositories` at the upstream. |
+| `POST /api/federation/authorize` `{client_id, redirect_uri, state, code_challenge, code_challenge_method, scope?, sub, login?, account, selection, repositories?}` | session or full-access token | Consent without the page `/federation/authorize`: installs on `account` (yourself or an organization you own) and returns `{redirect}`. |
+| `GET /api/user/federation/installations`, `GET /api/orgs/{org}/federation/installations` | signed-in user, organization owner | Active installations of other forges (also `/settings/forges`). |
+| `DELETE /api/federation/installations/{id}` | granting user, account manager, instance admin | Revokes an installation. `204`. |
+| `POST /api/federation/installations/exchange`, `GET /api/federation/installation` | other forge (signed JWT) | Code exchange and installation status. |
 | `POST /api/repos/{owner}/{name}/mirrors/{remote}/sync` | repository admin | Syncs now; `502` with the error if the sync failed. |
 | `POST /api/repos/{owner}/{name}/mirrors/{remote}/verify` | repository admin | Runs the deep check now and stores the result in the mirror status. |
 | `POST\|DELETE /api/federation/subscriptions` `{repository, callback}` | trusted instance (instance JWT) | Subscribes to push notifications for a repository it may read; the callback must be below its own issuer URL. |
@@ -475,6 +482,11 @@ attestation of the ref state it holds to the upstream, which checks it
 against its own ref checksum history and spot-checks random byte ranges of
 packs and LFS objects on the mirror (`GET …/mirrors/overview`). Spot checks
 of a private mirror need the mirror to grant the upstream read access too.
+
+Without an admin on either side, a user mirrors private repositories through
+a federation installation: "Mirror from another forge" on `/new` sends them to
+the upstream, where they choose repositories, and back; `/settings/forges` on
+the upstream lists and revokes installations.
 
 To use your own domain, add a `routes` entry with `custom_domain: true` to
 `wrangler.jsonc` or attach the domain in the dashboard.

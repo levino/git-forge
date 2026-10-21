@@ -59,13 +59,14 @@ export type MirrorSubscription = {
   readonly issuer: string
   readonly repository: string
   readonly callback: string
+  readonly installation?: { readonly id: string; readonly subject: string }
 }
 
 export const LOGIN_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/
 
 export const TEAM_SLUG_PATTERN = LOGIN_PATTERN
 
-export const RESERVED_LOGINS: ReadonlySet<string> = new Set(['api', 'explore', 'login', 'logout', 'settings', 'notifications', 'organizations', 'orgs', 'new', 'search', 'scim', 'apps'])
+export const RESERVED_LOGINS: ReadonlySet<string> = new Set(['api', 'explore', 'login', 'logout', 'settings', 'notifications', 'organizations', 'orgs', 'new', 'search', 'scim', 'apps', 'federation'])
 
 export const isReservedLogin = (login: string): boolean => RESERVED_LOGINS.has(login.toLowerCase())
 
@@ -1220,15 +1221,24 @@ export const createAccountsStore = (db: Database, options: AccountsStoreOptions 
 
     mirrorSubscriptions: async (repository: string): Promise<MirrorSubscription[]> =>
       (
-        await db.all<{ issuer: string; repository: string; callback: string }>(
+        await db.all<{ issuer: string; repository: string; callback: string; installation: string | null; subject: string | null }>(
           sql(
-            `SELECT s.issuer, s.repository, s.callback FROM mirror_subscriptions s
+            `SELECT s.issuer, s.repository, s.callback, NULL AS installation, NULL AS subject FROM mirror_subscriptions s
              JOIN trusted_instances t ON t.issuer = s.issuer AND t.disabled_at IS NULL
-             WHERE s.repository = ? ORDER BY s.issuer, s.callback`,
+             WHERE s.repository = ?
+             UNION ALL SELECT i.issuer, f.repository, f.callback, i.id AS installation, i.subject FROM federation_subscriptions f
+             JOIN federation_installations i ON i.id = f.installation_id AND i.revoked_at IS NULL
+             WHERE f.repository = ? ORDER BY 1, 3`,
+            repository.toLowerCase(),
             repository.toLowerCase(),
           ),
         )
-      ).map((row) => ({ issuer: row.issuer, repository: row.repository, callback: row.callback })),
+      ).map((row) => ({
+        issuer: row.issuer,
+        repository: row.repository,
+        callback: row.callback,
+        ...(row.installation !== null && row.subject !== null ? { installation: { id: row.installation, subject: row.subject } } : {}),
+      })),
 
     grantsFor: async (principal: Principal, repo: RepositorySubject): Promise<Grants> => {
       const grants = await store.directGrants(principal, repo)
@@ -1291,6 +1301,7 @@ export const createAccountsStore = (db: Database, options: AccountsStoreOptions 
           return { ...NO_GRANTS, appRole: isRole(row?.role) ? row.role : null }
         }
         case 'instance': {
+          if (principal.installation) return { ...NO_GRANTS, instanceRole: (await store.installationReads(principal, repo)) ? 'read' : null }
           const row = await first<{ role: string }>(
             db,
             sql(
@@ -1303,6 +1314,25 @@ export const createAccountsStore = (db: Database, options: AccountsStoreOptions 
           return { ...NO_GRANTS, instanceRole: row?.role === 'read' ? 'read' : null }
         }
       }
+    },
+
+    installationReads: async (principal: Principal & { readonly kind: 'instance' }, repo: RepositorySubject): Promise<boolean> => {
+      const granted = await first<{ id: string; login: string }>(
+        db,
+        sql(
+          `SELECT g.id, g.login FROM federation_installations i JOIN accounts g ON g.id = i.granted_by AND g.disabled_at IS NULL
+           WHERE i.id = ? AND i.issuer = ? AND i.subject = ? AND i.revoked_at IS NULL AND i.account_id = ?
+             AND (i.repository_selection = 'all' OR EXISTS (SELECT 1 FROM federation_installation_repositories r WHERE r.installation_id = i.id AND r.repository_id = ?))`,
+          principal.installation?.id ?? '',
+          principal.issuer,
+          principal.installation?.subject ?? '',
+          repo.ownerId,
+          repo.id,
+        ),
+      )
+      if (!granted) return false
+      const user: Principal = { kind: 'user', id: granted.id, login: granted.login, limits: null, tokenId: null }
+      return resolveAccess(user, repo, await store.grantsFor(user, repo)) !== 'none'
     },
 
     findTeam: async (organizationId: string, slug: string): Promise<{ readonly id: string; readonly slug: string; readonly name: string } | null> =>

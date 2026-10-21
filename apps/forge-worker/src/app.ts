@@ -59,7 +59,8 @@ import {
   createLoginStore,
   createOidcProvider,
   createGitAccess,
-  createInstanceVerifier,
+  createFederationInstallationStore,
+  createFederationVerifier,
   type InstancePrincipal,
   createJwksCache,
   type Database,
@@ -262,6 +263,7 @@ import { type BackupJob, type BackupStatus, backupStatus, backupStep, startBacku
 import { MirrorAuthError, type MirrorContext, runMirrorSync, type ScheduledMirrorRun, syncDueMirrors } from './mirrors.ts'
 import { receiveGitHubWebhook, setUpGitHubWebhook } from './github-mirrors.ts'
 import { createGitHubApps, type GitHubApps } from './github-apps.ts'
+import { createFederationInstallations, type FederationInstallations } from './federation-installations.ts'
 import { createMirrorSecrets, MirrorSecretsUnavailableError } from './mirror-secrets.ts'
 
 export type ActionsOptions = {
@@ -367,6 +369,7 @@ export type ForgeServices = {
   readonly listRepositories: (principal: Principal, options: RepositoryListOptions) => Promise<Page<RepositoryListing>>
   readonly search: (principal: Principal, request: SearchRequest) => Promise<SearchResults>
   readonly githubApps: GitHubApps['ui']
+  readonly federation: FederationInstallations['ui']
 }
 
 export type MirrorOverviewEntry = { readonly repository: RepositoryName; readonly config: MirrorConfig; readonly status: MirrorStatus | null }
@@ -636,11 +639,14 @@ export const createForge = (options: ForgeOptions): Forge => {
     allowInsecureHttp: options.allowInsecureFederation,
     ...(options.fetch ? { fetch: (input, init) => options.fetch!(new Request(input, init)) } : {}),
   })
+  const openJwks: JwksSource = createJwksCache({ allowInsecureHttp: options.allowInsecureFederation, fetch: (input, init) => remoteFetch(new Request(input, init)) })
+  const installations = createFederationInstallationStore(db, nowMs)
   const issuerFor = (request: Request): string => options.publicUrl ?? normalizeIssuer(new URL(request.url).origin)
+  const federationVerifier = (audience: string) => createFederationVerifier({ audience, trust: store.lookupTrustedIssuer, jwks, openJwks, installation: installations.installation })
 
   const authenticateOptions = (request: Request) => ({
     directory: store,
-    verifyInstance: createInstanceVerifier({ audience: issuerFor(request), trust: store.lookupTrustedIssuer, jwks }),
+    verifyInstance: federationVerifier(issuerFor(request)),
   })
 
   const membershipSource = options.login?.membershipSource ?? 'forge'
@@ -885,6 +891,20 @@ export const createForge = (options: ForgeOptions): Forge => {
     allowInsecureWebhooks: options.allowInsecureWebhooks ?? false,
   })
 
+  const federationInstallations = createFederationInstallations({
+    store,
+    installations,
+    publicUrl: options.publicUrl,
+    instanceKey: options.instanceKey,
+    issuerFor,
+    openJwks,
+    fetch: remoteFetch,
+    allowPrivateHosts: remotePolicy.allowPrivateHosts,
+    managedAccounts: githubApps.ui.managedAccounts,
+    principal: apiPrincipal,
+    verifyToken: (request, token) => federationVerifier(issuerFor(request))(token),
+  })
+
   const emit = async (event: ForgeEvent): Promise<void> => {
     try {
       await notifications.emit(event)
@@ -924,6 +944,7 @@ export const createForge = (options: ForgeOptions): Forge => {
     fetch: remoteFetch,
     ...(options.digests ? { digests: options.digests } : {}),
     secrets: mirrorSecrets,
+    installations,
     onSynced: async (repo, config, result) => {
       await emitMirrorAlarms(repo, config, result)
       if (result.updates.length > 0) await refreshRepository(repo)
@@ -937,6 +958,9 @@ export const createForge = (options: ForgeOptions): Forge => {
           issuer: options.publicUrl,
           instanceKey: options.instanceKey,
           jwks,
+          openJwks,
+          installations,
+          verifyToken: federationVerifier(options.publicUrl),
           jobs: options.jobs,
           verification,
           canRead: instanceRead,
@@ -1454,6 +1478,13 @@ export const createForge = (options: ForgeOptions): Forge => {
     addMirror: async (principal, repo, input, token) => {
       const { repository, principal: user } = await adminOf(principal, repo)
       if (input.auth === 'instance' && !(await store.isInstanceAdmin(user.id))) throw new HttpError(403, 'only an instance admin can add a mirror with instance authentication')
+      if (input.auth === 'installation') {
+        const connection = await installations.connection(normalizeIssuer(new URL(input.url).origin), input.installation ?? '')
+        if (connection?.userId !== user.id) throw new HttpError(403, 'only the user who connected this installation can mirror with it')
+        if (repository.ownerId !== user.id && !(repository.ownerKind === 'organization' && (await store.isOrganizationOwner(repository.ownerId, user.id)))) {
+          throw new HttpError(403, 'installation mirrors need a repository owned by you or an organization you own')
+        }
+      }
       const blocked = outboundUrlError(input.url, remotePolicy) ?? (input.lfsUrl !== undefined ? outboundUrlError(input.lfsUrl, remotePolicy) : null)
       if (blocked) throw new HttpError(400, blocked)
       const name = { owner: repository.owner, name: repository.name }
@@ -1706,7 +1737,8 @@ export const createForge = (options: ForgeOptions): Forge => {
     const mode = optionalString(body, 'mode')
     const auth = optionalString(body, 'auth')
     if (mode !== undefined && mode !== 'auto' && mode !== 'manual') throw new HttpError(400, 'mode must be auto or manual')
-    if (auth !== undefined && auth !== 'none' && auth !== 'instance' && auth !== 'token') throw new HttpError(400, 'auth must be none, instance or token')
+    if (auth !== undefined && auth !== 'none' && auth !== 'instance' && auth !== 'token' && auth !== 'installation') throw new HttpError(400, 'auth must be none, instance, token or installation')
+    const installation = optionalString(body, 'installation')
     const token = optionalString(body, 'token')
     if ((auth === 'token') !== (token !== undefined && token !== '')) throw new HttpError(400, 'auth token needs a token and a token needs auth token')
     if (token && !mirrorSecrets.available) throw new HttpError(503, new MirrorSecretsUnavailableError().message)
@@ -1722,6 +1754,7 @@ export const createForge = (options: ForgeOptions): Forge => {
       ...(body.lfs !== undefined ? { lfs: body.lfs as boolean } : {}),
       ...(lfsUrl !== undefined ? { lfsUrl } : {}),
       ...(auth !== undefined ? { auth } : {}),
+      ...(installation !== undefined ? { installation } : {}),
     }, token)
     return json(201, config)
   }
@@ -2417,6 +2450,8 @@ export const createForge = (options: ForgeOptions): Forge => {
     if (notificationsResponse) return notificationsResponse
     const appsResponse = await githubApps.handle(request)
     if (appsResponse) return appsResponse
+    const federationResponse = await federationInstallations.handle(request)
+    if (federationResponse) return federationResponse
     const releases = await handleReleasesRequest(request, releasesOptions(request, waitUntil))
     if (releases) return releases
     const pagesApi = await pages.api(request)
@@ -2582,6 +2617,7 @@ export const createForge = (options: ForgeOptions): Forge => {
         markAllRead: (user) => notifications.store.markAllRead(user.id, now().getTime()),
       },
       githubApps: githubApps.ui,
+      federation: federationInstallations.ui,
       collaboration: async (request, principal, owner, name, known) => {
         try {
           return await openCollaborationRepository(collaborationOptions(request), principal, owner, name, known)

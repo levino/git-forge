@@ -1,0 +1,44 @@
+---
+import Layout from '../../layouts/Layout.astro'
+import { type FederationOutcome, handleForgesPost } from '../../ui/federation.ts'
+
+const { forge, session } = Astro.locals
+if (!session) return Astro.redirect(`/login?return_to=${encodeURIComponent('/settings/forges')}`)
+let outcome: FederationOutcome | null = null
+if (Astro.request.method === 'POST') {
+  outcome = await handleForgesPost(forge, Astro.request)
+  if (outcome.kind === 'error') Astro.response.status = outcome.status
+}
+Astro.response.headers.set('Cache-Control', 'no-store')
+const account = Astro.url.searchParams.get('account') ?? undefined
+const installations = await forge.federation.installed(session.principal, account).catch(() => [])
+---
+
+<Layout title="Installed forges" narrow>
+  <h1 class="text-xl font-semibold mb-5">Installed forges{account && ` on ${account}`}</h1>
+  {outcome && outcome.kind !== 'redirect' && <div role={outcome.kind === 'error' ? 'alert' : 'status'} class:list={['alert mb-4', outcome.kind === 'error' ? 'alert-error' : 'alert-success']}>{outcome.message}</div>}
+  <section class="panel" aria-labelledby="installed">
+    <h2 id="installed" class="panel-title">Forges that may mirror your repositories</h2>
+    {
+      installations.length === 0 ? (
+        <p class="text-base-content/70">No other forge is authorized.</p>
+      ) : (
+        <ul class="border border-base-300 rounded-box divide-y divide-base-300">
+          {installations.map((installation) => (
+            <li class="flex flex-wrap items-center gap-3 px-4 py-3">
+              <span class="font-mono font-semibold">{installation.issuer}</span>
+              <span class="text-sm text-base-content/70">
+                {installation.selection === 'all' ? 'all repositories' : 'selected repositories'} of {installation.accountLogin} · {installation.scopes.join(' ')} · granted by {installation.grantedByLogin} on {new Date(installation.createdAt).toISOString().slice(0, 10)}
+              </span>
+              <form method="post" class="ml-auto">
+                <input type="hidden" name="csrf" value={session.csrf} />
+                <input type="hidden" name="id" value={installation.id} />
+                <button class="btn btn-xs btn-error btn-outline">Revoke</button>
+              </form>
+            </li>
+          ))}
+        </ul>
+      )
+    }
+  </section>
+</Layout>

@@ -2,6 +2,7 @@ import { AccountsError } from '@git-forge/accounts'
 import type { ImportPhase, ImportState, RepositoryName } from '@git-forge/core'
 import { HttpError, type ForgeServices, type NewRepository, type UiSession } from '../app.ts'
 import type { GithubProgress, GithubStage } from '../github-import.ts'
+import { federationMirrorAction } from './federation.ts'
 import { repoUrl } from './repository.ts'
 
 export type NewRepositoryAction = { readonly kind: 'redirect'; readonly location: string } | { readonly kind: 'error'; readonly status: number; readonly message: string }
@@ -21,6 +22,10 @@ const failure = (error: unknown): NewRepositoryAction => {
 
 export const newRepositoryAction = async (forge: ForgeServices, session: UiSession, form: FormData): Promise<NewRepositoryAction> => {
   const action = form.get('action')
+  if (action === 'federation' || action === 'federation-mirror') {
+    const outcome = await federationMirrorAction(forge, session, form)
+    return outcome.kind === 'ok' ? { kind: 'redirect', location: '/new' } : outcome
+  }
   if (action === 'github') {
     const account = field(form, 'account')
     const owner = field(form, 'owner')

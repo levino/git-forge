@@ -19,7 +19,7 @@ if (Astro.request.method === 'POST') {
     if (result.kind === 'redirect') return Astro.redirect(result.location, 303)
     Astro.response.status = result.status
     error = result.message
-    values = Object.fromEntries(['action', 'owner', 'name', 'visibility', 'defaultBranch', 'url', 'account'].map((key) => [key, String(form.get(key) ?? '')]))
+    values = Object.fromEntries(['action', 'owner', 'name', 'visibility', 'defaultBranch', 'url', 'account', 'upstream', 'installation'].map((key) => [key, String(form.get(key) ?? '')]))
   }
 }
 Astro.response.headers.set('Cache-Control', 'no-store')
@@ -28,6 +28,9 @@ const owners = await forge.repositories.owners(user)
 const selectedOwner = values.owner || Astro.url.searchParams.get('owner') || user.login
 const importing = values.action === 'import'
 const importsEnabled = forge.repositories.importsEnabled
+const connections = await forge.federation.connections(user)
+const chosenInstallation = Astro.url.searchParams.get('installation') ?? values.installation
+const chosen = chosenInstallation ? await forge.federation.remote(user, chosenInstallation).catch(() => null) : null
 ---
 
 <Layout title="New repository" narrow>
@@ -119,6 +122,64 @@ const importsEnabled = forge.repositories.importsEnabled
         </form>
       ) : (
         <p class="text-sm text-base-content/70">Imports are not available on this instance (they need the IMPORTS queue).</p>
+      )
+    }
+  </section>
+
+  <section class="panel max-w-2xl" aria-labelledby="federation-title">
+    <h2 id="federation-title" class="panel-title">Mirror from another forge</h2>
+    <form method="post" class="flex flex-col gap-3" aria-label="Connect another forge">
+      <div class="contents">
+        <p class="text-sm text-base-content/70">Signs you in at another git-forge instance, where you choose the repositories this forge may mirror, including private ones with LFS.</p>
+        <input type="hidden" name="csrf" value={session.csrf} />
+        <input type="hidden" name="action" value="federation" />
+        <label class="text-sm font-semibold" for="federation-upstream">Forge URL</label>
+        <input id="federation-upstream" name="upstream" type="url" class="input w-full font-mono" required placeholder="https://forge.example.org" value={values.action === 'federation' ? values.upstream : ''} />
+        <button class="btn self-start">Connect</button>
+      </div>
+    </form>
+    {
+      connections.length > 0 && (
+        <ul class="text-sm flex flex-col gap-1">
+          {connections.map((connection) => (
+            <li>
+              <a class="link font-mono" href={`/new?installation=${encodeURIComponent(connection.installation)}`}>{connection.upstream}</a>
+              <span class="text-base-content/70"> · connected {new Date(connection.createdAt).toISOString().slice(0, 10)}</span>
+            </li>
+          ))}
+        </ul>
+      )
+    }
+    {
+      chosen && !chosen.remote && <div role="alert" class="alert alert-warning">This installation was revoked at {chosen.connection.upstream}.</div>
+    }
+    {
+      chosen?.remote && (
+        <form method="post" class="flex flex-col gap-3" aria-label="Mirror from the connected forge">
+          <div class="contents">
+            <input type="hidden" name="csrf" value={session.csrf} />
+            <input type="hidden" name="action" value="federation-mirror" />
+            <input type="hidden" name="installation" value={chosen.connection.installation} />
+            <label class="text-sm font-semibold" for="federation-repository">Repository at {chosen.connection.upstream}</label>
+            <select id="federation-repository" name="repository" class="select">
+              {chosen.remote.repositories.map((repository) => <option value={repository.name}>{repository.name} ({repository.visibility})</option>)}
+            </select>
+            <div class="flex flex-wrap items-end gap-2">
+              <div class="flex flex-col gap-1">
+                <label class="text-sm font-semibold" for="federation-owner">Owner</label>
+                <select id="federation-owner" name="owner" class="select">
+                  {owners.map((owner) => <option value={owner} selected={owner === selectedOwner}>{owner}</option>)}
+                </select>
+              </div>
+              <span class="pb-2 text-lg" aria-hidden="true">/</span>
+              <div class="flex flex-col gap-1 flex-1 min-w-40">
+                <label class="text-sm font-semibold" for="federation-name">Repository name (default: the upstream name)</label>
+                <input id="federation-name" name="name" class="input w-full" maxlength="100" pattern="[A-Za-z0-9][A-Za-z0-9._\-]*" />
+              </div>
+            </div>
+            <button class="btn self-start">Create mirror</button>
+          </div>
+        </form>
       )
     }
   </section>

@@ -34,6 +34,7 @@ const configJson = JSON.stringify({ returnTo: '/settings', csrf: session.csrf })
   <div class="flex flex-wrap items-center gap-3 mb-5">
     <h1 class="text-xl font-semibold">Settings for {user.login}</h1>
     <a class="btn btn-sm ml-auto" href="/settings/apps">GitHub Apps</a>
+    <a class="btn btn-sm" href="/settings/forges">Installed forges</a>
   </div>
   {
     result?.kind === 'token-created' && (

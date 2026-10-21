@@ -37,6 +37,7 @@ if (repo.kind === 'ok' && session) {
     if (!(error instanceof ForgeError)) throw error
   }
 }
+const installationStatus = new Map(await Promise.all((data?.mirrors ?? []).filter(({ config }) => config.auth === 'installation').map(async ({ config }) => [config.remote, await forge.federation.status(config)] as const)))
 Astro.response.headers.set('Cache-Control', 'no-store')
 ---
 
@@ -180,6 +181,7 @@ Astro.response.headers.set('Cache-Control', 'no-store')
               <span class="badge badge-sm">{config.detachedAt ? 'detached' : config.mode}</span>
               {status?.lastRun && <span class:list={['badge badge-sm', !status.lastRun.finishedAt ? 'badge-info' : status.lastRun.ok === false ? 'badge-error' : 'badge-success']}>{!status.lastRun.finishedAt ? 'syncing' : status.lastRun.ok === false ? 'last sync failed' : 'synced'}</span>}
             </p>
+            {installationStatus.has(config.remote) && <p class="text-sm">Installation {config.installation} at {new URL(config.url).origin}: <span class:list={['badge badge-sm', installationStatus.get(config.remote) === 'active' ? 'badge-success' : 'badge-error']}>{installationStatus.get(config.remote)}</span></p>}
             {status?.lastSuccessAt && <p class="text-sm text-base-content/70">Last success: {status.lastSuccessAt}</p>}
             {status?.lastRun?.error && <p class="text-sm text-error">{status.lastRun.error}</p>}
             {status && status.alarms.length > 0 && (

@@ -235,7 +235,8 @@ OIDC-style, modelled on GitHub Actions OIDC:
   checked separately.
 - A mirror marks in its config (`auth: "instance"`) that it presents an
   instance token to its upstream; otherwise it fetches anonymously. Only an
-  instance admin may add such a mirror, since peers grant per issuer. A mirror
+  instance admin may add such a mirror, since peers grant per issuer
+  (per-user consent without an admin: *Federation installations*). A mirror
   of a mirror reads the upstream's `refs/upstream/{remote}/*` by setting the
   namespace to `upstream/{remote}/`.
 - JWKS documents are fetched without following redirects (`redirect:
@@ -250,6 +251,71 @@ OIDC-style, modelled on GitHub Actions OIDC:
   for tests.
 - There are no push certificates. The instance signs; trust is
   server-to-server.
+
+### Federation installations
+
+Per-user consent next to the admin's trust table, which keeps working
+unchanged (migration `0063_federation_installations`,
+`packages/accounts/src/federation-installations.ts`, HTTP in
+`apps/forge-worker/src/federation-installations.ts`). A is the upstream,
+B the mirroring instance. B needs no registration: it is identified by its
+issuer URL and JWKS.
+
+- **Start (B):** a signed-in user enters A's URL (`/new`, "Mirror from
+  another forge", or `POST /api/federation/connections {upstream}`). B
+  stores a request (SHA-256 of `state`, user, session, PKCE verifier, 10
+  minutes) and sends the browser to `{A}/federation/authorize` with
+  `client_id` = B's issuer, `redirect_uri` = `{B}/federation/callback`,
+  `state`, `code_challenge` (S256), `scope=git:read lfs:read`, `sub` = the
+  B user id and `login` (display only). A accepts a `redirect_uri` only on
+  B's origin below its issuer path, and refuses private hosts unless
+  `ALLOW_PRIVATE_REMOTES`.
+- **Consent (A):** the signed-in A user picks an account they manage
+  (themselves or an organization they own), all or selected repositories
+  of it, and confirms both scopes. A stores the installation (issuer, `sub`,
+  account, selection, scopes, granting user, created, revoked) and a code
+  (stored as SHA-256, single use, 10 minutes, bound to issuer, `sub`,
+  `redirect_uri` and challenge), then redirects to `redirect_uri?code&state`.
+  `POST /api/federation/authorize` (session or full-access token, same
+  parameters as JSON) returns that redirect instead.
+- **Exchange (B):** `/federation/callback` or `POST
+  /api/federation/connections/complete {state, code}` needs the request's
+  user (and session, if it started in one), consumes the request and posts
+  `{code, code_verifier, redirect_uri}` to
+  `{A}/api/federation/installations/exchange` with a JWT signed by the
+  instance key (`sub` = the B user id, no `installation` claim). A checks
+  signature (B's JWKS), issuer, `sub`, `redirect_uri` and verifier, marks
+  the code used and answers the installation; B stores a connection
+  (upstream, installation id, user). Codes, states and verifiers live only
+  in the database.
+- **Requests:** sync, LFS, subscriptions and status calls carry a federation
+  JWT with `sub` = the connection's B user, `installation`, `repositories`
+  and `scope` (≤ 300 s). A accepts it only while the installation is active
+  and its issuer and `sub` match, with the scopes intersected. A repository
+  is readable only if the installation covers it (`all` = every repository
+  of the account) and the granting user can read it now, so losing access
+  revokes automatically. Revocation (`DELETE
+  /api/federation/installations/{id}`, granting user or a manager of the
+  account) applies to the next request. Instance-audience visibility rules
+  stay trust-table only.
+- **Mirrors (B):** `auth: "installation"` with `installation: "<id>"` in the
+  mirror config (an id, no secret). Only the connection's user may set it,
+  on repositories owned by themselves or an organization they own, so no
+  instance admin is needed.
+- **Notifications:** `POST /api/federation/subscriptions` accepts
+  installation tokens and stores them in `federation_subscriptions`
+  (installation, repository, callback); delivery is the same as for trusted
+  subscribers while the installation still authorizes the repository. B
+  accepts notifications from upstreams it has a connection with as well as
+  trusted ones.
+- **Status:** `GET {A}/api/federation/installation` (installation token)
+  answers account, selection, scopes and readable repositories. B lists
+  them on `/new` to create mirrors and shows active/revoked on the mirror
+  in the repository settings.
+- **Lists:** A: `/settings/forges` and `GET /api/user/federation/installations`
+  (installations on accounts the user manages, with revoke), `GET
+  /api/orgs/{org}/federation/installations`. B: `GET
+  /api/federation/connections`.
 
 ## 5. Refs, force pushes and archive
 

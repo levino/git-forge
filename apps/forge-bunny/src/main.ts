@@ -1,4 +1,3 @@
-import worker from 'git-forge:astro-entry'
-import { serve } from './serve.ts'
+import { start } from 'git-forge:astro-entry'
 
-serve(worker)
+start()

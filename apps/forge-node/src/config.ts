@@ -24,6 +24,7 @@ export type NodeVars = ForgeVars & {
   readonly S3_FORCE_PATH_STYLE?: string
   readonly SCHEDULE?: string
   readonly JOB_CONCURRENCY?: string
+  readonly JOB_POLL_SECONDS?: string
   readonly SMTP_HOST?: string
   readonly SMTP_PORT?: string
   readonly SMTP_SECURITY?: string
@@ -70,6 +71,7 @@ export type NodeConfig = {
   readonly conditionalWrites: ConditionalWrites
   readonly schedule: CronSchedule
   readonly jobConcurrency: number
+  readonly jobPollMs: number
   readonly email: NodeEmailSettings | undefined
   readonly lfsPublishDir: string | null
   readonly backup: StorageConfig | null
@@ -84,6 +86,8 @@ export const DEFAULT_DATA_DIR = './data'
 export const DEFAULT_SCHEDULE = '17 3 * * *'
 
 export const DEFAULT_JOB_CONCURRENCY = 2
+
+export const DEFAULT_JOB_POLL_SECONDS = 30
 
 const present = (value: string | undefined): string | undefined => (value === undefined || value.trim() === '' ? undefined : value.trim())
 
@@ -216,6 +220,7 @@ export const parseNodeConfig = (vars: NodeVars): NodeConfig => {
     conditionalWrites: conditionalWrites(vars.CONDITIONAL_WRITES),
     schedule: schedule(vars.SCHEDULE),
     jobConcurrency: integer('JOB_CONCURRENCY', vars.JOB_CONCURRENCY, DEFAULT_JOB_CONCURRENCY, 1, 64),
+    jobPollMs: integer('JOB_POLL_SECONDS', vars.JOB_POLL_SECONDS, DEFAULT_JOB_POLL_SECONDS, 1, 3600) * 1000,
     email: emailSettings(vars),
     lfsPublishDir: present(vars.LFS_PUBLISH_DIR) ?? null,
     backup: storageConfig(vars, 'BACKUP_', null),

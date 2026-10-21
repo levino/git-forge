@@ -180,6 +180,24 @@ export const createNotificationStore = (db: Database, now: () => number = Date.n
       return rows[0]!.id
     },
 
+    insertRepositoryEvent: async (event: ForgeEvent): Promise<number | null> => {
+      const rows = await db.all<{ id: number }>(
+        sql(
+          'INSERT INTO forge_events (name, action, repository_id, actor_kind, actor_id, actor_login, data, created_at) SELECT ?, ?, r.id, ?, ?, ?, ?, ? FROM repositories r JOIN accounts a ON a.id = r.owner_id WHERE a.login = ? AND r.name = ? AND r.deleted_at IS NULL RETURNING id',
+          event.name,
+          event.action ?? null,
+          event.actor.kind,
+          event.actor.id,
+          event.actor.login,
+          JSON.stringify(event),
+          now(),
+          event.repository.owner,
+          event.repository.name,
+        ),
+      )
+      return rows[0]?.id ?? null
+    },
+
     getEvent: async (id: number): Promise<StoredEvent | null> => {
       const row = await first<{ id: number; data: string; repository_id: string | null; created_at: number }>(
         db,

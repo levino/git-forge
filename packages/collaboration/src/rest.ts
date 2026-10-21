@@ -914,6 +914,7 @@ export const handleCollaborationApi = async (request: Request, options: Collabor
   if (!matched) return null
   if (!matched.route) return errorResponse(405, 'Method Not Allowed', [], { Allow: matched.allowed.join(', ') })
   if (!isValidName(matched.owner) || !isValidName(matched.name)) return errorResponse(404, 'Not Found')
+  options.accounts.findRepository(matched.owner, matched.name).catch(() => undefined)
   const principal: Principal | null = options.authenticate
     ? await options.authenticate(request)
     : await authenticateRequest(request, {

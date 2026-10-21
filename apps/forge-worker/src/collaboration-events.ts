@@ -102,7 +102,7 @@ export const activityEvent = async (scope: Scope, activity: Activity, baseUrl: s
   const number = activity.number
   switch (activity.kind) {
     case 'issues':
-      return issuesEvent(context, activity.action as IssuesAction, issueInfo(await getIssue(scope, number)), activity.changes)
+      return issuesEvent(context, activity.action as IssuesAction, issueInfo(activity.issue ?? (await getIssue(scope, number))), activity.changes)
     case 'issue_comment': {
       const issue = await getIssue(scope, number)
       const comment = await getComment(scope, activity.commentId!, activity.deleted)

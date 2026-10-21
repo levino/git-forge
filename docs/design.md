@@ -495,6 +495,13 @@ tmp/<repo>/<timestamp>-<uuid>/part/<nnnnn>  # its parts, 1-based, five digits
    from compact column arrays, register the pack in `objects/info/packs`,
    update refs via CAS, `report-status`.
 
+The response starts as soon as the policy is known, before the pack is read:
+hosts that need a first byte within a fixed time (Bunny: 60 s) keep the
+connection, and with `side-band-64k` an empty keepalive packet goes out every
+5 s until the report. A push declared larger than `MAX_PUSH_BYTES` still gets
+413; one found too large while streaming gets an `unpack error` (or a
+side-band error) instead. `onPush` runs before the response ends.
+
 Memory is the cache budget (16 MiB), one staging chunk (4 MiB) and about
 60–100 bytes per object, independent of the pack's size in bytes. Plain
 blobs of any size are only streamed, but objects that must be materialized
@@ -1127,7 +1134,7 @@ database.
 | Object storage | R2 | any S3 with conditional writes: Hetzner, B2, OVH, IONOS, self-hosted (versitygw, RustFS); S3 without them (Bunny Storage) through `lockedStorage`; a local directory |
 | Database | D1 / SQLite in Durable Objects | libSQL over Hrana HTTP (`@git-forge/libsql`: Bunny Database, Turso, `sqld`), SQLite file (Pi) |
 | Per-repository consistency | Durable Object | conditional writes (S3 CAS), per-key leases in the database (`lockedStorage`), single-writer process |
-| Scheduling, jobs | Cron Triggers, Queues (Workflows for long jobs) | `Deno.cron`, systemd timers, job table, in-process queue, job table drained in `waitUntil` of incoming requests (Bunny Edge Scripting, `apps/forge-bunny`) |
+| Scheduling, jobs | Cron Triggers, Queues (Workflows for long jobs) | `Deno.cron`, systemd timers, job table with `git-forge-node jobs` (next to Bunny Edge Scripting, `apps/forge-bunny`), in-process queue |
 | Public LFS bucket (`LfsPublisher`) | second R2 bucket (`CDN_BUCKET`) | any `Storage`: S3 bucket, local directory (`LFS_PUBLISH_DIR`) |
 | Backup target (§19) | second R2 bucket (`BACKUP`) with a bucket lock | any `Storage` (`BACKUP_STORAGE`): S3 bucket with Object Lock, local directory |
 | Read replicas, page cache | D1 Sessions API (`d1Sessions`), Cache API (`cacheApiPageCache`) | none (Node reads one SQLite file) |
@@ -1166,10 +1173,17 @@ in two durable SQLite job queues (above) with the Worker's job handler and
 retry policy; email goes out through the configured `EmailSender` (SMTP, SES
 or console);
 a cron scheduler (five-field expressions in UTC) calls the same `scheduled`
-as the Worker's Cron Trigger. Configuration uses the Worker's variable names
+as the Worker's Cron Trigger. `git-forge-node jobs` runs only the two
+queues and the schedules, without HTTP, next to a serverless front end that
+only enqueues: the job table is polled with one indexed query, backing off
+from 2 s to `JOB_POLL_SECONDS` (30) while idle; schedules are rows
+`cron:<id>` in queue `cron` (payload `{"ranAt":…}`) claimed with a conditional `UPDATE` (so several
+runners or the edge never run one twice, and a missed run is caught up once
+after a pause), checked once a minute together with the heartbeat row
+`runner:jobs` (queue `runner`) that the admin page shows. Configuration uses the Worker's variable names
 plus `PORT`, `HOST`, `TRUST_PROXY`, `DATA_DIR`, `DATABASE`, `DATABASE_PATH`,
 `LIBSQL_URL`, `LIBSQL_AUTH_TOKEN`, `CONDITIONAL_WRITES`, `STORAGE`,
-`STORAGE_DIR`, `S3_*`, `SCHEDULE`, `JOB_CONCURRENCY` and `SMTP_*`
+`STORAGE_DIR`, `S3_*`, `SCHEDULE`, `JOB_CONCURRENCY`, `JOB_POLL_SECONDS` and `SMTP_*`
 (`EMAIL_PROVIDER=smtp`). Like the Worker it
 never migrates implicitly: `git-forge-node migrate` applies the bundled
 `MIGRATIONS` (the same SQL files as `migrations_dir`, kept in sync by a test
@@ -1186,6 +1200,22 @@ notifications.
 
 **SQLite as the common dialect:** the database layer writes SQLite SQL only,
 so it runs on D1, Durable Objects, libSQL and a file on a Pi.
+
+**Round trips.** On a remote database every statement is a round trip (on
+Bunny an HTTP request). `Database` has `read(statements)` (several reads, one
+round trip, no transaction: a Hrana pipeline, a D1 batch) next to `batch`,
+which now returns the rows of each statement. `requestScope` (accounts) gives
+every request and job its own scope (an `AsyncLocalStorage` from the host):
+reads issued within a few milliseconds of each other (`REMOTE_WINDOW_MS`,
+0 for a local file) go out as one `read`; a statement marked `reused`
+(repository, token, grants, protection rules, collaboration settings, issue
+rows, `storage_state` rows) is answered once per scope until a write to one
+of the tables it reads (taken from `FROM`/`JOIN`; an unparsable write clears
+all). Hot paths start independent lookups together (repository with the
+credential, grants with protection rules, timeline with the issue), so with
+coalescing a clone costs two database round trips and a repository page
+three to five. Usage counters and `storage_objects` rows are written once at
+the end of a request or job.
 
 **Storage interface:** `get` (including range), `head`, `put` (streaming,
 with checksum), `put` with `If-None-Match` / `If-Match`, `list` by prefix. No
@@ -1224,7 +1254,13 @@ bucket that ignores conditions: a conditional write takes a renewed per-key
 lease in `storage_locks`, checks the condition with `head` and writes
 unconditionally. It needs read-after-write consistent `head` and one
 database shared by all writers; it passes the conformance suite over a
-storage that ignores conditions and over `S3Storage` on versitygw. Presigned LFS
+storage that ignores conditions and over `S3Storage` on versitygw. For the
+state keys (`refs.json`, `packs`, `alternates`) `createStateCache(db, { locks })`
+takes the lease itself: one batch acquires the lease, reads the cached row
+and marks it pending, the condition is checked against the cached etag
+(`head` only when the row is not committed), and one batch commits the row
+and releases the lease, so a conditional state write costs two database round
+trips and one `put`. Presigned LFS
 uploads bind `Content-Length` and `x-amz-checksum-sha256` into the signature,
 so the bucket rejects any other content.
 
@@ -2458,11 +2494,19 @@ bundle.
 
 ### Entry and routing
 
-- `apps/forge-worker/src/worker.ts` is the Worker entry (`main` in
-  `wrangler.jsonc`). Its `fetch` hands every request to Astro's handler; its
-  `scheduled` and `queue` handlers and the `RunnerContainer` export are the
-  same as before the UI (`src/cloudflare.ts`), so cron, queues and containers
-  are unaffected by Astro.
+- `createWorker(host)` (`src/host.ts`) is the request entry of every
+  serverless host: a `Host` builds the `Forge` and may wrap the request (D1
+  sessions and bookmarks on Cloudflare); `createWorker` runs the request in
+  the forge's request scope, hands it to `createForge` or Astro's handler and
+  sets `Cache-Control` (`cacheControlled`: `private, no-store` when missing;
+  `public`/`s-maxage` turn private for requests with a session cookie,
+  responses with `Set-Cookie`, and, where a shared cache sits in front
+  (`sharedCache`, Bunny), requests with `Authorization`). The middleware
+  takes the forge from the installed host. `src/worker.ts` is the Cloudflare
+  entry (`main` in `wrangler.jsonc`) with `createWorker`, the `scheduled` and
+  `queue` handlers and the `RunnerContainer` export (`src/cloudflare.ts`);
+  `apps/forge-bunny/src/entry.ts` is the Bunny entry, built by the same Astro
+  config with its own `wrangler.jsonc`.
 - The Astro middleware (`src/middleware.ts`) is the router between the two
   worlds. `isForgePath` (`src/routing.ts`, pure) sends to `createForge`:
   `/api` and everything below (including `/api/v3`), `/_services/`,

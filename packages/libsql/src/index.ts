@@ -1,4 +1,4 @@
-import type { Database, Row, RunResult, SqlValue, Statement } from '@git-forge/accounts'
+import type { BatchResult, Database, Row, SqlValue, Statement } from '@git-forge/accounts'
 
 export type LibsqlConfig = {
   readonly url: string
@@ -33,7 +33,7 @@ type HranaError = { readonly message: string; readonly code?: string | null }
 
 type StreamResult = { readonly type: 'ok'; readonly response: { readonly type: string; readonly result?: unknown } } | { readonly type: 'error'; readonly error: HranaError }
 
-type BatchResult = { readonly step_results: readonly (StmtResult | null)[]; readonly step_errors: readonly (HranaError | null)[] }
+type HranaBatch = { readonly step_results: readonly (StmtResult | null)[]; readonly step_errors: readonly (HranaError | null)[] }
 
 type Condition = { readonly type: 'ok'; readonly step: number } | { readonly type: 'not'; readonly cond: Condition }
 
@@ -91,22 +91,21 @@ export const libsqlDatabase = (config: LibsqlConfig): Database => {
   const headers: Record<string, string> = { 'content-type': 'application/json' }
   if (config.authToken) headers.authorization = `Bearer ${config.authToken}`
 
-  const request = async (body: unknown): Promise<{ readonly type: string; readonly result?: unknown }> => {
-    const response = await send(endpoint, { method: 'POST', headers, body: JSON.stringify({ baton: null, requests: [body, { type: 'close' }] }) })
+  const pipeline = async (bodies: readonly unknown[]): Promise<{ readonly type: string; readonly result?: unknown }[]> => {
+    const response = await send(endpoint, { method: 'POST', headers, body: JSON.stringify({ baton: null, requests: [...bodies, { type: 'close' }] }) })
     const text = await response.text()
     if (!response.ok) throw new LibsqlError(`libSQL ${response.status}: ${text.slice(0, 500)}`)
-    const result = (JSON.parse(text) as { results: StreamResult[] }).results[0]
-    if (!result) throw new LibsqlError('libSQL: empty pipeline response')
-    if (result.type === 'error') return fail(result.error)
-    return result.response
+    const results = (JSON.parse(text) as { results: StreamResult[] }).results.slice(0, bodies.length)
+    if (results.length < bodies.length) throw new LibsqlError('libSQL: incomplete pipeline response')
+    return results.map((result) => (result.type === 'error' ? fail(result.error) : result.response))
   }
 
-  const execute = async (statement: Statement): Promise<StmtResult> => (await request({ type: 'execute', stmt: stmt(statement) })).result as StmtResult
+  const execute = async (statement: Statement): Promise<StmtResult> => (await pipeline([{ type: 'execute', stmt: stmt(statement) }]))[0]!.result as StmtResult
 
   return {
     all: async <T extends Row>(statement: Statement) => rowsOf<T>(await execute(statement)),
     run: async (statement) => ({ changes: (await execute(statement)).affected_row_count }),
-    batch: async (statements): Promise<RunResult[]> => {
+    batch: async (statements): Promise<BatchResult[]> => {
       if (statements.length === 0) return []
       const commit = statements.length + 1
       const steps: { stmt: ReturnType<typeof stmt>; condition?: Condition }[] = [
@@ -115,10 +114,12 @@ export const libsqlDatabase = (config: LibsqlConfig): Database => {
         { stmt: { sql: 'COMMIT', args: [] }, condition: { type: 'ok', step: statements.length } },
         { stmt: { sql: 'ROLLBACK', args: [] }, condition: { type: 'not', cond: { type: 'ok', step: commit } } },
       ]
-      const result = (await request({ type: 'batch', batch: { steps } })).result as BatchResult
+      const result = (await pipeline([{ type: 'batch', batch: { steps } }]))[0]!.result as HranaBatch
       const error = result.step_errors.slice(0, commit + 1).find((entry) => entry !== null)
       if (error) fail(error)
-      return result.step_results.slice(1, commit).map((entry) => ({ changes: entry?.affected_row_count ?? 0 }))
+      return result.step_results.slice(1, commit).map((entry) => ({ changes: entry?.affected_row_count ?? 0, rows: entry ? rowsOf(entry) : [] }))
     },
+    read: async (statements) =>
+      statements.length === 0 ? [] : (await pipeline(statements.map((statement) => ({ type: 'execute', stmt: stmt(statement) })))).map((response) => rowsOf(response.result as StmtResult)),
   }
 }

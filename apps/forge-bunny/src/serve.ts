@@ -4,7 +4,7 @@ import { type Counter, counting, uncounted, vars } from './runtime.ts'
 
 declare const Bunny: { v1: { serve(handler: (request: Request) => Promise<Response>): void; waitUntil(promise: Promise<unknown>): void } }
 
-type Worker = { fetch(request: Request, env: unknown, context: unknown): Promise<Response> }
+type Worker = { fetch(request: Request, env: never, context: { waitUntil(promise: Promise<unknown>): void; passThroughOnException(): void; readonly props?: unknown }): Promise<Response> }
 
 const STATS = 'CREATE TABLE IF NOT EXISTS edge_stats (at INTEGER, method TEXT, path TEXT, status INTEGER, db INTEGER, statements INTEGER, s3 INTEGER, other INTEGER, bg_db INTEGER, bg_statements INTEGER, bg_s3 INTEGER, bg_other INTEGER, ms INTEGER, trace TEXT)'
 
@@ -45,13 +45,6 @@ const finished = (response: Response, onDone: () => void): Response => {
   return new Response(body, { status: response.status, statusText: response.statusText, headers: response.headers })
 }
 
-const uncached = (response: Response): Response => {
-  if (response.headers.has('cache-control')) return response
-  const headers = new Headers(response.headers)
-  headers.set('cache-control', 'private, no-store')
-  return new Response(response.body, { status: response.status, statusText: response.statusText, headers })
-}
-
 export const serve = (worker: Worker): void =>
   Bunny.v1.serve(async (request) => {
     const started = Date.now()
@@ -62,7 +55,7 @@ export const serve = (worker: Worker): void =>
     let done!: () => void
     const complete = new Promise<void>((resolve) => (done = resolve))
     const { counter, result } = counting(async () => {
-      const response = await worker.fetch(request, { ...vars(), ASSETS: { fetch: async () => new Response('not found\n', { status: 404 }) } }, context)
+      const response = await worker.fetch(request, { ...vars(), ASSETS: { fetch: async () => new Response('not found\n', { status: 404 }) } } as never, context)
       Bunny.v1.waitUntil(
         complete.then(async () => {
           const ms = Date.now() - started
@@ -72,7 +65,7 @@ export const serve = (worker: Worker): void =>
           if (key) await uncounted(() => record(request, response.status, counter, ms)).catch((error: unknown) => console.error(error))
         }),
       )
-      return finished(uncached(response), done)
+      return finished(response, done)
     })
     return result
   })

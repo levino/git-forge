@@ -106,7 +106,7 @@ describe('GitHub backup mirrors', () => {
     expect(await head('public-one')).toBe(main)
     expect(await readMirrorConfig(forge.storage, { owner: 'admin', name: 'private-one' })).toMatchObject({ url: 'https://github.com/levino/private-one.git', auth: 'token' })
     expect((await readMirrorConfig(forge.storage, { owner: 'admin', name: 'public-one' }))?.auth).toBeUndefined()
-    expect(hooks.map((hook) => [hook.repository, hook.url])).toEqual([
+    expect(hooks.map((hook) => [hook.repository, hook.url]).sort()).toEqual([
       ['private-one', `${BASE}/api/repos/admin/private-one/mirrors/origin/webhook`],
       ['public-one', `${BASE}/api/repos/admin/public-one/mirrors/origin/webhook`],
     ])

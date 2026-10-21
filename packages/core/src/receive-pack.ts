@@ -73,6 +73,7 @@ export type ReceiveOptions = {
   readonly check?: RefCheck
   readonly beforeUpdate?: (pushed: PushedPack, commands: readonly RefCommand[]) => Promise<string | null>
   readonly pack?: IngestOptions
+  readonly onCommands?: (capabilities: ReadonlySet<string>) => void
 }
 
 const readCommands = async (cursor: ByteCursor): Promise<{ commands: RefCommand[]; capabilities: Set<string> }> => {
@@ -144,6 +145,7 @@ export const receivePack = async (
     return { response: report(outcome, false), outcome }
   }
   const { commands, capabilities } = parsed
+  options.onCommands?.(capabilities)
   const useSideband = capabilities.has('side-band-64k')
   const atomic = capabilities.has('atomic')
   const odb = new ObjectDatabase(storage, repo)
@@ -196,9 +198,10 @@ export const receivePack = async (
       return { response: report(outcome, useSideband), outcome }
     }
   }
-  const packName = pack ? await odb.storePack(pack) : null
+  const [packName, initial] = await Promise.all([pack ? odb.storePack(pack) : null, readRefs(storage, repo)])
+  const peeler = { peel: async (id: ObjectId) => (pack?.typeOf(id) === 'commit' ? id : odb.peel(id)) }
   for (let attempt = 0; attempt < 10; attempt++) {
-    const current = await readRefs(storage, repo)
+    const current = attempt === 0 ? initial : await readRefs(storage, repo)
     if (!current) return fail('error repository not found')
     const at = now()
     const refs: Record<string, ObjectId> = { ...current.state.refs }
@@ -247,7 +250,7 @@ export const receivePack = async (
     if (finalResults.every((result) => !result.ok)) return { response: report(outcome, useSideband), outcome }
     const state: RefsState = { ...current.state, refs }
     if (await writeRefs(storage, repo, state, current.etag)) {
-      await writeServerInfo(storage, repo, state, odb)
+      await writeServerInfo(storage, repo, state, peeler, current.state)
       return { response: report(outcome, useSideband), outcome }
     }
   }

@@ -1,4 +1,4 @@
-import { type Database, sql } from '@git-forge/accounts'
+import { type Database, sql, type Statement } from '@git-forge/accounts'
 import { lfsPrefix, packKey, type RepositoryName, type Storage } from '@git-forge/core'
 import { monthKey, type UsageMetric } from './costs.ts'
 
@@ -39,11 +39,14 @@ export const createUsageMeter = (db: Database, now: () => number): UsageMeter =>
     pending.set(metric, (pending.get(metric) ?? 0) + amount)
     total += amount
   }
-  const record = async (objects: readonly { readonly key: string; readonly size: number }[]) => {
-    const statements = objects.flatMap(({ key, size }) => {
+  const stored: Statement[] = []
+  const objectStatements = (objects: readonly { readonly key: string; readonly size: number }[]) =>
+    objects.flatMap(({ key, size }) => {
       const kind = classifyKey(key)
       return kind ? [sql('INSERT OR IGNORE INTO storage_objects (key, repository, kind, size, created_at) VALUES (?, ?, ?, ?, ?)', key, kind.repository, kind.kind, size, now())] : []
     })
+  const record = async (objects: readonly { readonly key: string; readonly size: number }[]) => {
+    const statements = objectStatements(objects)
     if (statements.length > 0) await db.batch(statements)
   }
   return {
@@ -55,7 +58,7 @@ export const createUsageMeter = (db: Database, now: () => number): UsageMeter =>
       put: async (key, body, size, options) => {
         count('r2_class_a')
         const result = await inner.put(key, body, size, options)
-        if (result.ok) await record([{ key, size }])
+        if (result.ok) stored.push(...objectStatements([{ key, size }]))
         return result
       },
       list: (prefix) => (count('r2_class_a'), inner.list(prefix)),
@@ -66,19 +69,24 @@ export const createUsageMeter = (db: Database, now: () => number): UsageMeter =>
       all: (statement) => (count('d1_reads'), inner.all(statement)),
       run: (statement) => (count('d1_writes'), inner.run(statement)),
       batch: (statements) => (count('d1_writes', statements.length), inner.batch(statements)),
+      read: (statements) => (count('d1_reads', statements.length), inner.read(statements)),
     }),
     flush: async (force = false) => {
-      if (total === 0 || (!force && total < FLUSH_COUNT && now() - flushedAt < FLUSH_MS)) return
+      const due = total > 0 && (force || total >= FLUSH_COUNT || now() - flushedAt >= FLUSH_MS)
+      if (!due && stored.length === 0) return
       const month = monthKey(now())
-      const entries = [...pending]
-      pending.clear()
-      total = 0
-      flushedAt = now()
-      await db.batch(
-        entries.map(([metric, value]) =>
+      const entries = due ? [...pending] : []
+      if (due) {
+        pending.clear()
+        total = 0
+        flushedAt = now()
+      }
+      await db.batch([
+        ...stored.splice(0),
+        ...entries.map(([metric, value]) =>
           sql('INSERT INTO usage_counters (month, metric, value) VALUES (?, ?, ?) ON CONFLICT (month, metric) DO UPDATE SET value = value + excluded.value', month, metric, value),
         ),
-      )
+      ])
     },
     repositories: async () =>
       (

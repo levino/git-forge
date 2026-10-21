@@ -152,13 +152,13 @@ describe('SQLite job queue', () => {
       await new Promise<void>((resolve) => {
         release = resolve
       })
-    }, { leaseMs: 30 })
-    const second = queue(db, async (_job, attempt) => void runs.push(attempt), { leaseMs: 30 })
+    }, { leaseMs: 300 })
+    const second = queue(db, async (_job, attempt) => void runs.push(attempt), { leaseMs: 300 })
     first.jobs.start()
     await first.jobs.enqueue({ n: 1 })
     await waitFor(() => runs.length === 1)
     second.jobs.start()
-    await new Promise((resolve) => setTimeout(resolve, 150))
+    await new Promise((resolve) => setTimeout(resolve, 900))
     expect(runs).toEqual([1])
     release()
     await first.jobs.idle()

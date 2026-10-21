@@ -1,14 +1,19 @@
-import { createStateCache, type Database, lockedStorage, sql } from '@git-forge/accounts'
-import { libsqlDatabase } from '@git-forge/libsql'
+import { AsyncLocalStorage } from 'node:async_hooks'
+import { createStateCache, type Database, lockedStorage, REMOTE_WINDOW_MS, requestScope, type ScopeState, sha256Hex } from '@git-forge/accounts'
+import { cacheApiObjectCache, cacheApiPageCache } from '@git-forge/cloudflare/cache'
 import { continueImport, createConsoleEmailSender, type ImportJob } from '@git-forge/core'
+import { libsqlDatabase } from '@git-forge/libsql'
 import { nodeDigests } from '@git-forge/node'
 import { S3Storage } from '@git-forge/s3'
 import { createSesEmailSender } from '@git-forge/ses'
 import { type AppJob, createForge, type Forge } from 'forge-worker/app'
 import { ACTIONS_CRON, loadIdTokenKeys, loadSecretsKey, parseActionsSettings, parseSettings } from 'forge-worker/config'
+import { RUNNER_STALE_MS, runnerSeenAt } from 'forge-worker/jobs'
+import { PAGE_CACHE_SECONDS } from 'forge-worker/page-cache'
 import { type NodeVars, parseNodeConfig } from 'forge-node/config'
-import { type CronSchedule, nextRun, parseCron } from 'forge-node/cron'
+import { parseCron } from 'forge-node/cron'
 import { createSqliteJobQueue, type SqliteJobQueue } from 'forge-node/jobs'
+import { claimDueCrons } from 'forge-node/runner'
 import { databaseFetch, markEnqueued, vars } from './runtime.ts'
 
 declare const GIT_FORGE_VERSION: string | undefined
@@ -17,20 +22,12 @@ export type Edge = { readonly forge: Forge; readonly db: Database; background(en
 
 const CHECK_MS = 60_000
 
+const CACHE_VERSION = 'v1'
+
 const drain = async <J>(queue: SqliteJobQueue<J>): Promise<void> => {
   queue.start()
   await queue.idle()
   await queue.stop(0)
-}
-
-const dueCrons = async (db: Database, crons: readonly { id: string; schedule: CronSchedule }[], at: number): Promise<string[]> => {
-  const results = await db.batch(
-    crons.flatMap((cron) => [
-      sql("INSERT OR IGNORE INTO jobs (id, queue, payload, attempts, run_at, created_at) VALUES (?, 'cron', '{}', 0, ?, ?)", `cron:${cron.id}`, at, at),
-      sql("UPDATE jobs SET run_at = ? WHERE id = ? AND queue = 'cron' AND run_at <= ?", nextRun(cron.schedule, new Date(at)).getTime(), `cron:${cron.id}`, at),
-    ]),
-  )
-  return crons.filter((_, i) => (results[i * 2 + 1]?.changes ?? 0) > 0).map((cron) => cron.id)
 }
 
 const build = async (): Promise<Edge> => {
@@ -41,9 +38,12 @@ const build = async (): Promise<Edge> => {
   const actions = parseActionsSettings(env)
   const secretsKey = await loadSecretsKey(actions, env)
   const idTokenKeys = await loadIdTokenKeys(actions, settings.instanceKey)
-  const db = libsqlDatabase({ ...config.database, fetch: databaseFetch })
-  const bucket = new S3Storage(config.storage.config)
-  const storage = config.conditionalWrites === 'database' ? lockedStorage(bucket, db) : bucket
+  const scope = requestScope(new AsyncLocalStorage<ScopeState>(), REMOTE_WINDOW_MS)
+  const db = scope.database(libsqlDatabase({ ...config.database, fetch: databaseFetch }))
+  const locked = config.conditionalWrites === 'database'
+  const storage = locked ? lockedStorage(new S3Storage(config.storage.config), db) : new S3Storage(config.storage.config)
+  const origin = settings.publicUrl ? `${new URL(settings.publicUrl).origin}/_cache/${(await sha256Hex(`cache:${env.INSTANCE_KEY ?? ''}`)).slice(0, 32)}` : undefined
+  const named = (name: string) => ({ cache: caches.open(`git-forge-${name}-${CACHE_VERSION}`), ...(origin ? { origin: `${origin}/${name}` } : {}) })
   const onError = (error: unknown) => console.error(JSON.stringify({ event: 'error', error: error instanceof Error ? error.stack : String(error) }))
   let forge: Forge | undefined
   const jobQueue = () => createSqliteJobQueue<AppJob>({ db, onError, queue: 'jobs', leaseMs: 120_000, handler: (job, attempt) => forge!.runJob(job, attempt) })
@@ -56,7 +56,7 @@ const build = async (): Promise<Edge> => {
       leaseMs: 120_000,
       handler: async (job) => {
         await continueImport(job, {
-          storage,
+          storage: forge!.services.storage,
           fetch: forge!.services.remoteFetch,
           digests: nodeDigests,
           schedule: enqueueImport,
@@ -76,7 +76,10 @@ const build = async (): Promise<Edge> => {
     ...(email ? { email } : {}),
     storage,
     db,
-    stateCache: createStateCache(db),
+    requestScope: scope,
+    stateCache: createStateCache(db, locked ? { locks: {} } : {}),
+    objectCache: cacheApiObjectCache(named('objects')),
+    pageCache: cacheApiPageCache(PAGE_CACHE_SECONDS, named('pages')),
     digests: nodeDigests,
     version: typeof GIT_FORGE_VERSION === 'string' ? GIT_FORGE_VERSION : 'dev',
     ...(secretsKey ? { secretsKey } : {}),
@@ -102,20 +105,29 @@ const build = async (): Promise<Edge> => {
     { id: 'mirror-sync', schedule: config.schedule },
     { id: 'actions', schedule: parseCron(ACTIONS_CRON) },
   ]
-  let nextCheck = 0
+  let checkedAt = 0
+  let drainedAt = 0
+  let stale = false
   const instance = forge
   return {
     forge: instance,
     db,
     background: async (enqueued) => {
       const at = Date.now()
-      const due = at >= nextCheck ? ((nextCheck = at + CHECK_MS), await dueCrons(db, crons, at)) : []
-      if (due.includes('mirror-sync')) await instance.scheduled(new Date(at))
-      if (due.includes('actions')) await instance.actionsTick()
-      if (enqueued || due.length > 0) {
-        await drain(jobQueue())
-        await drain(importQueue())
+      if (at - checkedAt >= CHECK_MS) {
+        checkedAt = at
+        const seen = await runnerSeenAt(db)
+        stale = seen === null || at - seen > RUNNER_STALE_MS
+        if (stale) {
+          const due = await claimDueCrons(db, crons, at)
+          if (due.includes('mirror-sync')) await instance.scheduled(new Date(at))
+          if (due.includes('actions')) await instance.actionsTick()
+        }
       }
+      if (!stale || (!enqueued && at - drainedAt < CHECK_MS)) return
+      drainedAt = at
+      await drain(jobQueue())
+      await drain(importQueue())
     },
   }
 }

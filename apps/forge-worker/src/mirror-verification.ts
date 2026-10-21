@@ -13,6 +13,7 @@ import {
   evaluateMirror,
   lfsPrefix,
   listMirrors,
+  UPSTREAM_PREFIX,
   namespacedChecksum,
   ObjectDatabase,
   packKey,
@@ -61,7 +62,8 @@ const json = (status: number, body: unknown) => new Response(JSON.stringify(body
 export const recordChecksums = async (verification: MirrorVerificationStore, storage: Storage, repo: RepositoryName): Promise<void> => {
   const refs = await readRefs(storage, repo)
   if (!refs) return
-  const namespaces = ['', ...(await listMirrors(storage, repo)).map((config) => `upstream/${config.remote}/`)]
+  const mirrored = Object.keys(refs.state.refs).some((name) => name.startsWith(UPSTREAM_PREFIX))
+  const namespaces = ['', ...(mirrored ? await listMirrors(storage, repo) : []).map((config) => `upstream/${config.remote}/`)]
   for (const namespace of namespaces) {
     const { checksum, refs: count } = namespacedChecksum(refs.state, namespace)
     await verification.recordChecksum(nameOf(repo), namespace, checksum, count)

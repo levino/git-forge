@@ -1,4 +1,4 @@
-import { type Database, first, type Principal, resolveAccess, sql, type Statement, atLeast } from '@git-forge/accounts'
+import { type Database, first, type Principal, resolveAccess, reused, sql, type Statement, atLeast } from '@git-forge/accounts'
 import { actorColumns, externalUser, loadUsers, type UserDirectory, type UserSummary } from './actors.ts'
 import {
   type ActorRef,
@@ -290,7 +290,7 @@ export const hydrateIssues = async (db: Database, rows: readonly IssueRow[]): Pr
 }
 
 export const issueRow = async (scope: Scope, number: number): Promise<IssueRow> => {
-  const row = await first<IssueRow>(scope.db, sql('SELECT * FROM issues WHERE repository_id = ? AND number = ?', scope.repository.id, number))
+  const row = await first<IssueRow>(scope.db, reused(sql('SELECT * FROM issues WHERE repository_id = ? AND number = ?', scope.repository.id, number)))
   if (!row) throw notFound()
   return row
 }
@@ -521,12 +521,13 @@ export const emitIssueChanges = async (scope: Scope, before: Issue, after: Issue
 export const createIssue = async (scope: Scope, input: IssueInput): Promise<Issue> => {
   const author = requirePermission(scope, 'issue:create')
   const node = nodeId('I')
-  await scope.db.batch(await insertIssueStatements(scope, author, node, input, 'issue'))
-  const row = await issueRowByNode(scope.db, node)
+  const inserted = await scope.db.batch([...(await insertIssueStatements(scope, author, node, input, 'issue')), sql('SELECT * FROM issues WHERE node_id = ?', node)])
+  const row = inserted.at(-1)?.rows[0] as IssueRow | undefined
+  if (!row) throw new Error(`issue ${node} vanished`)
   const references = await crossReferenceStatements(scope, { number: row.number, isPull: false }, row.body, author)
   if (references.length > 0) await scope.db.batch(references)
   const issue = (await hydrateIssues(scope.db, [row]))[0]!
-  await emitActivity(scope, { kind: 'issues', action: 'opened', number: issue.number, actor: author })
+  await emitActivity(scope, { kind: 'issues', action: 'opened', number: issue.number, actor: author, issue })
   return issue
 }
 

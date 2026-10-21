@@ -10,7 +10,8 @@
   "exports": {
     "./config": "./src/config.ts",
     "./cron": "./src/cron.ts",
-    "./jobs": "./src/jobs.ts"
+    "./jobs": "./src/jobs.ts",
+    "./runner": "./src/runner.ts"
   },
   "scripts": {
     "start": "node --experimental-transform-types --no-warnings src/main.ts",

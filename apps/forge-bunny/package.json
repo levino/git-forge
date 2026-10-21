@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@git-forge/accounts": "workspace:*",
+    "@git-forge/cloudflare": "workspace:*",
     "@git-forge/core": "workspace:*",
     "@git-forge/libsql": "workspace:*",
     "@git-forge/node": "workspace:*",

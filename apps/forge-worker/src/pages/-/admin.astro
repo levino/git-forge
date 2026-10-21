@@ -50,7 +50,7 @@ const ago = (iso: string | undefined) => (iso ? relativeTime(Math.floor(Date.par
       </div>
       {outcome && <div role={outcome.kind === 'error' ? 'alert' : 'status'} class:list={['alert mb-6 break-words', outcome.kind === 'error' ? 'alert-error' : 'alert-success']}>{outcome.message}</div>}
       <AdminUpdates update={overview.update} csrf={session.csrf} />
-      <AdminJobs imports={overview.imports} failures={overview.failures} csrf={session.csrf} />
+      <AdminJobs imports={overview.imports} failures={overview.failures} runnerSeenAt={overview.runnerSeenAt} csrf={session.csrf} />
       <AdminStorage usage={overview.usage} cost={overview.cost} csrf={session.csrf} />
       <div class="grid gap-x-6 md:grid-cols-2 items-start">
         <section class="panel" aria-labelledby="admins">

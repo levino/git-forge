@@ -1,3 +1,5 @@
+import { type CacheApiOptions, cacheApi } from './object-cache.ts'
+
 export type ResponseCache = {
   readonly match: (key: string) => Promise<Response | null>
   readonly put: (key: string, response: Response) => Promise<void>
@@ -5,11 +7,11 @@ export type ResponseCache = {
 
 const ORIGINAL = 'X-Forge-Cache-Control'
 
-export const cacheApiPageCache = (maxAgeSeconds: number, cache: Cache = (caches as unknown as { readonly default: Cache }).default): ResponseCache => {
-  const url = (key: string) => `https://page-cache.git-forge.internal/${encodeURIComponent(key)}`
+export const cacheApiPageCache = (maxAgeSeconds: number, options: CacheApiOptions = {}): ResponseCache => {
+  const { cache, url } = cacheApi(options, 'https://page-cache.git-forge.internal')
   return {
     match: async (key) => {
-      const response = await cache.match(url(key))
+      const response = await (await cache()).match(url(key))
       if (!response) return null
       const headers = new Headers(response.headers)
       const original = headers.get(ORIGINAL)
@@ -26,7 +28,7 @@ export const cacheApiPageCache = (maxAgeSeconds: number, cache: Cache = (caches 
       if (original) headers.set(ORIGINAL, original)
       headers.set('Cache-Control', `public, max-age=${maxAgeSeconds}`)
       headers.delete('Vary')
-      await cache.put(url(key), new Response(response.body, { status: response.status, headers }))
+      await (await cache()).put(url(key), new Response(response.body, { status: response.status, headers }))
     },
   }
 }

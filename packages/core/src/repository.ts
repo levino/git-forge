@@ -112,16 +112,16 @@ export const writeRefs = async (storage: Storage, repo: RepositoryName, state: R
 export const sortedRefs = (state: Pick<RefsState, 'refs'>): [string, ObjectId][] =>
   Object.entries(state.refs).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
 
-export const writeServerInfo = async (storage: Storage, repo: RepositoryName, stored: RefsState, odb: ObjectDatabase): Promise<void> => {
+export const writeServerInfo = async (storage: Storage, repo: RepositoryName, stored: RefsState, odb: Pick<ObjectDatabase, 'peel'>, previous?: RefsState): Promise<void> => {
   const state = advertisedRefs(stored)
   const lines: string[] = []
   for (const [name, id] of sortedRefs(state)) {
     lines.push(`${id}\t${name}\n`)
-    const peeled = await odb.peel(id)
+    const peeled = name.startsWith('refs/heads/') ? id : await odb.peel(id)
     if (peeled !== id) lines.push(`${peeled}\t${name}^{}\n`)
   }
   await putText(storage, infoRefsKey(repo), lines.join(''))
-  await putText(storage, headKey(repo), `ref: ${state.head}\n`)
+  if (previous?.head !== stored.head) await putText(storage, headKey(repo), `ref: ${state.head}\n`)
 }
 
 const BLOB_CODE = 3
@@ -446,8 +446,25 @@ export class ObjectDatabase {
     })
   }
 
-  writePack(pack: IndexedPack): Promise<string | null> {
-    return pack.finalize(this.#storage, (file) => packKey(this.#repo, file))
+  async writePack(pack: IndexedPack): Promise<string | null> {
+    const storage = this.#storage
+    const written: { index?: Uint8Array; size?: number } = {}
+    const capturing: Storage = {
+      get: (key, range) => storage.get(key, range),
+      head: (key) => storage.head(key),
+      list: (prefix) => storage.list(prefix),
+      put: (key, body, size, options) => {
+        if (key.endsWith('.idx') && body instanceof Uint8Array) written.index = body
+        else written.size = size
+        return storage.put(key, body, size, options)
+      },
+    }
+    const name = await pack.finalize(capturing, (file) => packKey(this.#repo, file))
+    if (name && written.index && written.size !== undefined) {
+      this.#indexes.set(name, new PackIndex(written.index), written.index.length)
+      this.#sizes.set(name, written.size, 1)
+    }
+    return name
   }
 
   async storePack(pack: IndexedPack): Promise<string | null> {

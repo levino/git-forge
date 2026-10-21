@@ -1,4 +1,4 @@
-import { type Database, sql } from '@git-forge/accounts'
+import { type Database, reused, sql } from '@git-forge/accounts'
 import type { EventActor } from './context.ts'
 
 export type UserSummary = {
@@ -31,7 +31,7 @@ export const loadUsers = async (db: Database, actors: readonly (ActorKey | null 
   const placeholders = (ids: readonly string[]) => ids.map(() => '?').join(', ')
   if (userIds.length > 0) {
     const rows = await db.all<{ id: string; login: string; display_name: string | null; email: string | null }>(
-      sql(`SELECT id, login, display_name, email FROM accounts WHERE id IN (${placeholders(userIds)})`, ...userIds),
+      reused(sql(`SELECT id, login, display_name, email FROM accounts WHERE id IN (${placeholders(userIds)})`, ...userIds)),
     )
     for (const row of rows) found.set(`user:${row.id}`, { kind: 'user', id: row.id, login: row.login, name: row.display_name, email: row.email })
   }

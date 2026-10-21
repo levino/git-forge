@@ -1,13 +1,12 @@
-import { env } from 'cloudflare:workers'
 import { defineMiddleware } from 'astro/middleware'
-import { type Env, forgeFor } from './cloudflare.ts'
+import { hostForge } from './host.ts'
 import { isCrossSiteWrite, isForgePath, isLoginPath } from './routing.ts'
 import { cachedPage } from './ui/page-cache.ts'
 import { signIn } from './ui/sign-in.ts'
 import { LOGIN_PAGE_ROUTE, takeLoginPage } from './ui/login-pages.ts'
 
 export const onRequest = defineMiddleware(async (context, next) => {
-  const forge = await forgeFor(env as unknown as Env)
+  const forge = await hostForge()
   const setLocals = async () => {
     context.locals.forge = forge.services
     const signed = await signIn(forge.services, context.request)

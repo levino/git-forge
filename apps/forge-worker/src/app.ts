@@ -126,6 +126,8 @@ import {
   type SearchResults,
   type SearchType,
   setRepositoryStats,
+  requestScope,
+  type RequestScope,
 } from '@git-forge/accounts'
 import {
   type Authorize,
@@ -239,7 +241,7 @@ import {
 import { type ArtifactSource, createPages, isPagesJob, type PagesJob } from '@git-forge/pages'
 import { type AssetRow, createReleaseStore, handleReleasesRequest, type ReleaseOperations, releaseOperations, type ReleaseRow, type ReleasesOptions } from '@git-forge/releases'
 import { AdminError, type AdminOperations, createAdminOperations, readOidcSettings } from './admin/operations.ts'
-import { createJobFailures } from './admin/jobs.ts'
+import { createJobFailures, runnerSeenAt } from './admin/jobs.ts'
 import { createInstanceSettings, deriveSettingsKey } from './admin/settings.ts'
 import type { Location } from './admin/setup.ts'
 import { createUsageMeter, type UsageScanJob } from './admin/usage.ts'
@@ -301,6 +303,7 @@ export type ForgeOptions = ForgeSettings & {
   readonly backup?: Storage
   readonly backupBudget?: CopyBudget
   readonly pageCache?: PageCache
+  readonly requestScope?: RequestScope
 }
 
 export type LfsPublishJob = { readonly kind: 'lfs-publish'; readonly owner: string; readonly name: string; readonly oids: readonly string[] | null }
@@ -520,6 +523,7 @@ export type RepositoryAccess = {
 
 export type Forge = {
   readonly fetch: (request: Request, waitUntil?: WaitUntil) => Promise<Response>
+  readonly scope: <T>(callback: () => Promise<T>) => Promise<T>
   readonly isPagesRequest: (request: Request) => boolean
   readonly services: ForgeServices
   readonly scheduled: (at?: Date) => Promise<ScheduledMirrorRun[]>
@@ -1058,6 +1062,7 @@ export const createForge = (options: ForgeOptions): Forge => {
     storage,
     settings: instanceSettings,
     failures,
+    runnerSeenAt: () => runnerSeenAt(db),
     meter,
     fetch: outbound,
     now: nowMs,
@@ -2160,25 +2165,18 @@ export const createForge = (options: ForgeOptions): Forge => {
   }
 
   const afterPush = async (request: Request, repo: RepositoryName, outcome: PushOutcome, waitUntil: WaitUntil | undefined, principal: Principal | null): Promise<void> => {
-    if (outcome.results.some((result) => result.ok)) await refreshRepository(repo)
-    if (federation) await notifyAfterPush(federation)(repo, outcome)
-    if (outcome.results.some((result) => result.ok)) {
-      await recordChecksums(verification, storage, repo).catch((error: unknown) =>
-        console.error(JSON.stringify({ event: 'ref-checksum-failed', repository: `${repo.owner}/${repo.name}`, error: String(error) })),
-      )
-    }
-    const published = Promise.all([pages.onPush(repo, outcome, principal), publishAfterPush(repo, outcome), scheduleLastCommits(repo, outcome)]).catch((error: unknown) =>
-      console.error(JSON.stringify({ event: 'pages-or-publish-failed', repository: `${repo.owner}/${repo.name}`, error: String(error) })),
-    )
-    if (waitUntil && !options.jobs) waitUntil(published)
-    else await published
-    if (options.actions) await queueRunsForPush(dispatchOptions(request), { repo, outcome, actor: principal?.kind === 'user' ? principal.login : (principal?.kind ?? 'unknown') })
-    if (!outcome.results.some((result) => result.ok)) return
-    const events = emitPushEvents(request, repo, outcome, principal).catch((error: unknown) =>
-      console.error(JSON.stringify({ event: 'push-events-failed', repository: `${repo.owner}/${repo.name}`, error: String(error) })),
-    )
-    if (waitUntil) waitUntil(events)
-    else await events
+    const updated = outcome.results.some((result) => result.ok)
+    const failed = (event: string) => (error: unknown) => console.error(JSON.stringify({ event, repository: `${repo.owner}/${repo.name}`, error: String(error) }))
+    const published = Promise.all([pages.onPush(repo, outcome, principal), publishAfterPush(repo, outcome), scheduleLastCommits(repo, outcome)]).catch(failed('pages-or-publish-failed'))
+    const events = updated ? emitPushEvents(request, repo, outcome, principal).catch(failed('push-events-failed')) : null
+    await Promise.all([
+      updated ? refreshRepository(repo) : null,
+      federation ? notifyAfterPush(federation)(repo, outcome) : null,
+      updated ? recordChecksums(verification, storage, repo).catch(failed('ref-checksum-failed')) : null,
+      waitUntil && !options.jobs ? waitUntil(published) : published,
+      options.actions ? queueRunsForPush(dispatchOptions(request), { repo, outcome, actor: principal?.kind === 'user' ? principal.login : (principal?.kind ?? 'unknown') }) : null,
+      events && waitUntil ? waitUntil(events) : events,
+    ])
   }
 
   const collaborationOptions = (request: Request, waitUntil?: WaitUntil): CollaborationOptions => ({
@@ -2501,8 +2499,7 @@ export const createForge = (options: ForgeOptions): Forge => {
       onPush: async (repo, outcome) => {
         await compactAfterPush(waitUntil)(repo, outcome)
         const principal = await authenticateRequest(request, authentication)
-        await refreshCollaboration(request, repo, outcome, principal)
-        await afterPush(request, repo, outcome, waitUntil, principal)
+        await Promise.all([refreshCollaboration(request, repo, outcome, principal), afterPush(request, repo, outcome, waitUntil, principal)])
       },
     })
     return git ?? json(404, { error: 'not found' })
@@ -2537,17 +2534,21 @@ export const createForge = (options: ForgeOptions): Forge => {
     return principal?.kind === 'app' && principal.installationId !== undefined ? null : principal
   }
 
+  const scope = options.requestScope ?? requestScope(null)
+
   return {
-    fetch: async (request, waitUntil) => {
-      try {
-        const response = await handle(request, waitUntil)
-        if (![401, 403, 404].includes(response.status) || pages.isPagesRequest(request)) return response
-        const location = await redirect(request, (await authenticate(request)) ?? { kind: 'anonymous' })
-        return location ? new Response(null, { status: request.method === 'GET' || request.method === 'HEAD' ? 301 : 307, headers: { Location: location } }) : response
-      } finally {
-        await observe(waitUntil)
-      }
-    },
+    fetch: (request, waitUntil) =>
+      scope.run(async () => {
+        try {
+          const response = await handle(request, waitUntil)
+          if (![401, 403, 404].includes(response.status) || pages.isPagesRequest(request)) return response
+          const location = await redirect(request, (await authenticate(request)) ?? { kind: 'anonymous' })
+          return location ? new Response(null, { status: request.method === 'GET' || request.method === 'HEAD' ? 301 : 307, headers: { Location: location } }) : response
+        } finally {
+          await observe(waitUntil)
+        }
+      }),
+    scope: scope.run,
     isPagesRequest: pages.isPagesRequest,
     services: {
       storage,
@@ -2640,7 +2641,7 @@ export const createForge = (options: ForgeOptions): Forge => {
         write: (request, principal) => releaseOperations(releasesOptions(request), principal, issuerFor(request)),
       },
     },
-    scheduled: async (at = now()) => {
+    scheduled: (at = now()) => scope.fresh(async () => {
       const sweep = await notifications.sweep().catch((error: unknown) => ({ error: String(error) }))
       console.log(JSON.stringify({ event: 'notification-sweep', ...sweep }))
       const purged = await logins.purgeExpired().catch((error: unknown) => ({ error: String(error) }))
@@ -2652,8 +2653,8 @@ export const createForge = (options: ForgeOptions): Forge => {
         console.log(JSON.stringify({ event: 'backup-scheduled', ...backup }))
       }
       return federation ? enqueueDueMirrors(federation, at, options.mirrorIntervalMinutes) : syncDueMirrors(mirrorContext(options.publicUrl), at, options.mirrorIntervalMinutes)
-    },
-    actionsTick: async () => {
+    }),
+    actionsTick: () => scope.fresh(async () => {
       if (!options.actions) return null
       const serverUrl = options.publicUrl ?? 'http://localhost'
       return actionsTick({
@@ -2665,8 +2666,8 @@ export const createForge = (options: ForgeOptions): Forge => {
         now: () => now().getTime(),
         log: (event) => console.log(JSON.stringify(event)),
       })
-    },
-    runJob: async (job, attempt = 1) => {
+    }),
+    runJob: (job, attempt = 1) => scope.fresh(async () => {
       try {
         await runAppJob(job)
       } catch (error) {
@@ -2676,7 +2677,7 @@ export const createForge = (options: ForgeOptions): Forge => {
         await meter.flush().catch(() => undefined)
       }
       await failures.succeeded(job).catch(() => undefined)
-    },
+    }),
     refreshRepository,
     importMetadata,
     notifications,

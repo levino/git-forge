@@ -31,6 +31,7 @@ export const d1Sessions = (d1: D1Database, context: ContextStorage<RequestSessio
       all: (statement) => (READ.test(statement.sql) ? undefined : wrote(), inner.all(statement)),
       run: (statement) => (wrote(), inner.run(statement)),
       batch: (statements) => (wrote(), inner.batch(statements)),
+      read: (statements) => inner.read(statements),
     },
     primary: d1Database(d1),
     run: async (bookmark, callback) => {

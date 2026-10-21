@@ -1,18 +1,26 @@
 ---
 import type { ImportEntry } from '../admin/operations.ts'
-import type { JobFailure } from '../admin/jobs.ts'
+import { type JobFailure, RUNNER_STALE_MS } from '../admin/jobs.ts'
 import { importProgress } from '../ui/admin.ts'
 import { relativeTime } from '../ui/format.ts'
 import { IMPORT_PHASES } from '../ui/new-repository.ts'
 
-type Props = { imports: readonly ImportEntry[]; failures: readonly JobFailure[]; csrf: string }
+type Props = { imports: readonly ImportEntry[]; failures: readonly JobFailure[]; runnerSeenAt: number | null; csrf: string }
 
-const { imports, failures, csrf } = Astro.props
+const { imports, failures, runnerSeenAt, csrf } = Astro.props
 const now = Math.floor(Date.now() / 1000)
+const stale = runnerSeenAt !== null && Date.now() - runnerSeenAt > RUNNER_STALE_MS
 ---
 
 <section class="panel" aria-labelledby="jobs">
   <h2 id="jobs" class="panel-title">Jobs and queues</h2>
+  {
+    runnerSeenAt !== null && (
+      <p class:list={[stale ? 'text-error' : 'text-base-content/70']}>
+        Jobs runner last seen {relativeTime(Math.floor(runnerSeenAt / 1000), now)}{stale && ' (stale: requests run due jobs until it is back)'}
+      </p>
+    )
+  }
   {imports.length === 0 && failures.length === 0 && <p class="text-base-content/70">No recent imports and no failed jobs.</p>}
   {
     imports.length > 0 && (

@@ -20,6 +20,7 @@ export const gitEnv = {
 export const tempDir = (): string => mkdtempSync(join(tmpdir(), 'git-forge-e2e-'))
 
 export const git = async (cwd: string, args: readonly string[]): Promise<string> => {
+  if (!cwd) throw new Error(`git ${args.join(' ')} needs a working directory`)
   const { stdout } = await run('git', args, { cwd, env: { ...process.env, ...gitEnv }, maxBuffer: 512 * 1024 * 1024 })
   return stdout
 }

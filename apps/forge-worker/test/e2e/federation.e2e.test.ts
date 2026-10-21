@@ -67,10 +67,11 @@ const mirrorStatus = async (instance: Instance, remote = 'origin') => {
 }
 
 const syncedByCron = async (instance: Instance) => {
+  let idle: { startedAt?: string; finishedAt?: string } | undefined
   await expect
-    .poll(async () => (await mirrorStatus(instance))?.lastRun, { timeout: 30_000, interval: 250 })
+    .poll(async () => (idle = (await mirrorStatus(instance))?.lastRun), { timeout: 30_000, interval: 250 })
     .toSatisfy((run: { finishedAt?: string } | undefined) => run === undefined || run.finishedAt !== undefined)
-  const before = (await mirrorStatus(instance))?.lastRun?.startedAt
+  const before = idle?.startedAt
   await cron(instance)
   await expect
     .poll(async () => (await mirrorStatus(instance))?.lastRun, { timeout: 30_000, interval: 250 })
@@ -106,10 +107,10 @@ const randomBlob = (size: number, seed: number): Buffer => {
 
 const sha256 = (bytes: Uint8Array) => createHash('sha256').update(bytes).digest('hex')
 
-let source: string
-let firstTip: string
-let firstBlob: Buffer
-let secondBlob: Buffer
+const once = <T>(run: () => Promise<T>) => {
+  let result: Promise<T> | undefined
+  return () => (result ??= run())
+}
 
 beforeAll(async () => {
   const ports = await Promise.all(names.map(() => freePort()))
@@ -148,7 +149,110 @@ afterAll(async () => {
   await Promise.all(Object.values(instances).map((instance) => instance.dev.stop()))
 })
 
-describe('three federated instances on wrangler dev', () => {
+const pushed = once(async () => {
+  const { alpha } = instances
+  const source = tempDir()
+  await git(source, ['init', '-q', '-b', 'main'])
+  await lfsGit(source, ['lfs', 'track', '*.bin'])
+  const firstBlob = randomBlob(200_000, 1)
+  writeFileSync(join(source, 'scan.bin'), firstBlob)
+  writeFileSync(join(source, 'README.md'), '# Village archive\n')
+  await lfsGit(source, ['add', '-A'])
+  await lfsGit(source, ['commit', '-q', '-m', 'first scan'])
+  writeFileSync(join(source, 'README.md'), '# Village archive\n\nScans of the parish register.\n')
+  await lfsGit(source, ['commit', '-q', '-am', 'describe'])
+  await lfsGit(source, ['push', '-q', withToken(alpha), 'main'])
+  const firstTip = (await git(source, ['rev-parse', 'main'])).trim()
+  expect((await lsRemote(alpha)).get('refs/heads/main')).toBe(firstTip)
+  expect(sha256((await lfsObject(alpha, sha256(firstBlob)))!)).toBe(sha256(firstBlob))
+  expect(await gitFails(tempDir(), ['clone', '-q', repoUrl(alpha), 'out'])).toMatch(/401|Authentication failed|could not read Username/i)
+  return { source, firstTip, firstBlob }
+})
+
+const betaMirrors = once(async () => {
+  const { alpha, beta } = instances
+  const { firstTip, firstBlob } = await pushed()
+  await expectStatus(api(beta, 'POST', '/api/repos/village/archive/mirrors', { url: repoUrl(alpha), auth: 'instance' }), 201)
+  await cron(beta)
+  await expect.poll(async () => (await mirrorStatus(beta))?.lastRun?.error, { timeout: 30_000 }).toMatch(/401/)
+  await expectStatus(api(alpha, 'POST', '/api/admin/instances', { issuer: beta.url }), 200)
+  await expectStatus(api(alpha, 'POST', '/api/repos/village/archive/instances', { issuer: beta.url }), 200)
+  await syncedByCron(beta)
+  const refs = await lsRemote(beta)
+  expect(refs.get('refs/upstream/origin/heads/main')).toBe(firstTip)
+  expect(refs.get('refs/heads/main')).toBe(firstTip)
+  await lfsArrives(beta, firstBlob)
+})
+
+const gammaMirrors = once(async () => {
+  const { alpha, beta, gamma } = instances
+  const { firstTip, firstBlob } = await pushed()
+  await betaMirrors()
+  await expectStatus(api(gamma, 'POST', '/api/repos/village/archive/mirrors', { url: repoUrl(beta), auth: 'instance', namespace: 'upstream/origin/' }), 201)
+  await expectStatus(api(gamma, 'POST', '/api/repos/village/archive/mirrors', { url: repoUrl(alpha), auth: 'instance', remote: 'direct', mode: 'manual' }), 201)
+  await expectStatus(api(beta, 'POST', '/api/admin/instances', { issuer: gamma.url }), 200)
+  await expectStatus(api(beta, 'POST', '/api/repos/village/archive/instances', { issuer: gamma.url }), 200)
+  await syncedByCron(gamma)
+  const refs = await lsRemote(gamma)
+  expect(refs.get('refs/upstream/origin/heads/main')).toBe(firstTip)
+  await lfsArrives(gamma, firstBlob)
+  const direct = await api(gamma, 'POST', '/api/repos/village/archive/mirrors/direct/sync')
+  expect(direct.status).toBe(502)
+  expect(((await direct.json()) as { error: string }).error).toMatch(/401/)
+  const clone = tempDir()
+  await lfsGit(clone, ['clone', '-q', withToken(gamma), 'out'])
+  await lfsGit(join(clone, 'out'), ['fetch', '-q', 'origin', 'refs/upstream/origin/heads/main'])
+  expect((await git(join(clone, 'out'), ['rev-parse', 'FETCH_HEAD'])).trim()).toBe(firstTip)
+})
+
+const rewritten = once(async () => {
+  const { alpha, beta, gamma } = instances
+  const { source, firstTip } = await pushed()
+  await gammaMirrors()
+  await git(source, ['reset', '-q', '--hard', 'main~1'])
+  const secondBlob = randomBlob(150_000, 2)
+  writeFileSync(join(source, 'scan2.bin'), secondBlob)
+  await lfsGit(source, ['add', '-A'])
+  await lfsGit(source, ['commit', '-q', '-m', 'rewritten'])
+  await lfsGit(source, ['push', '-q', '--force', withToken(alpha), 'main'])
+  const tip = (await git(source, ['rev-parse', 'main'])).trim()
+  const alphaRefs = await lsRemote(alpha)
+  expect(alphaRefs.get('refs/heads/main')).toBe(tip)
+  expect([...alphaRefs].some(([ref, id]) => ref.startsWith('refs/archive/') && ref.endsWith('/heads/main') && id === firstTip)).toBe(true)
+
+  for (const instance of [beta, gamma]) {
+    await syncedByCron(instance)
+    const refs = await lsRemote(instance)
+    expect(refs.get('refs/upstream/origin/heads/main')).toBe(tip)
+    const archived = [...refs].find(([ref, id]) => /^refs\/archive\/[^/]+\/upstream\/origin\/heads\/main$/.test(ref) && id === firstTip)
+    expect(archived).toBeDefined()
+    const status = await mirrorStatus(instance)
+    expect(status?.alarms).toContainEqual(expect.objectContaining({ kind: 'history-rewritten', ref: 'refs/heads/main', archivedAs: archived![0] }))
+    await lfsArrives(instance, secondBlob)
+  }
+})
+
+const notified = once(async () => {
+  const { alpha, beta, gamma } = instances
+  const { source } = await pushed()
+  await rewritten()
+  const cronTicks = () => Object.values(instances).map((instance) => instance.dev.output().split('"event":"scheduled"').length).join()
+  await expectStatus(api(beta, 'POST', '/api/admin/instances', { issuer: alpha.url }), 200)
+  await expectStatus(api(gamma, 'POST', '/api/admin/instances', { issuer: beta.url }), 200)
+  const ticks = cronTicks()
+  writeFileSync(join(source, 'notified.md'), 'arrives without cron\n')
+  await lfsGit(source, ['add', '-A'])
+  await lfsGit(source, ['commit', '-q', '-m', 'notified'])
+  await lfsGit(source, ['push', '-q', withToken(alpha), 'main'])
+  const tip = (await git(source, ['rev-parse', 'main'])).trim()
+  for (const instance of [beta, gamma]) {
+    await expect.poll(async () => (await lsRemote(instance)).get('refs/upstream/origin/heads/main'), { timeout: 45_000, interval: 500 }).toBe(tip)
+  }
+  expect(cronTicks()).toBe(ticks)
+  expect(alpha.dev.output()).toContain('POST /api/federation/subscriptions')
+})
+
+describe('three federated instances on wrangler dev', { timeout: 240_000 }, () => {
   it('serves its own discovery documents per environment', async () => {
     for (const instance of Object.values(instances)) {
       const config = (await (await fetch(`${instance.url}/.well-known/openid-configuration`)).json()) as { issuer: string }
@@ -156,98 +260,13 @@ describe('three federated instances on wrangler dev', () => {
     }
   })
 
-  it('pushes a private repository with LFS content to alpha', async () => {
-    const { alpha } = instances
-    source = tempDir()
-    await git(source, ['init', '-q', '-b', 'main'])
-    await lfsGit(source, ['lfs', 'track', '*.bin'])
-    firstBlob = randomBlob(200_000, 1)
-    writeFileSync(join(source, 'scan.bin'), firstBlob)
-    writeFileSync(join(source, 'README.md'), '# Village archive\n')
-    await lfsGit(source, ['add', '-A'])
-    await lfsGit(source, ['commit', '-q', '-m', 'first scan'])
-    writeFileSync(join(source, 'README.md'), '# Village archive\n\nScans of the parish register.\n')
-    await lfsGit(source, ['commit', '-q', '-am', 'describe'])
-    await lfsGit(source, ['push', '-q', withToken(alpha), 'main'])
-    firstTip = (await git(source, ['rev-parse', 'main'])).trim()
-    expect((await lsRemote(alpha)).get('refs/heads/main')).toBe(firstTip)
-    expect(sha256((await lfsObject(alpha, sha256(firstBlob)))!)).toBe(sha256(firstBlob))
-    expect(await gitFails(tempDir(), ['clone', '-q', repoUrl(alpha), 'out'])).toMatch(/401|Authentication failed|could not read Username/i)
-  })
+  it('pushes a private repository with LFS content to alpha', pushed)
 
-  it('lets beta mirror alpha only after alpha trusts beta for this repository', async () => {
-    const { alpha, beta } = instances
-    await expectStatus(api(beta, 'POST', '/api/repos/village/archive/mirrors', { url: repoUrl(alpha), auth: 'instance' }), 201)
-    await cron(beta)
-    await expect.poll(async () => (await mirrorStatus(beta))?.lastRun?.error, { timeout: 30_000 }).toMatch(/401/)
-    await expectStatus(api(alpha, 'POST', '/api/admin/instances', { issuer: beta.url }), 200)
-    await expectStatus(api(alpha, 'POST', '/api/repos/village/archive/instances', { issuer: beta.url }), 200)
-    await syncedByCron(beta)
-    const refs = await lsRemote(beta)
-    expect(refs.get('refs/upstream/origin/heads/main')).toBe(firstTip)
-    expect(refs.get('refs/heads/main')).toBe(firstTip)
-    await lfsArrives(beta, firstBlob)
-  })
+  it('lets beta mirror alpha only after alpha trusts beta for this repository', betaMirrors)
 
-  it('lets gamma mirror beta, but not alpha directly', async () => {
-    const { alpha, beta, gamma } = instances
-    await expectStatus(api(gamma, 'POST', '/api/repos/village/archive/mirrors', { url: repoUrl(beta), auth: 'instance', namespace: 'upstream/origin/' }), 201)
-    await expectStatus(api(gamma, 'POST', '/api/repos/village/archive/mirrors', { url: repoUrl(alpha), auth: 'instance', remote: 'direct', mode: 'manual' }), 201)
-    await expectStatus(api(beta, 'POST', '/api/admin/instances', { issuer: gamma.url }), 200)
-    await expectStatus(api(beta, 'POST', '/api/repos/village/archive/instances', { issuer: gamma.url }), 200)
-    await syncedByCron(gamma)
-    const refs = await lsRemote(gamma)
-    expect(refs.get('refs/upstream/origin/heads/main')).toBe(firstTip)
-    await lfsArrives(gamma, firstBlob)
-    const direct = await api(gamma, 'POST', '/api/repos/village/archive/mirrors/direct/sync')
-    expect(direct.status).toBe(502)
-    expect(((await direct.json()) as { error: string }).error).toMatch(/401/)
-    const clone = tempDir()
-    await lfsGit(clone, ['clone', '-q', withToken(gamma), 'out'])
-    await lfsGit(join(clone, 'out'), ['fetch', '-q', 'origin', 'refs/upstream/origin/heads/main'])
-    expect((await git(join(clone, 'out'), ['rev-parse', 'FETCH_HEAD'])).trim()).toBe(firstTip)
-  })
+  it('lets gamma mirror beta, but not alpha directly', gammaMirrors)
 
-  it('archives rewritten history and propagates new LFS objects down the chain', async () => {
-    const { alpha, beta, gamma } = instances
-    await git(source, ['reset', '-q', '--hard', 'main~1'])
-    secondBlob = randomBlob(150_000, 2)
-    writeFileSync(join(source, 'scan2.bin'), secondBlob)
-    await lfsGit(source, ['add', '-A'])
-    await lfsGit(source, ['commit', '-q', '-m', 'rewritten'])
-    await lfsGit(source, ['push', '-q', '--force', withToken(alpha), 'main'])
-    const rewritten = (await git(source, ['rev-parse', 'main'])).trim()
-    const alphaRefs = await lsRemote(alpha)
-    expect(alphaRefs.get('refs/heads/main')).toBe(rewritten)
-    expect([...alphaRefs].some(([ref, id]) => ref.startsWith('refs/archive/') && ref.endsWith('/heads/main') && id === firstTip)).toBe(true)
+  it('archives rewritten history and propagates new LFS objects down the chain', rewritten)
 
-    for (const instance of [beta, gamma]) {
-      await syncedByCron(instance)
-      const refs = await lsRemote(instance)
-      expect(refs.get('refs/upstream/origin/heads/main')).toBe(rewritten)
-      const archived = [...refs].find(([ref, id]) => /^refs\/archive\/[^/]+\/upstream\/origin\/heads\/main$/.test(ref) && id === firstTip)
-      expect(archived).toBeDefined()
-      const status = await mirrorStatus(instance)
-      expect(status?.alarms).toContainEqual(expect.objectContaining({ kind: 'history-rewritten', ref: 'refs/heads/main', archivedAs: archived![0] }))
-      await lfsArrives(instance, secondBlob)
-    }
-  })
-
-  it('propagates a push from alpha through beta to gamma by notifications alone', async () => {
-    const { alpha, beta, gamma } = instances
-    const cronTicks = () => Object.values(instances).map((instance) => instance.dev.output().split('"event":"scheduled"').length).join()
-    await expectStatus(api(beta, 'POST', '/api/admin/instances', { issuer: alpha.url }), 200)
-    await expectStatus(api(gamma, 'POST', '/api/admin/instances', { issuer: beta.url }), 200)
-    const ticks = cronTicks()
-    writeFileSync(join(source, 'notified.md'), 'arrives without cron\n')
-    await lfsGit(source, ['add', '-A'])
-    await lfsGit(source, ['commit', '-q', '-m', 'notified'])
-    await lfsGit(source, ['push', '-q', withToken(alpha), 'main'])
-    const tip = (await git(source, ['rev-parse', 'main'])).trim()
-    for (const instance of [beta, gamma]) {
-      await expect.poll(async () => (await lsRemote(instance)).get('refs/upstream/origin/heads/main'), { timeout: 45_000, interval: 500 }).toBe(tip)
-    }
-    expect(cronTicks()).toBe(ticks)
-    expect(alpha.dev.output()).toContain('POST /api/federation/subscriptions')
-  })
+  it('propagates a push from alpha through beta to gamma by notifications alone', notified)
 })

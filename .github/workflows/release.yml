@@ -111,7 +111,7 @@ jobs:
         run: echo "sha256=$(GIT_FORGE_VERSION=${TAG#v} sh release/build-release.sh "$RUNNER_TEMP/release")" >> "$GITHUB_OUTPUT"
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.4.2
+          bun-version: 1.4.3
       - name: Build the git-forge CLI executables
         run: sh packages/cli/build-executables.sh "$RUNNER_TEMP/cli"
       - name: Build the git-forge-node executables

@@ -82,7 +82,7 @@ jobs:
           cache: pnpm
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.4.2
+          bun-version: 1.4.3
       - run: pnpm install --frozen-lockfile
       - run: sh apps/forge-node/build-executables.sh "$RUNNER_TEMP/node"
       - run: pnpm --filter forge-node test:e2e

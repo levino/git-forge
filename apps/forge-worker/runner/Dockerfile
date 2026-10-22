@@ -1,6 +1,7 @@
 ARG RUNNER_VERSION=2.338.0
 FROM ghcr.io/actions/actions-runner:${RUNNER_VERSION}
 
+# renovate: datasource=node-version depName=node
 ARG NODE_VERSION=22.22.0
 
 USER root

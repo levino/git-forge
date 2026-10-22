@@ -13,7 +13,7 @@ jobs:
   pin:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - id: pin
         run: |
           V=$(curl -fsSI https://github.com/levino/git-forge/releases/latest | tr -d '\r' | sed -n -E 's#^location: .*/releases/tag/v([0-9]+\.[0-9]+\.[0-9]+)$#\1#ip')

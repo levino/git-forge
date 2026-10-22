@@ -1,4 +1,4 @@
-ARG RUNNER_VERSION=2.338.0
+ARG RUNNER_VERSION=2.338.0@sha256:4ffadc0002b2581327e06101fc8c06cd189232baf79fe561fac9caeb76f5e807
 FROM ghcr.io/actions/actions-runner:${RUNNER_VERSION}
 
 # renovate: datasource=node-version depName=node

@@ -42,7 +42,7 @@
     "@git-forge/releases": "workspace:*",
     "@git-forge/s3": "workspace:*",
     "@git-forge/ses": "workspace:*",
-    "astro": "7.4.0",
+    "astro": "7.4.7",
     "rehype-sanitize": "6.0.0",
     "rehype-stringify": "10.0.1",
     "remark-gfm": "4.0.1",
